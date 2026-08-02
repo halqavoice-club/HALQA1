@@ -26,6 +26,15 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+# rclone executable path (winget installs here, not in PATH by default)
+$RcloneExe = "C:\Users\hp\AppData\Local\Microsoft\WinGet\Packages\Rclone.Rclone_Microsoft.Winget.Source_8wekyb3d8bbwe\rclone-v1.75.0-windows-amd64\rclone.exe"
+if (-not (Test-Path $RcloneExe)) {
+    # fallback to PATH
+    $RcloneExe = "rclone"
+}
+
+function Invoke-Rclone { & $RcloneExe @args }
+
 function Write-Step([string]$m) { Write-Host "`n[$m]" -ForegroundColor Cyan }
 function Write-OK([string]$m)   { Write-Host "  ✅ $m" -ForegroundColor Green }
 function Write-WARN([string]$m) { Write-Host "  ⚠  $m" -ForegroundColor Yellow }
@@ -40,30 +49,17 @@ Write-Host @"
 
 # ── Check rclone installed ─────────────────────────────────────────────────
 Write-Step "Checking rclone"
-$rclone = Get-Command rclone -ErrorAction SilentlyContinue
+$rclone = if (Test-Path $RcloneExe) { $RcloneExe } else { Get-Command rclone -ErrorAction SilentlyContinue }
 if (-not $rclone) {
-    Write-ERR "rclone not found."
-    Write-Host @"
-
-  Install rclone (choose one):
-
-  Option A — winget (easiest):
-    winget install Rclone.Rclone
-
-  Option B — manual:
-    1. Download from https://rclone.org/downloads/
-    2. Extract rclone.exe to C:\Windows\System32\
-
-  After installing, configure your cloud remote:
-    rclone config
-"@ -ForegroundColor Yellow
+    Write-ERR "rclone not found at $RcloneExe"
     exit 1
 }
-Write-OK "rclone found: $(rclone version 2>&1 | Select-Object -First 1)"
+$ver = & $RcloneExe version 2>&1 | Select-Object -First 1
+Write-OK "rclone found: $ver"
 
 # ── Check remote is configured ─────────────────────────────────────────────
 Write-Step "Checking remote '$Remote'"
-$remotes = rclone listremotes 2>&1
+$remotes = & $RcloneExe listremotes 2>&1
 if ($remotes -notmatch $Remote) {
     Write-ERR "Remote '$Remote' not configured in rclone."
     Write-Host @"
@@ -111,7 +107,7 @@ if ($todayFolder) {
     )
     if ($DryRun) { $rcloneArgs += "--dry-run" }
     
-    & rclone @rcloneArgs
+    & $RcloneExe @rcloneArgs
     
     if ($LASTEXITCODE -eq 0) {
         Write-OK "Today's backup uploaded: $($todayFolder.Name)"
@@ -124,7 +120,7 @@ if ($todayFolder) {
     if ($latest) {
         $rcloneArgs = @("copy", $latest.FullName, "${Remote}:${RemotePath}/$($latest.Name)", "--progress")
         if ($DryRun) { $rcloneArgs += "--dry-run" }
-        & rclone @rcloneArgs
+        & $RcloneExe @rcloneArgs
         Write-OK "Uploaded: $($latest.Name)"
     }
 }
@@ -141,14 +137,14 @@ if (Test-Path $weeklyPath) {
         "--transfers", "2"
     )
     if ($DryRun) { $rcloneArgs += "--dry-run" }
-    & rclone @rcloneArgs
+    & $RcloneExe @rcloneArgs
     Write-OK "Weekly backups synced"
 }
 
 # ── Verify upload ──────────────────────────────────────────────────────────
 Write-Step "Verifying cloud storage"
 Write-Host "  Files in ${Remote}:${RemotePath}:"
-rclone lsd "${Remote}:${RemotePath}" 2>&1 | Select-Object -Last 10 | ForEach-Object {
+& $RcloneExe lsd "${Remote}:${RemotePath}" 2>&1 | Select-Object -Last 10 | ForEach-Object {
     Write-Host "    $_" -ForegroundColor Gray
 }
 
