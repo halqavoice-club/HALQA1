@@ -1,0 +1,205 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   User Profile Sheet (ups-*)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.ups-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  z-index: 200;
+}
+
+.ups-sheet {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-width: 480px;
+  margin: 0 auto;
+  background: #fff;
+  border-radius: 24px 24px 0 0;
+  z-index: 201;
+  padding-bottom: env(safe-area-inset-bottom, 16px);
+  box-shadow: 0 -8px 40px rgba(0,0,0,0.18);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.ups-handle {
+  width: 36px; height: 4px;
+  background: #e5e7eb;
+  border-radius: 2px;
+  margin: 12px auto 0;
+}
+
+.ups-close {
+  position: absolute;
+  top: 14px; right: 16px;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: #f3f4f6;
+  border: none;
+  display: flex; align-items: center; justify-content: center;
+  color: #6b7280;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.ups-close:hover { background: #e5e7eb; }
+
+/* Header */
+.ups-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 20px 20px 12px;
+  gap: 10px;
+}
+
+.ups-avatar-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.ups-avatar {
+  width: 80px; height: 80px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: #e0e7ff;
+  display: flex; align-items: center; justify-content: center;
+  border: 3px solid #fff;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+}
+.ups-avatar-img { width: 100%; height: 100%; object-fit: cover; }
+.ups-avatar-initials { font-size: 28px; font-weight: 800; color: #6366f1; }
+
+.ups-speaking-ring {
+  position: absolute;
+  top: -4px; left: -4px; right: -4px; bottom: -4px;
+  border-radius: 50%;
+  border: 3px solid #6366f1;
+  animation: ups-pulse 1.5s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes ups-pulse {
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%     { opacity: 0.5; transform: scale(1.06); }
+}
+
+.ups-role-badge {
+  font-size: 11px; font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1.5px solid;
+  white-space: nowrap;
+}
+
+.ups-name-block {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap; justify-content: center;
+}
+.ups-name { font-size: 20px; font-weight: 800; color: #111827; text-align: center; margin: 0; }
+.ups-you-badge { font-size: 11px; font-weight: 700; background: #e0e7ff; color: #6366f1; padding: 2px 8px; border-radius: 20px; }
+.ups-muted-badge { font-size: 11px; font-weight: 600; background: #f3f4f6; color: #9ca3af; padding: 2px 8px; border-radius: 20px; }
+
+/* Bio */
+.ups-bio {
+  font-size: 13px;
+  color: #6b7280;
+  text-align: center;
+  margin: 4px 20px 0;
+  line-height: 1.5;
+  font-style: italic;
+}
+
+/* Stats */
+.ups-stats {
+  display: flex; align-items: center; justify-content: center;
+  padding: 12px 20px 4px;
+  border-top: 1px solid #f3f4f6;
+  border-bottom: 1px solid #f3f4f6;
+  margin: 0 16px;
+}
+.ups-stat { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 0; }
+.ups-stat-value { font-size: 20px; font-weight: 900; color: #111827; line-height: 1; }
+.ups-stat-label { font-size: 11px; color: #9ca3af; font-weight: 500; }
+.ups-stat-divider { width: 1px; height: 32px; background: #e5e7eb; flex-shrink: 0; }
+.ups-stat-skeleton {
+  flex: 1; height: 40px; background: #f3f4f6; border-radius: 8px;
+  animation: ups-shimmer 1.2s ease-in-out infinite;
+}
+@keyframes ups-shimmer { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* Mutual */
+.ups-mutual { text-align: center; font-size: 12px; color: #6b7280; margin: 8px 20px 0; font-weight: 500; }
+
+/* Action buttons */
+.ups-actions {
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px; padding: 14px 20px 4px; flex-wrap: wrap;
+}
+.ups-actions-skeleton { display: flex; gap: 8px; padding: 14px 20px 4px; justify-content: center; }
+.ups-btn-skeleton { width: 100px; height: 36px; background: #f3f4f6; border-radius: 20px; animation: ups-shimmer 1.2s ease-in-out infinite; }
+
+.ups-action-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 18px; border-radius: 20px;
+  font-size: 13px; font-weight: 700;
+  border: none; cursor: pointer;
+  transition: all 0.15s; text-decoration: none; white-space: nowrap;
+}
+.ups-action-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.ups-action-btn--follow    { background: #6366f1; color: #fff; }
+.ups-action-btn--follow:hover { background: #4f46e5; }
+.ups-action-btn--following { background: #f3f4f6; color: #374151; }
+.ups-action-btn--following:hover { background: #fee2e2; color: #dc2626; }
+.ups-action-btn--friend    { background: #fff; color: #374151; border: 1.5px solid #d1d5db; }
+.ups-action-btn--friend:hover { border-color: #6366f1; color: #6366f1; }
+.ups-action-btn--requested { background: #f3f4f6; color: #9ca3af; cursor: default; }
+.ups-action-btn--accept    { background: #10b981; color: #fff; }
+.ups-action-btn--accept:hover { background: #059669; }
+.ups-action-btn--friends   { background: #dcfce7; color: #15803d; }
+.ups-action-btn--friends:hover { background: #fee2e2; color: #dc2626; }
+.ups-action-btn--message   { background: #eff6ff; color: #2563eb; }
+.ups-action-btn--message:hover { background: #dbeafe; }
+
+/* Profile link */
+.ups-profile-link {
+  display: block; text-align: center;
+  font-size: 12px; color: #6366f1; font-weight: 600;
+  padding: 10px 20px 4px;
+  text-decoration: none;
+  transition: color 0.15s;
+}
+.ups-profile-link:hover { color: #4f46e5; }
+
+/* Moderation section */
+.ups-mod-section {
+  margin: 12px 16px 8px;
+  background: #fafafa;
+  border: 1px solid #f3f4f6;
+  border-radius: 16px;
+  padding: 12px;
+}
+.ups-mod-title {
+  font-size: 10px; font-weight: 700; color: #9ca3af;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  margin: 0 0 8px;
+}
+.ups-mod-actions { display: flex; flex-direction: column; gap: 4px; }
+.ups-mod-btn {
+  width: 100%; text-align: left;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: none;
+  background: #fff;
+  font-size: 13px; font-weight: 600; color: #374151;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.ups-mod-btn:hover { background: #f3f4f6; }
+.ups-mod-btn.danger { color: #dc2626; }
+.ups-mod-btn.danger:hover { background: #fef2f2; }

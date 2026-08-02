@@ -1,0 +1,2898 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ───────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  SUPER_ADMIN
+  SCHOOL_ADMIN
+  TEACHER
+  STUDENT
+  GUARDIAN
+  REPRESENTATIVE
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  PENDING
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+  EXCUSED
+  LEFT_EARLY
+  CUSTOM_1
+  CUSTOM_2
+  CUSTOM_3
+  CUSTOM_4
+  CUSTOM_5
+}
+
+enum BehaviorType {
+  POSITIVE
+  NEGATIVE
+}
+
+enum GradeType {
+  ASSIGNMENT
+  QUIZ
+  EXAM
+  ORAL_TEST
+  MEMORIZATION
+  PROJECT
+  PARTICIPATION
+  OTHER
+}
+
+enum MessageStatus {
+  SENT
+  DELIVERED
+  READ
+}
+
+enum NotificationType {
+  // ── Education module types (original) ────────────────────────────────────
+  ATTENDANCE
+  GRADE
+  BEHAVIOR
+  MESSAGE
+  ANNOUNCEMENT
+  REMINDER
+  SYSTEM
+  // ── Social platform types (additive — zero impact on existing notifications) ──
+  // These allow the notification inbox to be filtered by category.
+  FOLLOW            // Someone followed you
+  LIKE              // Someone liked your post or story
+  COMMENT           // Someone commented on your post
+  COMMENT_REPLY     // Someone replied to your comment
+  FRIEND_REQUEST    // Someone sent you a friend request
+  FRIEND_ACCEPTED   // Your friend request was accepted
+  COMMUNITY_JOIN    // Someone joined your community
+  COMMUNITY_INVITE  // You were invited to a community
+  GIFT_RECEIVED     // You received a gift in a voice room
+  TIP_RECEIVED      // You received a creator tip
+  NEW_SUBSCRIBER    // Someone subscribed to your creator tier
+  MENTION           // You were @mentioned in a post or comment
+  VOICE_ROOM_LIVE   // A host you follow started a voice room
+  LIVE_CLASS_START  // A teacher started a live class for your class
+  COINS_PURCHASED   // Stripe payment confirmed — coins credited
+}
+
+enum EventType {
+  EXAM
+  ASSIGNMENT
+  HOLIDAY
+  MEETING
+  CLASS
+  PRAYER
+  ACTIVITY
+  OTHER
+}
+
+enum ActivityType {
+  EXAM
+  BREAK
+  LIBRARY
+  PRAYER
+  MEMORIZATION
+  COUNSELING
+  OTHER
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  LOGIN
+  LOGOUT
+  EXPORT
+  IMPORT
+  VIEW
+}
+
+// ─── SCHOOLS ─────────────────────────────────────────────────────────────────
+
+model School {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  type        String   @default("school") // school, academy, college, daycare, camp
+  address     String?  @db.Text
+  city        String?
+  state       String?
+  country     String   @default("US")
+  phone       String?
+  email       String?
+  website     String?
+  logoUrl     String?
+  timezone    String   @default("America/New_York")
+  isActive    Boolean  @default(true)
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  users           User[]
+  classes         Class[]
+  students        Student[]
+  teachers        Teacher[]
+  guardians       Guardian[]
+  terms           Term[]
+  events          CalendarEvent[]
+  announcements   Announcement[]
+  settings        SchoolSettings?
+  auditLogs       AuditLog[]
+  notifications   Notification[]
+  reports         Report[]
+  liveClasses     LiveClass[]
+  // Phase C-1: Group Chat
+  groupConversations GroupConversation[] @relation("GroupConversations")
+  // Phase C-2: Assignment Submissions
+  assignmentSubmissions AssignmentSubmission[] @relation("AssignmentSubmissions")
+  // Phase C-3: Exam Submissions
+  examSubmissions ExamSubmission[] @relation("ExamSubmissions")
+  // Phase C-4: Marketplace
+  marketplaceProducts Product[] @relation("MarketplaceProducts")
+  marketplaceOrders Order[] @relation("MarketplaceOrders")
+  // Phase C-5: Transport
+  schoolBuses SchoolBus[] @relation("SchoolBuses")
+  busRoutes BusRoute[] @relation("BusRoutes")
+  drivers Driver[] @relation("Drivers")
+
+  @@index([slug])
+  @@map("schools")
+}
+
+model SchoolSettings {
+  id                    String   @id @default(uuid())
+  schoolId              String   @unique
+  school                School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  gradingScale          Json?    // custom grading scale
+  attendanceTypes       Json?    // custom attendance types (up to 5)
+  behaviorCategories    Json?    // custom behavior categories
+  workingDays           Json?    // [1,2,3,4,5] = Mon-Fri
+  schoolStartTime       String   @default("08:00")
+  schoolEndTime         String   @default("15:00")
+  allowSelfCheckIn      Boolean  @default(true)
+  requireGpsCheckIn     Boolean  @default(false)
+  parentNotifications   Boolean  @default(true)
+  smsEnabled            Boolean  @default(false)
+  emailEnabled          Boolean  @default(true)
+  pushEnabled           Boolean  @default(true)
+  maxAbsenceAlert       Int      @default(3)
+  passingGrade          Float    @default(60.0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@map("school_settings")
+}
+
+// ─── USERS ───────────────────────────────────────────────────────────────────
+
+model User {
+  id              String     @id @default(uuid())
+  schoolId        String?
+  school          School?    @relation(fields: [schoolId], references: [id])
+  email           String     @unique
+  phone           String?
+  passwordHash    String
+  role            UserRole
+  status          UserStatus @default(PENDING)
+  firstName       String
+  lastName        String
+  avatarUrl       String?
+  dateOfBirth     DateTime?
+  gender          String?
+  address         String?    @db.Text
+  city            String?
+  country         String?
+  language        String     @default("en")
+  timezone        String     @default("America/New_York")
+  bio             String?    @db.Text   // short personal description
+  // username — unique handle for @mention matching (e.g. @john_doe).
+  // Nullable so existing users are not broken by this additive migration.
+  // Users set their username on first login or via the profile settings page.
+  // Pattern enforced at API layer: 3-30 chars, alphanumeric + underscore only.
+  username        String?    @unique    @db.VarChar(30)
+  // fcmToken — Firebase Cloud Messaging device token for push notifications.
+  // Updated by the mobile app on login and whenever the token rotates.
+  // Nullable: users without the mobile app or who denied push permission have null.
+  fcmToken        String?    @db.VarChar(512)
+  lastLoginAt     DateTime?
+  emailVerified   Boolean    @default(false)
+  phoneVerified   Boolean    @default(false)
+  twoFactorEnabled Boolean   @default(false)
+  deletedAt       DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  // Relations
+  refreshTokens      RefreshToken[]
+  otpCodes           OtpCode[]
+  student            Student?
+  teacher            Teacher?
+  guardian           Guardian?
+  sentMessages       Message[]          @relation("SentMessages")
+  receivedMessages   MessageRecipient[]
+  notifications      Notification[]
+  auditLogs          AuditLog[]
+  fileUploads        FileUpload[]
+  notes              Note[]
+  hostedVoiceRooms   VoiceRoom[]        @relation("VoiceRoomHost")
+  voiceParticipations VoiceParticipant[] @relation("VoiceParticipant")
+  voiceMessages      VoiceMessage[]     @relation("VoiceMessage")
+  voiceHostStats     VoiceHostStats[]   @relation("VoiceHostStats")
+  voiceRoomMemberships VoiceRoomMember[] @relation("VoiceRoomMember")
+  wallet             Wallet?            @relation("UserWallet")
+  walletTransactions WalletTransaction[] @relation("WalletTransactions")
+  giftsSent          GiftTransaction[]  @relation("GiftSender")
+  giftsReceived      GiftTransaction[]  @relation("GiftReceiver")
+  giftLeaderboard    RoomGiftLeaderboard[] @relation("GiftLeaderboard")
+  // Social
+  following          Follow[]           @relation("Follower")
+  followers          Follow[]           @relation("Following")
+  sentRequests       FriendRequest[]    @relation("FriendRequestSender")
+  receivedRequests   FriendRequest[]    @relation("FriendRequestReceiver")
+  // Direct Messages
+  dmConvsAsA         DmConversation[]   @relation("DmConvA")
+  dmConvsAsB         DmConversation[]   @relation("DmConvB")
+  dmSent             DirectMessage[]    @relation("DmSender")
+  dmReceived         DirectMessage[]    @relation("DmReceiver")
+  // Live Classes
+  liveClassParticipations LiveClassParticipant[] @relation("LiveClassParticipant")
+  liveClassMessages       LiveClassMessage[]     @relation("LiveClassMessage")
+  liveClassHandQueue      LiveClassHandQueue[]   @relation("LiveClassHandQueue")
+  // Report & Block
+  reportsSent        UserReport[]       @relation("ReportsSent")
+  reportsReceived    UserReport[]       @relation("ReportsReceived")
+  blocksSent         UserBlock[]        @relation("BlocksSent")
+  blocksReceived     UserBlock[]        @relation("BlocksReceived")
+  // Social Feed (Phase B-1)
+  posts              Post[]             @relation("PostAuthor")
+  postReactions      PostReaction[]     @relation("PostReactions")
+  postComments       PostComment[]      @relation("PostComments")
+  commentReactions   CommentReaction[]  @relation("CommentReactions")
+  postBookmarks      PostBookmark[]     @relation("PostBookmarks")
+  postViews          PostView[]         @relation("PostViews")
+  postMentions       PostMention[]      @relation("PostMentions")
+  // Stories (Phase B-3)
+  stories            Story[]            @relation("StoryAuthor")
+  storyViews         StoryView[]        @relation("StoryViewer")
+  storyReactions     StoryReaction[]    @relation("StoryReactions")
+  // Communities (Phase B-4)
+  ownedCommunities   Community[]        @relation("CommunityOwner")
+  communityMemberships CommunityMember[] @relation("CommunityMembers")
+  // Creator Economy (Phase B-6)
+  creatorProfile     CreatorProfile?    @relation("CreatorProfile")
+  creatorSubscriptions CreatorSubscription[] @relation("CreatorSubscriber")
+  tipsSent           CreatorTip[]       @relation("TipSender")
+  // Phase C-1: Group Chat
+  groupMemberships   GroupMember[]      @relation("GroupMemberships")
+  groupMessages      GroupMessage[]     @relation("GroupMessages")
+  groupReactions     GroupMessageReaction[] @relation("GroupReactions")
+  groupReads         GroupMessageRead[] @relation("GroupReads")
+  // Phase C-4: Marketplace
+  sellerProducts     Product[]          @relation("SellerProducts")
+  buyerOrders        Order[]            @relation("BuyerOrders")
+  sellerOrders       Order[]            @relation("SellerOrders")
+  userReviews        Review[]           @relation("UserReviews")
+  sellerReviews      Review[]           @relation("SellerReviews")
+  // Phase C-5: Transport
+  driverProfile      Driver?            @relation("DriverProfile")
+  // Phase C-7: Leaderboards
+  globalLeaderboard  GlobalLeaderboard? @relation("GlobalLeaderboard")
+  schoolLeaderboards SchoolLeaderboard[] @relation("SchoolLeaderboard")
+  // Session management
+  sessions           Session[]
+
+  @@index([email])
+  @@index([schoolId])
+  @@index([role])
+  @@index([firstName])
+  @@index([lastName])
+  @@index([username])
+  @@map("users")
+}
+
+model RefreshToken {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token       String   @unique @db.VarChar(512)
+  expiresAt   DateTime
+  isRevoked   Boolean  @default(false)
+  ipAddress   String?
+  userAgent   String?  @db.Text
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model OtpCode {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  code        String
+  type        String   // email_verify, password_reset, login_otp
+  expiresAt   DateTime
+  isUsed      Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@map("otp_codes")
+}
+
+// ─── ACADEMIC STRUCTURE ───────────────────────────────────────────────────────
+
+model Term {
+  id          String   @id @default(uuid())
+  schoolId    String
+  school      School   @relation(fields: [schoolId], references: [id])
+  name        String   // Fall 2024, Spring 2025
+  startDate   DateTime
+  endDate     DateTime
+  isActive    Boolean  @default(false)
+  isCurrent   Boolean  @default(false)
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  classes     Class[]
+  grades      Grade[]
+
+  @@index([schoolId])
+  @@map("terms")
+}
+
+model Class {
+  id          String   @id @default(uuid())
+  schoolId    String
+  school      School   @relation(fields: [schoolId], references: [id])
+  termId      String?
+  term        Term?    @relation(fields: [termId], references: [id])
+  name        String   // Grade 5A, Quran Level 2
+  description String?  @db.Text
+  gradeLevel  String?
+  room        String?
+  capacity    Int      @default(30)
+  schedule    Json?    // weekly schedule
+  isActive    Boolean  @default(true)
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  teacherClasses  TeacherClass[]
+  enrollments     Enrollment[]
+  attendance      Attendance[]
+  grades          Grade[]
+  gradeCategories GradeCategory[]
+  activities      Activity[]
+  events          CalendarEvent[]
+  notes           Note[]
+  liveClasses     LiveClass[]
+  // Phase C-1: Group Chat
+  groupConversations GroupConversation[] @relation("GroupConversations")
+  // Phase C-2: Assignment Submissions
+  assignmentSubmissions AssignmentSubmission[] @relation("AssignmentSubmissions")
+  // Phase C-3: Exam Submissions
+  examSubmissions ExamSubmission[] @relation("ExamSubmissions")
+
+  @@index([schoolId])
+  @@index([termId])
+  @@index([schoolId, isActive]) // active classes filter
+  @@map("classes")
+}
+
+// ─── PEOPLE ──────────────────────────────────────────────────────────────────
+
+model Student {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  schoolId        String
+  school          School   @relation(fields: [schoolId], references: [id])
+  studentId       String   // school-assigned ID
+  qrCode          String?  @unique
+  gradeLevel      String?  // e.g., Grade 1, Beginner, Intermediate, Advanced
+  enrollmentDate  DateTime @default(now())
+  graduationDate  DateTime?
+  medicalNotes    String?  @db.Text
+  emergencyContact Json?
+  deletedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  enrollments     Enrollment[]
+  attendance      Attendance[]
+  behaviorLogs    BehaviorLog[]
+  grades          Grade[]
+  guardianLinks   GuardianStudent[]
+  activities      ActivityParticipant[]
+  notes           Note[]
+  feeRecords      FeeRecord[]
+  libraryIssues   LibraryIssue[]
+  liveClassAttendance LiveClassAttendance[]
+  // Phase C-2: Assignment Submissions
+  assignmentSubmissions AssignmentSubmission[]
+  // Phase C-3: Exam Submissions
+  examSubmissions ExamSubmission[]
+  // Phase C-5: Transport
+  busAssignments BusAssignment[]
+
+  @@unique([schoolId, studentId])
+  @@index([schoolId])
+  @@index([qrCode])
+  @@index([studentId])
+  @@index([gradeLevel])
+  @@index([schoolId, deletedAt]) // active students filter
+  @@map("students")
+}
+
+model Teacher {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  schoolId        String
+  school          School   @relation(fields: [schoolId], references: [id])
+  employeeId      String?
+  department      String?
+  specialization  String?
+  hireDate        DateTime?
+  deletedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  teacherClasses  TeacherClass[]
+  attendance      Attendance[]   @relation("TeacherAttendance")
+  behaviorLogs    BehaviorLog[]
+  grades          Grade[]
+  activities      Activity[]
+  audioCourses    AudioCourse[]
+  audioLessons    AudioLesson[]
+  liveClasses     LiveClass[]
+
+  @@index([schoolId])
+  @@index([schoolId, deletedAt]) // active teachers filter
+  @@map("teachers")
+}
+
+model Guardian {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  schoolId        String
+  school          School   @relation(fields: [schoolId], references: [id])
+  relationship    String   @default("parent") // parent, guardian, grandparent
+  occupation      String?
+  deletedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  students        GuardianStudent[]
+
+  @@index([schoolId])
+  @@index([schoolId, deletedAt]) // active guardians filter
+  @@map("guardians")
+}
+
+model GuardianStudent {
+  id          String   @id @default(uuid())
+  guardianId  String
+  guardian    Guardian @relation(fields: [guardianId], references: [id], onDelete: Cascade)
+  studentId   String
+  student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  isPrimary   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@unique([guardianId, studentId])
+  @@map("guardian_students")
+}
+
+model TeacherClass {
+  id          String   @id @default(uuid())
+  teacherId   String
+  teacher     Teacher  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  classId     String
+  class       Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  isLead      Boolean  @default(false)
+  subject     String?
+  createdAt   DateTime @default(now())
+
+  @@unique([teacherId, classId])
+  @@map("teacher_classes")
+}
+
+model Enrollment {
+  id          String   @id @default(uuid())
+  studentId   String
+  student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  classId     String
+  class       Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  enrolledAt  DateTime @default(now())
+  droppedAt   DateTime?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  @@unique([studentId, classId])
+  @@index([classId])
+  @@index([studentId, isActive])   // active enrollment filter
+  @@index([classId, isActive])     // class roster
+  // DB-008: Covers attendance eligibility check: WHERE studentId=X AND classId=Y AND isActive=true
+  @@index([studentId, classId, isActive])
+  @@map("enrollments")
+}
+
+// ─── ATTENDANCE ───────────────────────────────────────────────────────────────
+
+model Attendance {
+  id              String           @id @default(uuid())
+  schoolId        String?
+  classId         String
+  class           Class            @relation(fields: [classId], references: [id])
+  studentId       String
+  student         Student          @relation(fields: [studentId], references: [id])
+  teacherId       String?
+  teacher         Teacher?         @relation("TeacherAttendance", fields: [teacherId], references: [id])
+  date            DateTime         @db.Date
+  status          AttendanceStatus @default(PRESENT)
+  checkInTime     DateTime?
+  checkOutTime    DateTime?
+  checkInMethod   String?          // manual, qr, barcode, id_scan
+  checkInLat      Float?
+  checkInLng      Float?
+  notes           String?          @db.Text
+  notifiedParent  Boolean          @default(false)
+  deletedAt       DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  logs            AttendanceLog[]
+
+  @@unique([classId, studentId, date])
+  @@index([classId])
+  @@index([studentId])
+  @@index([date])
+  // Composite indexes for report queries
+  @@index([schoolId, date])                    // admin dashboard: school + date range
+  @@index([studentId, date, status])           // student history: student + date + status
+  @@index([classId, date, status])             // class attendance: class + date + status
+  @@index([notifiedParent, status, date])      // parent notification queue
+  @@map("attendance")
+}
+
+model AttendanceLog {
+  id            String     @id @default(uuid())
+  attendanceId  String
+  attendance    Attendance @relation(fields: [attendanceId], references: [id], onDelete: Cascade)
+  action        String     // check_in, check_out, status_change
+  previousStatus String?
+  newStatus     String?
+  performedBy   String?
+  timestamp     DateTime   @default(now())
+  notes         String?    @db.Text
+
+  @@index([attendanceId])
+  @@map("attendance_logs")
+}
+
+// ─── BEHAVIOR ─────────────────────────────────────────────────────────────────
+
+model BehaviorLog {
+  id          String       @id @default(uuid())
+  studentId   String
+  student     Student      @relation(fields: [studentId], references: [id])
+  teacherId   String?
+  teacher     Teacher?     @relation(fields: [teacherId], references: [id])
+  type        BehaviorType
+  category    String       // participation, discipline, homework, teamwork, etc.
+  points      Int          // -99 to +99
+  description String?      @db.Text
+  date        DateTime     @default(now())
+  notifiedParent Boolean   @default(false)
+  deletedAt   DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([studentId])
+  @@index([teacherId])
+  @@index([date])
+  @@index([studentId, date]) // student behavior history
+  @@map("behavior_logs")
+}
+
+// ─── GRADES ───────────────────────────────────────────────────────────────────
+
+model GradeCategory {
+  id          String   @id @default(uuid())
+  classId     String
+  class       Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  name        String
+  type        String   // assignment, quiz, exam, etc.
+  weight      Float    @default(100) // percentage weight
+  maxPoints   Float    @default(100)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  grades      Grade[]
+
+  @@index([classId])
+  @@map("grade_categories")
+}
+
+model Grade {
+  id              String        @id @default(uuid())
+  studentId       String
+  student         Student       @relation(fields: [studentId], references: [id])
+  classId         String
+  class           Class         @relation(fields: [classId], references: [id])
+  termId          String?
+  term            Term?         @relation(fields: [termId], references: [id])
+  teacherId       String?
+  teacher         Teacher?      @relation(fields: [teacherId], references: [id])
+  categoryId      String?
+  category        GradeCategory? @relation(fields: [categoryId], references: [id])
+  title           String
+  type            String        // assignment, quiz, exam, oral, memorization, project
+  score           Float
+  maxScore        Float         @default(100)
+  weight          Float         @default(1.0)
+  percentage      Float?
+  letterGrade     String?
+  feedback        String?       @db.Text
+  gradedAt        DateTime      @default(now())
+  dueDate         DateTime?
+  deletedAt       DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  // Phase C-2: Assignment Submissions
+  assignmentSubmissions AssignmentSubmission[] @relation("AssignmentSubmissions")
+  // Phase C-3: Exam Submissions
+  examSubmissions ExamSubmission[] @relation("ExamSubmissions")
+
+  @@index([studentId])
+  @@index([classId])
+  @@index([termId])
+  @@index([studentId, classId, termId])   // student grade report (most common)
+  @@index([classId, termId, type])        // class grade report
+  @@index([studentId, deletedAt])         // active grades filter
+  @@map("grades")
+}
+
+// ─── ACTIVITIES ───────────────────────────────────────────────────────────────
+
+model Activity {
+  id          String       @id @default(uuid())
+  classId     String
+  class       Class        @relation(fields: [classId], references: [id])
+  teacherId   String?
+  teacher     Teacher?     @relation(fields: [teacherId], references: [id])
+  type        ActivityType
+  title       String
+  description String?      @db.Text
+  startTime   DateTime?
+  endTime     DateTime?
+  duration    Int?         // minutes
+  isActive    Boolean      @default(false)
+  deletedAt   DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  participants ActivityParticipant[]
+
+  @@index([classId])
+  @@index([classId, deletedAt]) // active activities filter
+  @@map("activities")
+}
+
+model ActivityParticipant {
+  id          String   @id @default(uuid())
+  activityId  String
+  activity    Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  studentId   String
+  student     Student  @relation(fields: [studentId], references: [id])
+  joinedAt    DateTime?
+  leftAt      DateTime?
+  duration    Int?     // minutes
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now())
+
+  @@unique([activityId, studentId])
+  @@map("activity_participants")
+}
+
+// ─── MESSAGING ────────────────────────────────────────────────────────────────
+
+model Message {
+  id              String        @id @default(uuid())
+  senderId        String
+  sender          User          @relation("SentMessages", fields: [senderId], references: [id])
+  subject         String?
+  body            String        @db.Text
+  attachments     Json?         // array of file URLs
+  isAnnouncement  Boolean       @default(false)
+  schoolId        String?
+  classId         String?
+  // Reply threading — null means top-level message; non-null means it's a reply
+  parentMessageId String?
+  parentMessage   Message?      @relation("MessageReplies", fields: [parentMessageId], references: [id], onDelete: SetNull)
+  replies         Message[]     @relation("MessageReplies")
+  deletedAt       DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  recipients  MessageRecipient[]
+
+  @@index([senderId])
+  @@index([parentMessageId])
+  @@index([senderId, deletedAt]) // active messages filter
+  @@map("messages")
+}
+
+model MessageRecipient {
+  id          String        @id @default(uuid())
+  messageId   String
+  message     Message       @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  recipientId String
+  recipient   User          @relation(fields: [recipientId], references: [id])
+  status      MessageStatus @default(SENT)
+  readAt      DateTime?
+  deletedAt   DateTime?
+  createdAt   DateTime      @default(now())
+
+  @@unique([messageId, recipientId])
+  @@index([recipientId])
+  @@map("message_recipients")
+}
+
+// ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+
+model Notification {
+  id          String           @id @default(uuid())
+  userId      String
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  schoolId    String?
+  school      School?          @relation(fields: [schoolId], references: [id])
+  type        NotificationType
+  title       String
+  body        String           @db.Text
+  data        Json?
+  isRead      Boolean          @default(false)
+  readAt      DateTime?
+  sentVia     Json?            // ["push", "email", "sms"]
+  createdAt   DateTime         @default(now())
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([userId, isRead, createdAt])   // unread count + inbox sort
+  @@index([userId, type, createdAt])     // filtered notification inbox
+  @@map("notifications")
+}
+
+// ─── CALENDAR & NOTES ─────────────────────────────────────────────────────────
+
+model CalendarEvent {
+  id          String    @id @default(uuid())
+  schoolId    String
+  school      School    @relation(fields: [schoolId], references: [id])
+  classId     String?
+  class       Class?    @relation(fields: [classId], references: [id])
+  createdBy   String
+  type        EventType
+  title       String
+  description String?   @db.Text
+  startDate   DateTime
+  endDate     DateTime?
+  allDay      Boolean   @default(false)
+  location    String?
+  color       String?
+  isPublic    Boolean   @default(true)
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([schoolId])
+  @@index([classId])
+  @@index([startDate])
+  @@index([schoolId, startDate, endDate]) // date range queries
+  @@map("calendar_events")
+}
+
+model Note {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  classId     String?
+  class       Class?   @relation(fields: [classId], references: [id])
+  studentId   String?
+  student     Student? @relation(fields: [studentId], references: [id])
+  title       String
+  content     String   @db.Text
+  isPrivate   Boolean  @default(false)
+  attachments Json?
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+  @@index([classId])
+  @@index([userId, deletedAt]) // active notes filter
+  @@map("notes")
+}
+
+// ─── ANNOUNCEMENTS ────────────────────────────────────────────────────────────
+
+model Announcement {
+  id          String   @id @default(uuid())
+  schoolId    String
+  school      School   @relation(fields: [schoolId], references: [id])
+  authorId    String
+  title       String
+  content     String   @db.Text
+  targetRoles Json?    // ["TEACHER", "STUDENT", "GUARDIAN"]
+  classIds    Json?    // specific classes
+  isPinned    Boolean  @default(false)
+  publishAt   DateTime @default(now())
+  expiresAt   DateTime?
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([schoolId])
+  @@index([publishAt])
+  @@index([schoolId, isPinned, publishAt]) // pinned announcements
+  @@index([schoolId, expiresAt]) // expired announcements cleanup
+  @@map("announcements")
+}
+
+// ─── FILE UPLOADS ─────────────────────────────────────────────────────────────
+
+model FileUpload {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  schoolId    String?
+  filename    String
+  originalName String
+  mimeType    String
+  size        Int
+  url         String
+  storageType String   @default("local") // local, s3, cloudinary
+  entityType  String?  // message, note, grade, etc.
+  entityId    String?
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([schoolId])
+  @@index([entityType, entityId]) // entity file lookup
+  @@map("file_uploads")
+}
+
+// ─── REPORTS ──────────────────────────────────────────────────────────────────
+
+model Report {
+  id          String   @id @default(uuid())
+  schoolId    String
+  school      School   @relation(fields: [schoolId], references: [id])
+  generatedBy String
+  type        String   // attendance, grades, behavior, performance
+  title       String
+  parameters  Json?
+  fileUrl     String?
+  status      String   @default("pending") // pending, processing, completed, failed
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+
+  @@index([schoolId])
+  @@index([status])
+  @@index([generatedBy])
+  @@map("reports")
+}
+
+// ─── LIBRARY MANAGEMENT ──────────────────────────────────────────────────────
+
+model LibraryBook {
+  id          String   @id @default(uuid())
+  schoolId    String?
+  title       String
+  author      String?
+  isbn        String?
+  category    String   @default("Other")
+  description String?  @db.Text
+  totalCopies Int      @default(1)
+  addedBy     String?
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  issues      LibraryIssue[]
+
+  @@index([schoolId])
+  @@index([category])
+  @@index([schoolId, deletedAt]) // active books filter
+  @@map("library_books")
+}
+
+model LibraryIssue {
+  id          String   @id @default(uuid())
+  bookId      String
+  book        LibraryBook @relation(fields: [bookId], references: [id])
+  studentId   String
+  student     Student  @relation(fields: [studentId], references: [id])
+  issuedBy    String?
+  issuedAt    DateTime @default(now())
+  dueDate     DateTime
+  returnedAt  DateTime?
+  status      String   @default("ISSUED") // ISSUED, RETURNED, LOST
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([bookId])
+  @@index([studentId])
+  @@index([status])
+  @@index([dueDate]) // overdue books query
+  @@map("library_issues")
+}
+
+// ─── FEE MANAGEMENT ──────────────────────────────────────────────────────────
+model FeeRecord {
+  id          String   @id @default(uuid())
+  schoolId    String?
+  studentId   String
+  student     Student  @relation(fields: [studentId], references: [id])
+  feeType     String   @default("TUITION") // TUITION, REGISTRATION, EXAM, ACTIVITY, TRANSPORT, OTHER
+  amount      Decimal  @db.Decimal(10, 2)
+  description String?  @db.Text
+  status      String   @default("PENDING") // PENDING, PAID, OVERDUE, WAIVED
+  dueDate     DateTime?
+  paidAt      DateTime?
+  notes       String?  @db.Text
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([schoolId])
+  @@index([studentId])
+  @@index([status])
+  @@index([dueDate]) // overdue fees query
+  @@map("fee_records")
+}
+
+// ─── AUDIO COURSE MODULE ──────────────────────────────────────────────────────
+model AudioCategory {
+  id          String   @id @default(uuid())
+  schoolId    String?
+  name        String
+  slug        String
+  description String?  @db.Text
+  isDefault   Boolean  @default(false)  // built-in categories
+  isCustom    Boolean  @default(false)  // teacher-created
+  createdBy   String?  // userId
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  courses     AudioCourse[]
+  lessons     AudioLesson[]
+
+  @@unique([schoolId, slug])
+  @@index([schoolId])
+  @@map("audio_categories")
+}
+
+model AudioCourse {
+  id          String   @id @default(uuid())
+  schoolId    String?
+  categoryId  String
+  category    AudioCategory @relation(fields: [categoryId], references: [id])
+  teacherId   String
+  teacher     Teacher  @relation(fields: [teacherId], references: [id])
+  title       String
+  description String?  @db.Text
+  coverUrl    String?
+  isPublished Boolean  @default(true)
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  lessons     AudioLesson[]
+
+  @@index([schoolId])
+  @@index([categoryId])
+  @@index([teacherId])
+  @@map("audio_courses")
+}
+
+model AudioLesson {
+  id          String   @id @default(uuid())
+  schoolId    String?
+  courseId    String
+  course      AudioCourse @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  categoryId  String
+  category    AudioCategory @relation(fields: [categoryId], references: [id])
+  teacherId   String
+  teacher     Teacher  @relation(fields: [teacherId], references: [id])
+  title       String
+  description String?  @db.Text
+  audioUrl    String   // /uploads/audio/<filename>
+  filename    String   // stored filename
+  originalName String  // original upload name
+  mimeType    String
+  fileSize    Int      // bytes
+  duration    Int?     // seconds
+  orderIndex  Int      @default(0)
+  isPublished Boolean  @default(true)
+  playCount   Int      @default(0)
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([schoolId])
+  @@index([courseId])
+  @@index([categoryId])
+  @@index([teacherId])
+  @@map("audio_lessons")
+}
+
+// ─── VOICE CLUB ───────────────────────────────────────────────────────────────
+
+enum VoiceRoomPrivacy {
+  PUBLIC
+  PRIVATE
+  INVITE_ONLY
+}
+
+enum VoiceRoomStatus {
+  LIVE
+  IDLE
+  ENDED
+  SCHEDULED
+}
+
+enum VoiceParticipantRole {
+  HOST
+  MODERATOR
+  SPEAKER
+  AUDIENCE
+}
+
+model VoiceRoom {
+  id           String            @id @default(uuid())
+  schoolId     String?
+  hostId       String
+  host         User              @relation("VoiceRoomHost", fields: [hostId], references: [id], onDelete: Cascade)
+  title        String
+  description  String?           @db.Text
+  privacy      VoiceRoomPrivacy  @default(PUBLIC)
+  status          VoiceRoomStatus   @default(IDLE)
+  maxSpeakers     Int               @default(10)
+  isOpenMic       Boolean           @default(false)  // when true, audience can grab mic directly
+  micLocked       Boolean           @default(false)  // when true, nobody can grab or use mic
+  roomLevel       Int               @default(1)      // 1-10: controls max permanent members
+  coverEmoji      String?           @default("🎙️")
+  coverImageUrl   String?           // uploaded room avatar/banner image
+  topic           String?
+  scheduledAt     DateTime?
+  startedAt       DateTime?         @default(now())
+  endedAt         DateTime?
+  lastActivityAt  DateTime?         // updated whenever a participant joins/leaves
+  recordingUrl    String?
+  // ── Comment settings ──────────────────────────────────────────────────────
+  commentsEnabled Boolean           @default(true)   // allow chat messages
+  slowMode        Boolean           @default(false)  // 1 message per 5s per user
+  messageType     String            @default("all")  // "all" | "followers" | "none"
+  reactionsEnabled Boolean          @default(true)   // allow emoji reactions in room
+  deletedAt       DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  participants     VoiceParticipant[]
+  messages         VoiceMessage[]
+  userReports      UserReport[]
+  roomMembers      VoiceRoomMember[]
+
+  @@index([schoolId])
+  @@index([hostId])
+  @@index([status])
+  @@index([privacy])
+  // DB-001: Composite index for listRooms() — the most-hit query on the platform.
+  // Covers: WHERE status != 'ENDED' AND (schoolId = X OR schoolId IS NULL)
+  // AND optional privacy filter — eliminates full table scan.
+  @@index([status, privacy, schoolId])
+  @@map("voice_rooms")
+}
+
+model VoiceParticipant {
+  id           String               @id @default(uuid())
+  roomId       String
+  room         VoiceRoom            @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User                 @relation("VoiceParticipant", fields: [userId], references: [id], onDelete: Cascade)
+  role         VoiceParticipantRole @default(AUDIENCE)
+  isMuted      Boolean              @default(true)
+  handRaised   Boolean              @default(false)
+  handRaisedAt DateTime?
+  isPinned     Boolean              @default(false)   // pinned to top of stage grid by host/mod
+  joinedAt     DateTime             @default(now())
+  leftAt       DateTime?
+  isActive     Boolean              @default(true)
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+
+  @@unique([roomId, userId])
+  @@index([roomId])
+  @@index([userId])
+  @@index([isActive])
+  @@index([roomId, isActive, role])        // active speakers query
+  @@index([roomId, isActive, handRaised, handRaisedAt])  // hand queue
+  @@map("voice_participants")
+}
+
+// ─── Voice Room Membership — permanent members with level/badge ──────────────
+model VoiceRoomMember {
+  id           String    @id @default(uuid())
+  roomId       String
+  room         VoiceRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User      @relation("VoiceRoomMember", fields: [userId], references: [id], onDelete: Cascade)
+  memberLevel  Int       @default(1)   // 1-5: Fan/Regular/VIP/Super/Legend
+  role         String    @default("MEMBER")  // OWNER|CO_OWNER|ADMIN|MODERATOR|VIP|OFFICIAL|MEMBER|BLOCKED
+  status       String    @default("ACTIVE")  // PENDING|ACTIVE|REMOVED
+  nickname     String?                        // custom display name in this room
+  lastActiveAt DateTime?
+  isOnline     Boolean   @default(false)
+  contribution Int       @default(0)          // total coins gifted in this room
+  invitedBy    String?                        // userId who invited them
+  isBanned     Boolean   @default(false)
+  joinedAt     DateTime  @default(now())
+  upgradedAt   DateTime?
+  note         String?
+
+  @@unique([roomId, userId])
+  @@index([roomId])
+  @@index([userId])
+  @@index([roomId, memberLevel])
+  @@index([roomId, isBanned])
+  @@index([roomId, status])
+  @@index([roomId, role])
+  @@index([roomId, isOnline])
+  @@index([lastActiveAt])
+  @@map("voice_room_members")
+}
+
+model VoiceMessage {
+  id        String    @id @default(uuid())
+  roomId    String
+  room      VoiceRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User      @relation("VoiceMessage", fields: [userId], references: [id], onDelete: Cascade)
+  body      String    @db.Text
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([roomId])
+  @@index([userId])
+  @@index([roomId, createdAt])   // cursor pagination for chat history
+  @@map("voice_messages")
+}
+
+// ─── AUDIT LOGS ───────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id          String      @id @default(uuid())
+  userId      String?
+  user        User?       @relation(fields: [userId], references: [id])
+  schoolId    String?
+  school      School?     @relation(fields: [schoolId], references: [id])
+  action      AuditAction
+  entity      String      // table/model name
+  entityId    String?
+  oldValues   Json?
+  newValues   Json?
+  ipAddress   String?
+  userAgent   String?     @db.Text
+  createdAt   DateTime    @default(now())
+
+  @@index([userId])
+  @@index([schoolId])
+  @@index([entity])
+  @@index([createdAt])
+  @@index([schoolId, action, createdAt])  // admin audit view
+  @@index([entity, entityId, createdAt])  // entity-specific audit trail
+  @@map("audit_logs")
+}
+
+// ─── VOICE HOST STATS ─────────────────────────────────────────────────────────
+// One row per user per day — updated automatically when a hosted room ends.
+
+model VoiceHostStats {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation("VoiceHostStats", fields: [userId], references: [id], onDelete: Cascade)
+  date           DateTime @db.Date          // one record per calendar day
+  roomsHosted    Int      @default(0)       // rooms created that day
+  totalMinutes   Int      @default(0)       // total hosting minutes
+  peakAudience   Int      @default(0)       // highest audience count in any room
+  totalListeners Int      @default(0)       // unique listeners across all rooms
+  totalSpeakers  Int      @default(0)       // unique speakers promoted
+  totalMessages  Int      @default(0)       // chat messages in hosted rooms
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@index([date])
+  @@map("voice_host_stats")
+}
+
+// ─── VIRTUAL GIFT SYSTEM ──────────────────────────────────────────────────────
+
+model Wallet {
+  id          String   @id @default(uuid())
+  userId      String   @unique
+  user        User     @relation("UserWallet", fields: [userId], references: [id], onDelete: Cascade)
+  coins       Int      @default(0)      // spendable currency
+  diamonds    Int      @default(0)      // earned by receiving gifts
+  totalSpent  Int      @default(0)      // lifetime coins spent
+  totalEarned Int      @default(0)      // lifetime diamonds earned
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+  @@map("wallets")
+}
+
+// ─── WALLET TRANSACTION LEDGER ────────────────────────────────────────────────
+// Additive model — records every coin credit and debit with source traceability.
+// stripeSessionId has a @unique constraint — this is the primary defence against
+// Stripe webhook double-credit at the DB layer (beyond Redis idempotency).
+model WalletTransaction {
+  id               String   @id @default(uuid())
+  userId           String
+  user             User     @relation("WalletTransactions", fields: [userId], references: [id], onDelete: Cascade)
+  type             String   // STRIPE_PURCHASE | GIFT_SEND | TIP_SEND | SUBSCRIPTION | ADMIN_GRANT | REFUND
+  coins            Int      // positive = credit, negative = debit
+  description      String?  @db.VarChar(255)
+  stripeSessionId  String?  @unique  // unique constraint prevents Stripe double-credit
+  packageId        String?
+  giftTxId         String?
+  tipId            String?
+  subscriptionId   String?
+  createdAt        DateTime @default(now())
+
+  @@index([userId])
+  @@index([type])
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@map("wallet_transactions")
+}
+
+model CoinPackage {
+  id          String   @id @default(uuid())
+  name        String
+  coins       Int
+  priceUsd    Decimal  @db.Decimal(10, 2)
+  bonusCoins  Int      @default(0)
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("coin_packages")
+}
+
+model Gift {
+  id            String   @id @default(uuid())
+  name          String
+  emoji         String   @default("🎁")
+  imageUrl      String?
+  videoUrl      String?                        // optional video animation (webm/mp4 path or URL)
+  animationType String   @default("overlay")   // overlay | banner | spotlight | fullscreen | cinematic | video
+  soundEffect   String?
+  priceCoins    Int
+  rarity        String   @default("common")    // common | rare | epic | legendary | ultimate
+  comboEnabled  Boolean  @default(true)
+  priority      String   @default("normal")    // normal | high | ultra
+  isPremium     Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  transactions  GiftTransaction[]
+
+  @@index([isActive])
+  @@index([isPremium])
+  @@map("gifts")
+}
+
+model GiftTransaction {
+  id              String    @id @default(uuid())
+  roomId          String
+  roomType        String    @default("voice") @map("room_type")    // voice | live_class | video_live | pk | community
+  // No FK on roomId — it can reference voice_rooms OR live_classes depending on roomType
+  senderId        String
+  sender          User     @relation("GiftSender",   fields: [senderId],   references: [id], onDelete: Cascade)
+  receiverId      String
+  receiver        User     @relation("GiftReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  giftId          String
+  gift            Gift     @relation(fields: [giftId], references: [id])
+  count           Int      @default(1)
+  combo           Int      @default(1)
+  priority        String   @default("normal")   // normal | high | ultra
+  isPremium       Boolean  @default(false)
+  coinsSpent      Int
+  diamondsEarned  Int
+  idempotencyKey  String   @unique
+  createdAt       DateTime @default(now())
+
+  @@index([roomId])
+  @@index([roomType])
+  @@index([senderId])
+  @@index([receiverId])
+  @@index([createdAt])
+  @@index([isPremium])
+  // DB-002: Composite index for getDailyLeaderboard() groupBy.
+  // Covers: WHERE createdAt >= today GROUP BY senderId ORDER BY SUM(coinsSpent) DESC
+  @@index([createdAt, senderId])
+  @@map("gift_transactions")
+}
+
+model RoomGiftLeaderboard {
+  id         String    @id @default(uuid())
+  roomId     String
+  roomType   String    @default("voice") @map("room_type")    // voice | live_class | video_live | pk | community
+  // No FK on roomId — supports all room types
+  userId     String
+  user       User      @relation("GiftLeaderboard", fields: [userId], references: [id], onDelete: Cascade)
+  totalCoins Int       @default(0)
+  giftCount  Int       @default(0)
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([roomId, userId])
+  @@index([roomId])
+  @@index([roomType])
+  @@index([totalCoins])
+  @@map("room_gift_leaderboard")
+}
+
+// ─── SOCIAL SYSTEM ────────────────────────────────────────────────────────────
+
+// One-way follow (TikTok style) — A follows B, no approval needed
+model Follow {
+  id          String   @id @default(uuid())
+  followerId  String
+  follower    User     @relation("Follower",  fields: [followerId],  references: [id], onDelete: Cascade)
+  followingId String
+  following   User     @relation("Following", fields: [followingId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+  @@map("follows")
+}
+
+// Two-way friend request (IMO style) — requires acceptance
+model FriendRequest {
+  id         String              @id @default(uuid())
+  senderId   String
+  sender     User                @relation("FriendRequestSender",   fields: [senderId],   references: [id], onDelete: Cascade)
+  receiverId String
+  receiver   User                @relation("FriendRequestReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  status     FriendRequestStatus @default(PENDING)
+  createdAt  DateTime            @default(now())
+  updatedAt  DateTime            @updatedAt
+
+  @@unique([senderId, receiverId])
+  @@index([senderId])
+  @@index([receiverId])
+  @@index([status])
+  @@map("friend_requests")
+}
+
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+// ─── REPORT & BLOCK SYSTEM ───────────────────────────────────────────────────
+
+// Report a user for inappropriate behavior (abuse, spam, harassment, etc.)
+model UserReport {
+  id          String    @id @default(uuid())
+  reporterId  String
+  reporter    User      @relation("ReportsSent",     fields: [reporterId], references: [id], onDelete: Cascade)
+  reportedId  String
+  reported    User      @relation("ReportsReceived", fields: [reportedId], references: [id], onDelete: Cascade)
+  roomId      String?   // optional — the voice room context where incident occurred
+  room        VoiceRoom? @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  reason      String    // spam | harassment | hate_speech | sexual_content | scam | other
+  description String?   @db.Text
+  status      String    @default("PENDING") // PENDING | REVIEWED | DISMISSED | ACTION_TAKEN
+  reviewedBy  String?   // admin userId
+  reviewedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([reporterId, reportedId])   // one report per pair (reporter can update)
+  @@index([reporterId])
+  @@index([reportedId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("user_reports")
+}
+
+// Block a user — blocks DMs, hides them from voice rooms, prevents gifting
+model UserBlock {
+  id        String   @id @default(uuid())
+  blockerId String
+  blocker   User     @relation("BlocksSent",     fields: [blockerId], references: [id], onDelete: Cascade)
+  blockedId String
+  blocked   User     @relation("BlocksReceived", fields: [blockedId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([blockerId, blockedId])
+  @@index([blockerId])
+  @@index([blockedId])
+  @@map("user_blocks")
+}
+
+// ─── LIVE CLASS SYSTEM ───────────────────────────────────────────────────────
+
+enum LiveClassStatus {
+  SCHEDULED
+  LIVE
+  ENDED
+  CANCELLED
+}
+
+enum LiveClassParticipantRole {
+  HOST
+  STUDENT
+  OBSERVER
+}
+
+enum LiveClassMessageType {
+  TEXT
+  SYSTEM
+  POLL
+  QUESTION
+}
+
+enum LiveClassHandStatus {
+  WAITING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum LiveClassAttendanceStatus {
+  PRESENT
+  PARTIAL
+  ABSENT
+}
+
+model LiveClass {
+  id                 String          @id @default(uuid())
+  schoolId           String
+  school             School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classId            String
+  class              Class           @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacherId          String
+  teacher            Teacher         @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  title              String
+  description        String?         @db.Text
+  scheduledAt        DateTime?
+  duration           Int?                            // minutes — null means unlimited (permanent room)
+  status             LiveClassStatus @default(SCHEDULED)
+  livekitRoomName    String?
+  recordingUrl       String?
+  coverImageUrl      String?
+  maxParticipants    Int             @default(100)
+  isRecorded            Boolean         @default(false)
+  recordingStartedAt    DateTime?                       // set when recording is active
+  chatEnabled           Boolean         @default(true)
+  handRaiseEnabled      Boolean         @default(true)
+  whiteboardEnabled     Boolean         @default(true)
+  quranPanelEnabled     Boolean         @default(false)
+  isOpenMic             Boolean         @default(false)  // when true, all students can publish freely
+  screenShareEnabled    Boolean         @default(true)   // when true, all participants can share screen
+  startedAt             DateTime?
+  endedAt               DateTime?
+  deletedAt          DateTime?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  participants  LiveClassParticipant[]
+  messages      LiveClassMessage[]
+  handQueue     LiveClassHandQueue[]
+  attendance    LiveClassAttendance[]
+
+  @@index([schoolId])
+  @@index([classId])
+  @@index([teacherId])
+  @@index([status])
+  @@index([scheduledAt])
+  @@map("live_classes")
+}
+
+model LiveClassParticipant {
+  id            String                   @id @default(uuid())
+  liveClassId   String
+  liveClass     LiveClass                @relation(fields: [liveClassId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User                     @relation("LiveClassParticipant", fields: [userId], references: [id], onDelete: Cascade)
+  role          LiveClassParticipantRole @default(STUDENT)
+  isMuted       Boolean                  @default(true)
+  isVideoOn     Boolean                  @default(false)
+  handRaised    Boolean                  @default(false)
+  handRaisedAt  DateTime?
+  joinedAt      DateTime                 @default(now())
+  leftAt        DateTime?
+  totalDuration Int                      @default(0)  // seconds
+  isActive      Boolean                  @default(true)
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+
+  @@unique([liveClassId, userId])
+  @@index([liveClassId])
+  @@index([userId])
+  @@index([isActive])
+  @@map("live_class_participants")
+}
+
+model LiveClassMessage {
+  id          String               @id @default(uuid())
+  liveClassId String
+  liveClass   LiveClass            @relation(fields: [liveClassId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User                 @relation("LiveClassMessage", fields: [userId], references: [id], onDelete: Cascade)
+  body        String               @db.Text
+  type        LiveClassMessageType @default(TEXT)
+  deletedAt   DateTime?
+  createdAt   DateTime             @default(now())
+
+  @@index([liveClassId])
+  @@index([userId])
+  @@map("live_class_messages")
+}
+
+model LiveClassHandQueue {
+  id          String              @id @default(uuid())
+  liveClassId String
+  liveClass   LiveClass           @relation(fields: [liveClassId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User                @relation("LiveClassHandQueue", fields: [userId], references: [id], onDelete: Cascade)
+  raisedAt    DateTime            @default(now())
+  status      LiveClassHandStatus @default(WAITING)
+  createdAt   DateTime            @default(now())
+
+  @@unique([liveClassId, userId])
+  @@index([liveClassId])
+  @@map("live_class_hand_queue")
+}
+
+model LiveClassAttendance {
+  id           String                    @id @default(uuid())
+  liveClassId  String
+  liveClass    LiveClass                 @relation(fields: [liveClassId], references: [id], onDelete: Cascade)
+  studentId    String
+  student      Student                   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  joinedAt     DateTime                  @default(now())
+  leftAt       DateTime?
+  totalMinutes Int                       @default(0)
+  status       LiveClassAttendanceStatus @default(PRESENT)
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+
+  @@unique([liveClassId, studentId])
+  @@index([liveClassId])
+  @@index([studentId])
+  @@map("live_class_attendance")
+}
+
+// ─── DIRECT MESSAGES ─────────────────────────────────────────────────────────
+// 1-to-1 real-time private chat (separate from broadcast Message system)
+
+model DmConversation {
+  id          String   @id @default(uuid())
+  // Canonical ordering: userAId < userBId (alphabetically) to prevent duplicates
+  userAId     String
+  userA       User     @relation("DmConvA", fields: [userAId], references: [id], onDelete: Cascade)
+  userBId     String
+  userB       User     @relation("DmConvB", fields: [userBId], references: [id], onDelete: Cascade)
+  // Last message snapshot for conversation list
+  lastMessage String?  @db.Text
+  lastMessageAt DateTime?
+  lastSenderId  String?
+  // Unread counts per user
+  unreadA     Int      @default(0)   // unread for userA
+  unreadB     Int      @default(0)   // unread for userB
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  messages    DirectMessage[]
+
+  @@unique([userAId, userBId])
+  @@index([userAId])
+  @@index([userBId])
+  @@index([lastMessageAt])
+  @@map("dm_conversations")
+}
+
+model DirectMessage {
+  id             String         @id @default(uuid())
+  conversationId String
+  conversation   DmConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User           @relation("DmSender",   fields: [senderId],   references: [id], onDelete: Cascade)
+  receiverId     String
+  receiver       User           @relation("DmReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  body           String         @db.Text
+  status         DmStatus       @default(SENT)
+  deliveredAt    DateTime?
+  readAt         DateTime?
+  deletedBySender   Boolean     @default(false)
+  deletedByReceiver Boolean     @default(false)
+  // Story reply context — L8 fix: allows replying to a story via DM.
+  // When set, the message is a story reply; the client shows a story preview above the message.
+  storyId        String?        // optional FK → stories.id
+  story          Story?         @relation("StoryReplies", fields: [storyId], references: [id], onDelete: SetNull)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([conversationId])
+  @@index([senderId])
+  @@index([receiverId])
+  @@index([createdAt])
+  @@index([conversationId, createdAt])
+  @@index([receiverId, status, createdAt])
+  @@index([storyId])   // fetch all replies to a specific story
+  @@map("direct_messages")
+}
+
+enum DmStatus {
+  SENT
+  DELIVERED
+  READ
+}
+
+
+// ─── SOCIAL FEED ─────────────────────────────────────────────────────────────
+// Phase B-1: Posts, reactions, comments, hashtags, bookmarks, views
+// All tables are NEW — zero changes to existing models above.
+
+model Hashtag {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  postCount Int      @default(0)
+  createdAt DateTime @default(now())
+
+  posts PostHashtag[]
+
+  @@map("hashtags")
+}
+
+model Post {
+  id              String    @id @default(uuid())
+  authorId        String
+  author          User      @relation("PostAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  body            String?   @db.Text
+  type            String    @default("TEXT")
+  // TEXT | IMAGE | VIDEO | AUDIO | DOCUMENT | POLL | MULTI_IMAGE
+  // LIVE_ROOM_SHARE | LIVE_CLASS_SHARE | VOICE_CLUB_SHARE | REPOST | QUOTE
+  visibility      String    @default("PUBLIC")
+  // PUBLIC | FOLLOWERS | PRIVATE | SCHOOL_ONLY
+  schoolId        String?   // non-null when visibility = SCHOOL_ONLY
+  likeCount       Int       @default(0)
+  commentCount    Int       @default(0)
+  shareCount      Int       @default(0)
+  viewCount       Int       @default(0)
+  bookmarkCount   Int       @default(0)
+  isPinned        Boolean   @default(false)
+  isArchived      Boolean   @default(false)
+  isDraft         Boolean   @default(false)
+  scheduledAt     DateTime?
+  // repost / quote
+  originalPostId  String?
+  originalPost    Post?     @relation("PostReposts", fields: [originalPostId], references: [id], onDelete: SetNull)
+  reposts         Post[]    @relation("PostReposts")
+  quotedBody      String?   @db.Text
+  // link preview
+  linkUrl         String?   @db.VarChar(2048)
+  linkTitle       String?   @db.VarChar(512)
+  linkDescription String?   @db.Text
+  linkImage       String?   @db.VarChar(2048)
+  // poll JSON when type=POLL
+  pollData        Json?
+  // shared entity reference
+  refEntityType   String?   // voice_room | live_class | school_announcement
+  refEntityId     String?
+  communityId     String?   // Phase B-4: null = personal post, non-null = community post
+  community       Community? @relation(fields: [communityId], references: [id], onDelete: SetNull)
+  isExclusive     Boolean?  @default(false)   // Phase B-6: true = subscribers only
+  tierRequired    String?                     // Phase B-6: FK → creator_tiers.id
+  tier            CreatorTier? @relation("TierPosts", fields: [tierRequired], references: [id], onDelete: SetNull)
+  location        String?   @db.VarChar(120)  // display label, no GPS (Phase B-1)
+  deletedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  media       PostMedia[]
+  reactions   PostReaction[]
+  comments    PostComment[]
+  hashtags    PostHashtag[]
+  mentions    PostMention[]
+  bookmarks   PostBookmark[]
+  views       PostView[]
+
+  @@index([authorId])
+  @@index([visibility])
+  @@index([schoolId])
+  @@index([communityId])
+  @@index([createdAt])
+  @@index([isDraft])
+  @@index([scheduledAt])
+  @@index([originalPostId])
+  @@index([deletedAt])
+  @@map("posts")
+}
+
+model PostMedia {
+  id          String   @id @default(uuid())
+  postId      String
+  post        Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  url         String   @db.VarChar(2048)
+  type        String   @default("IMAGE")  // IMAGE | VIDEO | AUDIO | DOCUMENT
+  mimeType    String?
+  size        Int?
+  width       Int?
+  height      Int?
+  duration    Int?     // seconds for video/audio
+  thumbnail   String?  @db.VarChar(2048)
+  orderIndex  Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  @@index([postId])
+  @@map("post_media")
+}
+
+model PostReaction {
+  id        String   @id @default(uuid())
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation("PostReactions", fields: [userId], references: [id], onDelete: Cascade)
+  type      String   @default("LIKE")
+  // LIKE | LOVE | CELEBRATE | SUPPORT | INSIGHTFUL | FUNNY
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+  @@index([postId])
+  @@index([userId])
+  @@map("post_reactions")
+}
+
+model PostComment {
+  id         String   @id @default(uuid())
+  postId     String
+  post       Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  authorId   String
+  author     User     @relation("PostComments", fields: [authorId], references: [id], onDelete: Cascade)
+  parentId   String?  // null = top-level, non-null = reply
+  parent     PostComment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies    PostComment[] @relation("CommentReplies")
+  body       String   @db.Text
+  likeCount  Int      @default(0)
+  replyCount Int      @default(0)
+  deletedAt  DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  reactions  CommentReaction[]
+  mentions   PostMention[]
+
+  @@index([postId])
+  @@index([authorId])
+  @@index([parentId])
+  @@index([createdAt])
+  @@map("post_comments")
+}
+
+model CommentReaction {
+  id        String      @id @default(uuid())
+  commentId String
+  comment   PostComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User        @relation("CommentReactions", fields: [userId], references: [id], onDelete: Cascade)
+  type      String      @default("LIKE")
+  createdAt DateTime    @default(now())
+
+  @@unique([commentId, userId])
+  @@index([commentId])
+  @@map("comment_reactions")
+}
+
+model PostHashtag {
+  postId    String
+  post      Post    @relation(fields: [postId], references: [id], onDelete: Cascade)
+  hashtagId String
+  hashtag   Hashtag @relation(fields: [hashtagId], references: [id], onDelete: Cascade)
+
+  @@id([postId, hashtagId])
+  @@map("post_hashtags")
+}
+
+model PostMention {
+  id        String       @id @default(uuid())
+  postId    String?
+  post      Post?        @relation(fields: [postId], references: [id], onDelete: Cascade)
+  commentId String?
+  comment   PostComment? @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User         @relation("PostMentions", fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime     @default(now())
+
+  @@index([postId])
+  @@index([commentId])
+  @@index([userId])
+  @@map("post_mentions")
+}
+
+model PostBookmark {
+  id        String   @id @default(uuid())
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation("PostBookmarks", fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+  @@index([userId])
+  @@map("post_bookmarks")
+}
+
+model PostView {
+  id        String   @id @default(uuid())
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation("PostViews", fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+  @@index([postId])
+  @@map("post_views")
+}
+
+// ─── STORIES ─────────────────────────────────────────────────────────────────
+// Phase B-3: 24-hour stories (Instagram/WhatsApp style)
+// All tables are NEW — zero changes to existing models above.
+
+model Story {
+  id            String    @id @default(uuid())
+  authorId      String
+  author        User      @relation("StoryAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  type          String    @default("IMAGE")  // IMAGE | VIDEO | TEXT
+  mediaUrl      String?   @db.VarChar(2048)
+  mimeType      String?
+  thumbnail     String?   @db.VarChar(2048)
+  // Text story fields
+  text          String?   @db.VarChar(500)
+  textColor     String?   @default("#ffffff")
+  bgColor       String?   @default("#6366f1")
+  bgGradient    String?
+  // Caption overlay (for media stories)
+  caption       String?   @db.VarChar(280)
+  duration      Int       @default(5)       // seconds to display
+  expiresAt     DateTime                    // createdAt + 24h
+  viewCount     Int       @default(0)
+  reactionCount Int       @default(0)
+  deletedAt     DateTime?
+  createdAt     DateTime  @default(now())
+
+  views     StoryView[]
+  reactions StoryReaction[]
+  dmReplies DirectMessage[] @relation("StoryReplies")
+
+  @@index([authorId])
+  @@index([expiresAt])
+  @@index([createdAt])
+  @@index([deletedAt])
+  @@map("stories")
+}
+
+model StoryView {
+  id        String   @id @default(uuid())
+  storyId   String
+  story     Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  viewerId  String
+  viewer    User     @relation("StoryViewer", fields: [viewerId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([storyId, viewerId])
+  @@index([storyId])
+  @@map("story_views")
+}
+
+model StoryReaction {
+  id        String   @id @default(uuid())
+  storyId   String
+  story     Story    @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation("StoryReactions", fields: [userId], references: [id], onDelete: Cascade)
+  type      String   @default("LIKE")
+  createdAt DateTime @default(now())
+
+  @@unique([storyId, userId])
+  @@index([storyId])
+  @@map("story_reactions")
+}
+
+// ─── COMMUNITIES ─────────────────────────────────────────────────────────────
+// Phase B-4: Communities — groups, clubs, topic spaces
+// Additive: communities + community_members tables new.
+// posts.communityId added as optional nullable FK.
+
+model Community {
+  id          String   @id @default(uuid())
+  slug        String   @unique
+  name        String
+  description String?  @db.Text
+  avatarUrl   String?  @db.VarChar(2048)
+  coverUrl    String?  @db.VarChar(2048)
+  privacy     String   @default("PUBLIC")   // PUBLIC | PRIVATE | INVITE_ONLY
+  ownerId     String
+  owner       User     @relation("CommunityOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  memberCount Int      @default(1)
+  postCount   Int      @default(0)
+  isVerified  Boolean  @default(false)
+  rules       String?  @db.Text
+  category    String?  // education | religion | technology | sports | arts | other
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members CommunityMember[]
+  posts   Post[]
+
+  @@index([ownerId])
+  @@index([privacy])
+  @@index([category])
+  @@index([createdAt])
+  @@map("communities")
+}
+
+model CommunityMember {
+  id          String    @id @default(uuid())
+  communityId String
+  community   Community @relation(fields: [communityId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation("CommunityMembers", fields: [userId], references: [id], onDelete: Cascade)
+  role        String    @default("MEMBER")  // OWNER | ADMIN | MODERATOR | MEMBER
+  joinedAt    DateTime  @default(now())
+  invitedBy   String?
+
+  @@unique([communityId, userId])
+  @@index([communityId])
+  @@index([userId])
+  @@index([role])
+  @@map("community_members")
+}
+
+// ─── CREATOR ECONOMY ──────────────────────────────────────────────────────────
+// Phase B-6: Creator profiles, tiers, subscriptions, tips
+// All tables NEW. One additive nullable FK added to Post (tierRequired).
+
+model CreatorProfile {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation("CreatorProfile", fields: [userId], references: [id], onDelete: Cascade)
+  displayName     String?  @db.VarChar(120)
+  tagline         String?  @db.VarChar(280)
+  isActive        Boolean  @default(true)
+  isVerified      Boolean  @default(false)
+  totalEarned     Int      @default(0)
+  subscriberCount Int      @default(0)
+  tipCount        Int      @default(0)
+  links           Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tiers         CreatorTier[]
+  subscriptions CreatorSubscription[]
+  tips          CreatorTip[]
+
+  @@map("creator_profiles")
+}
+
+model CreatorTier {
+  id          String         @id @default(uuid())
+  creatorId   String
+  creator     CreatorProfile @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  name        String         @db.VarChar(80)
+  description String?        @db.VarChar(500)
+  priceCoins  Int            @default(100)
+  sortOrder   Int            @default(0)
+  isActive    Boolean        @default(true)
+  perks       Json?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  subscriptions CreatorSubscription[]
+  posts         Post[]                @relation("TierPosts")
+
+  @@index([creatorId])
+  @@map("creator_tiers")
+}
+
+model CreatorSubscription {
+  id           String         @id @default(uuid())
+  subscriberId String
+  subscriber   User           @relation("CreatorSubscriber", fields: [subscriberId], references: [id], onDelete: Cascade)
+  creatorId    String
+  creator      CreatorProfile @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  tierId       String
+  tier         CreatorTier    @relation(fields: [tierId], references: [id], onDelete: Cascade)
+  status       String         @default("ACTIVE")  // ACTIVE | EXPIRED | CANCELLED
+  startedAt    DateTime       @default(now())
+  expiresAt    DateTime
+  renewedAt    DateTime?
+  coinsCharged Int            @default(0)
+  createdAt    DateTime       @default(now())
+
+  @@unique([subscriberId, creatorId])
+  @@index([creatorId])
+  @@index([subscriberId])
+  @@index([expiresAt])
+  @@index([status])
+  @@map("creator_subscriptions")
+}
+
+model CreatorTip {
+  id             String         @id @default(uuid())
+  senderId       String
+  sender         User           @relation("TipSender", fields: [senderId], references: [id], onDelete: Cascade)
+  creatorId      String
+  creator        CreatorProfile @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  amount         Int
+  diamondsEarned Int
+  message        String?        @db.VarChar(280)
+  postId         String?
+  idempotencyKey String         @unique
+  createdAt      DateTime       @default(now())
+
+  @@index([senderId])
+  @@index([creatorId])
+  @@index([createdAt])
+  @@map("creator_tips")
+}
+
+// ─── GROUP CHAT SYSTEM ─────────────────────────────────────────────────────────
+// Phase C-1: Multi-user group conversations (separate from DM and broadcast Message)
+// Additive: All tables are NEW — zero changes to existing models above.
+
+enum GroupChatPrivacy {
+  PUBLIC
+  PRIVATE
+  SCHOOL_ONLY
+  CLASS_ONLY
+}
+
+enum GroupChatRole {
+  OWNER
+  ADMIN
+  MODERATOR
+  MEMBER
+}
+
+enum GroupMessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT
+  POLL
+  SYSTEM
+}
+
+model GroupConversation {
+  id          String           @id @default(uuid())
+  schoolId    String?
+  school      School?          @relation("GroupConversations", fields: [schoolId], references: [id])
+  classId     String?
+  class       Class?           @relation("GroupConversations", fields: [classId], references: [id])
+  name        String
+  description String?          @db.Text
+  avatarUrl   String?         @db.VarChar(2048)
+  privacy     GroupChatPrivacy @default(PRIVATE)
+  maxMembers  Int              @default(100)
+  isMuted     Boolean          @default(false)  // when true, only admins can send
+  slowMode    Boolean          @default(false)  // 1 message per 5s per user
+  memberCount Int              @default(1)
+  messageCount Int             @default(0)
+  lastMessage  String?          @db.Text
+  lastMessageAt DateTime?
+  createdBy   String
+  deletedAt   DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  members     GroupMember[]
+  messages    GroupMessage[]
+
+  @@index([schoolId])
+  @@index([classId])
+  @@index([privacy])
+  @@index([createdAt])
+  @@map("group_conversations")
+}
+
+model GroupMember {
+  id             String           @id @default(uuid())
+  conversationId String
+  conversation   GroupConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User             @relation("GroupMemberships", fields: [userId], references: [id], onDelete: Cascade)
+  role           GroupChatRole    @default(MEMBER)
+  isMuted        Boolean          @default(false)
+  joinedAt       DateTime         @default(now())
+  leftAt         DateTime?
+  unreadCount    Int              @default(0)
+  lastReadAt     DateTime?
+  deletedAt      DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  @@unique([conversationId, userId])
+  @@index([conversationId])
+  @@index([userId])
+  @@index([role])
+  @@map("group_members")
+}
+
+model GroupMessage {
+  id             String           @id @default(uuid())
+  conversationId String
+  conversation   GroupConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User             @relation("GroupMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  type           GroupMessageType @default(TEXT)
+  body           String?          @db.Text
+  mediaUrl       String?          @db.VarChar(2048)
+  mimeType       String?
+  fileSize       Int?
+  replyToId      String?          // reply to another message in same group
+  replyTo        GroupMessage?    @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies        GroupMessage[]   @relation("MessageReplies")
+  isPinned       Boolean          @default(false)
+  pinnedAt       DateTime?
+  pinnedBy       String?          // userId who pinned it
+  deletedBy      Json?            // array of userIds who deleted this message
+  deletedAt      DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  reactions      GroupMessageReaction[]
+  reads          GroupMessageRead[]
+
+  @@index([conversationId])
+  @@index([senderId])
+  @@index([createdAt])
+  @@index([conversationId, createdAt])
+  @@index([conversationId, isPinned])
+  @@map("group_messages")
+}
+
+model GroupMessageReaction {
+  id             String   @id @default(uuid())
+  messageId      String
+  message        GroupMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User     @relation("GroupReactions", fields: [userId], references: [id], onDelete: Cascade)
+  type           String   @default("LIKE")
+  createdAt      DateTime @default(now())
+
+  @@unique([messageId, userId])
+  @@index([messageId])
+  @@index([userId])
+  @@map("group_message_reactions")
+}
+
+model GroupMessageRead {
+  id             String   @id @default(uuid())
+  messageId      String
+  message        GroupMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User     @relation("GroupReads", fields: [userId], references: [id], onDelete: Cascade)
+  readAt         DateTime @default(now())
+
+  @@unique([messageId, userId])
+  @@index([messageId])
+  @@index([userId])
+  @@map("group_message_reads")
+}
+
+// ─── ASSIGNMENT SUBMISSION SYSTEM ─────────────────────────────────────────────────
+// Phase C-2: Student assignment submissions with file uploads and grading
+// Additive: AssignmentSubmission table NEW. Grade table extended with submissionId FK.
+
+enum SubmissionStatus {
+  DRAFT
+  SUBMITTED
+  REVIEWED
+  GRADED
+  REJECTED
+  LATE
+}
+
+model AssignmentSubmission {
+  id              String           @id @default(uuid())
+  schoolId        String?
+  school          School?          @relation("AssignmentSubmissions", fields: [schoolId], references: [id])
+  classId         String
+  class           Class            @relation("AssignmentSubmissions", fields: [classId], references: [id])
+  gradeId         String?          // links to the Grade record
+  grade           Grade?           @relation("AssignmentSubmissions", fields: [gradeId], references: [id])
+  studentId       String
+  student         Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  teacherId       String?
+  title           String
+  description     String?          @db.Text
+  attachments     Json?            // array of file URLs
+  textContent     String?          @db.Text
+  status          SubmissionStatus @default(DRAFT)
+  submittedAt     DateTime?
+  reviewedAt      DateTime?
+  gradedAt        DateTime?
+  feedback        String?          @db.Text
+  score           Float?
+  maxScore        Float?
+  percentage      Float?
+  isLate          Boolean          @default(false)
+  deletedAt       DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([schoolId])
+  @@index([classId])
+  @@index([gradeId])
+  @@index([studentId])
+  @@index([status])
+  @@index([submittedAt])
+  @@map("assignment_submissions")
+}
+
+// ─── EXAM SUBMISSION SYSTEM ─────────────────────────────────────────────────────
+// Phase C-3: Student exam submissions with auto-grading support
+// Additive: ExamSubmission table NEW. Grade table extended with examSubmissionId FK.
+
+model ExamSubmission {
+  id              String           @id @default(uuid())
+  schoolId        String?
+  school          School?          @relation("ExamSubmissions", fields: [schoolId], references: [id])
+  classId         String
+  class           Class            @relation("ExamSubmissions", fields: [classId], references: [id])
+  gradeId         String?          // links to the Grade record
+  grade           Grade?           @relation("ExamSubmissions", fields: [gradeId], references: [id])
+  studentId       String
+  student         Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  teacherId       String?
+  title           String
+  answers         Json?            // structured answers (multiple choice, essay, etc.)
+  attachments     Json?            // uploaded files (scans, documents)
+  status          SubmissionStatus @default(DRAFT)
+  submittedAt     DateTime?
+  reviewedAt      DateTime?
+  gradedAt        DateTime?
+  feedback        String?          @db.Text
+  score           Float?
+  maxScore        Float?
+  percentage      Float?
+  autoGraded      Boolean          @default(false)
+  deletedAt       DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([schoolId])
+  @@index([classId])
+  @@index([gradeId])
+  @@index([studentId])
+  @@index([status])
+  @@index([submittedAt])
+  @@map("exam_submissions")
+}
+
+// ─── MARKETPLACE SYSTEM ───────────────────────────────────────────────────────────
+// Phase C-4: School marketplace for books, uniforms, supplies
+// Additive: All tables are NEW — zero changes to existing models above.
+
+enum ProductCondition {
+  NEW
+  LIKE_NEW
+  GOOD
+  FAIR
+  POOR
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+model Product {
+  id              String           @id @default(uuid())
+  schoolId        String?
+  school          School?          @relation("MarketplaceProducts", fields: [schoolId], references: [id])
+  sellerId        String
+  seller          User             @relation("SellerProducts", fields: [sellerId], references: [id], onDelete: Cascade)
+  title           String
+  description     String?          @db.Text
+  category        String           @default("OTHER") // BOOKS, UNIFORMS, SUPPLIES, ELECTRONICS, OTHER
+  condition       ProductCondition @default(NEW)
+  price           Decimal          @db.Decimal(10, 2)
+  negotiable      Boolean          @default(false)
+  images          Json?            // array of image URLs
+  stock           Int              @default(1)
+  viewCount       Int              @default(0)
+  favoriteCount   Int              @default(0)
+  soldCount       Int              @default(0)
+  isActive        Boolean          @default(true)
+  featured        Boolean          @default(false)
+  expiresAt       DateTime?
+  deletedAt       DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  orders          Order[]
+  reviews         Review[]
+
+  @@index([schoolId])
+  @@index([sellerId])
+  @@index([category])
+  @@index([condition])
+  @@index([isActive])
+  @@index([createdAt])
+  @@map("products")
+}
+
+model Order {
+  id              String       @id @default(uuid())
+  schoolId        String?
+  school          School?      @relation("MarketplaceOrders", fields: [schoolId], references: [id])
+  productId       String
+  product         Product      @relation(fields: [productId], references: [id])
+  buyerId         String
+  buyer           User         @relation("BuyerOrders", fields: [buyerId], references: [id], onDelete: Cascade)
+  sellerId        String
+  seller          User         @relation("SellerOrders", fields: [sellerId], references: [id], onDelete: Cascade)
+  quantity        Int          @default(1)
+  totalPrice      Decimal      @db.Decimal(10, 2)
+  status          OrderStatus  @default(PENDING)
+  shippingAddress Json?
+  notes           String?      @db.Text
+  confirmedAt     DateTime?
+  shippedAt       DateTime?
+  deliveredAt     DateTime?
+  cancelledAt     DateTime?
+  refundedAt      DateTime?
+  deletedAt       DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  reviews         Review[]
+
+  @@index([schoolId])
+  @@index([productId])
+  @@index([buyerId])
+  @@index([sellerId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+model Review {
+  id              String   @id @default(uuid())
+  productId       String?
+  product         Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  orderId         String?
+  order           Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  reviewerId      String
+  reviewer        User     @relation("UserReviews", fields: [reviewerId], references: [id], onDelete: Cascade)
+  sellerId        String
+  seller          User     @relation("SellerReviews", fields: [sellerId], references: [id], onDelete: Cascade)
+  rating          Int      // 1-5 stars
+  title           String?
+  body            String?  @db.Text
+  images          Json?    // array of image URLs
+  isVerified      Boolean  @default(false) // verified purchase
+  deletedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([productId])
+  @@index([orderId])
+  @@index([reviewerId])
+  @@index([sellerId])
+  @@index([rating])
+  @@map("reviews")
+}
+
+// ─── TRANSPORT SYSTEM ─────────────────────────────────────────────────────────────
+// Phase C-5: School bus management with routes, stops, and drivers
+// Additive: All tables are NEW — zero changes to existing models above.
+
+enum BusStatus {
+  ACTIVE
+  INACTIVE
+  MAINTENANCE
+  OUT_OF_SERVICE
+}
+
+enum DriverStatus {
+  ACTIVE
+  INACTIVE
+  ON_LEAVE
+  SUSPENDED
+}
+
+model SchoolBus {
+  id              String     @id @default(uuid())
+  schoolId        String
+  school          School     @relation("SchoolBuses", fields: [schoolId], references: [id])
+  plateNumber     String     @unique
+  busNumber       String     @unique
+  capacity        Int        @default(40)
+  make            String?
+  model           String?
+  year            Int?
+  color           String?
+  fuelType        String?    @default("DIESEL")
+  status          BusStatus  @default(ACTIVE)
+  insuranceExpiry DateTime?
+  lastServiceAt   DateTime?
+  nextServiceAt   DateTime?
+  notes           String?    @db.Text
+  deletedAt       DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  routes          BusRoute[]
+  assignments     BusAssignment[]
+
+  @@index([schoolId])
+  @@index([status])
+  @@map("school_buses")
+}
+
+model BusRoute {
+  id              String   @id @default(uuid())
+  schoolId        String
+  school          School   @relation("BusRoutes", fields: [schoolId], references: [id])
+  busId           String
+  bus             SchoolBus @relation(fields: [busId], references: [id], onDelete: Cascade)
+  name            String
+  description     String?  @db.Text
+  routeNumber     String?
+  startTime       String   // HH:MM format
+  endTime         String   // HH:MM format
+  distanceKm      Float?
+  durationMin     Int?
+  isActive        Boolean  @default(true)
+  deletedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  stops           BusStop[]
+  assignments     BusAssignment[]
+
+  @@index([schoolId])
+  @@index([busId])
+  @@index([isActive])
+  @@map("bus_routes")
+}
+
+model BusStop {
+  id              String   @id @default(uuid())
+  routeId         String
+  route           BusRoute @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  name            String
+  address         String?  @db.Text
+  latitude        Float?
+  longitude       Float?
+  sequence        Int      @default(0)
+  estimatedTime   String?  // HH:MM format from start
+  isActive        Boolean  @default(true)
+  deletedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  assignments     BusAssignment[]
+
+  @@index([routeId])
+  @@index([sequence])
+  @@map("bus_stops")
+}
+
+model Driver {
+  id              String       @id @default(uuid())
+  schoolId        String
+  school          School       @relation("Drivers", fields: [schoolId], references: [id])
+  userId          String?      @unique
+  user            User?        @relation("DriverProfile", fields: [userId], references: [id], onDelete: SetNull)
+  firstName       String
+  lastName        String
+  phone           String
+  licenseNumber   String       @unique
+  licenseExpiry   DateTime?
+  address         String?      @db.Text
+  emergencyContact Json?
+  status          DriverStatus @default(ACTIVE)
+  hiredAt         DateTime?
+  notes           String?      @db.Text
+  deletedAt       DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  assignments     BusAssignment[]
+
+  @@index([schoolId])
+  @@index([userId])
+  @@index([status])
+  @@map("drivers")
+}
+
+model BusAssignment {
+  id              String   @id @default(uuid())
+  schoolId        String
+  busId           String
+  bus             SchoolBus @relation(fields: [busId], references: [id], onDelete: Cascade)
+  routeId         String
+  route           BusRoute  @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  stopId          String?
+  stop            BusStop?  @relation(fields: [stopId], references: [id], onDelete: SetNull)
+  driverId        String
+  driver          Driver    @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  studentId       String
+  student         Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  pickupTime      String   // HH:MM format
+  dropoffTime     String   // HH:MM format
+  isMorning       Boolean  @default(true)
+  isAfternoon     Boolean  @default(true)
+  isActive        Boolean  @default(true)
+  effectiveFrom   DateTime @default(now())
+  effectiveTo     DateTime?
+  notes           String?  @db.Text
+  deletedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([studentId, isMorning, effectiveFrom])
+  @@index([schoolId])
+  @@index([busId])
+  @@index([routeId])
+  @@index([driverId])
+  @@index([studentId])
+  @@index([isActive])
+  @@map("bus_assignments")
+}
+
+// ─── ANALYTICS AGGREGATION TABLES ─────────────────────────────────────────────────
+// Phase C-6: Pre-aggregated analytics tables for performance
+// Additive: All tables are NEW — zero changes to existing models above.
+
+model DailySchoolStats {
+  id              String   @id @default(uuid())
+  schoolId        String
+  date            DateTime @db.Date
+  studentCount    Int      @default(0)
+  teacherCount    Int      @default(0)
+  classCount      Int      @default(0)
+  attendanceRate  Float?
+  averageGrade    Float?
+  behaviorScore   Float?
+  totalPosts      Int      @default(0)
+  totalMessages   Int      @default(0)
+  totalGifts      Int      @default(0)
+  totalCoins      Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([schoolId, date])
+  @@index([schoolId])
+  @@index([date])
+  @@map("daily_school_stats")
+}
+
+model DailyUserStats {
+  id              String   @id @default(uuid())
+  userId          String
+  date            DateTime @db.Date
+  loginCount      Int      @default(0)
+  postsCreated    Int      @default(0)
+  commentsCreated Int      @default(0)
+  likesGiven      Int      @default(0)
+  likesReceived   Int      @default(0)
+  messagesSent    Int      @default(0)
+  voiceMinutes    Int      @default(0)
+  giftsSent       Int      @default(0)
+  giftsReceived   Int      @default(0)
+  coinsSpent      Int      @default(0)
+  coinsEarned     Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@index([date])
+  @@map("daily_user_stats")
+}
+
+// ─── LEADERBOARD CACHE TABLES ─────────────────────────────────────────────────────
+// Phase C-7: Pre-computed leaderboards for performance
+// Additive: All tables are NEW — zero changes to existing models above.
+
+model GlobalLeaderboard {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation("GlobalLeaderboard", fields: [userId], references: [id], onDelete: Cascade)
+  totalCoins      Int      @default(0)
+  totalDiamonds   Int      @default(0)
+  totalGifts      Int      @default(0)
+  totalPosts      Int      @default(0)
+  totalFollowers  Int      @default(0)
+  rank            Int      @default(0)
+  previousRank    Int?
+  period          String   @default("ALL_TIME") // ALL_TIME, WEEKLY, MONTHLY
+  updatedAt       DateTime @updatedAt
+
+  @@index([rank])
+  @@index([period])
+  @@map("global_leaderboard")
+}
+
+model SchoolLeaderboard {
+  id              String   @id @default(uuid())
+  schoolId        String
+  userId          String
+  user            User     @relation("SchoolLeaderboard", fields: [userId], references: [id], onDelete: Cascade)
+  totalCoins      Int      @default(0)
+  totalDiamonds   Int      @default(0)
+  totalGifts      Int      @default(0)
+  totalPosts      Int      @default(0)
+  rank            Int      @default(0)
+  previousRank    Int?
+  period          String   @default("ALL_TIME")
+  updatedAt       DateTime @updatedAt
+
+  @@unique([schoolId, userId, period])
+  @@index([schoolId])
+  @@index([rank])
+  @@index([period])
+  @@map("school_leaderboard")
+}
+
+// ─── SEARCH OPTIMIZATION TABLES ───────────────────────────────────────────────────
+// Phase C-8: Full-text search optimization tables
+// Additive: All tables are NEW — zero changes to existing models above.
+
+model SearchIndex {
+  id              String   @id @default(uuid())
+  entityType      String   // user, post, community, product
+  entityId        String
+  title           String
+  content         String?  @db.Text
+  tags            Json?    // array of tags
+  schoolId        String?
+  userId          String?
+  popularity      Float    @default(0)
+  lastIndexedAt   DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([entityType, entityId])
+  @@index([entityType])
+  @@index([schoolId])
+  @@index([userId])
+  @@index([popularity])
+  @@map("search_index")
+}
+
+model TrendingHashtag {
+  id              String   @id @default(uuid())
+  hashtag         String   @unique
+  count           Int      @default(0)
+  rank            Int      @default(0)
+  previousRank    Int?
+  period          String   @default("HOURLY") // HOURLY, DAILY, WEEKLY
+  updatedAt       DateTime @updatedAt
+
+  @@index([rank])
+  @@index([period])
+  @@map("trending_hashtags")
+}
+
+// ─── BACKUP METADATA ─────────────────────────────────────────────────────────────
+// Phase C-9: Backup tracking and metadata
+// Additive: All tables are NEW — zero changes to existing models above.
+
+model BackupMetadata {
+  id              String   @id @default(uuid())
+  backupType      String   // FULL, INCREMENTAL, DIFFERENTIAL
+  backupMethod    String   // MANUAL, AUTOMATED, SCHEDULED
+  fileName        String
+  fileSize        BigInt
+  filePath        String
+  checksum        String   @db.VarChar(64)
+  status          String   @default("COMPLETED") // PENDING, COMPLETED, FAILED
+  startedAt       DateTime
+  completedAt     DateTime?
+  retentionDays   Int      @default(30)
+  createdBy       String?
+  notes           String?  @db.Text
+  deletedAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([backupType])
+  @@index([status])
+  @@index([startedAt])
+  @@map("backup_metadata")
+}
+
+// ─── SESSION MANAGEMENT ───────────────────────────────────────────────────────
+// Tracks per-device sessions for each user. Used by session.middleware.js
+// to enforce session limits and allow users to view / terminate sessions.
+
+model Session {
+  id                  String    @id @default(uuid())
+  userId              String
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceName          String?   @db.VarChar(255) // e.g. "Windows - Chrome"
+  deviceType          String?   @db.VarChar(50)  // desktop | mobile | tablet
+  deviceFingerprint   String?   @db.VarChar(64)
+  ipAddress           String?   @db.VarChar(45)
+  userAgent           String?   @db.Text
+  isActive            Boolean   @default(true)
+  lastSeenAt          DateTime  @default(now())
+  terminatedAt        DateTime?
+  terminationReason   String?   @db.VarChar(50) // SESSION_LIMIT | USER_TERMINATED | USER_TERMINATED_ALL
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([userId, isActive])
+  @@index([deviceFingerprint])
+  @@map("sessions")
+}
+
+// ─── WEBHOOK SYSTEM ───────────────────────────────────────────────────────────
+// Manages webhook endpoints for event-driven integrations.
+
+model Webhook {
+  id          String   @id @default(uuid())
+  url         String
+  events      String
+  secret      String?  @db.VarChar(255)
+  headers     Json?
+  description String?  @db.Text
+  userId      String?
+  schoolId    String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  deliveries  WebhookDelivery[]
+
+  @@index([userId])
+  @@index([schoolId])
+  @@map("webhooks")
+}
+
+model WebhookDelivery {
+  id          String   @id @default(uuid())
+  webhookId   String
+  deliveryId  String
+  event       String
+  success     Boolean
+  error       String?  @db.Text
+  attempt     Int      @default(1)
+  timestamp   DateTime @default(now())
+
+  webhook     Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId])
+  @@index([timestamp])
+  @@map("webhook_deliveries")
+}
+
+// ─── JOB SCHEDULER ─────────────────────────────────────────────────────────────
+// Manages scheduled jobs and their execution history.
+
+model ScheduledJob {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  type        String   @db.VarChar(50)
+  schedule    String   @db.VarChar(100)
+  timezone    String?  @db.VarChar(50)
+  isActive    Boolean  @default(true)
+  lastRunAt   DateTime?
+  nextRunAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  executions  JobExecution[]
+
+  @@map("scheduled_jobs")
+}
+
+model JobExecution {
+  id          String   @id @default(uuid())
+  jobId       String
+  name        String
+  status      String   @db.VarChar(50)
+  startedAt   DateTime @default(now())
+  completedAt DateTime?
+  error       String?  @db.Text
+
+  job         ScheduledJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+  @@index([status])
+  @@map("job_executions")
+}
+
+// ─── IMPROVED AUDIT LOG ───────────────────────────────────────────────────────────
+// Phase C-10: Enhanced audit log with additional fields
+// Additive: New fields added to existing AuditLog model (backward compatible)
+
+// Note: AuditLog model already exists above. The following fields are conceptually added:
+// - sessionId: String? (for tracking session-based actions)
+// - requestMethod: String? (HTTP method for API calls)
+// - requestPath: String? (API endpoint path)
+// - responseStatus: Int? (HTTP response code)
+// - durationMs: Int? (request duration in milliseconds)
+// These would be added via migration without breaking existing data.

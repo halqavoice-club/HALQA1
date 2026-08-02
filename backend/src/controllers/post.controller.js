@@ -1,0 +1,974 @@
+'use strict';
+/**
+ * Post Controller — Social Feed (Phase B-1)
+ * Reuses: prisma, response helpers, notification service, getIo, auth middleware
+ * Never modifies existing controllers or routes.
+ */
+const { v4: uuidv4 } = require('uuid');
+const prisma = require('../utils/prisma');
+const { getIo } = require('../sockets');
+const { successResponse, errorResponse, getPagination, buildPaginationMeta } = require('../utils/response');
+const { notify } = require('../services/notification.service');
+const logger = require('../utils/logger');
+
+// ─── Shared selects ───────────────────────────────────────────────────────────
+const AUTHOR_SELECT = {
+  id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true
+};
+
+const POST_INCLUDE = (viewerId) => ({
+  author: { select: AUTHOR_SELECT },
+  media: { orderBy: { orderIndex: 'asc' } },
+  hashtags: { include: { hashtag: { select: { id: true, name: true } } } },
+  community: { select: { id: true, slug: true, name: true, avatarUrl: true } },
+  _count: { select: { reactions: true, comments: true } },
+  reactions: viewerId ? { where: { userId: viewerId }, select: { type: true } } : false,
+  bookmarks: viewerId ? { where: { userId: viewerId }, select: { id: true } } : false,
+  originalPost: {
+    include: {
+      author: { select: AUTHOR_SELECT },
+      media: { orderBy: { orderIndex: 'asc' } },
+    }
+  }
+});
+
+// ─── Helper: extract & upsert hashtags ───────────────────────────────────────
+async function syncHashtags(postId, body) {
+  if (!body) return;
+  const tags = [...new Set((body.match(/#[\w\u0600-\u06FF]+/g) || []).map(t => t.slice(1).toLowerCase()))];
+  if (!tags.length) return;
+
+  await Promise.all(tags.map(async (name) => {
+    const hashtag = await prisma.hashtag.upsert({
+      where: { name },
+      create: { id: uuidv4(), name, postCount: 1 },
+      update: { postCount: { increment: 1 } }
+    });
+    await prisma.postHashtag.upsert({
+      where: { postId_hashtagId: { postId, hashtagId: hashtag.id } },
+      create: { postId, hashtagId: hashtag.id },
+      update: {}
+    });
+  }));
+}
+
+// ─── Helper: extract & save mentions ─────────────────────────────────────────
+// BUG FIX: Previously matched @handles against User.firstName and User.lastName.
+// This caused notification spam — all users sharing a first/last name were notified.
+// Now matches against User.username (unique field) for precise single-user targeting.
+//
+// Backward compat: if a user has no username set (null), they cannot be @mentioned
+// until they set one. This is the correct behavior for a unique handle system.
+async function syncMentions(postId, commentId, body, authorId) {
+  if (!body) return;
+
+  // Extract @handles: @word chars (letters, digits, underscore)
+  const handles = [...new Set((body.match(/@[\w]+/g) || []).map(h => h.slice(1).toLowerCase()))];
+  if (!handles.length) return;
+
+  // Match against username field only — unique, so at most 1 user per handle
+  const users = await prisma.user.findMany({
+    where: {
+      username: { in: handles },
+      id:       { not: authorId },  // don't notify the author about their own mention
+      status:   'ACTIVE',
+      deletedAt: null
+    },
+    select: { id: true, firstName: true, username: true }
+  });
+
+  if (!users.length) return;
+
+  // Create mention records + send notifications in parallel
+  await Promise.allSettled(users.map(async (u) => {
+    // Upsert to avoid duplicate mention records if body is re-saved
+    await prisma.postMention.upsert({
+      where:  { id: `${postId || commentId}_${u.id}` },
+      create: {
+        id:        uuidv4(),
+        postId:    postId    || null,
+        commentId: commentId || null,
+        userId:    u.id
+      },
+      update: {}
+    }).catch(() => {
+      // Fallback: if upsert fails (e.g. id collision), try plain create
+      return prisma.postMention.create({
+        data: { id: uuidv4(), postId: postId || null, commentId: commentId || null, userId: u.id }
+      }).catch(() => {}); // idempotent — ignore duplicate
+    });
+
+    await notify(u.id, {
+      type:  'MENTION',
+      title: 'You were mentioned',
+      body:  `Someone mentioned @${u.username} in a post`,
+      data:  { postId, commentId }
+    });
+  }));
+}
+
+// ─── Helper: build visibility filter for feed queries ────────────────────────
+// Returns a Prisma `where` clause that filters posts to only those the viewer
+// is allowed to see, based on:
+//   1. Post visibility setting (PUBLIC / FOLLOWERS / PRIVATE / SCHOOL_ONLY)
+//   2. Whether the viewer follows the author (for FOLLOWERS posts)
+//   3. School membership (for SCHOOL_ONLY posts)
+//   4. Creator subscription (for isExclusive posts)
+//
+// SECURITY FIX: Added isExclusive enforcement.
+// Previously, posts marked isExclusive:true were returned to ALL followers
+// regardless of subscription status. Now they are only returned to:
+//   - The post author themselves
+//   - Viewers who have an active CreatorSubscription matching the post's tierRequired
+async function visibilityFilter(viewerId) {
+  // Run all 4 prerequisite queries in parallel — cuts latency from ~4× to ~1×
+  const [viewer, following, activeSubs] = await Promise.all([
+    prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } }),
+    prisma.follow.findMany({ where: { followerId: viewerId }, select: { followingId: true } }),
+    prisma.creatorSubscription.findMany({
+      where: { subscriberId: viewerId, status: 'ACTIVE', expiresAt: { gt: new Date() } },
+      select: { creatorId: true }
+    }).catch(() => [])  // non-fatal — table may not exist in older DB
+  ]);
+  const followingIds = following.map(f => f.followingId);
+
+  // Resolve creatorProfile → userId mapping (only if we have active subs)
+  let subscribedCreatorIds = [];
+  if (activeSubs.length > 0) {
+    try {
+      const creatorProfiles = await prisma.creatorProfile.findMany({
+        where: { id: { in: activeSubs.map(s => s.creatorId) } },
+        select: { userId: true }
+      });
+      subscribedCreatorIds = creatorProfiles.map(p => p.userId);
+    } catch {
+      // Non-fatal — if subscription check fails, exclusive posts are simply hidden
+    }
+  }
+
+  return {
+    deletedAt: null,
+    isDraft:   false,
+    OR: [
+      // Non-exclusive public posts visible to everyone
+      { visibility: 'PUBLIC',      isExclusive: false },
+      // Non-exclusive follower-only posts visible to followers
+      { visibility: 'FOLLOWERS',   isExclusive: false, authorId: { in: followingIds } },
+      // Own posts always visible (author sees all their own posts)
+      { authorId: viewerId },
+      // School-only posts visible to school members
+      ...(viewer?.schoolId
+        ? [{ visibility: 'SCHOOL_ONLY', isExclusive: false, schoolId: viewer.schoolId }]
+        : []),
+      // Exclusive posts: only visible to active subscribers
+      ...(subscribedCreatorIds.length > 0
+        ? [{ isExclusive: true, authorId: { in: subscribedCreatorIds } }]
+        : [])
+    ]
+  };
+}
+
+// ─── CREATE POST ─────────────────────────────────────────────────────────────
+async function createPost(req, res, next) {
+  try {
+    const { body, type = 'TEXT', visibility = 'PUBLIC', media = [], isDraft = false,
+      scheduledAt, pollData, linkUrl, linkTitle, linkDescription, linkImage,
+      originalPostId, quotedBody, refEntityType, refEntityId, communityId,
+      isExclusive, tierRequired, location } = req.body;
+
+    if (!body?.trim() && !media.length && type !== 'REPOST' && type !== 'POLL') {
+      return errorResponse(res, 'Post body or media required', 400);
+    }
+
+    const post = await prisma.post.create({
+      data: {
+        id: uuidv4(), authorId: req.user.id,
+        body: body?.trim() || null, type, visibility, isDraft,
+        scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
+        schoolId: visibility === 'SCHOOL_ONLY' ? req.user.schoolId : null,
+        pollData: pollData || null,
+        linkUrl: linkUrl || null, linkTitle: linkTitle || null,
+        linkDescription: linkDescription || null, linkImage: linkImage || null,
+        originalPostId: originalPostId || null, quotedBody: quotedBody || null,
+        refEntityType: refEntityType || null, refEntityId: refEntityId || null,
+        communityId: communityId || null,
+        isExclusive: isExclusive || false,
+        tierRequired: tierRequired || null,
+        location: location?.trim() || null,
+      }
+    });
+
+    // Save media
+    if (media.length) {
+      await prisma.postMedia.createMany({
+        data: media.map((m, i) => ({ id: uuidv4(), postId: post.id, url: m.url, type: m.type || 'IMAGE', mimeType: m.mimeType || null, size: m.size || null, width: m.width || null, height: m.height || null, duration: m.duration || null, thumbnail: m.thumbnail || null, orderIndex: i }))
+      });
+    }
+
+    // Repost: increment share count on original
+    if (originalPostId) {
+      await prisma.post.update({ where: { id: originalPostId }, data: { shareCount: { increment: 1 } } });
+    }
+
+    await syncHashtags(post.id, body);
+    await syncMentions(post.id, null, body, req.user.id);
+
+    const full = await prisma.post.findUnique({ where: { id: post.id }, include: POST_INCLUDE(req.user.id) });
+
+    // Broadcast to feed rooms via socket
+    const io = getIo();
+    if (io && !isDraft) {
+      if (post.visibility === 'PUBLIC' || post.visibility === 'FOLLOWERS') {
+        // All connected clients receive this (they filter server-side by visibility)
+        io.to('feed:public').emit('post:create', { post: full });
+      } else if (post.visibility === 'SCHOOL_ONLY' && req.user.schoolId) {
+        // Broadcast to school-scoped room — clients join `feed:school:<schoolId>` on connect
+        io.to(`feed:school:${req.user.schoolId}`).emit('post:create', { post: full });
+      }
+      // PRIVATE posts are not broadcast
+    }
+
+    // Invalidate trending hashtag cache when a new post is created with hashtags
+    if (body && body.includes('#')) {
+      try {
+        const { isRedisReady, deleteCache } = require('../utils/redis');
+        if (isRedisReady()) await deleteCache('trending:hashtags');
+      } catch { /* non-fatal */ }
+    }
+
+    return successResponse(res, full, 'Post created', 201);
+  } catch (e) { next(e); }
+}
+
+// ─── GET SINGLE POST ─────────────────────────────────────────────────────────
+async function getPost(req, res, next) {
+  try {
+    const post = await prisma.post.findFirst({
+      where: { id: req.params.id, deletedAt: null },
+      include: POST_INCLUDE(req.user.id)
+    });
+    if (!post) return errorResponse(res, 'Post not found', 404);
+
+    // Record view (fire-and-forget)
+    prisma.postView.upsert({
+      where: { postId_userId: { postId: post.id, userId: req.user.id } },
+      create: { id: uuidv4(), postId: post.id, userId: req.user.id },
+      update: {}
+    }).then(() => prisma.post.update({ where: { id: post.id }, data: { viewCount: { increment: 1 } } })).catch(() => {});
+
+    return successResponse(res, post);
+  } catch (e) { next(e); }
+}
+
+// ─── UPDATE POST ─────────────────────────────────────────────────────────────
+async function updatePost(req, res, next) {
+  try {
+    const post = await prisma.post.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!post) return errorResponse(res, 'Post not found', 404);
+    if (post.authorId !== req.user.id) return errorResponse(res, 'Not your post', 403);
+
+    const { body, visibility, isDraft, scheduledAt, linkUrl, linkTitle, linkDescription, linkImage, location } = req.body;
+    const updated = await prisma.post.update({
+      where: { id: post.id },
+      data: {
+        ...(body !== undefined && { body: body?.trim() || null }),
+        ...(visibility !== undefined && { visibility }),
+        ...(isDraft !== undefined && { isDraft }),
+        ...(scheduledAt !== undefined && { scheduledAt: scheduledAt ? new Date(scheduledAt) : null }),
+        ...(linkUrl !== undefined && { linkUrl, linkTitle, linkDescription, linkImage }),
+        ...(location !== undefined && { location: location?.trim() || null }),
+      },
+      include: POST_INCLUDE(req.user.id)
+    });
+
+    if (body !== undefined) {
+      await syncHashtags(post.id, body);
+    }
+
+    const io = getIo();
+    if (io) io.to('feed:public').emit('post:update', { post: updated });
+
+    return successResponse(res, updated, 'Post updated');
+  } catch (e) { next(e); }
+}
+
+// ─── DELETE POST ─────────────────────────────────────────────────────────────
+async function deletePost(req, res, next) {
+  try {
+    const post = await prisma.post.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!post) return errorResponse(res, 'Post not found', 404);
+    const canDelete = post.authorId === req.user.id || ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(req.user.role);
+    if (!canDelete) return errorResponse(res, 'Not authorized', 403);
+
+    // FIX: Decrement hashtag post counts before soft-deleting the post.
+    // Previously postCount only ever incremented (on create) and never decremented,
+    // causing Hashtag.postCount to drift higher than the real post count over time.
+    // We do this before the soft-delete so the PostHashtag join records still exist.
+    try {
+      const postHashtags = await prisma.postHashtag.findMany({
+        where:  { postId: post.id },
+        select: { hashtagId: true }
+      });
+      if (postHashtags.length > 0) {
+        const hashtagIds = postHashtags.map(ph => ph.hashtagId);
+        await prisma.hashtag.updateMany({
+          where: { id: { in: hashtagIds } },
+          data:  { postCount: { decrement: 1 } }
+        });
+      }
+    } catch (hashtagErr) {
+      // Non-fatal — soft-delete still proceeds; postCount may drift but post is deleted
+      logger.warn(`[deletePost] Hashtag decrement failed for post ${post.id}: ${hashtagErr.message}`);
+    }
+
+    await prisma.post.update({ where: { id: post.id }, data: { deletedAt: new Date() } });
+
+    // Invalidate trending hashtag cache so the next request reflects the deletion
+    try {
+      const { isRedisReady, deleteCache } = require('../utils/redis');
+      if (isRedisReady()) await deleteCache('trending:hashtags');
+    } catch { /* non-fatal */ }
+
+    const io = getIo();
+    if (io) io.to('feed:public').emit('post:delete', { postId: post.id });
+
+    return successResponse(res, null, 'Post deleted');
+  } catch (e) { next(e); }
+}
+
+// ─── HOME FEED ───────────────────────────────────────────────────────────────
+// Algorithm: posts from followed users + own posts, newest first, cursor pagination
+async function getFeed(req, res, next) {
+  try {
+    const { cursor, limit = 20 } = req.query;
+    const take = Math.min(50, Math.max(1, parseInt(limit)));
+    const viewerId = req.user.id;
+
+    const where = await visibilityFilter(viewerId);
+
+    // Cursor pagination (createdAt + id for stable sort)
+    if (cursor) {
+      const [cursorTime, cursorId] = cursor.split('_');
+      where.OR = where.OR || [];
+      where.createdAt = { lte: new Date(cursorTime) };
+      where.NOT = { id: cursorId };
+    }
+
+    const posts = await prisma.post.findMany({
+      where,
+      include: POST_INCLUDE(viewerId),
+      orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
+      take: take + 1
+    });
+
+    const hasMore = posts.length > take;
+    const items = hasMore ? posts.slice(0, take) : posts;
+    const nextCursor = hasMore && items.length > 0
+      ? `${items[items.length - 1].createdAt.toISOString()}_${items[items.length - 1].id}`
+      : null;
+
+    return successResponse(res, { items, nextCursor, hasMore });
+  } catch (e) { next(e); }
+}
+
+// ─── USER POSTS (profile tab) ─────────────────────────────────────────────────
+async function getUserPosts(req, res, next) {
+  try {
+    let { userId } = req.params;
+    // Support 'me' alias for the authenticated user
+    if (userId === 'me') userId = req.user.id;
+    const { cursor, limit = 20, tab = 'posts' } = req.query;
+    const take = Math.min(50, Math.max(1, parseInt(limit)));
+    const viewerId = req.user.id;
+    const isOwner = userId === viewerId;
+
+    let where = { authorId: userId, deletedAt: null, isDraft: false };
+
+    if (tab === 'bookmarks' && isOwner) {
+      // Return bookmarked posts
+      const bookmarks = await prisma.postBookmark.findMany({
+        where: { userId: viewerId },
+        include: { post: { include: POST_INCLUDE(viewerId) } },
+        orderBy: { createdAt: 'desc' },
+        take: take + 1,
+        ...(cursor && { cursor: { id: cursor }, skip: 1 })
+      });
+      const hasMore = bookmarks.length > take;
+      const items = (hasMore ? bookmarks.slice(0, take) : bookmarks).map(b => b.post).filter(Boolean);
+      return successResponse(res, { items, nextCursor: hasMore && items.length > 0 ? items[items.length - 1]?.id : null, hasMore });
+    }
+
+    if (tab === 'media') where.type = { in: ['IMAGE', 'VIDEO', 'MULTI_IMAGE'] };
+    // BUG FIX: Post has no parentId field (that belongs to PostComment).
+    // 'replies' tab on a user profile shows their QUOTE posts (originalPostId set + quotedBody).
+    if (tab === 'replies') where = { ...where, type: 'QUOTE', originalPostId: { not: null } };
+    if (!isOwner) where.visibility = { not: 'PRIVATE' };
+
+    if (cursor) { where.createdAt = { lte: new Date(cursor.split('_')[0]) }; }
+
+    const posts = await prisma.post.findMany({
+      where,
+      include: POST_INCLUDE(viewerId),
+      orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
+      take: take + 1
+    });
+
+    const hasMore = posts.length > take;
+    const items = hasMore ? posts.slice(0, take) : posts;
+    const nextCursor = hasMore && items.length > 0 ? `${items[items.length - 1].createdAt.toISOString()}_${items[items.length - 1].id}` : null;
+
+    return successResponse(res, { items, nextCursor, hasMore });
+  } catch (e) { next(e); }
+}
+
+// ─── REACT TO POST ───────────────────────────────────────────────────────────
+async function reactToPost(req, res, next) {
+  try {
+    const { type = 'LIKE' } = req.body;
+    const { id: postId } = req.params;
+    const userId = req.user.id;
+    const VALID = ['LIKE','LOVE','CELEBRATE','SUPPORT','INSIGHTFUL','FUNNY'];
+    if (!VALID.includes(type)) return errorResponse(res, 'Invalid reaction type', 400);
+
+    const post = await prisma.post.findFirst({ where: { id: postId, deletedAt: null } });
+    if (!post) return errorResponse(res, 'Post not found', 404);
+
+    const existing = await prisma.postReaction.findUnique({
+      where: { postId_userId: { postId, userId } }
+    });
+
+    let action, delta;
+    if (existing) {
+      if (existing.type === type) {
+        // Same reaction — remove it (toggle off)
+        await prisma.postReaction.delete({ where: { postId_userId: { postId, userId } } });
+        delta = -1; action = 'removed';
+      } else {
+        // Different reaction — update type
+        await prisma.postReaction.update({ where: { postId_userId: { postId, userId } }, data: { type } });
+        delta = 0; action = 'updated';
+      }
+    } else {
+      await prisma.postReaction.create({ data: { id: uuidv4(), postId, userId, type } });
+      delta = 1; action = 'added';
+    }
+
+    if (delta !== 0) {
+      await prisma.post.update({ where: { id: postId }, data: { likeCount: { increment: delta } } });
+    }
+
+    // Notify post author (only on new reaction, not own post)
+    if (action === 'added' && post.authorId !== userId) {
+      await notify(post.authorId, {
+        type:  'LIKE',
+        title: `${req.user.firstName} reacted to your post`,
+        body:  `${req.user.firstName} ${req.user.lastName} reacted with ${type.toLowerCase()}`,
+        data:  { postId, type: 'post_reaction' }
+      });
+    }
+
+    const io = getIo();
+    if (io) io.to('feed:public').emit('post:like', { postId, userId, type, action });
+
+    return successResponse(res, { action, type });
+  } catch (e) { next(e); }
+}
+
+// ─── GET REACTIONS ───────────────────────────────────────────────────────────
+async function getReactions(req, res, next) {
+  try {
+    const reactions = await prisma.postReaction.findMany({
+      where: { postId: req.params.id },
+      include: { user: { select: AUTHOR_SELECT } },
+      orderBy: { createdAt: 'desc' },
+      take: 100
+    });
+    // Group by type
+    const grouped = {};
+    reactions.forEach(r => {
+      if (!grouped[r.type]) grouped[r.type] = [];
+      grouped[r.type].push(r.user);
+    });
+    return successResponse(res, { reactions, grouped, total: reactions.length });
+  } catch (e) { next(e); }
+}
+
+// ─── ADD COMMENT ─────────────────────────────────────────────────────────────
+async function addComment(req, res, next) {
+  try {
+    const { body, parentId } = req.body;
+    const { id: postId } = req.params;
+    if (!body?.trim()) return errorResponse(res, 'Comment body required', 400);
+
+    const post = await prisma.post.findFirst({ where: { id: postId, deletedAt: null } });
+    if (!post) return errorResponse(res, 'Post not found', 404);
+
+    // Validate parentId belongs to this post
+    if (parentId) {
+      const parent = await prisma.postComment.findFirst({ where: { id: parentId, postId, deletedAt: null } });
+      if (!parent) return errorResponse(res, 'Parent comment not found', 404);
+    }
+
+    const comment = await prisma.postComment.create({
+      data: { id: uuidv4(), postId, authorId: req.user.id, parentId: parentId || null, body: body.trim() },
+      include: { author: { select: AUTHOR_SELECT } }
+    });
+
+    // Increment counts
+    await prisma.post.update({ where: { id: postId }, data: { commentCount: { increment: 1 } } });
+    if (parentId) {
+      await prisma.postComment.update({ where: { id: parentId }, data: { replyCount: { increment: 1 } } });
+    }
+
+    await syncMentions(postId, comment.id, body, req.user.id);
+
+    // Notify post author
+    if (post.authorId !== req.user.id) {
+      await notify(post.authorId, {
+        type:  'COMMENT',
+        title: `${req.user.firstName} commented on your post`,
+        body:  body.substring(0, 80),
+        data:  { postId, commentId: comment.id, type: 'post_comment' }
+      });
+    }
+    // Notify parent comment author if reply
+    if (parentId) {
+      const parent = await prisma.postComment.findUnique({ where: { id: parentId }, select: { authorId: true } });
+      if (parent && parent.authorId !== req.user.id && parent.authorId !== post.authorId) {
+        await notify(parent.authorId, {
+          type:  'COMMENT_REPLY',
+          title: `${req.user.firstName} replied to your comment`,
+          body:  body.substring(0, 80),
+          data:  { postId, commentId: comment.id, type: 'comment_reply' }
+        });
+      }
+    }
+
+    const io = getIo();
+    if (io) io.to('feed:public').emit('comment:create', { postId, comment });
+
+    return successResponse(res, comment, 'Comment added', 201);
+  } catch (e) { next(e); }
+}
+
+// ─── GET COMMENTS ────────────────────────────────────────────────────────────
+async function getComments(req, res, next) {
+  try {
+    const { cursor, limit = 20, parentId } = req.query;
+    const take = Math.min(50, parseInt(limit));
+
+    const where = {
+      postId: req.params.id,
+      deletedAt: null,
+      parentId: parentId || null
+    };
+    if (cursor) where.createdAt = { lte: new Date(cursor.split('_')[0]) };
+
+    const comments = await prisma.postComment.findMany({
+      where,
+      include: {
+        author: { select: AUTHOR_SELECT },
+        reactions: { where: { userId: req.user.id }, select: { type: true } },
+        _count: { select: { replies: true, reactions: true } }
+      },
+      orderBy: { createdAt: 'asc' },
+      take: take + 1
+    });
+
+    const hasMore = comments.length > take;
+    const items = hasMore ? comments.slice(0, take) : comments;
+    const nextCursor = hasMore && items.length > 0 ? `${items[items.length - 1].createdAt.toISOString()}_${items[items.length - 1].id}` : null;
+
+    return successResponse(res, { items, nextCursor, hasMore });
+  } catch (e) { next(e); }
+}
+
+// ─── EDIT COMMENT ────────────────────────────────────────────────────────────
+async function editComment(req, res, next) {
+  try {
+    const { body } = req.body;
+    if (!body?.trim()) return errorResponse(res, 'Body required', 400);
+    const comment = await prisma.postComment.findFirst({ where: { id: req.params.commentId, deletedAt: null } });
+    if (!comment) return errorResponse(res, 'Comment not found', 404);
+    if (comment.authorId !== req.user.id) return errorResponse(res, 'Not your comment', 403);
+    const updated = await prisma.postComment.update({
+      where: { id: comment.id },
+      data: { body: body.trim() },
+      include: { author: { select: AUTHOR_SELECT } }
+    });
+    return successResponse(res, updated, 'Comment updated');
+  } catch (e) { next(e); }
+}
+
+// ─── DELETE COMMENT ──────────────────────────────────────────────────────────
+async function deleteComment(req, res, next) {
+  try {
+    const comment = await prisma.postComment.findFirst({ where: { id: req.params.commentId, deletedAt: null } });
+    if (!comment) return errorResponse(res, 'Comment not found', 404);
+    const can = comment.authorId === req.user.id || ['SUPER_ADMIN','SCHOOL_ADMIN'].includes(req.user.role);
+    if (!can) return errorResponse(res, 'Not authorized', 403);
+    await prisma.postComment.update({ where: { id: comment.id }, data: { deletedAt: new Date() } });
+    await prisma.post.update({ where: { id: comment.postId }, data: { commentCount: { decrement: 1 } } });
+    return successResponse(res, null, 'Comment deleted');
+  } catch (e) { next(e); }
+}
+
+// ─── REACT TO COMMENT ────────────────────────────────────────────────────────
+async function reactToComment(req, res, next) {
+  try {
+    const { type = 'LIKE' } = req.body;
+    const { commentId } = req.params;
+    const userId = req.user.id;
+    const existing = await prisma.commentReaction.findUnique({ where: { commentId_userId: { commentId, userId } } });
+    let delta;
+    if (existing) {
+      await prisma.commentReaction.delete({ where: { commentId_userId: { commentId, userId } } });
+      delta = -1;
+    } else {
+      await prisma.commentReaction.create({ data: { id: uuidv4(), commentId, userId, type } });
+      delta = 1;
+    }
+    await prisma.postComment.update({ where: { id: commentId }, data: { likeCount: { increment: delta } } });
+    return successResponse(res, { action: delta > 0 ? 'added' : 'removed' });
+  } catch (e) { next(e); }
+}
+
+// ─── BOOKMARK ────────────────────────────────────────────────────────────────
+async function toggleBookmark(req, res, next) {
+  try {
+    const { id: postId } = req.params;
+    const userId = req.user.id;
+    const existing = await prisma.postBookmark.findUnique({ where: { postId_userId: { postId, userId } } });
+    let action;
+    if (existing) {
+      await prisma.postBookmark.delete({ where: { postId_userId: { postId, userId } } });
+      await prisma.post.update({ where: { id: postId }, data: { bookmarkCount: { decrement: 1 } } });
+      action = 'removed';
+    } else {
+      await prisma.postBookmark.create({ data: { id: uuidv4(), postId, userId } });
+      await prisma.post.update({ where: { id: postId }, data: { bookmarkCount: { increment: 1 } } });
+      action = 'added';
+    }
+    return successResponse(res, { action, bookmarked: action === 'added' });
+  } catch (e) { next(e); }
+}
+
+// ─── PIN POST ────────────────────────────────────────────────────────────────
+async function pinPost(req, res, next) {
+  try {
+    const post = await prisma.post.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!post) return errorResponse(res, 'Post not found', 404);
+    if (post.authorId !== req.user.id) return errorResponse(res, 'Not your post', 403);
+    // Unpin any previously pinned post
+    await prisma.post.updateMany({ where: { authorId: req.user.id, isPinned: true }, data: { isPinned: false } });
+    const updated = await prisma.post.update({ where: { id: post.id }, data: { isPinned: !post.isPinned } });
+    return successResponse(res, { isPinned: updated.isPinned });
+  } catch (e) { next(e); }
+}
+
+// ─── SEARCH POSTS ────────────────────────────────────────────────────────────
+// PERFORMANCE FIX (L1): Now uses MySQL FULLTEXT MATCH AGAINST instead of LIKE.
+// Falls back to LIKE automatically if FULLTEXT index is not yet applied.
+async function searchPosts(req, res, next) {
+  try {
+    const { q, limit = 20, before } = req.query;
+    if (!q || q.trim().length < 2) {
+      return successResponse(res, { items: [], nextCursor: null, hasMore: false });
+    }
+    const take     = Math.min(50, parseInt(limit));
+    const { searchPosts: ftSearchPosts } = require('../utils/search');
+
+    const items = await ftSearchPosts(prisma, q.trim(), req.user.id, { take, before });
+    const nextCursor = items.length === take && items.length > 0
+      ? `${items[items.length - 1].createdAt.toISOString()}_${items[items.length - 1].id}`
+      : null;
+
+    return successResponse(res, { items, nextCursor, hasMore: !!nextCursor });
+  } catch (e) { next(e); }
+}
+
+// ─── TRENDING HASHTAGS ───────────────────────────────────────────────────────
+// L10 fix: Upgraded from raw postCount sort to an engagement-weighted trending score.
+//
+// Algorithm (inspired by Reddit/HN decay formula):
+//   score = (recentPosts × 3) + (recentLikes × 2) + (recentComments × 1)
+//   where "recent" = last 48 hours
+//
+// This means a hashtag with 10 posts in the last 2h ranks higher than
+// a hashtag with 100 posts from last month. Fresh engagement wins.
+//
+// Cache: 5 minutes (trending changes slowly, serving from cache is correct).
+async function getTrendingHashtags(req, res, next) {
+  try {
+    // Serve from cache if available
+    try {
+      const { isRedisReady, getCache } = require('../utils/redis');
+      if (isRedisReady()) {
+        const cached = await getCache('trending:hashtags');
+        if (cached) return successResponse(res, cached);
+      }
+    } catch { /* non-fatal */ }
+
+    const since48h = new Date(Date.now() - 48 * 60 * 60 * 1000);
+
+    // Step 1: Get recent post activity per hashtag
+    const recentHashtagPosts = await prisma.postHashtag.findMany({
+      where: { post: { createdAt: { gte: since48h }, deletedAt: null, isDraft: false, visibility: 'PUBLIC' } },
+      select: { hashtagId: true, post: { select: { likeCount: true, commentCount: true } } }
+    });
+
+    // Step 2: Aggregate engagement score per hashtag
+    const scoreMap = new Map();
+    recentHashtagPosts.forEach(({ hashtagId, post }) => {
+      const prev = scoreMap.get(hashtagId) || { posts: 0, likes: 0, comments: 0 };
+      scoreMap.set(hashtagId, {
+        posts:    prev.posts    + 1,
+        likes:    prev.likes    + (post?.likeCount    || 0),
+        comments: prev.comments + (post?.commentCount || 0)
+      });
+    });
+
+    if (scoreMap.size === 0) {
+      // No recent posts — fall back to all-time postCount
+      const tags = await prisma.hashtag.findMany({ orderBy: { postCount: 'desc' }, take: 20 });
+      try {
+        const { isRedisReady, setCache } = require('../utils/redis');
+        if (isRedisReady()) await setCache('trending:hashtags', tags, 300);
+      } catch {}
+      return successResponse(res, tags);
+    }
+
+    // Step 3: Fetch hashtag details for trending IDs
+    const topIds = [...scoreMap.entries()]
+      .map(([id, s]) => ({ id, score: (s.posts * 3) + (s.likes * 2) + (s.comments * 1) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 20)
+      .map(x => x.id);
+
+    const hashtags = await prisma.hashtag.findMany({ where: { id: { in: topIds } } });
+
+    // Re-sort to match relevance order
+    const orderMap = new Map(topIds.map((id, i) => [id, i]));
+    const sorted   = hashtags.sort((a, b) => (orderMap.get(a.id) ?? 99) - (orderMap.get(b.id) ?? 99));
+
+    // Add trending score to each result for frontend display
+    const enriched = sorted.map(h => ({
+      ...h,
+      trendingScore: scoreMap.get(h.id)
+        ? (scoreMap.get(h.id).posts * 3) + (scoreMap.get(h.id).likes * 2) + (scoreMap.get(h.id).comments * 1)
+        : 0
+    }));
+
+    try {
+      const { isRedisReady, setCache } = require('../utils/redis');
+      if (isRedisReady()) await setCache('trending:hashtags', enriched, 300);
+    } catch {}
+
+    return successResponse(res, enriched);
+  } catch (e) { next(e); }
+}
+
+// ─── REPORT POST ─────────────────────────────────────────────────────────────
+async function reportPost(req, res, next) {
+  try {
+    const { reason, description } = req.body;
+    if (!reason) return errorResponse(res, 'reason required', 400);
+
+    const post = await prisma.post.findFirst({ where: { id: req.params.id, deletedAt: null } });
+    if (!post) return errorResponse(res, 'Post not found', 404);
+
+    // BUG FIX: Previously called notify(null, ...) which caused a NOT NULL
+    // constraint violation on Notification.userId, crashing the notification worker.
+    //
+    // New approach:
+    //   1. Emit a real-time socket event to all SUPER_ADMIN and SCHOOL_ADMIN role rooms
+    //      so admins see the report instantly in their dashboard (no DB write needed).
+    //   2. Notify the post's school admin via the school admin's personal notification
+    //      (uses a valid userId — the post's school admin — not null).
+    //   3. Log the report to the server logs as a permanent audit trail.
+
+    const io = getIo();
+    const reportPayload = {
+      type:        'post_reported',
+      postId:      post.id,
+      authorId:    post.authorId,
+      reporterId:  req.user.id,
+      reporterName:`${req.user.firstName} ${req.user.lastName}`,
+      reason,
+      description: description || '',
+      reportedAt:  new Date().toISOString()
+    };
+
+    // Broadcast to admin role rooms for real-time dashboard updates
+    if (io) {
+      io.to('role:SUPER_ADMIN').emit('admin:post_reported', reportPayload);
+      io.to('role:SCHOOL_ADMIN').emit('admin:post_reported', reportPayload);
+    }
+
+    // Notify the post author's school admin if the post belongs to a school
+    if (post.schoolId) {
+      try {
+        const schoolAdmin = await prisma.user.findFirst({
+          where: {
+            schoolId: post.schoolId,
+            role: 'SCHOOL_ADMIN',
+            status: 'ACTIVE',
+            deletedAt: null
+          },
+          select: { id: true }
+        });
+        if (schoolAdmin) {
+          await notify(schoolAdmin.id, {
+            type:  'SYSTEM',
+            title: `Post reported: ${reason}`,
+            body:  description || `A post was reported by ${req.user.firstName} ${req.user.lastName}`,
+            data:  reportPayload
+          });
+        }
+      } catch (notifyErr) {
+        // Non-fatal — report is still logged even if notification fails
+        logger.warn(`[reportPost] School admin notification failed: ${notifyErr.message}`);
+      }
+    }
+
+    logger.info(`[reportPost] Post ${post.id} reported by user ${req.user.id} — reason: ${reason}`);
+    return successResponse(res, null, 'Report submitted. Our moderation team will review it.');
+  } catch (e) { next(e); }
+}
+
+// ─── GET LIVE SESSIONS ────────────────────────────────────────────────────────
+// Returns currently active voice rooms + live classes as feed cards.
+// Called by FeedPage on mount and after feed:live socket events.
+async function getLiveSessions(req, res, next) {
+  try {
+    const viewerId = req.user.id;
+    const viewer   = await prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } });
+
+    // Fetch currently LIVE voice rooms (PUBLIC only)
+    const [liveVoiceRooms, liveClasses] = await Promise.all([
+      prisma.voiceRoom.findMany({
+        where: { status: 'LIVE', privacy: 'PUBLIC', deletedAt: null },
+        include: {
+          host: { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } },
+          _count: { select: { participants: { where: { isActive: true } } } }
+        },
+        orderBy: { lastActivityAt: 'desc' },
+        take: 10,
+      }),
+      prisma.liveClass.findMany({
+        where: {
+          status: 'LIVE',
+          deletedAt: null,
+          ...(viewer?.schoolId ? { schoolId: viewer.schoolId } : {}),
+        },
+        include: {
+          teacher: { include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } } } },
+          class: { select: { id: true, name: true } },
+          _count: { select: { participants: { where: { isActive: true } } } }
+        },
+        orderBy: { startedAt: 'desc' },
+        take: 10,
+      }),
+    ]);
+
+    // Shape into unified feed cards
+    const voiceCards = liveVoiceRooms.map(room => ({
+      id:            `live-voice-${room.id}`,
+      type:          'LIVE_ROOM_SHARE',
+      refEntityType: 'voice_room',
+      refEntityId:   room.id,
+      authorId:      room.hostId,
+      author:        room.host,
+      body:          room.description ? `${room.title}\n\n${room.description}` : room.title,
+      visibility:    'PUBLIC',
+      media: [], hashtags: [], reactions: [], bookmarks: [],
+      _count: { reactions: 0, comments: 0 },
+      likeCount: 0, commentCount: 0, shareCount: 0, viewCount: 0, bookmarkCount: 0,
+      isPinned: false, isDraft: false, scheduledAt: null,
+      linkUrl: null, linkTitle: null, linkDescription: null, linkImage: null,
+      pollData: null, originalPostId: null, originalPost: null, quotedBody: null, location: null,
+      createdAt: room.startedAt ?? room.createdAt,
+      updatedAt: room.updatedAt,
+      liveData: {
+        title:            room.title,
+        description:      room.description,
+        coverEmoji:       room.coverEmoji ?? '🎙️',
+        coverImageUrl:    room.coverImageUrl ?? null,
+        participantCount: room._count.participants,
+        isLive:           true,
+      },
+    }));
+
+    const classCards = liveClasses.map(lc => ({
+      id:            `live-class-${lc.id}`,
+      type:          'LIVE_CLASS_SHARE',
+      refEntityType: 'live_class',
+      refEntityId:   lc.id,
+      authorId:      lc.teacher?.user?.id ?? viewerId,
+      author:        lc.teacher?.user ?? null,
+      body:          lc.description ? `${lc.title}\n\n${lc.description}` : lc.title,
+      visibility:    'SCHOOL_ONLY',
+      media: [], hashtags: [], reactions: [], bookmarks: [],
+      _count: { reactions: 0, comments: 0 },
+      likeCount: 0, commentCount: 0, shareCount: 0, viewCount: 0, bookmarkCount: 0,
+      isPinned: false, isDraft: false, scheduledAt: null,
+      linkUrl: null, linkTitle: null, linkDescription: null, linkImage: null,
+      pollData: null, originalPostId: null, originalPost: null, quotedBody: null, location: null,
+      createdAt: lc.startedAt ?? lc.createdAt,
+      updatedAt: lc.updatedAt,
+      liveData: {
+        title:            lc.title,
+        description:      lc.description,
+        coverEmoji:       '📹',
+        coverImageUrl:    lc.coverImageUrl ?? null,
+        participantCount: lc._count.participants,
+        className:        lc.class?.name ?? null,
+        isLive:           true,
+      },
+    }));
+
+    return successResponse(res, [...voiceCards, ...classCards]);
+  } catch (e) { next(e); }
+}
+
+// ─── RECORD VIEW (feed impression) ───────────────────────────────────────────
+// Called by the frontend when a post scrolls into view in the feed.
+// Uses upsert so each user counts only once per post.
+// Fire-and-forget design: returns 204 immediately, DB work is async.
+async function recordView(req, res, next) {
+  try {
+    const { id: postId } = req.params;
+    const userId = req.user.id;
+
+    // Verify post exists (lightweight check — no includes)
+    const exists = await prisma.post.findFirst({
+      where: { id: postId, deletedAt: null },
+      select: { id: true }
+    });
+    if (!exists) return res.status(204).end(); // silently ignore missing posts
+
+    // Upsert view record — one unique view per user per post
+    prisma.postView.upsert({
+      where:  { postId_userId: { postId, userId } },
+      create: { id: require('uuid').v4(), postId, userId },
+      update: {} // already viewed — no-op
+    }).then(() =>
+      prisma.post.update({
+        where: { id: postId },
+        data:  { viewCount: { increment: 1 } }
+      })
+    ).catch(() => {}); // fire-and-forget — never fail the request
+
+    return res.status(204).end();
+  } catch (e) { next(e); }
+}
+
+// ─── MODULE EXPORTS ──────────────────────────────────────────────────────────
+module.exports = {
+  createPost, getPost, updatePost, deletePost,
+  getFeed, getUserPosts,
+  reactToPost, getReactions,
+  addComment, getComments, editComment, deleteComment, reactToComment,
+  toggleBookmark, pinPost, recordView, getLiveSessions,
+  searchPosts, getTrendingHashtags, reportPost
+};

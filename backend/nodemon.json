@@ -1,0 +1,19 @@
+{
+  "watch": ["src", "prisma/schema.prisma"],
+  "ext": "js,json,prisma",
+  "ignore": [
+    "node_modules/**",
+    "logs/**",
+    "uploads/**",
+    "prisma/migrations/**",
+    "node_modules/.prisma/**",
+    "node_modules/@prisma/client/**"
+  ],
+  "delay": 500,
+  "env": {
+    "NODE_ENV": "development"
+  },
+  "events": {
+    "restart": "echo '🔄 Server restarted'"
+  }
+}

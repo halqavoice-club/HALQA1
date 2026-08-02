@@ -1,0 +1,912 @@
+'use client'
+
+import { useEffect, useCallback } from 'react'
+import { useVoiceStore, VoiceParticipant, VoiceMessage } from '@/store/voice.store'
+import { getSocket } from '@/lib/socket'
+import { useAuthStore } from '@/store/auth.store'
+import api from '@/lib/api'
+import { voiceOfflineBuffer } from '@/lib/voiceOfflineBuffer'
+import { useToast } from '@/components/ui/use-toast'
+
+// ─── Role helpers (mirrors backend VOICE_ROLES) ───────────────────────────────
+export const VOICE_ROLES = {
+  HOST:      'HOST',
+  MODERATOR: 'MODERATOR',
+  SPEAKER:   'SPEAKER',
+  AUDIENCE:  'AUDIENCE'
+} as const
+
+export type VoiceRole = typeof VOICE_ROLES[keyof typeof VOICE_ROLES]
+
+// ─── Safe cast helpers — convert raw socket strings to typed union values ─────
+const asRole     = (r: string): VoiceParticipant['role']  => r as VoiceParticipant['role']
+const asStatus   = (s: string): import('@/store/voice.store').VoiceRoomStatus  => s as import('@/store/voice.store').VoiceRoomStatus
+const asPrivacy  = (p: string): import('@/store/voice.store').VoiceRoomPrivacy => p as import('@/store/voice.store').VoiceRoomPrivacy
+
+/** Roles that can moderate (approve queue, mute others, kick, promote) */
+export const canModerate = (role?: string) =>
+  role === VOICE_ROLES.HOST || role === VOICE_ROLES.MODERATOR
+
+/** Roles that can publish audio */
+export const canSpeak = (role?: string) =>
+  role === VOICE_ROLES.HOST || role === VOICE_ROLES.MODERATOR || role === VOICE_ROLES.SPEAKER
+
+export function useVoiceRoom(roomId: string | null) {
+  const { user } = useAuthStore()
+  const { toast } = useToast()
+  const {
+    activeRoom, setActiveRoom,
+    addParticipant, removeParticipant, updateParticipant, updateRoom,
+    addMessage, setMessages,
+    setSpeaking, addReaction,
+    setPendingMicOffer, clearPendingMicOffer,
+    setSpeakerQueue,
+    addGiftEvent, setGiftLeaderboard, setWallet
+  } = useVoiceStore()
+
+  // ── Socket event listeners ──────────────────────────────────────────────────
+  useEffect(() => {
+    if (!roomId) return
+    const socket = getSocket()
+    if (!socket) return
+
+    socket.emit('voice:join_room', roomId)
+
+    // Phase 6: Flush offline buffer when connection is established
+    // Any messages/hand raises buffered during disconnection are replayed now.
+    if (voiceOfflineBuffer.size > 0) {
+      voiceOfflineBuffer.flush(async (event) => {
+        try {
+          if (event.type === 'voice:message' && event.payload?.body) {
+            await api.post(`/voice/${roomId}/messages`, { body: event.payload.body })
+            return true
+          }
+          if (event.type === 'voice:queue:raise') {
+            await api.post(`/voice/${roomId}/queue/raise`)
+            return true
+          }
+          if (event.type === 'voice:queue:cancel') {
+            await api.delete(`/voice/${roomId}/queue/cancel`)
+            return true
+          }
+          return false
+        } catch { return false }
+      }).catch(() => {})
+    }
+
+    const onUserJoined = (data: {
+      roomId: string; userId: string
+      firstName: string; lastName: string
+      avatarUrl: string | null; role: string
+    }) => {
+      if (data.roomId !== roomId) return
+      addParticipant({
+        id: data.userId, userId: data.userId,
+        role: asRole(data.role), isMuted: true,
+        handRaised: false, handRaisedAt: null,
+        joinedAt: new Date().toISOString(), isActive: true,
+        isPinned: false,
+        user: { id: data.userId, firstName: data.firstName, lastName: data.lastName, avatarUrl: data.avatarUrl }
+      })
+    }
+
+    const onUserLeft = (data: { roomId: string; userId: string }) => {
+      if (data.roomId !== roomId) return
+      removeParticipant(data.userId)
+    }
+
+    const onMuteChanged = (data: { roomId: string; userId: string; isMuted: boolean }) => {
+      if (data.roomId !== roomId) return
+      updateParticipant(data.userId, { isMuted: data.isMuted })
+    }
+
+    const onHandRaised = (data: {
+      roomId: string; userId: string; raised: boolean
+      firstName: string; lastName: string
+    }) => {
+      if (data.roomId !== roomId) return
+      updateParticipant(data.userId, {
+        handRaised: data.raised,
+        handRaisedAt: data.raised ? new Date().toISOString() : null
+      })
+      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      if (canModerate(myRole) && data.raised && data.userId !== user?.id) {
+        toast({
+          title: `✋ ${data.firstName} ${data.lastName} raised their hand`,
+          description: 'Tap Hands to approve them as a speaker'
+        })
+      }
+    }
+
+    const onRoleChanged = (data: { roomId: string; userId: string; role: string }) => {
+      if (data.roomId !== roomId) return
+      updateParticipant(data.userId, {
+        role: asRole(data.role),
+        isMuted: data.role === VOICE_ROLES.AUDIENCE,
+        handRaised: false, handRaisedAt: null
+      })
+      if (data.userId === user?.id && data.role === VOICE_ROLES.SPEAKER) {
+        toast({ title: '🎙️ You\'re now a speaker!', description: 'Your microphone is now active' })
+      }
+      if (data.userId === user?.id && data.role === VOICE_ROLES.AUDIENCE) {
+        toast({ title: 'Moved to audience', description: 'You can raise your hand to speak again' })
+      }
+    }
+
+    // BUG FIX: voice:your_role_changed is emitted by promoteParticipant() to the
+    // promoted user directly — it carries the same payload as voice:role_changed
+    // but was never handled, so the promoted user's own UI never updated.
+    const onYourRoleChanged = (data: { roomId: string; role: string }) => {
+      if (data.roomId !== roomId) return
+      if (!user?.id) return
+      updateParticipant(user.id, {
+        role: asRole(data.role),
+        isMuted: data.role === VOICE_ROLES.AUDIENCE,
+        handRaised: false, handRaisedAt: null
+      })
+    }
+    const onModeratorAssigned = (data: {
+      roomId: string; userId: string; firstName: string; lastName: string
+    }) => {
+      if (data.roomId !== roomId) return
+      updateParticipant(data.userId, { role: VOICE_ROLES.MODERATOR, isMuted: false })
+      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      if (myRole === VOICE_ROLES.HOST) {
+        toast({ title: `🛡️ ${data.firstName} ${data.lastName} is now a moderator` })
+      }
+    }
+
+    const onModeratorRemoved = (data: { roomId: string; userId: string }) => {
+      if (data.roomId !== roomId) return
+      updateParticipant(data.userId, { role: VOICE_ROLES.AUDIENCE, isMuted: true })
+    }
+
+    const onAdminTransferred = (data: {
+      roomId: string; newHostId: string; prevHostId: string; newHostName: string
+    }) => {
+      if (data.roomId !== roomId) return
+      updateParticipant(data.newHostId,  { role: VOICE_ROLES.HOST })
+      updateParticipant(data.prevHostId, { role: VOICE_ROLES.MODERATOR })
+      toast({ title: `👑 ${data.newHostName} is now the host` })
+      // Re-check follow status for the new host
+      if (user?.id && data.newHostId !== user.id) {
+        api.get(`/social/counts/${data.newHostId}`)
+          .then(r => useVoiceStore.getState().updateRoom({ isFollowingHost: r.data.data?.isFollowing ?? false }))
+          .catch(() => {})
+      } else if (data.newHostId === user?.id) {
+        // I am now the host — I always can chat
+        useVoiceStore.getState().updateRoom({ isFollowingHost: true })
+      }
+    }
+
+    const onYouAreModerator = (data: { roomId: string; message: string }) => {
+      if (data.roomId !== roomId) return
+      toast({ title: '🛡️ You are now a moderator!', description: data.message })
+    }
+
+    const onYouAreHost = (data: { roomId: string; message: string }) => {
+      if (data.roomId !== roomId) return
+      toast({ title: '👑 You are now the host!', description: data.message })
+    }
+
+    const onMessage = (data: { roomId: string; message: VoiceMessage }) => {
+      if (data.roomId !== roomId) return
+      addMessage(data.message)
+    }
+
+    const onSpeaking = (data: { userId: string; speaking: boolean }) => {
+      setSpeaking(data.userId, data.speaking)
+    }
+
+    const onReaction = (data: { userId: string; emoji: string }) => {
+      addReaction({ userId: data.userId, emoji: data.emoji, id: Date.now() + Math.random() })
+    }
+
+    const onRoomEnded = (data: { roomId: string }) => {
+      if (data.roomId !== roomId) return
+      toast({ title: 'Room ended', description: 'The host has ended this room.' })
+      setActiveRoom(null)
+    }
+
+    const onRoomDeleted = (data: { roomId: string }) => {
+      if (data.roomId !== roomId) return
+      toast({ title: 'Room deleted', description: 'This room has been deleted by the host.' })
+      setActiveRoom(null)
+    }
+
+    const onKicked = (data: { roomId: string }) => {
+      if (data.roomId !== roomId) return
+      toast({ title: 'You were removed', description: 'You were removed from this room.', variant: 'destructive' })
+      setActiveRoom(null)
+    }
+
+    const onHostChanged = (data: { roomId: string; newHostId: string }) => {
+      if (data.roomId !== roomId) return
+      updateParticipant(data.newHostId, { role: VOICE_ROLES.HOST })
+      if (data.newHostId === user?.id) toast({ title: '👑 You are now the host!' })
+    }
+
+    const onSlotFreed = (data: { roomId: string; speakerCount: number; maxSpeakers: number }) => {
+      if (data.roomId !== roomId) return
+      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      if (canModerate(myRole)) {
+        const queue = activeRoom?.participants.filter(p => p.handRaised && p.role === VOICE_ROLES.AUDIENCE) || []
+        if (queue.length > 0) {
+          toast({ title: `🎙️ Speaker slot freed — ${queue.length} hand${queue.length > 1 ? 's' : ''} waiting` })
+        }
+      }
+    }
+
+    // ── Mic pass events ────────────────────────────────────────────────────
+    const onMicOffer = (data: {
+      offerId: string; roomId: string; passerId: string
+      passerName: string; passerAvatar: string | null
+      passerRole: string; expiresIn: number
+    }) => {
+      if (data.roomId !== roomId) return
+      setPendingMicOffer({ ...data, receivedAt: Date.now() })
+      toast({
+        title: `🎙️ ${data.passerName} is passing the mic to you!`,
+        description: `You have ${data.expiresIn} seconds to accept.`
+      })
+    }
+
+    const onMicPassed = (data: {
+      roomId: string; passerId: string; passerName: string
+      targetId: string; targetName: string; passerRole: string
+    }) => {
+      if (data.roomId !== roomId) return
+      // Update roles in store
+      if (data.passerRole !== VOICE_ROLES.HOST) {
+        updateParticipant(data.passerId, { role: VOICE_ROLES.AUDIENCE, isMuted: true })
+      }
+      updateParticipant(data.targetId, {
+        role: VOICE_ROLES.SPEAKER, isMuted: false,
+        handRaised: false, handRaisedAt: null
+      })
+      clearPendingMicOffer()
+      toast({ title: `🎙️ ${data.passerName} passed the mic to ${data.targetName}` })
+    }
+
+    const onMicReceived = (data: { roomId: string; message: string }) => {
+      if (data.roomId !== roomId) return
+      clearPendingMicOffer()
+      toast({ title: '🎙️ Mic received!', description: data.message })
+    }
+
+    const onMicDeclined = (data: { roomId: string; targetName: string }) => {
+      if (data.roomId !== roomId) return
+      toast({
+        title: `${data.targetName} declined the mic`,
+        description: 'Your mic offer was declined.',
+        variant: 'destructive'
+      })
+    }
+
+    const onMicOfferCancelled = (data: { roomId: string; offerId: string }) => {
+      if (data.roomId !== roomId) return
+      clearPendingMicOffer()
+      toast({ title: 'Mic offer was cancelled' })
+    }
+
+    // ── Open Mic events ────────────────────────────────────────────────────
+    const onOpenMicChanged = (data: { roomId: string; isOpenMic: boolean; changedBy: string }) => {
+      if (data.roomId !== roomId) return
+      updateRoom({ isOpenMic: data.isOpenMic })
+      if (data.changedBy !== user?.id) {
+        toast({
+          title: data.isOpenMic ? '🎙️ Open Mic is ON!' : '🔒 Open Mic is OFF',
+          description: data.isOpenMic
+            ? 'Tap "Take Mic" to speak instantly'
+            : 'Raise your hand to request speaking'
+        })
+      }
+    }
+
+    const onMicLockChanged = (data: { roomId: string; micLocked: boolean; changedBy: string }) => {
+      if (data.roomId !== roomId) return
+      updateRoom({ micLocked: data.micLocked })
+      if (data.changedBy !== user?.id) {
+        toast({
+          title: data.micLocked ? '🔒 Mic Locked' : '🔓 Mic Unlocked',
+          description: data.micLocked ? 'The host has locked the microphone' : 'The microphone has been unlocked'
+        })
+      }
+    }
+
+    // ── Membership events ──────────────────────────────────────────────────────
+    const onJoinRequest = (d: { roomId: string; userId: string; firstName: string; lastName: string }) => {
+      if (d.roomId !== roomId) return
+      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      if (canModerate(myRole)) {
+        toast({ title: `✋ ${d.firstName} ${d.lastName} wants to join the room`, description: 'Check Member Requests to approve' })
+      }
+    }
+    const onJoinApproved = (d: { roomId: string; title?: string }) => {
+      if (d.roomId !== roomId) return
+      toast({ title: '✅ Your join request was approved!', description: 'You are now a permanent member' })
+    }
+    const onYourMemberRole = (d: { roomId: string; role: string; levelMeta?: any }) => {
+      if (d.roomId !== roomId) return
+      const meta = d.levelMeta
+      if (meta) toast({ title: `${meta.emoji} Your member role is now ${d.role}` })
+    }
+    const onRemovedFromRoom = (d: { roomId: string }) => {
+      if (d.roomId !== roomId) return
+      toast({ title: '🚫 You were removed from this room', variant: 'destructive' })
+      setActiveRoom(null)
+    }
+    const onBlockedFromRoom = (d: { roomId: string }) => {
+      if (d.roomId !== roomId) return
+      toast({ title: '⛔ You were blocked from this room', variant: 'destructive' })
+      setActiveRoom(null)
+    }
+
+    const onMicGrabbed = (data: {
+      roomId: string; userId: string; firstName: string; lastName: string
+    }) => {
+      if (data.roomId !== roomId) return
+      updateParticipant(data.userId, {
+        role: VOICE_ROLES.SPEAKER, isMuted: false,
+        handRaised: false, handRaisedAt: null
+      })
+      if (data.userId !== user?.id) {
+        toast({ title: `🎙️ ${data.firstName} ${data.lastName} grabbed the mic` })
+      }
+    }
+
+    // ── FIFO queue updates ─────────────────────────────────────────────────
+    const onQueueUpdated = (data: {
+      roomId: string
+      queue: Array<{ userId: string; firstName: string; lastName: string; avatarUrl: string | null; raisedAt: string }>
+      queueLength: number
+    }) => {
+      if (data.roomId !== roomId) return
+      setSpeakerQueue(data.queue)
+    }
+
+    const onQueueRejected = (data: { roomId: string; message: string }) => {
+      if (data.roomId !== roomId) return
+      toast({ title: '❌ Request declined', description: data.message, variant: 'destructive' })
+    }
+
+    const onPromotedToSpeaker = (data: { roomId: string; message: string }) => {
+      if (data.roomId !== roomId) return
+      toast({ title: '🎙️ You\'re on stage!', description: data.message })
+    }
+
+    const onQueuePosition = (data: { roomId: string; position: number }) => {
+      if (data.roomId !== roomId) return
+      toast({ title: `✋ You're #${data.position} in the queue`, description: 'Wait for the host to approve you' })
+    }
+
+    const onStatusChanged = (data: { roomId: string; status: string }) => {
+      if (data.roomId !== roomId) return
+      updateRoom({ status: asStatus(data.status) })
+    }
+
+    const onRoomUpdated = (data: {
+      roomId: string; title: string; description: string | null
+      topic: string | null; privacy: string; coverEmoji: string
+      coverImageUrl?: string | null
+      commentsEnabled?: boolean; slowMode?: boolean; messageType?: string
+      reactionsEnabled?: boolean
+    }) => {
+      if (data.roomId !== roomId) return
+      updateRoom({
+        title:           data.title,
+        description:     data.description,
+        topic:           data.topic,
+        privacy:         asPrivacy(data.privacy),
+        coverEmoji:      data.coverEmoji,
+        coverImageUrl:   data.coverImageUrl,
+        ...(data.commentsEnabled  !== undefined && { commentsEnabled:  data.commentsEnabled }),
+        ...(data.slowMode         !== undefined && { slowMode:         data.slowMode }),
+        ...(data.messageType      !== undefined && { messageType:      data.messageType as 'all' | 'followers' | 'none' }),
+        ...(data.reactionsEnabled !== undefined && { reactionsEnabled: data.reactionsEnabled }),
+      })
+    }
+
+    // ── Gift events ────────────────────────────────────────────────────────
+    const onGiftSent = (data: any) => {
+      if (data.roomId !== roomId) return
+      const eventId = data.transactionId ?? `${Date.now()}-${Math.random()}`
+      const isAllStage = data.type === 'VOICE_GIFT_ALL'
+      addGiftEvent({
+        ...data,
+        id:           eventId,
+        isAllStage,
+        receiverCount: data.receiverCount ?? (isAllStage ? data.receivers?.length : 1),
+        priority:     data.priority  ?? 'normal',
+        isPremium:    data.isPremium ?? false,
+        holdMs:       data.holdMs    ?? 0,
+        coinsSpent:   data.coinsSpentTotal ?? data.coinsSpent ?? 0,
+        diamondsEarned: data.diamondsPerPerson ?? data.diamondsEarned ?? 0,
+        combo:        data.combo ?? 1,
+      })
+
+      // Refresh leaderboard silently
+      api.get(`/voice/${roomId}/gifts/leaderboard?limit=10`)
+        .then(r => setGiftLeaderboard(r.data.data || []))
+        .catch(() => {})
+
+      // Toast for big gifts
+      const rarity = data.gift?.rarity
+      if (isAllStage) {
+        toast({
+          title: `${data.gift?.emoji} ${data.sender?.firstName} gifted everyone on stage!`,
+          description: `${data.gift?.name} × ${data.receiverCount ?? data.receivers?.length ?? '?'} people`
+        })
+      } else if (rarity === 'ultimate') {
+        toast({
+          title: `${data.gift.emoji} ${data.sender.firstName} sent ${data.gift.name}!`,
+          description: '🌟 ULTIMATE GIFT — Room-wide moment!'
+        })
+      } else if (rarity === 'legendary' || rarity === 'epic') {
+        toast({
+          title: `${data.gift.emoji} ${data.sender.firstName} sent ${data.gift.name}!`,
+          description: rarity === 'legendary' ? '🌟 Legendary gift!' : '✨ Epic gift!'
+        })
+      }
+    }
+
+    // voice:gift_all fires in addition to voice:gift_sent for all-stage gifts
+    // We handle it via onGiftSent (already registered) — just dedup here
+    const onGiftAll = (data: any) => {
+      if (data.roomId !== roomId) return
+      // Already handled by onGiftSent — only process if not already in store
+      const existing = useVoiceStore.getState().activeGiftEvents
+        .find(e => e.timestamp === data.timestamp && e.sender?.id === data.sender?.id)
+      if (!existing) onGiftSent(data)
+    }
+
+    const onGiftReceived = (data: any) => {
+      // Refresh wallet balance when we receive a gift
+      if (data.receiver?.id === user?.id) {
+        api.get('/wallet/me').then(r => setWallet(r.data.data)).catch(() => {})
+      }
+    }
+
+    socket.on('voice:user_joined',        onUserJoined)
+    socket.on('voice:user_left',          onUserLeft)
+    socket.on('voice:mute_changed',       onMuteChanged)
+    socket.on('voice:hand_raised',        onHandRaised)
+    socket.on('voice:role_changed',       onRoleChanged)
+    socket.on('voice:your_role_changed',  onYourRoleChanged)  // BUG FIX: was missing
+    socket.on('voice:moderator_assigned', onModeratorAssigned)
+    socket.on('voice:moderator_removed',  onModeratorRemoved)
+    socket.on('voice:admin_transferred',  onAdminTransferred)
+    socket.on('voice:you_are_moderator',  onYouAreModerator)
+    socket.on('voice:you_are_host',       onYouAreHost)
+    socket.on('voice:message',            onMessage)
+    socket.on('voice:speaking',           onSpeaking)
+    socket.on('voice:reaction',           onReaction)
+    socket.on('voice:room_ended',         onRoomEnded)
+    socket.on('voice:room_deleted',       onRoomDeleted)
+    socket.on('voice:kicked',             onKicked)
+    // voice:host_changed is never emitted by the backend.
+    // Ownership transfers come via voice:admin_transferred, already handled above.
+    socket.on('voice:speaker_slot_freed', onSlotFreed)
+    socket.on('voice:mic_offer',          onMicOffer)
+    socket.on('voice:mic_passed',         onMicPassed)
+    socket.on('voice:mic_received',       onMicReceived)
+    socket.on('voice:mic_declined',       onMicDeclined)
+    socket.on('voice:mic_offer_cancelled',onMicOfferCancelled)
+    socket.on('voice:open_mic_changed',   onOpenMicChanged)
+    socket.on('voice:mic_lock_changed',   onMicLockChanged)
+    socket.on('voice:join_request',      onJoinRequest)
+    socket.on('voice:join_approved',     onJoinApproved)
+    socket.on('voice:your_member_role',  onYourMemberRole)
+    socket.on('voice:removed_from_room', onRemovedFromRoom)
+    socket.on('voice:blocked_from_room', onBlockedFromRoom)
+    socket.on('voice:mic_grabbed',        onMicGrabbed)
+    socket.on('voice:queue_updated',      onQueueUpdated)
+    socket.on('voice:queue_rejected',     onQueueRejected)
+    socket.on('voice:promoted_to_speaker',onPromotedToSpeaker)
+    socket.on('voice:queue_position',     onQueuePosition)
+    socket.on('voice:status_changed',     onStatusChanged)
+    socket.on('voice:room_updated',       onRoomUpdated)
+    socket.on('voice:gift_sent',          onGiftSent)
+    socket.on('voice:speaker_pinned',     (d: { roomId: string; userId: string; isPinned: boolean }) => {
+      if (d.roomId !== roomId) return
+      updateParticipant(d.userId, { isPinned: d.isPinned })
+    })
+    socket.on('voice:premium_gift',       onGiftSent)   // BUG FIX: premium gifts use a separate channel
+    socket.on('voice:gift_received',      onGiftReceived)
+    socket.on('voice:gift_all',           onGiftAll)
+
+    return () => {
+      socket.emit('voice:leave_room', roomId)
+      socket.off('voice:user_joined',        onUserJoined)
+      socket.off('voice:user_left',          onUserLeft)
+      socket.off('voice:mute_changed',       onMuteChanged)
+      socket.off('voice:hand_raised',        onHandRaised)
+      socket.off('voice:role_changed',       onRoleChanged)
+      socket.off('voice:your_role_changed',  onYourRoleChanged)
+      socket.off('voice:moderator_assigned', onModeratorAssigned)
+      socket.off('voice:moderator_removed',  onModeratorRemoved)
+      socket.off('voice:admin_transferred',  onAdminTransferred)
+      socket.off('voice:you_are_moderator',  onYouAreModerator)
+      socket.off('voice:you_are_host',       onYouAreHost)
+      socket.off('voice:message',            onMessage)
+      socket.off('voice:speaking',           onSpeaking)
+      socket.off('voice:reaction',           onReaction)
+      socket.off('voice:room_ended',         onRoomEnded)
+      socket.off('voice:room_deleted',       onRoomDeleted)
+      socket.off('voice:kicked',             onKicked)
+      // voice:host_changed was never emitted — removed; ownership handled by voice:admin_transferred above
+      socket.off('voice:speaker_slot_freed', onSlotFreed)
+      socket.off('voice:mic_offer',          onMicOffer)
+      socket.off('voice:mic_passed',         onMicPassed)
+      socket.off('voice:mic_received',       onMicReceived)
+      socket.off('voice:mic_declined',       onMicDeclined)
+      socket.off('voice:mic_offer_cancelled',onMicOfferCancelled)
+      socket.off('voice:open_mic_changed',   onOpenMicChanged)
+      socket.off('voice:mic_lock_changed',   onMicLockChanged)
+    // (duplicate removed)
+      socket.off('voice:join_approved',     onJoinApproved)
+      socket.off('voice:your_member_role',  onYourMemberRole)
+      socket.off('voice:removed_from_room', onRemovedFromRoom)
+      socket.off('voice:blocked_from_room', onBlockedFromRoom)
+      socket.off('voice:mic_grabbed',        onMicGrabbed)
+      socket.off('voice:queue_updated',      onQueueUpdated)
+      socket.off('voice:queue_rejected',     onQueueRejected)
+      socket.off('voice:promoted_to_speaker',onPromotedToSpeaker)
+      socket.off('voice:queue_position',     onQueuePosition)
+      socket.off('voice:status_changed',     onStatusChanged)
+      socket.off('voice:room_updated',       onRoomUpdated)
+      socket.off('voice:gift_sent',          onGiftSent)
+      socket.off('voice:premium_gift',       onGiftSent)
+      socket.off('voice:gift_received',      onGiftReceived)
+      socket.off('voice:gift_all',           onGiftAll)
+    }
+  }, [roomId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load chat history on enter
+  useEffect(() => {
+    if (!roomId) return
+    api.get(`/voice/${roomId}/messages?limit=100`)
+      .then(r => setMessages(r.data.data || []))
+      .catch(() => {})
+  }, [roomId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load wallet balance, gift leaderboard, and follow status on enter
+  useEffect(() => {
+    if (!roomId) return
+    api.get('/wallet/me').then(r => setWallet(r.data.data)).catch(() => {})
+    api.get(`/voice/${roomId}/gifts/leaderboard?limit=10`)
+      .then(r => setGiftLeaderboard(r.data.data || []))
+      .catch(() => {})
+    // Check if current user follows the host (needed for followers-only chat)
+    // activeRoom is already set before this hook mounts — read directly from store
+    const hostId = useVoiceStore.getState().activeRoom?.hostId
+    if (hostId && user?.id && hostId !== user.id) {
+      api.get(`/social/counts/${hostId}`)
+        .then(cr => {
+          useVoiceStore.getState().updateRoom({ isFollowingHost: cr.data.data?.isFollowing ?? false })
+        })
+        .catch(() => {
+          // Social endpoint unavailable — default to allowing chat
+          useVoiceStore.getState().updateRoom({ isFollowingHost: true })
+        })
+    } else {
+      // I am the host, or no host info yet — allow chat
+      useVoiceStore.getState().updateRoom({ isFollowingHost: true })
+    }
+  }, [roomId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const myParticipant = activeRoom?.participants.find(p => p.userId === user?.id)
+
+  // ── Actions ─────────────────────────────────────────────────────────────────
+
+  const toggleMute = useCallback(async () => {
+    if (!roomId || !myParticipant) return
+    const newMuted = !myParticipant.isMuted
+    try {
+      await api.patch(`/voice/${roomId}/mute`, { isMuted: newMuted })
+      // Optimistically update local store so UI reflects immediately
+      useVoiceStore.getState().updateParticipant(myParticipant.userId, { isMuted: newMuted })
+    } catch {
+      toast({ title: 'Failed to toggle mute', variant: 'destructive' })
+    }
+  }, [roomId, myParticipant?.userId, myParticipant?.isMuted]) // eslint-disable-line
+
+  const raiseHand = useCallback(async () => {
+    if (!roomId || !myParticipant) return
+    try {
+      if (myParticipant.handRaised) {
+        await api.delete(`/voice/${roomId}/queue/cancel`)
+      } else {
+        await api.post(`/voice/${roomId}/queue/raise`)
+      }
+    } catch {
+      toast({ title: 'Failed to raise hand', variant: 'destructive' })
+    }
+  }, [roomId, myParticipant]) // eslint-disable-line
+
+  const sendMessage = useCallback(async (body: string) => {
+    if (!roomId || !body.trim()) return
+    try {
+      await api.post(`/voice/${roomId}/messages`, { body })
+    } catch {
+      // Phase 6: buffer for offline replay
+      voiceOfflineBuffer.enqueue('voice:message', { roomId, body })
+      toast({ title: 'Failed to send message', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const promoteUser = useCallback(async (targetUserId: string, role: 'SPEAKER' | 'AUDIENCE') => {
+    if (!roomId) return
+    try {
+      await api.patch(`/voice/${roomId}/promote`, { targetUserId, role })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to update role', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const kickUser = useCallback(async (targetUserId: string) => {
+    if (!roomId) return
+    try {
+      await api.delete(`/voice/${roomId}/kick/${targetUserId}`)
+    } catch {
+      toast({ title: 'Failed to remove user', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const muteUser = useCallback(async (targetUserId: string, isMuted: boolean) => {
+    if (!roomId) return
+    try {
+      await api.patch(`/voice/${roomId}/mute`, { targetUserId, isMuted })
+    } catch {
+      toast({ title: 'Failed to mute user', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const muteAll = useCallback(async () => {
+    if (!roomId) return
+    try {
+      await api.patch(`/voice/${roomId}/mute-all`)
+      toast({ title: '🔇 All speakers muted' })
+    } catch {
+      toast({ title: 'Failed to mute all', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const assignModerator = useCallback(async (targetUserId: string) => {
+    if (!roomId) return
+    try {
+      await api.post(`/voice/${roomId}/moderator/${targetUserId}`)
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to assign moderator', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const removeModerator = useCallback(async (targetUserId: string) => {
+    if (!roomId) return
+    try {
+      await api.delete(`/voice/${roomId}/moderator/${targetUserId}`)
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to remove moderator', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const pinSpeaker = useCallback(async (targetUserId: string) => {
+    if (!roomId) return
+    try {
+      await api.patch(`/voice/${roomId}/pin/${targetUserId}`)
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to pin speaker', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const transferAdmin = useCallback(async (targetUserId: string) => {
+    if (!roomId) return
+    try {
+      await api.post(`/voice/${roomId}/transfer/${targetUserId}`)
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to transfer ownership', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const endRoom = useCallback(async () => {
+    if (!roomId) return
+    try {
+      await api.patch(`/voice/${roomId}/end`)
+    } catch {
+      toast({ title: 'Failed to end room', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const broadcastReaction = useCallback((emoji: string) => {
+    if (!roomId) return
+    const socket = getSocket()
+    if (socket) socket.emit('voice:reaction', { roomId, emoji })
+  }, [roomId])
+
+  const broadcastSpeaking = useCallback((speaking: boolean) => {
+    if (!roomId) return
+    const socket = getSocket()
+    if (socket) socket.emit('voice:speaking', { roomId, speaking })
+  }, [roomId])
+
+  const passMic = useCallback(async (targetUserId: string) => {
+    if (!roomId) return null
+    try {
+      const res = await api.post(`/voice/${roomId}/mic-pass/${targetUserId}`)
+      toast({
+        title: `🎙️ Mic offer sent`,
+        description: res.data.data?.targetName
+          ? `Waiting for ${res.data.data.targetName} to accept (30s)`
+          : 'Waiting for acceptance'
+      })
+      return res.data.data as { offerId: string; targetName: string; expiresIn: number }
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to pass mic', variant: 'destructive' })
+      return null
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const acceptMic = useCallback(async (offerId: string) => {
+    if (!roomId) return
+    try {
+      await api.post(`/voice/${roomId}/mic-pass/${offerId}/accept`)
+      clearPendingMicOffer()
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to accept mic', variant: 'destructive' })
+      clearPendingMicOffer()
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const declineMic = useCallback(async (offerId: string) => {
+    if (!roomId) return
+    try {
+      await api.post(`/voice/${roomId}/mic-pass/${offerId}/decline`)
+      clearPendingMicOffer()
+    } catch {
+      clearPendingMicOffer()
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const cancelMicOffer = useCallback(async (offerId: string) => {
+    if (!roomId) return
+    try {
+      await api.delete(`/voice/${roomId}/mic-pass/${offerId}`)
+    } catch {
+      toast({ title: 'Failed to cancel mic offer', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const toggleOpenMic = useCallback(async (enabled?: boolean) => {
+    if (!roomId) return
+    try {
+      const res = await api.patch(`/voice/${roomId}/open-mic`,
+        enabled !== undefined ? { enabled } : {}
+      )
+      const state = res.data.data?.isOpenMic
+      toast({ title: state ? '🎙️ Open Mic ON' : '🔒 Open Mic OFF' })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to toggle Open Mic', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const toggleMicLock = useCallback(async (locked?: boolean) => {
+    if (!roomId) return
+    try {
+      const res = await api.patch(`/voice/${roomId}/mic-lock`,
+        locked !== undefined ? { locked } : {}
+      )
+      const state = res.data.data?.micLocked
+      toast({ title: state ? '🔒 Mic Locked' : '🔓 Mic Unlocked' })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to toggle Mic Lock', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const grabMic = useCallback(async () => {
+    if (!roomId) return
+    // If mic is locked by host, block attempt and notify user
+    if (useVoiceStore.getState().activeRoom?.micLocked) {
+      toast({ title: '🔒 Mic is locked', description: 'The host has locked the mic — wait for it to be unlocked', variant: 'destructive' })
+      return
+    }
+    try {
+      const res = await api.post(`/voice/${roomId}/grab-mic`)
+      const { queued, position, role } = res.data.data ?? {}
+      if (queued) {
+        toast({
+          title: `✋ Stage full — you're #${position} in the queue`,
+          description: 'You\'ll be promoted automatically when a slot opens.'
+        })
+      } else {
+        toast({ title: '🎙️ You\'re on stage!', description: 'Your mic is now active.' })
+      }
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to take mic', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  // Drop mic — demote self from SPEAKER back to AUDIENCE (stays in room)
+  const dropMic = useCallback(async () => {
+    if (!roomId) return
+    try {
+      await api.post(`/voice/${roomId}/drop-mic`)
+      toast({ title: '🎙️ Mic dropped', description: 'You are now in the audience.' })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to drop mic', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  // ── Send gift ────────────────────────────────────────────────────────────────
+  const sendGift = useCallback(async (
+    giftId: string,
+    receiverId: string,
+    count = 1,
+    idempotencyKey?: string
+  ) => {
+    if (!roomId) return null
+    try {
+      const res = await api.post(`/voice/${roomId}/gifts`, {
+        giftId, receiverId, count,
+        idempotencyKey: idempotencyKey || `${Date.now()}-${giftId}-${receiverId}`
+      })
+      const { senderCoinsRemaining } = res.data.data ?? {}
+      if (senderCoinsRemaining !== undefined) {
+        useVoiceStore.getState().setWallet({
+          coins:    senderCoinsRemaining,
+          diamonds: useVoiceStore.getState().wallet?.diamonds ?? 0
+        })
+      }
+      return res.data.data
+    } catch (e: any) {
+      const msg = e?.response?.data?.message || 'Failed to send gift'
+      toast({ title: msg, variant: 'destructive' })
+      return null
+    }
+  }, [roomId]) // eslint-disable-line
+
+  // ── Send gift to ALL speakers on stage ───────────────────────────────────────
+  const sendGiftToAll = useCallback(async (
+    giftId: string,
+    count = 1,
+    idempotencyKey?: string
+  ) => {
+    if (!roomId) return null
+    try {
+      const res = await api.post(`/voice/${roomId}/gifts/all`, {
+        giftId, count,
+        idempotencyKey: idempotencyKey || `all-${Date.now()}-${giftId}`
+      })
+      const { senderCoinsRemaining, receiverCount } = res.data.data ?? {}
+      if (senderCoinsRemaining !== undefined) {
+        useVoiceStore.getState().setWallet({
+          coins:    senderCoinsRemaining,
+          diamonds: useVoiceStore.getState().wallet?.diamonds ?? 0
+        })
+      }
+      return res.data.data
+    } catch (e: any) {
+      const msg = e?.response?.data?.message || 'Failed to send gift to all'
+      toast({ title: msg, variant: 'destructive' })
+      return null
+    }
+  }, [roomId]) // eslint-disable-line
+
+  return {
+    myParticipant,
+    // Self controls
+    toggleMute, raiseHand, sendMessage,
+    broadcastReaction, broadcastSpeaking,
+    // Open Mic
+    grabMic, dropMic, toggleOpenMic, toggleMicLock,
+    // Mic pass
+    passMic, acceptMic, declineMic, cancelMicOffer,
+    // Gift system
+    sendGift, sendGiftToAll,
+    // Moderator controls (HOST + MODERATOR)
+    promoteUser, kickUser, muteUser, muteAll,
+    // Host-only controls
+    assignModerator, removeModerator, transferAdmin, endRoom,
+    // Host + Mod controls
+    pinSpeaker
+  }
+}

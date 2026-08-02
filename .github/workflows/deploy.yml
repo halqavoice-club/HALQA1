@@ -1,0 +1,110 @@
+name: HALQA Deploy
+
+on:
+  push:
+    branches: [main]
+    # Only trigger deploy when these paths change
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'nginx/**'
+      - 'docker-compose.prod.yml'
+
+# Prevent concurrent deployments
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment: production  # Requires manual approval in GitHub Environments settings
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key:      ${{ secrets.DEPLOY_SSH_KEY }}
+          port:     ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            set -e
+            cd /opt/halqa
+
+            # Pull latest code (new migration files land here)
+            git pull origin main
+
+            # DO-004: Run migrations BEFORE rebuilding the backend.
+            #
+            # Previous order (unsafe):
+            #   1. git pull
+            #   2. migrate deploy   ← exec into OLD running backend container
+            #   3. up --build       ← kills old, starts new
+            #
+            # Problem: if the OLD backend container is not running (crash,
+            # first deploy, OOM kill), step 2 fails with "no such container"
+            # and the new backend starts against an unmigrated schema → crashes.
+            #
+            # Safe order (DO-004 fix):
+            #   1. git pull
+            #   2. migrate deploy   ← run in a TEMPORARY container from the
+            #                          existing image using the production env.
+            #                          Works even if the backend is not running.
+            #   3. up --build       ← new backend starts against migrated schema
+            #
+            # Using --rm so the migration container is auto-removed after use.
+            # Using the existing backend image (before the rebuild) means the
+            # migration runs against a known-good Prisma client, not a partial build.
+            echo "Running database migrations..."
+            docker compose -f docker-compose.prod.yml run --rm \
+              --no-deps \
+              -e DATABASE_URL \
+              backend \
+              npx prisma migrate deploy
+            echo "Migrations complete"
+
+            # Rebuild and restart changed services (zero-downtime rolling restart)
+            # --no-deps: only rebuild the named services, not their dependencies
+            docker compose -f docker-compose.prod.yml up -d --build --no-deps backend frontend
+
+            # Health check — wait up to 90s for backend to be ready
+            # (longer than before because image rebuild takes time)
+            echo "Waiting for backend health check..."
+            for i in $(seq 1 18); do
+              if curl -sf http://localhost:5000/health > /dev/null 2>&1; then
+                echo "Backend is healthy after $((i * 5))s"
+                break
+              fi
+              if [ "$i" -eq 18 ]; then
+                echo "Health check failed after 90s"
+                # Print recent logs to help diagnose the issue
+                docker compose -f docker-compose.prod.yml logs --tail=50 backend
+                exit 1
+              fi
+              echo "Attempt $i/18 — waiting 5s..."
+              sleep 5
+            done
+
+            # Final health verification
+            curl -sf http://localhost:5000/health || (
+              echo "Final health check failed"
+              docker compose -f docker-compose.prod.yml logs --tail=50 backend
+              exit 1
+            )
+
+            echo "Deployment complete"
+
+  # Notify on failure
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: failure()
+    steps:
+      - name: Log failure
+        run: echo "Deployment to production FAILED. Check the deploy job logs."

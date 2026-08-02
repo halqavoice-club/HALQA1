@@ -1,0 +1,18 @@
+{
+  "name": "halqa-shared",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Shared layout engine and test utilities for HALQA (platform-agnostic, no React deps)",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "1.6.0",
+    "fast-check": "3.22.0",
+    "typescript": "5.3.3",
+    "vitest": "1.6.0"
+  }
+}

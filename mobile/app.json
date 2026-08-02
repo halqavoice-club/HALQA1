@@ -1,0 +1,93 @@
+{
+  "expo": {
+    "owner": "halqa",
+    "name": "HALQA",
+    "slug": "halqa-mobile",
+    "version": "1.0.11",
+    "runtimeVersion": {
+      "policy": "sdkVersion"
+    },
+    "scheme": "halqa",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#4f46e5"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.halqa.mobile",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Required for profile photos and story creation",
+        "NSMicrophoneUsageDescription": "Required for voice rooms and live classes",
+        "NSPhotoLibraryUsageDescription": "Required for uploading media"
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#4f46e5"
+      },
+      "package": "com.halqa.mobile",
+      "versionCode": 11,
+      "usesCleartextTraffic": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.VIBRATE"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-document-picker",
+      "./plugins/withAndroidScaling",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "HALQA needs camera access for profile photos and stories"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#4f46e5"
+        }
+      ],
+      [
+        "@stripe/stripe-react-native",
+        {
+          "merchantIdentifier": "merchant.com.halqa.mobile",
+          "enableGooglePay": false
+        }
+      ],
+      "expo-secure-store",
+      "@react-native-community/datetimepicker"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "6d809e46-f158-4552-8996-ef179bfaf59e"
+      }
+    }
+  }
+}

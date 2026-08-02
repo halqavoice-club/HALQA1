@@ -1,0 +1,234 @@
+version: '3.8'
+
+# Production Docker Compose
+# Usage: docker-compose -f docker-compose.prod.yml up -d
+# Requires: .env.docker file with all production values
+
+services:
+  mysql:
+    image: mariadb:10.11
+    container_name: halqa-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: halqa_db
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks:
+      - halqa-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: halqa-redis
+    restart: always
+    # SECURITY FIX: requirepass now uses ${REDIS_PASSWORD} without a fallback.
+    # If REDIS_PASSWORD is unset, the service will fail to start, which is the
+    # correct behavior — Redis must never run without auth in production.
+    # Set REDIS_PASSWORD in your .env.docker file before deploying.
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - halqa-net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: halqa-backend
+    restart: always
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@mysql:3306/halqa_db
+      # SECURITY FIX: REDIS_PASSWORD no longer has a fallback to empty string.
+      # If REDIS_PASSWORD is unset the server will refuse to start (connectRedis validates this).
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+      CLIENT_URL: ${CLIENT_URL}
+      PORT: 5000
+      # ── Email ────────────────────────────────────────────────────────────────
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      EMAIL_FROM: ${EMAIL_FROM}
+      OTP_EXPIRY_MINUTES: ${OTP_EXPIRY_MINUTES:-10}
+      # ── Storage (Cloudflare R2) ───────────────────────────────────────────────
+      # FIX: Removed dead AWS_* vars (app uses R2, not S3). Added correct R2 vars.
+      STORAGE_TYPE: ${STORAGE_TYPE:-r2}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY}
+      R2_BUCKET: ${R2_BUCKET:-halqa-uploads}
+      R2_PUBLIC_URL: ${R2_PUBLIC_URL}
+      # ── LiveKit (Voice Club + Live Classes) ───────────────────────────────────
+      # FIX: These were missing — Voice Club and Live Classes failed silently on deploy.
+      LIVEKIT_URL: ${LIVEKIT_URL}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      # ── Stripe (Coin purchases) ───────────────────────────────────────────────
+      # FIX: These were missing — Stripe checkout and webhooks failed on deploy.
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      STRIPE_SUCCESS_URL: ${STRIPE_SUCCESS_URL:-https://yourdomain.com/wallet?payment=success}
+      STRIPE_CANCEL_URL: ${STRIPE_CANCEL_URL:-https://yourdomain.com/wallet?payment=cancelled}
+      # ── Rate limiting ─────────────────────────────────────────────────────────
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-900000}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-100}
+      # ── Monitoring ───────────────────────────────────────────────────────────
+      METRICS_TOKEN: ${METRICS_TOKEN}
+      SERVICE_NAME: ${SERVICE_NAME:-halqa-api}
+      SLOW_REQUEST_MS: ${SLOW_REQUEST_MS:-500}
+      SLOW_QUERY_THRESHOLD_MS: ${SLOW_QUERY_THRESHOLD_MS:-200}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/app/uploads
+      - logs_data:/app/logs
+    networks:
+      - halqa-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: halqa-frontend
+    restart: always
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - halqa-net
+    # DO-007: Health check so nginx stops routing to a crashed frontend container.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # DO-006: Certbot — automatic Let's Encrypt certificate renewal.
+  # Checks for renewal every 12 hours (Let's Encrypt requires renewal before 90-day expiry).
+  # Certificates are written to the same volume nginx reads from.
+  # After renewal, nginx is signaled to reload its config without downtime.
+  certbot:
+    image: certbot/certbot:latest
+    container_name: halqa-certbot
+    restart: unless-stopped
+    volumes:
+      - ./nginx/ssl:/etc/letsencrypt
+      - certbot_data:/var/www/certbot
+    # Renew if expiry < 30 days; otherwise sleep 12h and check again.
+    # `--webroot` uses the existing nginx to serve the ACME challenge.
+    entrypoint: >
+      sh -c "
+        trap exit TERM;
+        while :; do
+          certbot renew --webroot -w /var/www/certbot --quiet --deploy-hook 'nginx -s reload' 2>&1;
+          sleep 12h & wait $${!};
+        done
+      "
+    networks:
+      - halqa-net
+
+  nginx:
+    image: nginx:alpine
+    container_name: halqa-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - certbot_data:/var/www/certbot:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - halqa-net
+
+  # ── Database Backup Service ─────────────────────────────────────────────────
+  # Runs mysqldump daily at 02:00 UTC and keeps the last 7 backups.
+  # Backup files are written to the backups_data volume.
+  # To restore: docker exec halqa-backup sh /backup/restore.sh <filename>
+  #
+  # SETUP: This service uses ofelia (a Docker cron scheduler).
+  # Labels configure ofelia to run the backup command on a schedule.
+  # Ofelia container is not included here — add it separately or use
+  # the host cron to trigger: docker exec halqa-backup sh /backup/backup.sh
+  #
+  # For a simpler alternative without ofelia, run backup manually:
+  #   docker exec halqa-mysql sh -c "mysqldump -u${MYSQL_USER} -p${MYSQL_PASSWORD} halqa_db | gzip > /backups/halqa_$(date +%Y%m%d_%H%M%S).sql.gz"
+  db-backup:
+    image: mariadb:10.11
+    container_name: halqa-backup
+    restart: always
+    environment:
+      MYSQL_HOST:     mysql
+      MYSQL_USER:     ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: halqa_db
+      BACKUP_KEEP_DAYS: 7
+    volumes:
+      - backups_data:/backups
+      - ./scripts/backup.sh:/backup/backup.sh:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+    # Run backup once on startup, then sleep (external scheduler triggers repeats)
+    command: >
+      sh -c "
+        echo '#!/bin/sh' > /tmp/run_backup.sh &&
+        echo 'FILE=/backups/halqa_$$(date +%Y%m%d_%H%M%S).sql.gz' >> /tmp/run_backup.sh &&
+        echo 'mysqldump -h$$MYSQL_HOST -u$$MYSQL_USER -p$$MYSQL_PASSWORD $$MYSQL_DATABASE | gzip > $$FILE' >> /tmp/run_backup.sh &&
+        echo 'echo Backup written: $$FILE' >> /tmp/run_backup.sh &&
+        echo 'find /backups -name \"halqa_*.sql.gz\" -mtime +$$BACKUP_KEEP_DAYS -delete' >> /tmp/run_backup.sh &&
+        chmod +x /tmp/run_backup.sh &&
+        sh /tmp/run_backup.sh &&
+        tail -f /dev/null
+      "
+    networks:
+      - halqa-net
+
+volumes:
+  mysql_data:
+  redis_data:
+  uploads_data:
+  logs_data:
+  certbot_data:
+  backups_data:    # database backup files (7-day retention)
+
+networks:
+  halqa-net:
+    driver: bridge

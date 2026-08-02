@@ -1,0 +1,10 @@
+User-agent: *
+Disallow: /api/
+Disallow: /dashboard/
+Disallow: /students/
+Disallow: /teachers/
+Disallow: /login
+Allow: /
+
+# Halqa Management System - Private School ERP
+# Not intended for public indexing

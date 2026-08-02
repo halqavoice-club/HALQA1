@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head><title>HALQA Phone Test</title>
+<style>body{font-family:Arial;padding:20px;max-width:500px;margin:0 auto}
+.ok{color:green;font-weight:bold}.fail{color:red;font-weight:bold}</style>
+</head>
+<body>
+<h2>HALQA Backend Test</h2>
+<p>If you see this page, your phone CAN reach the backend.</p>
+<h3>Login Test</h3>
+<button onclick="testLogin()">Test Login</button>
+<div id="result" style="margin-top:20px;padding:10px;border:1px solid #ccc"></div>
+<script>
+async function testLogin() {
+  document.getElementById('result').innerHTML = 'Testing...';
+  try {
+    const r = await fetch('/api/v1/auth/login', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({email:'superadmin@halqa.com', password:'Admin@2024'})
+    });
+    const d = await r.json();
+    document.getElementById('result').innerHTML = d.success 
+      ? '<span class=ok>✅ LOGIN SUCCESS! Backend is working.</span>'
+      : '<span class=fail>❌ Login failed: ' + d.message + '</span>';
+  } catch(e) {
+    document.getElementById('result').innerHTML = '<span class=fail>❌ Network error: ' + e.message + '</span>';
+  }
+}
+</script>
+</body></html>

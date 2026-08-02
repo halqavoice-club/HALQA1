@@ -1,0 +1,144 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+  }}
+
+@layer base {
+  * { @apply border-border; }
+  body { @apply bg-background text-foreground; }
+  /* Arabic font when RTL */
+  [dir="rtl"] body { font-family: var(--font-arabic), 'Noto Sans Arabic', sans-serif; }
+  [dir="rtl"] * { font-family: var(--font-arabic), 'Noto Sans Arabic', sans-serif; }
+}
+
+/* Dark mode — bg-gray-50 overrides */
+.dark body { @apply bg-gray-950; }
+.dark .bg-gray-50 { @apply bg-gray-900; }
+.dark .bg-white { @apply bg-gray-800; }
+.dark .text-gray-900 { @apply text-gray-100; }
+.dark .text-gray-700 { @apply text-gray-300; }
+.dark .text-gray-600 { @apply text-gray-400; }
+.dark .text-gray-500 { @apply text-gray-400; }
+.dark .border-gray-200 { @apply border-gray-700; }
+.dark .border-gray-100 { @apply border-gray-700; }
+.dark .divide-gray-100 > * { @apply border-gray-700; }
+.dark .shadow-sm { box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.4); }
+
+/* RTL support — targeted, not global */
+[dir="rtl"] body { font-family: 'Noto Sans Arabic', 'Inter', sans-serif; }
+
+/* Flip flex rows in RTL — only for explicit layout containers */
+[dir="rtl"] .rtl-flip { flex-direction: row-reverse; }
+
+/* Sidebar in RTL goes to the right */
+[dir="rtl"] aside.sidebar-left {
+  order: 2;
+}
+[dir="rtl"] .main-content {
+  order: 1;
+}
+
+/* Text alignment */
+[dir="rtl"] .rtl-text { text-align: right; }
+
+/* Padding/margin flips for search icon */
+[dir="rtl"] .search-icon-left {
+  left: auto;
+  right: 0.75rem;
+}
+[dir="rtl"] .search-input-padded {
+  padding-left: 1rem;
+  padding-right: 2.5rem;
+}
+
+/* Dropdown menus align to left in RTL */
+[dir="rtl"] [data-radix-popper-content-wrapper] {
+  direction: rtl;
+}
+
+/* Scrollbar stays on left in RTL */
+[dir="rtl"] * {
+  unicode-bidi: plaintext;
+}
+
+/* Fix icon margins in RTL nav items */
+[dir="rtl"] .nav-item-icon {
+  margin-right: 0;
+  margin-left: 0.75rem;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { @apply bg-muted; }
+::-webkit-scrollbar-thumb { @apply bg-muted-foreground/30 rounded-full; }
+::-webkit-scrollbar-thumb:hover { @apply bg-muted-foreground/50; }
+
+/* Print styles */
+@media print {
+  .no-print { display: none !important; }
+  .print-only { display: block !important; }
+  body { background: white !important; font-size: 12px !important; }
+  nav, header, aside, footer, .mobile-nav { display: none !important; }
+  main { padding: 0 !important; overflow: visible !important; margin: 0 !important; }
+  /* Report card specific */
+  .print\:shadow-none { box-shadow: none !important; }
+  .print\:border-none { border: none !important; }
+  .print\:rounded-none { border-radius: 0 !important; }
+  .print\:p-6 { padding: 1.5rem !important; }
+  /* Page breaks */
+  .page-break-before { page-break-before: always; }
+  .page-break-after { page-break-after: always; }
+  .avoid-break { page-break-inside: avoid; }
+  /* Colors in print */
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  @page { margin: 1cm; size: A4; }
+}
+
+/* PWA safe area */
+.safe-top { padding-top: env(safe-area-inset-top); }
+.safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
