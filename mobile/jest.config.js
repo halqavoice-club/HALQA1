@@ -8,6 +8,12 @@ module.exports = {
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
   },
+  // Include src/tests/ alongside component test files
+  testMatch: [
+    '**/__tests__/**/*.[jt]s?(x)',
+    '**/?(*.)+(spec|test).[jt]s?(x)',
+    '**/src/tests/**/*.test.[jt]s?(x)',
+  ],
   testPathIgnorePatterns: ['/node_modules/', '/.expo/'],
   cacheDirectory: '.jest/cache',
 };
