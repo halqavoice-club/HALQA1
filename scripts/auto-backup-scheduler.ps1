@@ -46,12 +46,16 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
     -RestartCount 2 `
     -RestartInterval (New-TimeSpan -Minutes 5) `
-    -StartWhenAvailable `     # runs even if PC was off at scheduled time
+    -StartWhenAvailable `
     -RunOnlyIfNetworkAvailable
 
+# FIX: Use S4U logon type so the task runs even when the user is NOT logged in.
+# Previously LogonType was "Interactive" which means the backup never runs on
+# an unattended server or when the PC is locked. S4U (Service For User) runs
+# the task under the current user account without requiring an active session.
 $principal = New-ScheduledTaskPrincipal `
     -UserId $env:USERNAME `
-    -LogonType Interactive `
+    -LogonType S4U `
     -RunLevel Highest
 
 Register-ScheduledTask `

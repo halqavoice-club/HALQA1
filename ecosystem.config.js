@@ -1,10 +1,18 @@
 // PM2 Process Manager Configuration
-// Usage:
-//   pm2 start ecosystem.config.js
-//   pm2 save
-//   pm2 startup   (auto-start on server reboot)
-//   pm2 monit     (live monitoring)
-//   pm2 logs      (view logs)
+//
+// USE CASE: VPS deployment WITHOUT Docker (Option B from README)
+//
+//   pm2 start ecosystem.config.js --env production
+//   pm2 save          (persist process list across reboots)
+//   pm2 startup       (generate init script for auto-start)
+//   pm2 monit         (live monitoring dashboard)
+//   pm2 logs          (view logs)
+//
+// NOTE: If you are using Docker (docker-compose.prod.yml), you do NOT need
+// PM2. Docker handles process restarts via the `restart: always` policy.
+// PM2 is only for bare-metal / VPS deployments without Docker.
+//
+// See README.md → "Option B — VPS with PM2" for full setup instructions.
 
 module.exports = {
   apps: [
