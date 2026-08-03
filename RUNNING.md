@@ -31,10 +31,16 @@ npm install
 npx prisma generate
 
 # Run ALL database migrations (creates tables + applies latest changes)
+npx prisma migrate deploy
 
-
-# Seed demo data
+# Seed base data (users, school, roles)
 node src/prisma/seed.js
+
+# Seed demo data (grades, attendance, announcements)
+node src/prisma/seed-data.js
+
+# Optional: add test coins for gift system testing
+node seed-check.js --add-coins
 ```
 
 ---
@@ -94,9 +100,32 @@ Express Backend (localhost:5000)
     └── Redis (optional, localhost:6379)
 ```
 
----
+## Redis (optional but recommended)
 
-## Environment Files
+Install Redis for Windows via WSL or use the Windows port:
+```bash
+# Option A — WSL (recommended)
+wsl --install
+wsl -d Ubuntu -e sudo apt-get install -y redis-server
+wsl -d Ubuntu -e sudo service redis-server start
+
+# Option B — Windows binary
+# Download from https://github.com/microsoftarchive/redis/releases
+# Run: redis-server.exe
+```
+Without Redis the system runs in-memory fallback mode (rate limiting and caching still work, but do not persist across restarts).
+
+## LiveKit (required for Voice Club + Live Classes)
+
+Voice Club and Live Classes require a LiveKit server. For local development, use LiveKit Cloud:
+1. Create a free account at https://livekit.io
+2. Get your `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET`
+3. Add them to `backend/.env`
+4. Add `NEXT_PUBLIC_LIVEKIT_URL` to `frontend/.env.local`
+
+Without LiveKit configured, Voice Club and Live Classes will not work.
+
+---
 
 **backend/.env** — already configured for XAMPP:
 ```
@@ -124,12 +153,10 @@ NEXT_PUBLIC_SOCKET_URL=http://localhost:5000
 **Port already in use:**
 ```bash
 # Kill process on port 5000
-
-npx kill-port 5000\
-
+npx kill-port 5000
 
 # Kill process on port 3000
-non
+npx kill-port 3000
 ```
 
 **Frontend shows blank page:**
@@ -247,3 +274,59 @@ npx prisma db push   # applies isPinned + parentMessageId schema changes
 | `app/live-class/[id].tsx` | Fixed 4 broken `@/src/` import paths |
 | `app/dm/[id].tsx` | Fixed broken `participants` lookup → uses `other` field; fixed socket payload; added `dm:delivered`/`dm:read` |
 | `app/group-chat/[id].tsx` | Added `group:message_deleted` socket handler |
+
+---
+
+## New Features (Added August 2026)
+
+### 🔐 Two-Factor Authentication (2FA)
+Users can enable TOTP-based 2FA from **Settings → Security**.
+- Backend: `POST /api/v1/auth/2fa/setup` → `verify` → `disable`
+- Web: `/settings/security`
+- Requires `otplib` (already installed)
+
+### 💸 Diamond Payout
+Hosts can request cash withdrawals for earned diamonds.
+- Backend: `POST /api/v1/wallet/payout/request`
+- Web: `/wallet/payout`
+- Minimum: 2,000 diamonds = $10 USD
+- Run migration: `npx prisma migrate deploy` (adds `payout_requests` table)
+
+### 🛡️ Admin Content Moderation
+Admins can review and act on reported content.
+- Web: `/admin/moderation` (SCHOOL_ADMIN / SUPER_ADMIN only)
+- Backend: existing `/api/v1/report-block/reports` endpoint
+
+### ⏰ Scheduled Room Reminders
+When creating a scheduled voice room, followers automatically receive push notifications 15 minutes before start.
+- Requires Redis + BullMQ (already set up)
+- No configuration needed — activates automatically
+
+### 🔍 Elasticsearch Search
+Set `ELASTICSEARCH_URL` in `.env` to activate full-text search.
+Without it, the app uses MySQL LIKE queries as fallback.
+
+### 📊 Monitoring Alerts
+Import `backend/grafana/alert_rules.json` into Grafana to activate Prometheus alert rules for:
+- Backend down, high error rate, slow queries, Redis latency, missing backups
+
+---
+
+## Running Tests
+
+```bash
+# Backend unit tests
+cd backend && npm test
+
+# Backend integration tests (requires MySQL + Redis)
+cd backend && npm run test:integration
+
+# Frontend unit + PBT tests
+cd frontend && npm test
+
+# Mobile tests
+cd mobile && npm test
+
+# Frontend E2E tests (requires running backend + frontend)
+cd frontend && npm run test:e2e
+```

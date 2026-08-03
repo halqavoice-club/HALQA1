@@ -1,0 +1,175 @@
+{
+  "title": "HALQA Platform Alert Rules",
+  "description": "Prometheus-backed alert rules for Grafana. Import via Grafana UI → Alerting → Alert Rules → Import.",
+  "groups": [
+    {
+      "name": "halqa.backend",
+      "interval": "60s",
+      "rules": [
+        {
+          "uid": "halqa-backend-down",
+          "title": "Backend Down",
+          "condition": "A",
+          "data": [
+            {
+              "refId": "A",
+              "queryType": "instant",
+              "expr": "absent(halqa_process_uptime_seconds) == 1"
+            }
+          ],
+          "for": "1m",
+          "labels": { "severity": "critical", "team": "platform" },
+          "annotations": {
+            "summary": "HALQA backend is not responding",
+            "description": "The halqa-api process has not exposed metrics for over 1 minute. The service may be down.",
+            "runbook": "Restart the backend container: docker compose -f docker-compose.prod.yml restart backend"
+          }
+        },
+        {
+          "uid": "halqa-error-rate-high",
+          "title": "High HTTP Error Rate (5xx)",
+          "condition": "A",
+          "data": [
+            {
+              "refId": "A",
+              "queryType": "instant",
+              "expr": "sum(rate(halqa_http_errors_total{status_code=~\"5..\"}[5m])) / sum(rate(halqa_http_requests_total[5m])) > 0.05"
+            }
+          ],
+          "for": "2m",
+          "labels": { "severity": "critical", "team": "platform" },
+          "annotations": {
+            "summary": "HTTP 5xx error rate above 5%",
+            "description": "More than 5% of requests are returning 5xx errors in the last 5 minutes. Possible DB or upstream failure.",
+            "runbook": "Check backend logs: docker compose -f docker-compose.prod.yml logs --tail=100 backend"
+          }
+        },
+        {
+          "uid": "halqa-db-pool-pressure",
+          "title": "Database Connection Pool Pressure",
+          "condition": "A",
+          "data": [
+            {
+              "refId": "A",
+              "queryType": "instant",
+              "expr": "rate(halqa_db_slow_queries_total[5m]) > 5"
+            }
+          ],
+          "for": "3m",
+          "labels": { "severity": "warning", "team": "platform" },
+          "annotations": {
+            "summary": "More than 5 slow DB queries per second",
+            "description": "Elevated slow query rate suggests connection pool pressure or missing index. Check SLOW_QUERY_THRESHOLD_MS logs.",
+            "runbook": "Run SHOW PROCESSLIST; in MySQL. Check query cache hit rate and index usage."
+          }
+        },
+        {
+          "uid": "halqa-redis-unreachable",
+          "title": "Redis Unreachable",
+          "condition": "A",
+          "data": [
+            {
+              "refId": "A",
+              "queryType": "instant",
+              "expr": "halqa_redis_ping_duration_ms{quantile=\"0.99\"} > 500"
+            }
+          ],
+          "for": "2m",
+          "labels": { "severity": "warning", "team": "platform" },
+          "annotations": {
+            "summary": "Redis p99 latency above 500ms",
+            "description": "Redis is responding slowly. Rate limiting and caching may be degraded. App falls back to in-memory.",
+            "runbook": "Check Redis container: docker compose -f docker-compose.prod.yml logs redis"
+          }
+        },
+        {
+          "uid": "halqa-high-request-latency",
+          "title": "API Response Time Degraded",
+          "condition": "A",
+          "data": [
+            {
+              "refId": "A",
+              "queryType": "instant",
+              "expr": "histogram_quantile(0.95, sum(rate(halqa_http_request_duration_ms_bucket[5m])) by (le)) > 2000"
+            }
+          ],
+          "for": "5m",
+          "labels": { "severity": "warning", "team": "platform" },
+          "annotations": {
+            "summary": "p95 API response time above 2 seconds",
+            "description": "95th percentile response time has exceeded 2000ms for 5 minutes. Users may be experiencing slowness.",
+            "runbook": "Check DB slow query log and Redis latency metrics."
+          }
+        },
+        {
+          "uid": "halqa-socket-connections-spike",
+          "title": "Socket.IO Connections Spike",
+          "condition": "A",
+          "data": [
+            {
+              "refId": "A",
+              "queryType": "instant",
+              "expr": "halqa_socket_connections_active > 5000"
+            }
+          ],
+          "for": "5m",
+          "labels": { "severity": "warning", "team": "platform" },
+          "annotations": {
+            "summary": "More than 5000 active Socket.IO connections",
+            "description": "Unusually high number of active WebSocket connections. Check for connection leaks or viral traffic spike.",
+            "runbook": "Check voice room participant counts and verify socket disconnect handlers are firing."
+          }
+        },
+        {
+          "uid": "halqa-backup-missing",
+          "title": "Daily Backup Missing",
+          "condition": "A",
+          "data": [
+            {
+              "refId": "A",
+              "queryType": "instant",
+              "expr": "time() - halqa_last_backup_timestamp_seconds > 90000"
+            }
+          ],
+          "for": "1m",
+          "labels": { "severity": "critical", "team": "ops" },
+          "annotations": {
+            "summary": "No backup completed in the last 25 hours",
+            "description": "The daily backup has not run or failed. Data loss risk is elevated.",
+            "runbook": "Check db-backup container logs: docker compose -f docker-compose.prod.yml logs db-backup. Run manually: docker exec halqa-backup sh /backup/backup.sh"
+          }
+        }
+      ]
+    }
+  ],
+  "contactPoints": [
+    {
+      "name": "slack-ops",
+      "type": "slack",
+      "settings": {
+        "url": "${SLACK_WEBHOOK_URL}",
+        "channel": "${SLACK_CHANNEL:-#alerts}",
+        "username": "HALQA Alerts",
+        "icon_emoji": ":warning:"
+      }
+    },
+    {
+      "name": "pagerduty-critical",
+      "type": "pagerduty",
+      "settings": {
+        "integrationKey": "${PAGERDUTY_ROUTING_KEY}",
+        "severity": "critical"
+      }
+    }
+  ],
+  "policies": [
+    {
+      "receiver": "slack-ops",
+      "matchers": [{ "name": "severity", "value": "warning" }]
+    },
+    {
+      "receiver": "pagerduty-critical",
+      "matchers": [{ "name": "severity", "value": "critical" }]
+    }
+  ]
+}

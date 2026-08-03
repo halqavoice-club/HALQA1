@@ -9,13 +9,15 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
-      }
+      },
+      "channel": "development"
     },
     "preview": {
       "distribution": "internal",
       "android": {
         "buildType": "apk"
       },
+      "channel": "preview",
       "env": {
         "EXPO_PUBLIC_API_URL": "http://192.168.100.147:5000/api/v1",
         "EXPO_PUBLIC_SOCKET_URL": "http://192.168.100.147:5000",
@@ -30,6 +32,7 @@
       "ios": {
         "distribution": "store"
       },
+      "channel": "production",
       "env": {
         "EXPO_PUBLIC_API_URL": "https://api.halqa.app/api/v1",
         "EXPO_PUBLIC_SOCKET_URL": "https://api.halqa.app",
@@ -39,7 +42,15 @@
     }
   },
   "submit": {
-    "production": {}
+    "production": {
+      "android": {
+        "serviceAccountKeyPath": "./google-service-account.json",
+        "track": "internal"
+      }
+    }
+  },
+  "update": {
+    "channel": "production"
   }
 }
 

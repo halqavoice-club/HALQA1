@@ -455,16 +455,52 @@ node seed-check.js
 2. Set `innodb_buffer_pool_size=128M`
 3. Restart MySQL
 
+**Voice Club / Live Classes not working:**
+- Confirm `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` are set in `backend/.env`
+- Confirm `NEXT_PUBLIC_LIVEKIT_URL` is set in `frontend/.env.local`
+- Test connectivity: `GET http://localhost:5000/health/detailed` — look for `"livekit": { "status": "ok" }`
+- Sign up free at https://livekit.io to get credentials (no self-hosting required for development)
+
+**SMS OTP not sending:**
+- Set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` in `backend/.env`
+- Without these, OTPs are sent via email only — SMS is silently disabled
+- Test with: `node -e "require('./src/utils/sms').initialize(); console.log(require('./src/utils/sms').isEnabled())"`
+
+**Alerts / monitoring not firing:**
+- Set `SLACK_WEBHOOK_URL` in `backend/.env` to receive production alerts in Slack
+- Import `backend/grafana/alert_rules.json` into Grafana to activate Prometheus alert rules
+- See `docs/SCALING.md` for full monitoring setup guide
+
+---
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| `RUNNING.md` | Step-by-step local dev setup |
+| `docs/SCALING.md` | Horizontal scaling, Redis cluster, Elasticsearch, load testing |
+| `HALQA_FULL_AUDIT_REPORT.md` | August 2026 full security and performance audit |
+| `AUDIT_REPORT.md` | July 2026 auth / mobile APK audit |
+| `scripts/restore.sh` | Database restore procedure |
+| `backend/grafana/alert_rules.json` | Prometheus alert rules for Grafana |
+
 ---
 
 ## Production Checklist
 
-- [ ] Change all JWT secrets
+- [ ] Change all JWT secrets (`npm run secrets` in backend/)
 - [ ] Set `NODE_ENV=production`
-- [ ] Configure SMTP provider
-- [ ] Set `STORAGE_TYPE=s3` for file uploads
-- [ ] Use managed MySQL (PlanetScale, AWS RDS)
+- [ ] Configure SMTP provider (Gmail or SendGrid)
+- [ ] Set `STORAGE_TYPE=r2` and configure Cloudflare R2 credentials
+- [ ] Use managed MySQL (PlanetScale, AWS RDS, or MariaDB with connection pool)
+- [ ] Add `?connection_limit=25&pool_timeout=10` to `DATABASE_URL`
 - [ ] Set `CLIENT_URL` to your frontend domain
-- [ ] Configure LiveKit production server
-- [ ] Set `GIFT_DAILY_CAP` appropriately
-- [ ] Enable Redis for production caching
+- [ ] Configure LiveKit production server and set all three LiveKit env vars
+- [ ] Set `GIFT_DAILY_CAP` appropriately for your user base
+- [ ] Enable Redis with `REDIS_PASSWORD` (required — no fallback in production)
+- [ ] Set `METRICS_TOKEN` to protect the `/metrics` endpoint
+- [ ] Set `ADMIN_IP_ALLOWLIST` to your office/VPN IP
+- [ ] Set `SLACK_WEBHOOK_URL` for production alerting
+- [ ] Import `backend/grafana/alert_rules.json` into Grafana
+- [ ] Run `sh scripts/restore.sh` monthly to verify backup integrity
+- [ ] Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PUBLISHABLE_KEY`

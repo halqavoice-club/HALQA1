@@ -184,3 +184,38 @@ eas build -p android --profile preview
 - **Stripe payments** also require a native build
 - All screens work in Expo Go except LiveKit rooms and Stripe checkout
 - Test credentials: `superadmin@halqa.com` / `Admin@2024`
+
+---
+
+## ⚠️ React Version Compatibility Note (MOB-006)
+
+`package.json` currently specifies `react: 19.1.0` with `expo: ~54.0.0` (Expo SDK 54).
+
+**Expo SDK 54 officially supports React 18**. React 19 with Expo SDK 54 is experimental and may cause unexpected behavior in production builds — particularly with `expo-router` navigation transitions and Concurrent Mode features.
+
+### Recommended options
+
+**Option A — Downgrade React to 18 (stable, recommended for production):**
+```bash
+cd mobile
+npm install react@18.3.1 react-dom@18.3.1 react-native@0.76.x
+```
+
+**Option B — Upgrade Expo SDK (if React 19 features are needed):**
+```bash
+cd mobile
+npx expo upgrade
+# Follow the migration guide at https://expo.dev/changelog
+```
+
+**Current status:** The app works in development (`expo start`) with React 19. Production APK builds on EAS may encounter edge cases. Run `eas build --platform android --profile preview` to validate before production release.
+
+---
+
+## OTA Updates
+
+Push JavaScript-only changes without rebuilding the APK:
+```bash
+eas update --channel production --message "description of change"
+```
+See `BUILD_APK.md` for full details.

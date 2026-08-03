@@ -20,7 +20,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Export from `lib/mediaUtils.ts`
     - _Requirements: 1.10–1.13_
 
-  - [ ]* 1.3 Write property test for `resolveMediaLayout()`
+  - [x]* 1.3 Write property test for `resolveMediaLayout()`
     - **Property 2: Media grid layout is always valid**
     - For any `media` array of length 1–10, `resolveMediaLayout(media).type` is always one of the four valid layout types
     - **Validates: Requirements 1.10–1.13**
@@ -30,7 +30,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Export from `lib/chatUtils.ts`
     - _Requirements: 8.6–8.9_
 
-  - [ ]* 1.5 Write property test for `resolveReadReceipt()`
+  - [x]* 1.5 Write property test for `resolveReadReceipt()`
     - **Property 10: Read receipt is accurate for own messages**
     - `resolveReadReceipt` returns `'read'` iff every member id (excluding sender) is in `msg.readBy`
     - **Validates: Requirements 8.6–8.9**
@@ -40,7 +40,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Export from `lib/chatUtils.ts`
     - _Requirements: 8.2_
 
-  - [ ]* 1.7 Write property test for `buildMessageClusters()`
+  - [x]* 1.7 Write property test for `buildMessageClusters()`
     - **Property 9: Message cluster count matches message count**
     - For any `messages` array, `buildMessageClusters(messages).length === messages.length`
     - **Validates: Requirements 8.2**
@@ -80,7 +80,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Toggle off active reaction when same emoji is clicked again
     - _Requirements: 2.1–2.6_
 
-  - [ ]* 3.4 Write property test for feed deduplication
+  - [x]* 3.4 Write property test for feed deduplication
     - **Property 4: Feed deduplication is guaranteed**
     - For any list of incoming posts merged with cached posts, no `post.id` appears more than once
     - **Validates: Requirements 5.6**
@@ -108,7 +108,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - `CommentsSection` below action bar (collapsed by default)
     - _Requirements: 1.1–1.18_
 
-  - [ ]* 3.8 Write property test for hashtag link rendering
+  - [x]* 3.8 Write property test for hashtag link rendering
     - **Property 3: Hashtag links are rendered for all hashtag tokens**
     - If `post.body` contains any `#token`, at least one `<Link>` pointing to `/explore/hashtag/...` is rendered
     - **Validates: Requirements 1.3**
@@ -134,7 +134,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Feed API failure: inline error state with retry button
     - _Requirements: 5.1–5.8, 11.1_
 
-  - [ ]* 4.3 Write property test for "all caught up" condition
+  - [x]* 4.3 Write property test for "all caught up" condition
     - **Property 5: "All caught up" state condition is exact**
     - Message renders if and only if `!hasNextPage && allPosts.length > 0`
     - **Validates: Requirements 5.8**
@@ -151,7 +151,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Toast + re-enable button on join/leave failure
     - _Requirements: 6.1–6.3, 11.4_
 
-  - [ ]* 6.2 Write property test for join button visibility
+  - [x]* 6.2 Write property test for join button visibility
     - **Property 6: Join button is hidden for invite-only communities**
     - For any community where `privacy === 'INVITE_ONLY'`, join/leave button is never rendered
     - **Validates: Requirements 6.3**
@@ -163,7 +163,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Media tab: photo/video grid filtered to `IMAGE` or `VIDEO` type items only
     - _Requirements: 6.2, 6.4–6.10_
 
-  - [ ]* 6.4 Write property test for member search completeness
+  - [x]* 6.4 Write property test for member search completeness
     - **Property 8: Members tab search is case-insensitive and complete**
     - Every member whose lowercased full name contains the lowercased query is included; none are omitted
     - **Validates: Requirements 6.6, 6.10**
@@ -179,7 +179,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Show empty list silently when pending requests fail to load
     - _Requirements: 7.1–7.10, 11.8_
 
-  - [ ]* 7.2 Write property test for AdminPanel role gating
+  - [x]* 7.2 Write property test for AdminPanel role gating
     - **Property 7: Admin Panel is gated to admins and owners**
     - For any community where `myRole !== 'OWNER' && myRole !== 'ADMIN'`, the trigger button is absent from the DOM
     - **Validates: Requirements 7.1–7.2**
@@ -196,7 +196,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Only one instance visible at a time (singleton via shared state)
     - _Requirements: 9.1–9.10_
 
-  - [ ]* 9.2 Write property test for ContextMenu singleton constraint
+  - [x]* 9.2 Write property test for ContextMenu singleton constraint
     - **Property 11: Context menu is a singleton**
     - At most one `ContextMenu` is non-null in `contextMenu` state across the entire chat window
     - **Validates: Requirements 9.9**
@@ -221,7 +221,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Emit `group:typing_stop` after 2.5 seconds of inactivity
     - _Requirements: 10.1–10.5_
 
-  - [ ]* 10.2 Write property test for typing indicator self-exclusion
+  - [x]* 10.2 Write property test for typing indicator self-exclusion
     - **Property 13: Typing indicators exclude self**
     - Typing indicator names are derived only from members whose `userId !== currentUser.id`
     - **Validates: Requirements 10.2–10.3**
@@ -233,7 +233,7 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Restore typed message and toast "Failed to send" on failure
     - _Requirements: 9.5, 10.6–10.7, 11.5_
 
-  - [ ]* 10.4 Write property test for reply-to state clearing
+  - [x]* 10.4 Write property test for reply-to state clearing
     - **Property 12: Reply-to state is cleared after send**
     - After a successful message send, `replyTo` is always `null` regardless of message content
     - **Validates: Requirements 10.7**
@@ -267,18 +267,18 @@ Incremental implementation of the three social surfaces — Feed, Communities, a
     - Replace old group chat page with `GroupChatPage v2`
     - _Requirements: 1.1–11.8_
 
-  - [ ]* 12.2 Write integration tests for feed Socket.IO events
+  - [x]* 12.2 Write integration tests for feed Socket.IO events
     - Mock socket, emit `post:create` from another user → verify "N new posts" banner appears
     - Emit own `post:create` → verify no banner
     - Emit `post:delete` → verify post removed from list
     - _Requirements: 5.1–5.4_
 
-  - [ ]* 12.3 Write integration tests for Group Chat send + reply flow
+  - [x]* 12.3 Write integration tests for Group Chat send + reply flow
     - Submit message with `replyTo` set → verify `groupChatApi.send` called with `replyToId`
     - Verify `replyTo` is `null` after successful send
     - _Requirements: 10.6–10.7_
 
-  - [ ]* 12.4 Write integration tests for Community join/leave and AdminPanel flows
+  - [x]* 12.4 Write integration tests for Community join/leave and AdminPanel flows
     - Mock join API failure → verify toast and button re-enabled
     - Mock `kickMember` failure → verify toast "Failed to remove member" and list unchanged
     - _Requirements: 7.5–7.7, 11.4_
