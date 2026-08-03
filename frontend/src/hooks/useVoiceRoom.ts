@@ -44,6 +44,31 @@ export function useVoiceRoom(roomId: string | null) {
     addGiftEvent, setGiftLeaderboard, setWallet
   } = useVoiceStore()
 
+  // ── beforeunload: call leave API so the server marks participant inactive
+  //    even if the user closes the tab / refreshes / navigates away hard.
+  useEffect(() => {
+    if (!roomId) return
+    const handleBeforeUnload = () => {
+      // sendBeacon is the only reliable way to fire a request on tab close.
+      // It ignores CORS credentials, so we can't use the axios instance here.
+      // Fall back to a synchronous XHR if sendBeacon is unavailable.
+      const url = `${process.env.NEXT_PUBLIC_API_URL}/voice/${roomId}/leave`
+      const token = useAuthStore.getState().getAccessToken()
+      if (navigator.sendBeacon) {
+        const blob = new Blob([], { type: 'application/json' })
+        // sendBeacon does not support custom headers — use fetch with keepalive instead
+        fetch(url, {
+          method: 'POST',
+          keepalive: true,
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        }).catch(() => {})
+      }
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [roomId]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Socket event listeners ──────────────────────────────────────────────────
   useEffect(() => {
     if (!roomId) return
@@ -51,6 +76,16 @@ export function useVoiceRoom(roomId: string | null) {
     if (!socket) return
 
     socket.emit('voice:join_room', roomId)
+
+    // ── Re-join the socket room after a reconnect ─────────────────────────
+    // When the socket disconnects and reconnects (e.g. token refresh, network
+    // blip), the socket no longer belongs to the voice:${roomId} Socket.IO room.
+    // Re-emitting voice:join_room re-registers it so all room broadcasts
+    // (gifts, reactions, role changes) continue to arrive.
+    const onReconnect = () => {
+      socket.emit('voice:join_room', roomId)
+    }
+    socket.on('connect', onReconnect)
 
     // Phase 6: Flush offline buffer when connection is established
     // Any messages/hand raises buffered during disconnection are replayed now.
@@ -516,6 +551,7 @@ export function useVoiceRoom(roomId: string | null) {
     socket.on('voice:gift_all',           onGiftAll)
 
     return () => {
+      socket.off('connect', onReconnect)
       socket.emit('voice:leave_room', roomId)
       socket.off('voice:user_joined',        onUserJoined)
       socket.off('voice:user_left',          onUserLeft)

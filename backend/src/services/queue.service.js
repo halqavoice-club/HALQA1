@@ -6,16 +6,17 @@ let queues  = {};
 let workers = {};
 
 const QUEUE_NAMES = {
-  EMAIL:             'email',
-  NOTIFICATIONS:     'notifications',
-  REPORTS:           'reports',
-  ATTENDANCE_ALERTS: 'attendance-alerts',
-  CLEANUP:           'cleanup',
-  STORAGE_CLEANUP:   'storage-cleanup',   // orphaned R2 file removal
-  SOCIAL_CLEANUP:    'social-cleanup',    // Phase B-3/B-6: expire stories + creator subs
-  VIEW_AGGREGATION:  'view-aggregation',  // H7: aggregate PostView rows into Post.viewCount
-  AUDIT_ARCHIVE:     'audit-archive',     // H10: archive old audit_logs to prevent unbounded growth
-  POST_SCHEDULER:    'post-scheduler',    // L3: publish scheduled posts at scheduledAt time
+  EMAIL:              'email',
+  NOTIFICATIONS:      'notifications',
+  REPORTS:            'reports',
+  ATTENDANCE_ALERTS:  'attendance-alerts',
+  CLEANUP:            'cleanup',
+  STORAGE_CLEANUP:    'storage-cleanup',
+  SOCIAL_CLEANUP:     'social-cleanup',
+  VIEW_AGGREGATION:   'view-aggregation',
+  AUDIT_ARCHIVE:      'audit-archive',
+  POST_SCHEDULER:     'post-scheduler',
+  ROOM_REMINDERS:     'room-reminders',   // Send push notifications for scheduled rooms
 };
 
 /**
@@ -86,7 +87,8 @@ function startWorkers() {
     createReportWorker,
     createCleanupWorker,
     createStorageWorker,
-    createPostSchedulerWorker
+    createPostSchedulerWorker,
+    createRoomReminderWorker,
   } = require('../workers');
 
   workers.email          = createEmailWorker(connection);
@@ -95,6 +97,7 @@ function startWorkers() {
   workers.cleanup        = createCleanupWorker(connection);
   workers.storageCleanup = createStorageWorker(connection);
   workers.postScheduler  = createPostSchedulerWorker(connection);
+  workers.roomReminders  = createRoomReminderWorker(connection);
 
   logger.info('[queue] Core workers started from src/workers/');
 
@@ -409,6 +412,56 @@ async function queueStorageCleanup() {
   await queue.add('storage-cleanup-manual', {}, { priority: 5 });
 }
 
+/**
+ * Schedule a push notification reminder for a scheduled voice room.
+ * Called when a room is created with scheduledAt set.
+ *
+ * Sends the notification 15 minutes before the scheduled start time.
+ * If scheduledAt is less than 15 minutes away, sends immediately.
+ *
+ * @param {object} room  - { id, title, hostId, schoolId, scheduledAt }
+ */
+async function scheduleRoomReminder(room) {
+  try {
+    const queue = createQueue(QUEUE_NAMES.ROOM_REMINDERS);
+    const scheduledAt = new Date(room.scheduledAt).getTime();
+    const now         = Date.now();
+    const reminderAt  = scheduledAt - 15 * 60 * 1000; // 15 min before
+    const delay       = Math.max(0, reminderAt - now);
+
+    await queue.add('room-reminder', {
+      roomId:     room.id,
+      roomTitle:  room.title,
+      hostId:     room.hostId,
+      schoolId:   room.schoolId,
+      scheduledAt: room.scheduledAt,
+    }, {
+      delay,
+      jobId:    `room-reminder:${room.id}`, // deduplicate — one reminder per room
+      attempts: 2,
+      backoff:  { type: 'fixed', delay: 30_000 },
+    });
+
+    logger.info(`[queue] Room reminder scheduled for "${room.title}" in ${Math.round(delay / 60000)} min`);
+  } catch (err) {
+    // Non-fatal — room creation succeeds even if reminder scheduling fails
+    logger.warn(`[queue] Failed to schedule room reminder for ${room.id}: ${err.message}`);
+  }
+}
+
+/**
+ * Cancel a previously scheduled room reminder (e.g. room deleted/cancelled).
+ * @param {string} roomId
+ */
+async function cancelRoomReminder(roomId) {
+  try {
+    const queue = createQueue(QUEUE_NAMES.ROOM_REMINDERS);
+    await queue.remove(`room-reminder:${roomId}`);
+  } catch (err) {
+    logger.warn(`[queue] Failed to cancel room reminder for ${roomId}: ${err.message}`);
+  }
+}
+
 module.exports = {
   QUEUE_NAMES,
   createQueue,
@@ -418,6 +471,8 @@ module.exports = {
   queueReport,
   queueAttendanceAlert,
   queueStorageCleanup,
+  scheduleRoomReminder,
+  cancelRoomReminder,
   startWorkers,
   scheduleCleanup
 };

@@ -12,6 +12,7 @@ const { VOICE_ROLES, MODERATOR_ROLES } = require('../middleware/voiceRole.middle
 const logger = require('../utils/logger');
 const { broadcastLiveStart, broadcastLiveEnd, broadcastLiveUpdate } = require('../utils/feedLive');
 const { queueBulkNotifications } = require('../services/queue.service');
+const { scheduleRoomReminder, cancelRoomReminder } = require('../services/queue.service');
 
 //  STATUS CONSTANTS 
 // Rooms are PERSISTENT  they never auto-delete when empty.
@@ -306,6 +307,17 @@ async function createRoom(req, res, next) {
     await syncRoomStatus(roomId, schoolId);
     const updatedRoom = await getRoomWithParticipants(roomId);
 
+    // Schedule push notification reminder if room is scheduled for the future
+    if (scheduledAt) {
+      scheduleRoomReminder({
+        id:          roomId,
+        title:       title,
+        hostId,
+        schoolId,
+        scheduledAt
+      }).catch(() => {}); // non-fatal
+    }
+
     const io = getIo();
     if (io) {
       io.to(`school:${schoolId}`).emit('voice:room_created', updatedRoom);
@@ -384,8 +396,16 @@ async function joinRoom(req, res, next) {
       });
     }
 
+    // BE-005: Previously this was 3 separate sequential calls:
+    //   syncRoomStatus() → 2 DB hits (findUnique + countActive + update)
+    //   invalidateRoomCache() → Redis delete
+    //   getRoomWithParticipants() → DB hit + Redis write
+    //
+    // Now: syncRoomStatus() and invalidateRoomCache() are merged inside
+    // syncRoomStatus itself (it already calls invalidateRoomCache).
+    // getRoomWithParticipants() hits the cache we just populated — 1 DB hit max.
     await syncRoomStatus(roomId, schoolId);
-    await invalidateRoomCache(roomId, schoolId);
+    // syncRoomStatus already calls invalidateRoomCache — no second call needed.
     const updatedRoom = await getRoomWithParticipants(roomId);
 
     // ── Auto-create permanent membership on first join ──────────────────────

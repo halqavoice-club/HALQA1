@@ -49,6 +49,7 @@ const auditRoutes = require('./routes/audit.routes');
 const voiceRoutes = require('./routes/voice.routes');
 const walletRoutes = require('./routes/wallet.routes');
 const giftRoutes = require('./routes/gift.routes');
+const payoutRoutes = require('./routes/payout.routes');
 const livekitRoutes = require('./routes/livekit.routes');
 const dmRoutes = require('./routes/dm.routes');
 const studentReportRoutes = require('./routes/student-report.routes');
@@ -402,6 +403,25 @@ tracing.initialize().catch(err => logger.warn('Failed to initialize tracing:', e
 // Initialize feature flags
 featureFlags.initialize(featureFlags.defaultFlags).catch(err => logger.warn('Failed to initialize feature flags:', err.message));
 
+// Initialize SMS service (Twilio) — safe no-op when credentials not configured
+try {
+  const sms = require('./utils/sms');
+  sms.initialize();
+} catch (err) {
+  logger.warn('[startup] SMS initialization skipped:', err.message);
+}
+
+// Initialize Elasticsearch — only when ELASTICSEARCH_URL is set
+// Falls back to MySQL LIKE queries automatically when not configured
+if (process.env.ELASTICSEARCH_URL) {
+  const es = require('./utils/elasticsearch');
+  es.initialize().catch(err =>
+    logger.warn('[startup] Elasticsearch initialization failed (falling back to MySQL search):', err.message)
+  );
+} else {
+  logger.info('[startup] Elasticsearch not configured — using MySQL full-text search fallback');
+}
+
 // Initialize leader election (for clustering)
 leaderElection.initialize('halqa-backend').catch(err => logger.warn('Failed to initialize leader election:', err.message));
 
@@ -596,6 +616,7 @@ app.use('/api/v1/audit', auditRoutes);
 app.use('/api/v1/voice', voiceRoutes);
 app.use('/api/v1/voice/:id/members', require('./routes/room-member.routes'));
 app.use('/api/v1/wallet', walletRoutes);
+app.use('/api/v1/wallet/payout', payoutRoutes);
 app.use('/api/v1/gifts', giftRoutes);
 app.use('/api/v1/livekit', livekitRoutes);
 app.use('/api/v1/dm', dmRoutes);
