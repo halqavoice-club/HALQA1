@@ -35,6 +35,8 @@ router.get('/search',   ctrl.searchPosts);
 router.get('/user/:userId', ctrl.getUserPosts);
 
 // ─── CRUD ─────────────────────────────────────────────────────────────────────
+const { filterMiddleware: postFilter } = require('../utils/contentFilter');
+
 router.post('/',
   createLimit,
   [
@@ -47,6 +49,7 @@ router.post('/',
     body('location').optional().isString().isLength({ max: 120 }),
   ],
   validate,
+  postFilter('body', 'post'),
   ctrl.createPost
 );
 

@@ -232,6 +232,7 @@ model User {
   emailVerified   Boolean    @default(false)
   phoneVerified   Boolean    @default(false)
   twoFactorEnabled Boolean   @default(false)
+  twoFactorSecret  String?   @db.Text  // AES-256 encrypted TOTP secret
   deletedAt       DateTime?
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
@@ -258,6 +259,7 @@ model User {
   giftsSent          GiftTransaction[]  @relation("GiftSender")
   giftsReceived      GiftTransaction[]  @relation("GiftReceiver")
   giftLeaderboard    RoomGiftLeaderboard[] @relation("GiftLeaderboard")
+  payoutRequests     PayoutRequest[]       @relation("UserPayouts")
   // Social
   following          Follow[]           @relation("Follower")
   followers          Follow[]           @relation("Following")
@@ -2896,3 +2898,30 @@ model JobExecution {
 // - responseStatus: Int? (HTTP response code)
 // - durationMs: Int? (request duration in milliseconds)
 // These would be added via migration without breaking existing data.
+
+// ─── PAYOUT REQUESTS ─────────────────────────────────────────────────────────
+// Hosts request diamond-to-cash withdrawals via this model.
+// Flow: PENDING → APPROVED → PROCESSING → COMPLETED | REJECTED | CANCELLED
+// On reject/cancel: diamonds are refunded to the user's wallet.
+
+model PayoutRequest {
+  id             String    @id @default(uuid())
+  userId         String
+  diamonds       Int                          // diamonds requested for withdrawal
+  usdAmount      Float                        // USD value (diamonds × 0.005)
+  method         String    @db.VarChar(30)    // 'bank_transfer' | 'paypal' | 'stripe'
+  accountDetails String    @db.Text           // JSON: method-specific payout details
+  status         String    @default("PENDING") @db.VarChar(20)
+  adminNote      String?   @db.VarChar(500)
+  transactionRef String?   @db.VarChar(200)  // external payment reference
+  processedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user           User      @relation("UserPayouts", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("payout_requests")
+}

@@ -259,6 +259,7 @@ export function Sidebar() {
         { label: 'Friends',     href: '/social',      icon: UserPlus, badge: 'social' },
         { label: 'Creator',     href: '/creator',     icon: Sparkles },
         { label: 'Wallet',      href: '/wallet',       icon: Wallet },
+        { label: 'Payout',      href: '/wallet/payout', icon: DollarSign },
         { label: 'Marketplace', href: '/marketplace',  icon: DollarSign, future: true },
       ]
     },

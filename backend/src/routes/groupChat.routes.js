@@ -69,6 +69,8 @@ router.delete(
 /**
  * @route   POST /api/v1/group-chat/conversations/:conversationId/messages
  */
+const { filterMiddleware } = require('../utils/contentFilter');
+
 router.post(
   '/conversations/:conversationId/messages',
   msgLimit,
@@ -79,6 +81,7 @@ router.post(
     body('replyToId').optional().isUUID(),
   ],
   validate,
+  filterMiddleware('body', 'group-chat'),
   groupChatController.sendGroupMessage
 );
 
