@@ -21,6 +21,8 @@ const resolvers = {
     },
 
     user: async (parent, { id }, context) => {
+      // Require auth — user profile data should not be publicly queryable
+      if (!context.user) throw new Error('Not authenticated');
       return prisma.user.findUnique({
         where: { id },
         include: { school: true }
@@ -28,6 +30,11 @@ const resolvers = {
     },
 
     users: async (parent, { page = 1, pageSize = 20, schoolId }, context) => {
+      // Admin-only — listing all users is sensitive
+      if (!context.user) throw new Error('Not authenticated');
+      if (!['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(context.user.role)) {
+        throw new Error('Unauthorized');
+      }
       const where = schoolId ? { schoolId } : {};
       const [users, total] = await Promise.all([
         prisma.user.findMany({
@@ -49,14 +56,17 @@ const resolvers = {
     },
 
     // School queries
-    school: async (parent, { id }) => {
+    school: async (parent, { id }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
       return prisma.school.findUnique({
         where: { id },
         include: { users: true }
       });
     },
 
-    schools: async (parent, { page = 1, pageSize = 20 }) => {
+    schools: async (parent, { page = 1, pageSize = 20 }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      if (context.user.role !== 'SUPER_ADMIN') throw new Error('Unauthorized');
       const [schools, total] = await Promise.all([
         prisma.school.findMany({
           skip: (page - 1) * pageSize,
@@ -74,15 +84,17 @@ const resolvers = {
       };
     },
 
-    // Post queries
-    post: async (parent, { id }) => {
+    // Post queries — require auth (posts may contain school-scoped content)
+    post: async (parent, { id }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
       return prisma.post.findUnique({
         where: { id },
         include: { author: true, school: true }
       });
     },
 
-    posts: async (parent, { page = 1, pageSize = 20, schoolId, authorId }) => {
+    posts: async (parent, { page = 1, pageSize = 20, schoolId, authorId }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
       const where = {};
       if (schoolId) where.schoolId = schoolId;
       if (authorId) where.authorId = authorId;
@@ -106,7 +118,8 @@ const resolvers = {
       };
     },
 
-    searchPosts: async (parent, { query, page = 1, pageSize = 20 }) => {
+    searchPosts: async (parent, { query, page = 1, pageSize = 20 }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
       const where = {
         OR: [
           { title: { contains: query, mode: 'insensitive' } },
@@ -144,27 +157,38 @@ const resolvers = {
       });
     },
 
-    session: async (parent, { id }) => {
-      return prisma.session.findUnique({
-        where: { id },
-        include: { user: true }
-      });
+    session: async (parent, { id }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      // Users can only see their own sessions; admins can see any
+      const s = await prisma.session.findUnique({ where: { id }, include: { user: true } });
+      if (!s) return null;
+      if (s.userId !== context.user.id && !['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(context.user.role)) {
+        throw new Error('Unauthorized');
+      }
+      return s;
     },
 
-    // Health check
+    // Health check — public
     health: () => 'OK'
   },
 
   Mutation: {
     // User mutations
-    createUser: async (parent, { input }) => {
+    createUser: async (parent, { input }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      if (!['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(context.user.role)) throw new Error('Unauthorized');
       return prisma.user.create({
         data: input,
         include: { school: true }
       });
     },
 
-    updateUser: async (parent, { id, input }) => {
+    updateUser: async (parent, { id, input }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      // Users can update themselves; admins can update anyone in their school
+      const isSelf  = context.user.id === id;
+      const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(context.user.role);
+      if (!isSelf && !isAdmin) throw new Error('Unauthorized');
       return prisma.user.update({
         where: { id },
         data: input,
@@ -172,20 +196,26 @@ const resolvers = {
       });
     },
 
-    deleteUser: async (parent, { id }) => {
+    deleteUser: async (parent, { id }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      if (!['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(context.user.role)) throw new Error('Unauthorized');
       await prisma.user.delete({ where: { id } });
       return true;
     },
 
     // School mutations
-    createSchool: async (parent, { input }) => {
+    createSchool: async (parent, { input }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      if (context.user.role !== 'SUPER_ADMIN') throw new Error('Unauthorized');
       return prisma.school.create({
         data: input,
         include: { users: true }
       });
     },
 
-    updateSchool: async (parent, { id, input }) => {
+    updateSchool: async (parent, { id, input }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      if (!['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(context.user.role)) throw new Error('Unauthorized');
       return prisma.school.update({
         where: { id },
         data: input,
@@ -193,16 +223,16 @@ const resolvers = {
       });
     },
 
-    deleteSchool: async (parent, { id }) => {
+    deleteSchool: async (parent, { id }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      if (context.user.role !== 'SUPER_ADMIN') throw new Error('Unauthorized');
       await prisma.school.delete({ where: { id } });
       return true;
     },
 
     // Post mutations
     createPost: async (parent, { input }, context) => {
-      if (!context.user) {
-        throw new Error('Not authenticated');
-      }
+      if (!context.user) throw new Error('Not authenticated');
       return prisma.post.create({
         data: {
           ...input,
@@ -212,7 +242,13 @@ const resolvers = {
       });
     },
 
-    updatePost: async (parent, { id, input }) => {
+    updatePost: async (parent, { id, input }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      const post = await prisma.post.findUnique({ where: { id }, select: { authorId: true } });
+      if (!post) throw new Error('Post not found');
+      if (post.authorId !== context.user.id && !['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(context.user.role)) {
+        throw new Error('Unauthorized');
+      }
       return prisma.post.update({
         where: { id },
         data: input,
@@ -220,7 +256,13 @@ const resolvers = {
       });
     },
 
-    deletePost: async (parent, { id }) => {
+    deletePost: async (parent, { id }, context) => {
+      if (!context.user) throw new Error('Not authenticated');
+      const post = await prisma.post.findUnique({ where: { id }, select: { authorId: true } });
+      if (!post) throw new Error('Post not found');
+      if (post.authorId !== context.user.id && !['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(context.user.role)) {
+        throw new Error('Unauthorized');
+      }
       await prisma.post.delete({ where: { id } });
       return true;
     },
@@ -258,36 +300,41 @@ const resolvers = {
   },
 
   Subscription: {
-    // User subscriptions
+    // All subscriptions require auth — unauthenticated users have user=null
+    // Resolvers throw if user is absent.
     userCreated: {
-      subscribe: (parent, args, { pubsub }) => {
+      subscribe: (parent, args, { pubsub, user }) => {
+        if (!user) throw new Error('Not authenticated');
         return pubsub.asyncIterator(['USER_CREATED']);
       }
     },
     userUpdated: {
-      subscribe: (parent, args, { pubsub }) => {
+      subscribe: (parent, args, { pubsub, user }) => {
+        if (!user) throw new Error('Not authenticated');
         return pubsub.asyncIterator(['USER_UPDATED']);
       }
     },
     userDeleted: {
-      subscribe: (parent, args, { pubsub }) => {
+      subscribe: (parent, args, { pubsub, user }) => {
+        if (!user) throw new Error('Not authenticated');
         return pubsub.asyncIterator(['USER_DELETED']);
       }
     },
-
-    // Post subscriptions
     postCreated: {
-      subscribe: (parent, args, { pubsub }) => {
+      subscribe: (parent, args, { pubsub, user }) => {
+        if (!user) throw new Error('Not authenticated');
         return pubsub.asyncIterator(['POST_CREATED']);
       }
     },
     postUpdated: {
-      subscribe: (parent, args, { pubsub }) => {
+      subscribe: (parent, args, { pubsub, user }) => {
+        if (!user) throw new Error('Not authenticated');
         return pubsub.asyncIterator(['POST_UPDATED']);
       }
     },
     postDeleted: {
-      subscribe: (parent, args, { pubsub }) => {
+      subscribe: (parent, args, { pubsub, user }) => {
+        if (!user) throw new Error('Not authenticated');
         return pubsub.asyncIterator(['POST_DELETED']);
       }
     }

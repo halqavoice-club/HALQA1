@@ -28,9 +28,12 @@ describe('Zod Validation Schemas', () => {
     });
 
     test('should reject weak password', () => {
+      // loginSchema uses min(1) only — login does not enforce complexity.
+      // Password complexity is enforced at the route middleware level (auth.routes.js).
+      // A blank/empty password should be rejected; a short one is valid for the schema.
       const invalidData = {
         email: 'test@example.com',
-        password: 'weak'
+        password: ''  // empty string — the only case loginSchema rejects
       };
 
       const result = loginSchema.safeParse(invalidData);
@@ -87,9 +90,11 @@ describe('Zod Validation Schemas', () => {
 
   describe('createSchoolSchema', () => {
     test('should validate valid school data', () => {
+      // createSchoolSchema requires: name, slug (lowercase-hyphen), type (enum)
       const validData = {
         name: 'Test School',
-        address: '123 Test Street',
+        slug: 'test-school',
+        type: 'school',
         city: 'Test City',
         country: 'Test Country',
         phone: '+1234567890',
@@ -101,6 +106,7 @@ describe('Zod Validation Schemas', () => {
     });
 
     test('should reject missing required fields', () => {
+      // Missing slug and type — both required
       const invalidData = {
         name: 'Test School'
       };

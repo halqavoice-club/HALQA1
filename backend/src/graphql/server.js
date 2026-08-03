@@ -164,17 +164,29 @@ function setupSubscriptionServer(httpServer, schema) {
     {
       schema,
       context: async (ctx) => {
-        // Extract token from connection params
-        const token = ctx.connectionParams?.authorization;
-        
+        // BE-014 (WebSocket): Verify JWT for GraphQL subscriptions.
+        // HTTP query auth was already fixed; this closes the WebSocket gap.
+        // Unauthenticated subscription connections receive user=null — resolvers
+        // that require auth will reject them at the field level.
+        const rawToken = ctx.connectionParams?.authorization || ctx.connectionParams?.token;
+        const token = rawToken?.startsWith('Bearer ') ? rawToken.slice(7) : rawToken;
+
         let user = null;
         if (token) {
           try {
-            // TODO: Implement JWT verification
-            // const decoded = jwt.verify(token, process.env.JWT_SECRET);
-            // user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+            const decoded = verifyAccessToken(token);
+            user = await prisma.user.findUnique({
+              where:  { id: decoded.userId },
+              select: { id: true, email: true, role: true, status: true, schoolId: true,
+                        firstName: true, lastName: true, avatarUrl: true }
+            });
+            // Reject suspended/inactive users
+            if (user && (user.status === 'SUSPENDED' || user.status === 'INACTIVE')) {
+              user = null;
+            }
           } catch (error) {
-            logger.warn('[graphql] Invalid subscription token:', error.message);
+            // Invalid/expired token — connection allowed but user=null
+            logger.debug('[graphql:ws] Token verification failed:', error.message);
           }
         }
 

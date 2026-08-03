@@ -17,6 +17,8 @@ build/
 .env.production.local
 .env.production
 .env.docker
+.env.docker.local
+.env.docker.*.local
 
 # Logs
 logs/

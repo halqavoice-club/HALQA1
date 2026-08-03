@@ -122,6 +122,27 @@ function validateEnv() {
     }
   }
 
+  // ── Connection pool size warning ────────────────────────────────────────────
+  // Requirement 2.4: warn when connection_limit is not set in DATABASE_URL
+  const dbUrl = process.env.DATABASE_URL || '';
+  if (dbUrl && !dbUrl.includes('connection_limit')) {
+    const target = IS_PROD ? warnings : warnings;
+    target.push(
+      '  ⚠  DATABASE_URL does not include connection_limit. Under high traffic the default ' +
+      'pool size (5-10) may cause queuing.\n' +
+      '      Recommendation: append ?connection_limit=25&pool_timeout=10 to your DATABASE_URL'
+    );
+  }
+
+  // ── Alerting configuration warning (production) ──────────────────────────
+  if (IS_PROD && !process.env.SLACK_WEBHOOK_URL && !process.env.PAGERDUTY_ROUTING_KEY) {
+    warnings.push(
+      '  ⚠  Neither SLACK_WEBHOOK_URL nor PAGERDUTY_ROUTING_KEY is set.\n' +
+      '      Production incidents will not trigger automatic alerts.\n' +
+      '      Set at least one in your .env or Docker environment.'
+    );
+  }
+
   // ── Report warnings (development) ─────────────────────────────────────────
   if (warnings.length > 0) {
     console.warn('\n⚠️  HALQA — Environment warnings (safe to ignore in development):');

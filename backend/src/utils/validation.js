@@ -340,38 +340,48 @@ const searchSchema = z.object({
 
 /**
  * Validation middleware factory
+ *
+ * Uses safeParseAsync so Zod .refine() async validators work correctly.
+ * Never throws — always calls next() or returns a 400 JSON response.
+ *
+ * Note: Zod v3 uses ZodError.issues (not .errors) for the validation array.
  */
 function validate(schema, source = 'body') {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     try {
-      const data = source === 'body' ? req.body : 
-                   source === 'query' ? req.query :
+      const data = source === 'body'   ? req.body   :
+                   source === 'query'  ? req.query  :
                    source === 'params' ? req.params : req.body;
-      
-      const validated = schema.parse(data);
-      
-      // Replace request data with validated data
-      if (source === 'body') req.body = validated;
-      else if (source === 'query') req.query = validated;
-      else if (source === 'params') req.params = validated;
-      
+
+      const result = await schema.safeParseAsync(data);
+
+      if (!result.success) {
+        // ZodError uses .issues — not .errors
+        const formattedErrors = (result.error.issues ?? []).map(e => ({
+          field:   e.path.join('.') || 'root',
+          message: e.message
+        }));
+
+        return res.status(400).json({
+          success: false,
+          error: {
+            code:       'VAL_001',
+            message:    'Validation failed',
+            statusCode: 400,
+            details:    { errors: formattedErrors }
+          }
+        });
+      }
+
+      // Replace request data with validated + coerced data
+      if      (source === 'body')   req.body   = result.data;
+      else if (source === 'query')  req.query  = result.data;
+      else if (source === 'params') req.params = result.data;
+
       next();
-    } catch (error) {
-      const { ValidationError } = require('./errors');
-      const formattedErrors = error.errors.map(e => ({
-        field: e.path.join('.'),
-        message: e.message
-      }));
-      
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: 'VAL_001',
-          message: 'Validation failed',
-          statusCode: 400,
-          details: { errors: formattedErrors }
-        }
-      });
+    } catch (err) {
+      // Unexpected error in schema itself — propagate to Express error handler
+      next(err);
     }
   };
 }

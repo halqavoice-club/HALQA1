@@ -104,4 +104,46 @@ router.get('/sessions', authenticate, getSessions);
 router.delete('/sessions/all', authenticate, terminateAllSessions);
 router.delete('/sessions/:id', authenticate, terminateSession);
 
+// ─── Two-Factor Authentication (2FA / TOTP) ──────────────────────────────────
+// DB field `twoFactorEnabled` already exists in schema.
+// Uses otplib (already installed) for RFC 6238 TOTP.
+const tfCtrl = require('../controllers/twoFactor.controller');
+
+// Setup — generates secret + QR URI (does not activate 2FA yet)
+router.post('/2fa/setup',
+  authenticate,
+  strictLimiter,
+  tfCtrl.setup2FA
+);
+
+// Verify first TOTP code to activate 2FA, returns one-time backup codes
+router.post('/2fa/verify',
+  authenticate,
+  otpLimiter,
+  [body('code').isLength({ min: 6, max: 6 }).withMessage('6-digit TOTP code required')],
+  validate,
+  tfCtrl.verify2FA
+);
+
+// Disable 2FA (requires current password)
+router.post('/2fa/disable',
+  authenticate,
+  strictLimiter,
+  [body('password').notEmpty()],
+  validate,
+  tfCtrl.disable2FA
+);
+
+// Complete login for 2FA-enabled accounts (step 2 after password check)
+router.post('/2fa/authenticate',
+  authLimiter,
+  strictDeviceLimiter,
+  [
+    body('userId').notEmpty(),
+    body('code').isLength({ min: 6, max: 6 }).withMessage('6-digit TOTP code required')
+  ],
+  validate,
+  tfCtrl.authenticate2FA
+);
+
 module.exports = router;
