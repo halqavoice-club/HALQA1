@@ -16,8 +16,12 @@ process.env.PORT                = '5001';
 process.env.NODE_ENV            = 'test';
 process.env.SERVICE_NAME        = 'halqa-test';
 
-// ─── Database (not used in unit tests but prevents validateEnv crash) ─────────
-process.env.DATABASE_URL        = 'mysql://test:test@localhost:3306/halqa_test';
+// ─── Database ─────────────────────────────────────────────────────────────────
+// Don't override DATABASE_URL if already set by the caller (e.g. integration
+// tests running against XAMPP/halqa_db). Unit tests don't hit the DB at all.
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = 'mysql://root:@localhost:3306/halqa_db';
+}
 
 // ─── Redis (disabled in unit tests — mocked) ──────────────────────────────────
 // No REDIS_URL set → isRedisReady() returns false → fail-open mode
