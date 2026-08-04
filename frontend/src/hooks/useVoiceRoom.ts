@@ -54,16 +54,13 @@ export function useVoiceRoom(roomId: string | null) {
       // Fall back to a synchronous XHR if sendBeacon is unavailable.
       const url = `${process.env.NEXT_PUBLIC_API_URL}/voice/${roomId}/leave`
       const token = useAuthStore.getState().getAccessToken()
-      if (navigator.sendBeacon) {
-        const blob = new Blob([], { type: 'application/json' })
-        // sendBeacon does not support custom headers — use fetch with keepalive instead
-        fetch(url, {
-          method: 'POST',
-          keepalive: true,
-          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({})
-        }).catch(() => {})
-      }
+      // sendBeacon does not support custom headers — use fetch with keepalive instead
+      fetch(url, {
+        method: 'POST',
+        keepalive: true,
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      }).catch(() => {})
     }
     window.addEventListener('beforeunload', handleBeforeUnload)
     return () => window.removeEventListener('beforeunload', handleBeforeUnload)

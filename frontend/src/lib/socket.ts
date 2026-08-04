@@ -89,7 +89,7 @@ export function updateSocketToken(token: string): void {
   // If the socket is currently disconnected (e.g. mid-reconnect loop),
   // reconnect immediately with the fresh token instead of waiting for
   // the next reconnection delay.
-  if (!socket.connected && !socket.connecting) {
+  if (!socket.connected && !socket.active) {
     socket.connect()
   }
 }

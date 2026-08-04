@@ -207,12 +207,10 @@ function StudentBehaviorView() {
   )
 }
 
-export default function BehaviorPage() {
+// ─── Teacher/Admin view component ────────────────────────────────────────────
+
+function TeacherBehaviorView() {
   const { user } = useAuthStore()
-
-  // Students see their own behavior — no conditional hook calls
-  if (user?.role === 'STUDENT') return <StudentBehaviorView />
-
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [selectedStudent, setSelectedStudent] = useState('')
@@ -554,4 +552,11 @@ export default function BehaviorPage() {
       </Tabs>
     </div>
   )
+}
+
+// ─── Entry point — routes to role-specific view ───────────────────────────────
+export default function BehaviorPage() {
+  const { user } = useAuthStore()
+  if (user?.role === 'STUDENT') return <StudentBehaviorView />
+  return <TeacherBehaviorView />
 }

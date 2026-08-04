@@ -32,15 +32,30 @@ const FC_RUNS = 200
 
 const fcNonEmptyString = fc.string({ minLength: 1, maxLength: 30 })
 const fcUserId = fc.uuid()
-const fcMediaItem = fc.record({ id: fc.uuid(), url: fc.webUrl(), type: fc.constantFrom('IMAGE', 'VIDEO') })
+const fcMediaItem = fc.record({
+  id: fc.uuid(),
+  url: fc.webUrl(),
+  type: fc.constantFrom('IMAGE', 'VIDEO'),
+  orderIndex: fc.nat({ max: 20 }),
+})
 const fcMediaArray = fc.array(fcMediaItem, { minLength: 1, maxLength: 10 })
 
 const fcMessage = (senderIds: string[]) => fc.record({
-  id:        fc.uuid(),
-  senderId:  fc.constantFrom(...senderIds),
-  body:      fcNonEmptyString,
-  readBy:    fc.array(fc.constantFrom(...senderIds), { minLength: 0, maxLength: senderIds.length }),
-  createdAt: fc.date({ min: new Date('2024-01-01'), max: new Date('2026-12-31') }).map(d => d.toISOString()),
+  id:             fc.uuid(),
+  conversationId: fc.uuid(),
+  senderId:       fc.constantFrom(...senderIds),
+  sender:         fc.constant({ id: senderIds[0], firstName: 'User', lastName: 'Test', avatarUrl: null }),
+  type:           fc.constant('TEXT'),
+  body:           fcNonEmptyString,
+  mediaUrl:       fc.constant(null),
+  mimeType:       fc.constant(null),
+  fileSize:       fc.constant(null),
+  replyToId:      fc.constant(null),
+  replyTo:        fc.constant(null),
+  reactions:      fc.constant([]),
+  deletedAt:      fc.constant(null),
+  readBy:         fc.array(fc.constantFrom(...senderIds), { minLength: 0, maxLength: senderIds.length }),
+  createdAt:      fc.date({ min: new Date('2024-01-01'), max: new Date('2026-12-31') }).map(d => d.toISOString()),
 })
 
 const fcCommunityPrivacy = fc.constantFrom('PUBLIC', 'PRIVATE', 'INVITE_ONLY')
@@ -108,7 +123,13 @@ describe("P2 — resolveReadReceipt: 'read' iff every member (excl sender) is in
         (memberIds) => {
           const senderId = memberIds[0]
           const others   = memberIds.slice(1)
-          const msg = { id: 'msg1', senderId, readBy: [...others], createdAt: new Date().toISOString(), body: 'hi' }
+          const msg = {
+            id: 'msg1', conversationId: 'c1', senderId,
+            sender: { id: senderId, firstName: 'U', lastName: 'T', avatarUrl: null },
+            type: 'TEXT', body: 'hi', mediaUrl: null, mimeType: null, fileSize: null,
+            replyToId: null, replyTo: null, reactions: [], deletedAt: null,
+            readBy: [...others], createdAt: new Date().toISOString(),
+          }
 
           const result = resolveReadReceipt(msg, memberIds)
           expect(result).toBe('read')
@@ -124,11 +145,16 @@ describe("P2 — resolveReadReceipt: 'read' iff every member (excl sender) is in
         fc.array(fcUserId, { minLength: 3, maxLength: 8 }),
         (memberIds) => {
           const senderId = memberIds[0]
-          // Only include the first other member in readBy — leave the rest out
           const partial  = [memberIds[1]]
-          const msg = { id: 'msg1', senderId, readBy: partial, createdAt: new Date().toISOString(), body: 'hi' }
+          const msg = {
+            id: 'msg1', conversationId: 'c1', senderId,
+            sender: { id: senderId, firstName: 'U', lastName: 'T', avatarUrl: null },
+            type: 'TEXT', body: 'hi', mediaUrl: null, mimeType: null, fileSize: null,
+            replyToId: null, replyTo: null, reactions: [], deletedAt: null,
+            readBy: partial, createdAt: new Date().toISOString(),
+          }
 
-          if (memberIds.length < 3) return  // need at least one unread member
+          if (memberIds.length < 3) return
           const result = resolveReadReceipt(msg, memberIds)
           expect(['delivered', 'sent']).toContain(result)
         },
@@ -142,7 +168,13 @@ describe("P2 — resolveReadReceipt: 'read' iff every member (excl sender) is in
       fc.property(
         fc.array(fcUserId, { minLength: 2, maxLength: 6 }),
         (memberIds) => {
-          const msg = { id: 'msg1', senderId: memberIds[0], readBy: [], createdAt: new Date().toISOString(), body: 'hi' }
+          const msg = {
+            id: 'msg1', conversationId: 'c1', senderId: memberIds[0],
+            sender: { id: memberIds[0], firstName: 'U', lastName: 'T', avatarUrl: null },
+            type: 'TEXT', body: 'hi', mediaUrl: null, mimeType: null, fileSize: null,
+            replyToId: null, replyTo: null, reactions: [], deletedAt: null,
+            readBy: [], createdAt: new Date().toISOString(),
+          }
           const result = resolveReadReceipt(msg, memberIds)
           expect(result).not.toBe('read')
         },
@@ -180,7 +212,7 @@ describe('P3 — buildMessageClusters: cluster count equals message count', () =
           const clusters = buildMessageClusters(messages)
           // Every cluster must reference exactly one message
           clusters.forEach((cluster, i) => {
-            expect(cluster.messageId).toBe(messages[i].id)
+            expect(cluster.msg.id).toBe(messages[i].id)
           })
         },
       ),
@@ -233,7 +265,7 @@ describe('P5 — filterMentionCandidates: at most 5, case-insensitive', () => {
         fc.array(fcUser, { minLength: 0, maxLength: 30 }),
         fcNonEmptyString,
         (users, query) => {
-          const results = filterMentionCandidates(users, query)
+          const results = filterMentionCandidates(query, users)
           expect(results.length).toBeLessThanOrEqual(5)
         },
       ),
@@ -248,7 +280,7 @@ describe('P5 — filterMentionCandidates: at most 5, case-insensitive', () => {
         fcNonEmptyString,
         (users, query) => {
           const q = query.toLowerCase()
-          const results = filterMentionCandidates(users, query)
+          const results = filterMentionCandidates(query, users)
           for (const r of results) {
             const fullName = `${r.firstName} ${r.lastName}`.toLowerCase()
             expect(fullName).toContain(q)

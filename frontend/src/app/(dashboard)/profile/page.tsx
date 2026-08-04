@@ -61,16 +61,6 @@ export default function ProfilePage() {
     confirmPassword: ''
   })
 
-  if (!user) {
-    return (
-      <div className="max-w-2xl space-y-4">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-48 rounded-xl" />
-        <Skeleton className="h-48 rounded-xl" />
-      </div>
-    )
-  }
-
   // ── Avatar pick & upload ──────────────────────────────────────────────────
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -101,7 +91,7 @@ export default function ProfilePage() {
       })
 
       const updatedUser = res.data.data
-      setUser({ ...user, avatarUrl: updatedUser.avatarUrl })
+      if (user) setUser({ ...user, avatarUrl: updatedUser.avatarUrl })
       queryClient.invalidateQueries({ queryKey: ['me'] })
       toast({ title: 'Profile photo updated' })
     } catch (err: any) {
@@ -117,26 +107,12 @@ export default function ProfilePage() {
     }
   }, [user, setUser, queryClient, toast])
 
-  const handleRemoveAvatar = async () => {
-    setAvatarUploading(true)
-    try {
-      const res = await api.put('/users/profile', { avatarUrl: null })
-      setUser({ ...user, avatarUrl: null })
-      setPreview(null)
-      toast({ title: 'Profile photo removed' })
-    } catch {
-      toast({ title: 'Failed to remove photo', variant: 'destructive' })
-    } finally {
-      setAvatarUploading(false)
-    }
-  }
-
   // ── Profile info ──────────────────────────────────────────────────────────
   const profileMutation = useMutation({
     mutationFn: (data: any) => api.put('/users/profile', data),
     onSuccess: (res) => {
       toast({ title: 'Profile updated' })
-      setUser({ ...user, ...res.data.data })
+      if (user) setUser({ ...user, ...res.data.data })
       queryClient.invalidateQueries({ queryKey: ['me'] })
     },
     onError: () => toast({ title: 'Update failed', variant: 'destructive' })
@@ -154,6 +130,30 @@ export default function ProfilePage() {
       variant: 'destructive'
     })
   })
+
+  if (!user) {
+    return (
+      <div className="max-w-2xl space-y-4">
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-48 rounded-xl" />
+        <Skeleton className="h-48 rounded-xl" />
+      </div>
+    )
+  }
+
+  const handleRemoveAvatar = async () => {
+    setAvatarUploading(true)
+    try {
+      await api.put('/users/profile', { avatarUrl: null })
+      setUser({ ...user, avatarUrl: null })
+      setPreview(null)
+      toast({ title: 'Profile photo removed' })
+    } catch {
+      toast({ title: 'Failed to remove photo', variant: 'destructive' })
+    } finally {
+      setAvatarUploading(false)
+    }
+  }
 
   const handlePasswordChange = () => {
     if (pwForm.newPassword !== pwForm.confirmPassword) {

@@ -186,7 +186,7 @@ export default function StudentReportCardPage() {
             </h2>
             <div className="space-y-6">
               {Object.entries(gradesByClass).map(([className, classGrades]) => {
-                const avg = classGrades.reduce((s, g) => s + (g.percentage ?? 0), 0) / classGrades.length
+                const avg = classGrades.reduce((s: number, g: { percentage?: number | null }) => s + (g.percentage ?? 0), 0) / classGrades.length
                 const { letter, color } = getLetterGrade(avg)
                 return (
                   <div key={className}>

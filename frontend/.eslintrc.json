@@ -8,6 +8,7 @@
     "jsx-a11y/role-has-required-aria-props": "warn",
     "jsx-a11y/role-supports-aria-props": "warn",
     "jsx-a11y/anchor-is-valid": "warn",
-    "react/jsx-no-target-blank": ["error", { "allowReferrer": false }]
+    "react/jsx-no-target-blank": ["error", { "allowReferrer": false }],
+    "react/no-unescaped-entities": "warn"
   }
 }

@@ -48,7 +48,8 @@ function ThemeManager() {
 }
 
 export function Providers({ children }: { children: React.ReactNode }) {
-  const { accessToken, isAuthenticated } = useAuthStore()
+  const { isAuthenticated, getAccessToken } = useAuthStore()
+  const accessToken = getAccessToken()
   // Track whether the socket has been successfully initialised this session
   const socketReadyRef = useRef(false)
 

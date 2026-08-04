@@ -49,23 +49,15 @@ export default function ModerationQueuePage() {
   const [action, setAction]             = useState<'RESOLVED' | 'DISMISSED' | ''>('')
   const [adminNote, setAdminNote]       = useState('')
 
-  // Guard — admin only
-  if (!user || !['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user.role)) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <p className="text-gray-500">Access restricted to administrators.</p>
-      </div>
-    )
-  }
+  const isAdmin = !!user && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user.role)
 
-  // Fetch reports
+  // Fetch reports — only when admin
   const { data, isLoading } = useQuery({
     queryKey: ['moderation-reports', statusFilter],
     queryFn:  () => api.get(`/report-block/reports?status=${statusFilter}&limit=50`).then(r => r.data.data),
-    refetchInterval: 30_000, // refresh every 30s
+    refetchInterval: 30_000,
+    enabled: isAdmin,
   })
-
-  const reports = Array.isArray(data) ? data : (data?.reports ?? [])
 
   // Review mutation
   const reviewMutation = useMutation({
@@ -82,6 +74,17 @@ export default function ModerationQueuePage() {
       toast({ title: 'Action failed', description: err.response?.data?.message, variant: 'destructive' })
     }
   })
+
+  // Guard — admin only (after all hooks)
+  if (!isAdmin) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <p className="text-gray-500">Access restricted to administrators.</p>
+      </div>
+    )
+  }
+
+  const reports = Array.isArray(data) ? data : (data?.reports ?? [])
 
   const selectedReport = reports.find((r: any) => r.id === selectedId)
   const pendingCount   = reports.filter((r: any) => r.status === 'PENDING').length

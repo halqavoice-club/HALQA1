@@ -194,7 +194,6 @@ function NavGroupSection({
                     {groupUnread}
                   </span>
                 )}
-                )}
               </Link>
             )
           })}
