@@ -105,16 +105,20 @@ async function startup(req, res) {
  */
 async function detailed(req, res) {
   const checks = {
-    database: await checkDatabase(),
-    redis: await checkRedis(),
-    livekit: await checkLiveKit(),
+    database:       await checkDatabase(),
+    redis:          await checkRedis(),
+    livekit:        await checkLiveKit(),
     circuitBreakers: checkCircuitBreakers(),
-    memory: checkMemory(),
-    disk: await checkDisk(),
-    eventLoop: checkEventLoop()
+    memory:         checkMemory(),
+    disk:           await checkDisk(),
+    eventLoop:      await checkEventLoop()
   };
 
-  const allHealthy = Object.values(checks).every(c => c.status === 'ok');
+  // livekit 'not_configured' is not a health failure — it means the feature is
+  // disabled, not broken. Treat it the same as 'ok' for overall status.
+  const allHealthy = Object.values(checks).every(
+    c => c.status === 'ok' || c.status === 'not_configured'
+  );
   const overallStatus = allHealthy ? 'healthy' : 'degraded';
 
   const response = {

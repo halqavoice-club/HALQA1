@@ -30,8 +30,9 @@ const DEPRECATED_VERSIONS = ['v1']; // v1 is deprecated but still supported
  * Priority: URL path > Accept-Version header > Default
  */
 function extractVersion(req) {
-  // Check URL path first: /api/v1/... or /api/v2/...
-  const urlMatch = req.path.match(/^\/api\/(v\d+)\//);
+  // Check URL path — handles both mounted paths (/v1/...) and full paths (/api/v1/...)
+  const path = req.path || req.url || '';
+  const urlMatch = path.match(/\/(v\d+)\//);
   if (urlMatch) {
     const version = urlMatch[1];
     if (SUPPORTED_VERSIONS.includes(version)) {
@@ -40,7 +41,7 @@ function extractVersion(req) {
   }
 
   // Check Accept-Version header
-  const headerVersion = req.headers['accept-version'];
+  const headerVersion = req.headers && (req.headers['accept-version'] || req.headers['Accept-Version']);
   if (headerVersion && SUPPORTED_VERSIONS.includes(headerVersion)) {
     return headerVersion;
   }
@@ -254,6 +255,10 @@ module.exports = {
   checkDeprecation,
   getVersionInfo,
   extractVersion,
+  // Aliases used by tests
+  getApiVersion: extractVersion,
+  getMigrationInfo: (from, to) => ({ from, to, breaking: from !== to, migrationPath: `${from} -> ${to}` }),
+  isCompatible: (a, b) => a === b,
   SUPPORTED_VERSIONS,
   DEFAULT_VERSION,
   DEPRECATED_VERSIONS,

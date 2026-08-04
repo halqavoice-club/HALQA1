@@ -155,16 +155,19 @@ describe('Idempotency Middleware', () => {
   });
 
   describe('clearKey', () => {
-    test('should clear idempotency cache', async () => {
-      const { deleteCache } = require('../utils/redis');
+    test('should clear idempotency cache (calls deleteCache twice)', async () => {
+      const { deleteCache, isRedisReady } = require('../utils/redis');
+      isRedisReady.mockReturnValue(true);
       deleteCache.mockResolvedValue();
 
       await clearKey('test-key');
 
+      // clearIdempotencyKey calls deleteCache for both the response cache
+      // and the key tracking entry — hence exactly 2 calls.
       expect(deleteCache).toHaveBeenCalledTimes(2);
     });
 
-    test('should throw error when Redis unavailable', async () => {
+    test('should throw error when Redis is unavailable', async () => {
       const { isRedisReady } = require('../utils/redis');
       isRedisReady.mockReturnValue(false);
 

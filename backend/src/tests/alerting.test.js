@@ -21,6 +21,12 @@ jest.mock('../utils/email', () => ({
   sendEmail: jest.fn().mockResolvedValue()
 }));
 
+// Mock Prometheus metrics (alerting.js calls prom.alertsSentTotal.inc)
+jest.mock('../utils/prometheus', () => ({
+  alertsSentTotal:  { inc: jest.fn() },
+  alertsFailedTotal: { inc: jest.fn() }
+}));
+
 describe('Alerting System', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -29,6 +35,8 @@ describe('Alerting System', () => {
     process.env.SLACK_CHANNEL = '#alerts';
     process.env.PAGERDUTY_ROUTING_KEY = 'test-key';
     process.env.ALERT_EMAIL_TO = 'admin@example.com';
+    // Re-establish fetch mock after clearAllMocks() resets it
+    global.fetch.mockResolvedValue({ ok: true, status: 200 });
   });
 
   afterEach(() => {

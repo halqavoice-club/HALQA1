@@ -105,14 +105,18 @@ function idempotencyMiddleware(options = {}) {
           responseCaptured = true;
 
           // Determine if we should cache this response
+          // skipSuccessful: true = do NOT cache 2xx responses
+          // skipFailed: true = do NOT cache 4xx/5xx responses
           const statusCode = res.statusCode;
-          const shouldCache = 
-            (skipSuccessful && statusCode >= 200 && statusCode < 300) ||
-            (skipFailed && statusCode >= 400) ||
-            (!skipSuccessful && !skipFailed);
+          const isSuccess = statusCode >= 200 && statusCode < 300;
+          const isFailed  = statusCode >= 400;
+
+          const shouldCache =
+            !(skipSuccessful && isSuccess) &&
+            !(skipFailed    && isFailed);
 
           if (shouldCache) {
-            // Cache the response
+            // Cache the response body
             setCache(cacheKey, {
               statusCode,
               body,
@@ -120,6 +124,11 @@ function idempotencyMiddleware(options = {}) {
             }, ttl).catch(err => {
               logger.error('[idempotency] Failed to cache response:', err);
             });
+
+            // Track the key only when we are actually caching — avoids a
+            // spurious setCache call when skipFailed/skipSuccessful is active.
+            const keyTrackingKey = `idempotency:keys:${idempotencyKey}`;
+            setCache(keyTrackingKey, true, keyTtl).catch(() => {});
           }
 
           res.set('X-Idempotency-Key', idempotencyKey);
@@ -127,10 +136,6 @@ function idempotencyMiddleware(options = {}) {
 
         return originalJson(body);
       };
-
-      // Track the key to prevent key reuse
-      const keyTrackingKey = `idempotency:keys:${idempotencyKey}`;
-      await setCache(keyTrackingKey, true, keyTtl);
 
       // Emit Prometheus metric for cache miss (new request)
       prom.idempotencyMissesTotal.inc({ endpoint: req.path });
