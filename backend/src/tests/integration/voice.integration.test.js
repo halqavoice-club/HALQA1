@@ -112,28 +112,42 @@ describe('Voice — join and leave room', () => {
   it('returns HTTP 403 when room is at capacity (roomLevel 1 = 500)', async () => {
     if (!token) return;
 
-    // Fill the room to capacity using a raw upsert to avoid HTTP overhead
-    const mockParticipants = Array.from({ length: 500 }, (_, i) => ({
-      roomId:   room.id,
-      userId:   `00000000-0000-0000-0000-${String(i).padStart(12, '0')}`,
-      role:     'AUDIENCE',
-      isMuted:  true,
-      isActive: true,
-    }));
-
-    await prisma.voiceParticipant.createMany({
-      data: mockParticipants,
-      skipDuplicates: true,
-    });
+    // Insert 500 fake participants via raw SQL (bypass FK so we don't need real users)
+    await prisma.$executeRawUnsafe('SET FOREIGN_KEY_CHECKS=0');
+    try {
+      for (let batch = 0; batch < 5; batch++) {
+        const values = Array.from({ length: 100 }, (_, i) => {
+          const idx  = batch * 100 + i;
+          const id   = `ffffffff-ffff-${String(idx).padStart(4,'0')}-ffff-ffffffffffff`;
+          const uid  = `aaaaaaaa-aaaa-${String(idx).padStart(4,'0')}-aaaa-aaaaaaaaaaaa`;
+          return `('${id}','${room.id}','${uid}','AUDIENCE',1,0,0,NOW(),NOW())`;
+        }).join(',');
+        await prisma.$executeRawUnsafe(
+          `INSERT IGNORE INTO voice_participants ` +
+          `(id,roomId,userId,role,isMuted,handRaised,isPinned,createdAt,updatedAt) ` +
+          `VALUES ${values}`
+        );
+      }
+    } finally {
+      await prisma.$executeRawUnsafe('SET FOREIGN_KEY_CHECKS=1');
+    }
 
     const joinerEmail = testEmail();
     await createUser(joinerEmail);
     const joinerToken = await loginUser(joinerEmail);
-    if (!joinerToken) return;
 
-    const res = await request(app)
-      .post(`/api/v1/voice/${room.id}/join`)
-      .set('Authorization', `Bearer ${joinerToken}`);
+    let res;
+    try {
+      if (!joinerToken) return;
+      res = await request(app)
+        .post(`/api/v1/voice/${room.id}/join`)
+        .set('Authorization', `Bearer ${joinerToken}`);
+    } finally {
+      // Clean up fake participants regardless of assertion outcome
+      await prisma.$executeRawUnsafe(
+        `DELETE FROM voice_participants WHERE userId LIKE 'aaaaaaaa-aaaa-%'`
+      );
+    }
 
     expect(res.status).toBe(403);
   });

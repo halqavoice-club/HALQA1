@@ -30,12 +30,12 @@ jobs:
         run: npm ci
         working-directory: backend
 
-      - name: Run unit tests (auth + stripe + gift + wallet)
+      - name: Run unit tests (all unit tests, excluding integration)
         run: npm run test:unit -- --ci --reporters=default
         working-directory: backend
         env:
           NODE_ENV: test
-          # Jest setup file sets all required env vars, but CI needs
+          # jest.setup.js sets all required env vars, but CI needs
           # DATABASE_URL to satisfy validateEnv (not actually connected)
           DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
           JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'

@@ -7,9 +7,9 @@
     "start": "node src/app.js",
     "dev": "npx nodemon --config nodemon.json src/app.js",
     "test": "jest --runInBand --forceExit",
-    "test:unit": "jest --runInBand --forceExit --testPathPattern='(auth|stripe|gift|wallet)\\.test\\.js'",
+    "test:unit": "jest --runInBand --forceExit --testPathIgnorePatterns='integration'",
     "test:integration": "jest --runInBand --forceExit --testPathPattern='integration'",
-    "test:coverage": "jest --runInBand --forceExit --coverage",
+    "test:coverage": "jest --runInBand --forceExit --coverage --testPathIgnorePatterns='integration'",
     "check": "node src/prisma/check-setup.js",
     "setup": "npx prisma generate && npx prisma migrate dev --name init && node src/prisma/seed.js",
     "secrets": "node src/prisma/generate-secrets.js",
@@ -82,6 +82,10 @@
     "testEnvironment": "node",
     "testMatch": [
       "**/src/tests/**/*.test.js"
+    ],
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/src/tests/integration/"
     ],
     "testTimeout": 30000,
     "clearMocks": true,

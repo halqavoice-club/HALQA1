@@ -54,39 +54,37 @@ describe('Circuit Breaker Pattern', () => {
     });
 
     test('should fail fast when circuit is OPEN', async () => {
-      const fn = jest.fn().mockResolvedValue('success');
+      const failFn = jest.fn().mockRejectedValue(new Error('error'));
 
-      // Open the circuit
+      // Open the circuit using a separate fail function
       for (let i = 0; i < 3; i++) {
-        try {
-          await breaker.execute(fn.mockRejectedValue(new Error('error')));
-        } catch (error) {}
+        try { await breaker.execute(failFn); } catch (error) {}
       }
+      expect(breaker.getState().state).toBe('OPEN');
 
-      // Try to execute again
-      await expect(breaker.execute(fn)).rejects.toThrow('Circuit breaker OPEN');
-      expect(fn).not.toHaveBeenCalled();
+      // Now test that a NEW function is not called when circuit is OPEN
+      const newFn = jest.fn().mockResolvedValue('success');
+      await expect(breaker.execute(newFn)).rejects.toThrow('Circuit breaker OPEN');
+      expect(newFn).not.toHaveBeenCalled();
     });
 
     test('should transition to HALF_OPEN after timeout', async () => {
-      const fn = jest.fn().mockRejectedValue(new Error('error'));
+      const failFn = jest.fn().mockRejectedValue(new Error('error'));
 
-      // Open the circuit
+      // Open the circuit — 3 failures
       for (let i = 0; i < 3; i++) {
-        try {
-          await breaker.execute(fn);
-        } catch (error) {}
+        try { await breaker.execute(failFn); } catch (error) {}
       }
-
       expect(breaker.getState().state).toBe('OPEN');
 
-      // Wait for timeout
+      // Wait for the timeout (breaker.timeout = 1000ms)
       await new Promise(resolve => setTimeout(resolve, 1100));
 
-      // Execute again - should transition to HALF_OPEN
-      try {
-        await breaker.execute(fn);
-      } catch (error) {}
+      // Execute a SUCCESSFUL call — breaker should move to HALF_OPEN first,
+      // then onSuccess() will be called. Since threshold=3 and successCount
+      // only reaches 1, it stays in HALF_OPEN.
+      const successFn = jest.fn().mockResolvedValue('ok');
+      await breaker.execute(successFn);
 
       expect(breaker.getState().state).toBe('HALF_OPEN');
     });
@@ -127,7 +125,7 @@ describe('Circuit Breaker Pattern', () => {
       const initialState = breaker.getState();
       expect(initialState.metrics.stateChanges).toHaveLength(0);
 
-      breaker.transitionTo'OPEN');
+      breaker.transitionTo('OPEN');
       expect(breaker.getState().metrics.stateChanges).toHaveLength(1);
     });
   });
