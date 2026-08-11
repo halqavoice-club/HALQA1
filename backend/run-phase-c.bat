@@ -6,4 +6,4 @@ set JWT_REFRESH_SECRET=ci_refresh_secret_at_least_32_chars_!!
 set PORT=5001
 set SERVICE_NAME=halqa-test
 
-npx jest src/tests/phase-c.test.js --forceExit --no-coverage --runInBand 2>&1
+npx jest src/tests/phase-c.test.js --forceExit --no-coverage --runInBand --testPathIgnorePatterns="" 2>&1

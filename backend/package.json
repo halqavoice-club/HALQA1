@@ -8,7 +8,7 @@
     "dev": "npx nodemon --config nodemon.json src/app.js",
     "test": "jest --runInBand --forceExit",
     "test:unit": "jest --runInBand --forceExit --testPathIgnorePatterns='integration'",
-    "test:integration": "jest --runInBand --forceExit --testPathPattern='integration'",
+    "test:integration": "jest --runInBand --forceExit --testPathPattern='integration|phase-c'",
     "test:coverage": "jest --runInBand --forceExit --coverage --testPathIgnorePatterns='integration'",
     "check": "node src/prisma/check-setup.js",
     "setup": "npx prisma generate && npx prisma migrate dev --name init && node src/prisma/seed.js",
@@ -85,7 +85,8 @@
     ],
     "testPathIgnorePatterns": [
       "/node_modules/",
-      "/src/tests/integration/"
+      "/src/tests/integration/",
+      "/src/tests/phase-c.test.js"
     ],
     "testTimeout": 30000,
     "clearMocks": true,
