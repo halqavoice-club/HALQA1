@@ -72,7 +72,7 @@ async function listLiveClasses(req, res, next) {
     const [total, items] = await Promise.all([
       prisma.liveClass.count({ where }),
       prisma.liveClass.findMany({
-        where, skip, take,
+        where: { ...where, teacher: { is: { id: { not: undefined } } } }, skip, take,
         orderBy: { scheduledAt: 'desc' },
         include: {
           teacher: { include: { user: { select: userSelect } } },
