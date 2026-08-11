@@ -117,10 +117,11 @@ async function createLiveClass(req, res, next) {
     // Resolve teacherId:
     // 1. TEACHER role → use their own Teacher record.
     // 2. SCHOOL_ADMIN / SUPER_ADMIN:
-    //    a. If they explicitly passed a teacherId in the body → use it.
-    //    b. Otherwise → find any active teacher in the same school as a fallback.
-    //    c. If no teacher exists in the school at all → proceed with null
-    //       (requires teacherId to be nullable in schema; otherwise a migration is needed).
+    //    a. If explicit teacherId passed → use it.
+    //    b. Resolve from classId's assigned teacher (lead first).
+    //    c. Fallback: any teacher in the school / DB.
+    //    d. Last resort: auto-create a Teacher record from the admin user
+    //       so the class can be created without manual setup.
     const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
     const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(req.user.role);
 
@@ -128,34 +129,49 @@ async function createLiveClass(req, res, next) {
       return errorResponse(res, 'Only teachers and admins can create live classes', 403);
     }
 
-    // Validate explicit teacherId if provided
     let resolvedTeacherId = teacher?.id ?? null;
+
+    // Explicit teacherId override
     if (!resolvedTeacherId && explicitTeacherId) {
       const explicitTeacher = await prisma.teacher.findFirst({ where: { id: explicitTeacherId } });
       if (!explicitTeacher) return errorResponse(res, 'Teacher not found', 404);
       resolvedTeacherId = explicitTeacher.id;
     }
 
-    // Admin fallback: pick first teacher in the school so the class can be created
-    // without requiring the admin to manually select a teacher
+    // Resolve from class's assigned teacher
+    if (!resolvedTeacherId && isAdmin && classId) {
+      const classTeacher = await prisma.teacherClass.findFirst({
+        where: { classId, teacher: { is: { id: { not: undefined } } } },
+        orderBy: [{ isLead: 'desc' }, { createdAt: 'asc' }],
+        select: { teacherId: true },
+      });
+      if (classTeacher) resolvedTeacherId = classTeacher.teacherId;
+    }
+
+    // Fallback: any teacher in the school
     if (!resolvedTeacherId && isAdmin) {
-      const schoolId = req.user.schoolId;
-      const fallbackTeacher = schoolId
-        ? await prisma.teacher.findFirst({
-            where: { schoolId, user: { deletedAt: null } },
-            orderBy: { createdAt: 'asc' },
-          })
-        : null;
-      if (fallbackTeacher) {
-        resolvedTeacherId = fallbackTeacher.id;
-      } else {
-        // No teachers exist in the school yet — reject with a helpful message
-        return errorResponse(
-          res,
-          'No teachers found in this school. Please create a teacher account first, or pass a teacherId explicitly.',
-          400,
-        );
+      const cls = classId ? await prisma.class.findFirst({ where: { id: classId, deletedAt: null } }) : null;
+      const schoolId = req.user.schoolId || cls?.schoolId;
+      const fallbackTeacher = await prisma.teacher.findFirst({
+        where: schoolId ? { schoolId, user: { deletedAt: null } } : { user: { deletedAt: null } },
+        orderBy: { createdAt: 'asc' },
+      });
+      if (fallbackTeacher) resolvedTeacherId = fallbackTeacher.id;
+    }
+
+    // Last resort: auto-create a Teacher record from the admin user
+    // so admins can host live classes even when no teacher accounts exist yet
+    if (!resolvedTeacherId && isAdmin) {
+      const cls = classId ? await prisma.class.findFirst({ where: { id: classId, deletedAt: null } }) : null;
+      const schoolId = req.user.schoolId || cls?.schoolId;
+      if (!schoolId) {
+        return errorResponse(res, 'Cannot resolve school. Please pass teacherId explicitly or assign a school to your account.', 400);
       }
+      // Create a Teacher record linked to the admin user
+      const newTeacher = await prisma.teacher.create({
+        data: { userId: req.user.id, schoolId },
+      });
+      resolvedTeacherId = newTeacher.id;
     }
 
     const cls = await prisma.class.findFirst({ where: { id: classId, deletedAt: null } });
