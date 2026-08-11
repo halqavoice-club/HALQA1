@@ -21,6 +21,7 @@ async function listClasses(req, res, next) {
         where,
         include: {
           teacherClasses: {
+            where: { teacher: { is: { id: { not: undefined } } } },
             include: {
               teacher: {
                 include: { user: { select: { firstName: true, lastName: true } } }
