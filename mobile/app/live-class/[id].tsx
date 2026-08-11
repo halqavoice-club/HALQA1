@@ -568,6 +568,16 @@ export default function LiveClassScreen() {
   // Without this, pressing back navigates away silently, leaving the user as an
   // active participant in the DB and keeping the LiveKit connection open.
   // Show the same Leave confirmation dialog.
+
+  const handleEndClass = useCallback(async () => {
+    Alert.alert('End Class', 'End the class for all participants?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'End Class', style: 'destructive', onPress: async () => {
+        try { await api.post(`/live-classes/${id}/end`); qc.invalidateQueries({ queryKey: ['live-class', id] }); router.back(); } catch (e: any) { showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' }); }
+      }},
+    ]);
+  }, [id, qc, router]);
+
   useEffect(() => {
     if (!isJoined) return;
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -590,15 +600,6 @@ export default function LiveClassScreen() {
       }},
     ]);
   }, [id, qc]);
-
-  const handleEndClass = useCallback(async () => {
-    Alert.alert('End Class', 'End the class for all participants?', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'End Class', style: 'destructive', onPress: async () => {
-        try { await api.post(`/live-classes/${id}/end`); qc.invalidateQueries({ queryKey: ['live-class', id] }); router.back(); } catch (e: any) { showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' }); }
-      }},
-    ]);
-  }, [id, qc, router]);
 
   const handleMuteAll = useCallback(async () => {
     try { await api.patch(`/live-classes/${id}/mute-all`); showMessage({ message: '🔇 All muted', type: 'info' }); } catch {}
@@ -835,8 +836,8 @@ export default function LiveClassScreen() {
                     {isOpenMic && <Text allowFontScaling={false} style={styles.openMicBadge}>🎤 Open Mic</Text>}
                     {isHost && (
                       <TouchableOpacity style={styles.viewModeToggle} onPress={async () => {
-                        const next = viewMode === 'video' ? 'audio' : 'video';
-                        setViewMode(next);
+                        const next = (viewMode as string) === 'video' ? 'audio' : 'video' as 'video' | 'audio';
+                        setViewMode(next as 'video' | 'audio');
                         const socket = getSocket();
                         socket?.emit('liveclass:viewmode_changed', { liveClassId: id, viewMode: next });
                       }}>

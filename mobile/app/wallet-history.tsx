@@ -6,7 +6,7 @@ import { View, Text, FlatList, StyleSheet, SafeAreaView, ActivityIndicator, Refr
 import { useQuery } from '@tanstack/react-query';
 import { Stack } from 'expo-router';
 import { formatDistanceToNow } from 'date-fns';
-import { useScreenProtection } from '@/src/hooks/useScreenProtection';
+import { useScreenProtection } from '@/hooks/useScreenProtection';
 import api from '@/lib/api';
 
 type WalletTx = {

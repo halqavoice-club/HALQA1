@@ -329,7 +329,7 @@ export function SpeakerGrid({
   const pageWidth = screenWidth;
 
   const getItemLayout = useCallback(
-    (_data: SeatData[][] | null | undefined, index: number) => ({
+    (_data: ArrayLike<SeatData[]> | null | undefined, index: number) => ({
       length: pageWidth,
       offset: pageWidth * index,
       index,

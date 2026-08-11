@@ -419,6 +419,8 @@ function BgMusicPanel({ visible, roomId, onClose, onNowPlayingChange }: {
   );
 }
 
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+
 const bm = StyleSheet.create({
   backdrop:           { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)' },
   sheet:              { backgroundColor: '#1a1a2e', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 16, maxHeight: SCREEN_H * 0.85 },
@@ -467,14 +469,13 @@ const bm = StyleSheet.create({
   deviceTip:          { color: '#6b7280', fontSize: 11, lineHeight: 17 },
 });
 
-const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface VoiceRoom {
-  id: string; name: string; description?: string; hostId: string;
+  id: string; name: string; title?: string; description?: string; hostId: string;
   host: { id: string; name: string; avatar?: string };
-  participantsCount: number; topic?: string; isLive: boolean;
-  isOpenMic: boolean; micLocked: boolean; reactionsEnabled: boolean; roomLevel: number; commentsEnabled: boolean; slowMode: boolean;
+  participantsCount: number; topic?: string; isLive: boolean; privacy?: string;
+  isOpenMic: boolean; micLocked: boolean; reactionsEnabled: boolean; roomLevel: number;
+  commentsEnabled: boolean; slowMode: boolean; messageType?: string;
 }
 interface Participant {
   id: string; name: string; avatar?: string;
@@ -1212,6 +1213,7 @@ export default function VoiceRoomScreen() {
       setIsJoined(true);
 
       // Store in shared voice store so the tab bar shows the "IN ROOM" badge
+      const roomData = res.data.data;
       if (room && id) {
         setActiveRoom({
           id:              id,
@@ -1234,7 +1236,6 @@ export default function VoiceRoomScreen() {
       }
 
       // Populate participants from response
-      const roomData = res.data.data;
       const parts: Participant[] = (roomData?.participants || []).map((p: any) => ({
         id:         p.userId ?? p.id,
         name:       p.user ? `${p.user.firstName} ${p.user.lastName}`.trim() : 'User',
@@ -1321,7 +1322,7 @@ export default function VoiceRoomScreen() {
 
   const handleMuteUser = useCallback(async (targetId: string, currentlyMuted: boolean) => {
     try {
-      await api.patch(/voice//mute, { targetUserId: targetId, isMuted: !currentlyMuted });
+      await api.patch(`/voice/${id}/mute`, { targetUserId: targetId, isMuted: !currentlyMuted });
       setParticipants(prev => prev.map(p => p.id === targetId ? { ...p, isMuted: !currentlyMuted } : p));
       showMessage({ message: !currentlyMuted ? '🔇 Speaker muted' : '🎙️ Speaker unmuted', type: 'info' });
     } catch {}
@@ -1433,9 +1434,7 @@ export default function VoiceRoomScreen() {
   const handleToggleMicLock = useCallback(async () => {
     const currentLocked = room?.micLocked ?? false;
     try {
-      await api.patch(
-`/voice/${id}/mic-lock`
-, { locked: !currentLocked });
+      await api.patch(`/voice/${id}/mic-lock`, { locked: !currentLocked });
       showMessage({ message: !currentLocked ? '🔒 Mic Locked' : '🔓 Mic Unlocked', type: 'info' });
     } catch (e: any) { showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' }); }
   }, [id, room?.micLocked]);
@@ -1458,7 +1457,6 @@ export default function VoiceRoomScreen() {
   // Fetch membership status on join
   useEffect(() => {
     api.get(`/voice/${id}/members/status`).then(r => {
-    api.get(/voice//members/status).then(r => {
       const d = r.data.data;
       setIsMember(d?.isMember ?? false);
       setMemberLevel(d?.member?.memberLevel ?? 0);
@@ -1470,7 +1468,7 @@ export default function VoiceRoomScreen() {
     if (joiningMember || !id) return;
     setJoiningMember(true);
     try {
-      await api.post(/voice//members/join);
+      await api.post(`/voice/${id}/members/join`);
       setIsMember(true); setMemberLevel(1); setMemberCount(c => c + 1);
       showMessage({ message: '⭐ You joined as a permanent member!', type: 'success' });
     } catch (e: any) {
@@ -1482,7 +1480,7 @@ export default function VoiceRoomScreen() {
     if (leavingMember || !id) return;
     setLeavingMember(true);
     try {
-      await api.delete(/voice//members/leave);
+      await api.delete(`/voice/${id}/members/leave`);
       setIsMember(false); setMemberLevel(0); setMemberCount(c => Math.max(0, c - 1));
       showMessage({ message: 'Left room membership', type: 'info' });
     } catch {} finally { setLeavingMember(false); }
@@ -1490,9 +1488,9 @@ export default function VoiceRoomScreen() {
 
   const handleUpgradeMemberLevel = useCallback(async (targetUserId: string, level: number) => {
     try {
-      await api.patch(/voice//members//upgrade, { memberLevel: level });
+      await api.patch(`/voice/${id}/members/${targetUserId}/upgrade`, { memberLevel: level });
       const meta = MEMBER_LEVEL_META[level];
-      showMessage({ message: ${meta?.emoji} Member upgraded to , type: 'success' });
+      showMessage({ message: `${meta?.emoji} Member upgraded to ${meta?.label ?? level}`, type: 'success' });
     } catch (e: any) {
       showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
     }
@@ -1500,11 +1498,11 @@ export default function VoiceRoomScreen() {
 
   const handleUpgradeRoomLevel = useCallback(async (level: number) => {
     try {
-      await api.patch(/voice//members/room-level, { level });
+      await api.patch(`/voice/${id}/members/room-level`, { level });
       queryClient.setQueryData<any>(['voice-room', id], (old: any) =>
         old ? { ...old, roomLevel: level } : old
       );
-      showMessage({ message: 🎉 Room upgraded to Level ! Max  members, type: 'success' });
+      showMessage({ message: `🎉 Room upgraded to Level ${level}! Max ${ROOM_LEVEL_CAPACITY[level] ?? '?'} members`, type: 'success' });
     } catch (e: any) {
       showMessage({ message: e?.response?.data?.message ?? 'Upgrade failed', type: 'danger' });
     }
@@ -1522,8 +1520,8 @@ export default function VoiceRoomScreen() {
   const handleToggleReactions = useCallback(async () => {
     if (!room) return;
     const newVal = !(room.reactionsEnabled ?? true);
+    try {
       await api.patch(`/voice/${id}`, { reactionsEnabled: newVal });
-      await api.patch(/voice/, { reactionsEnabled: newVal });
       queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, reactionsEnabled: newVal } : old);
       showMessage({ message: newVal ? '🌹 Reactions enabled' : '🚫 Reactions disabled', type: 'info' });
     } catch {}
@@ -1612,6 +1610,7 @@ export default function VoiceRoomScreen() {
                 <Text style={{ fontSize: 9, fontWeight: '700', color: '#9ca3af' }}>🔒 Full</Text>
               </View>
             )}
+            <TouchableOpacity style={styles.leaderBtn} onPress={() => setShowRoomSettings(true)}>
               <Ionicons name="ellipsis-vertical" size={18} color="#a5b4fc" />
             </TouchableOpacity>
           </View>
@@ -1836,7 +1835,7 @@ export default function VoiceRoomScreen() {
             { icon: '🏆', label: 'Leaderboard',       onPress: () => { setShowDotMenu(false); setShowLeaderboard(true); } },
             { icon: '📊', label: 'My Stats',           onPress: () => { setShowDotMenu(false); router.push('/voice/stats' as any); } },
             { icon: '🎵', label: 'Background Music',   onPress: () => { setShowDotMenu(false); setShowBgMusic(true); } },
-            ...(isHost ? [{ icon: '⚙️', label: 'Room Settings', onPress: () => { setShowDotMenu(false); setShowRoomSettings(true); } }] : []),
+            ...(myRole === 'HOST' ? [{ icon: '⚙️', label: 'Room Settings', onPress: () => { setShowDotMenu(false); setShowRoomSettings(true); } }] : []),
           ].map((item, i, arr) => (
             <TouchableOpacity
               key={i}
@@ -2011,7 +2010,7 @@ export default function VoiceRoomScreen() {
             </TouchableOpacity>
             {/* Slow Mode toggle */}
             <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: (room?.slowMode ?? false) ? '#ef444422' : '#1e1e3a', borderWidth: 1, borderColor: (room?.slowMode ?? false) ? '#ef444444' : '#374151', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
-              onPress={() => api.patch(/voice/, { slowMode: !(room?.slowMode ?? false) }).then(() => queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, slowMode: !(room?.slowMode ?? false) } : old)).catch(() => {})}>
+              onPress={() => api.patch(`/voice/${id}`, { slowMode: !(room?.slowMode ?? false) }).then(() => queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, slowMode: !(room?.slowMode ?? false) } : old)).catch(() => {})}>
               <Ionicons name='timer-outline' size={22} color={(room?.slowMode ?? false) ? '#ef4444' : '#6b7280'} />
               <Text style={{ color: (room?.slowMode ?? false) ? '#ef4444' : '#6b7280', fontSize: 12, fontWeight: '600' }}>
                 {(room?.slowMode ?? false) ? '⏱ Slow Mode ON' : '⏱ Slow Mode'}
@@ -2019,7 +2018,7 @@ export default function VoiceRoomScreen() {
             </TouchableOpacity>
             {/* Message type: all / followers / none */}
             <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#1e1e3a', borderWidth: 1, borderColor: '#374151', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
-              onPress={() => { const types = ['all','followers','none']; const next = types[(types.indexOf(room?.messageType ?? 'all') + 1) % 3]; api.patch(/voice/, { messageType: next }).then(() => queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, messageType: next } : old)).catch(() => {}); }}>
+              onPress={() => { const types = ['all','followers','none']; const next = types[(types.indexOf(room?.messageType ?? 'all') + 1) % 3]; api.patch(`/voice/${id}`, { messageType: next }).then(() => queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, messageType: next } : old)).catch(() => {}); }}>
               <Ionicons name='people-outline' size={22} color='#6b7280' />
               <Text style={{ color: '#a5b4fc', fontSize: 12, fontWeight: '600' }}>
                 {room?.messageType === 'all' ? '🌍 All Chat' : room?.messageType === 'followers' ? '👥 Followers' : '🔇 No Chat'}
@@ -2040,8 +2039,8 @@ export default function VoiceRoomScreen() {
                 onPress={() => {
                   const nextLevel = (room?.roomLevel ?? 1) + 1;
                   Alert.alert(
-                    Upgrade to Level ?,
-                    Max members: ,
+                    `Upgrade to Level ${nextLevel}?`,
+                    `Max members: ${ROOM_LEVEL_CAPACITY[nextLevel] ?? '?'}`,
                     [
                       { text: 'Cancel', style: 'cancel' },
                       { text: 'Upgrade', onPress: () => handleUpgradeRoomLevel(nextLevel) }
@@ -2146,10 +2145,9 @@ export default function VoiceRoomScreen() {
                         </TouchableOpacity>
                       )}
                       {/* Pin Speaker — HOST and MOD can pin any speaker/mod */}
-                      {(p.role === 'SPEAKER' || p.role === 'MODERATOR' || p.role === 'HOST') && !isMe && (
+                      {p.role !== 'AUDIENCE' && !isMe && (
                         <TouchableOpacity style={{ padding: 7, backgroundColor: '#0ea5e922', borderRadius: 8 }}
-                          onPress={() => handlePinSpeaker(p.id)}
-                          title="Pin to stage">
+                          onPress={() => handlePinSpeaker(p.id)}>
                           <Ionicons name="pin" size={16} color="#0ea5e9" />
                         </TouchableOpacity>
                       )}

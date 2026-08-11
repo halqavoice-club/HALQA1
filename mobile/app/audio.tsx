@@ -230,7 +230,7 @@ function UploadTab() {
 
       const uploadResult = await FileSystem.uploadAsync(url, pickedFile.uri, {
         httpMethod: 'POST',
-        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+        uploadType: 1 as any, // MULTIPART = 1 in expo-file-system
         fieldName: 'audio',
         headers: { Authorization: `Bearer ${token}` },
         parameters: {

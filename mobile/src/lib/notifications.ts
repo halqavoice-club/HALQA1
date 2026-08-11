@@ -30,11 +30,12 @@ async function uploadPushToken(token: string): Promise<void> {
 
 export async function initializeNotifications(): Promise<void> {
   Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowAlert: true,
-      shouldPlaySound: true,
-      shouldSetBadge: true,
-    }),
+    handleNotification: async () =>
+      ({
+        shouldShowAlert: true,
+        shouldPlaySound: true,
+        shouldSetBadge: true,
+      } as any),
   });
 
   if (!Device.isDevice) return;

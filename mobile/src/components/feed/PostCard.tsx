@@ -10,7 +10,7 @@
  *  - Pinned indicator
  *  - REPOST / QUOTE banners
  */
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Image,
   Pressable, Modal, TextInput,

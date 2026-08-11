@@ -143,7 +143,7 @@ export default function GroupChatThreadScreen() {
   const [selected, setSelected] = useState<GcMsg | null>(null); // long-press menu
   const [showMembers, setShowMembers] = useState(false);
   const [typingNames, setTypingNames] = useState<string[]>([]);
-  const typingTimer = useRef<ReturnType<typeof setTimeout>>();
+  const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Load conversation info ─────────────────────────────────────────────────
   const { data: conv } = useQuery<GcConv>({
@@ -247,10 +247,10 @@ export default function GroupChatThreadScreen() {
     if (!typingTimer.current) {
       socket.emit('group:typing_start', { convId, userId: user?.id, name: user?.firstName });
     }
-    clearTimeout(typingTimer.current);
+    if (typingTimer.current != null) clearTimeout(typingTimer.current);
     typingTimer.current = setTimeout(() => {
       socket.emit('group:typing_stop', { convId, userId: user?.id, name: user?.firstName });
-      typingTimer.current = undefined;
+      typingTimer.current = null;
     }, 2500);
   }, [convId, user]);
 

@@ -14,9 +14,14 @@ interface User {
   status: string;
   schoolId: string | null;
   avatarUrl: string | null;
+  username?: string;
   // Convenience aliases (populated during login/restore)
   name: string;
   avatar?: string;
+  student?: { id: string } | null;
+  lastLoginAt?: string | null;
+  emailVerified?: boolean;
+  school?: { id: string; name: string } | null;
 }
 
 interface AuthState {

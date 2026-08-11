@@ -40,7 +40,7 @@ export default function BookmarksScreen() {
             data={data || []}
             keyExtractor={(item: any) => item.id}
             renderItem={({ item }: any) => (
-              <PostCard post={item} onComment={() => router.push({ pathname: '/post/[id]', params: { id: item.id } } as any)} />
+              <PostCard post={item} onNavigateToDetail={() => router.push({ pathname: '/post/[id]', params: { id: item.id } } as any)} />
             )}
             refreshControl={<RefreshControl refreshing={isRefetching} onRefresh={refetch} />}
             contentContainerStyle={styles.list}

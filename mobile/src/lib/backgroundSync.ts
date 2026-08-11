@@ -9,6 +9,7 @@
  * process termination between background task invocations.
  */
 import * as BackgroundFetch from 'expo-background-fetch';
+import { BackgroundFetchResult, BackgroundFetchStatus } from 'expo-background-fetch';
 import * as TaskManager from 'expo-task-manager';
 import * as SecureStore from 'expo-secure-store';
 import { syncPendingActions } from './offline';
@@ -69,15 +70,15 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK, async () => {
     if (synced) {
       // Req 16.1: success → reset backoff
       await onSyncSuccess();
-      return BackgroundFetch.Result.NewData;
+      return BackgroundFetchResult.NewData;
     } else {
       // No pending actions — not a failure, keep current backoff
-      return BackgroundFetch.Result.NoData;
+      return BackgroundFetchResult.NoData;
     }
   } catch {
     // Req 16.1: failure → increase backoff
     await onSyncFailed();
-    return BackgroundFetch.Result.Failed;
+    return BackgroundFetchResult.Failed;
   }
 });
 
@@ -85,7 +86,7 @@ TaskManager.defineTask(BACKGROUND_SYNC_TASK, async () => {
 export async function registerBackgroundSync() {
   try {
     const status = await BackgroundFetch.getStatusAsync();
-    if (status === BackgroundFetch.Status.Available) {
+    if (status === BackgroundFetchStatus.Available) {
       const tasks = await TaskManager.getRegisteredTasksAsync();
       if (!tasks.some(task => task.taskName === BACKGROUND_SYNC_TASK)) {
         // Use the current backoff interval as the minimum fetch interval

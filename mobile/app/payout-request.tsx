@@ -10,7 +10,7 @@ import {
 import { Stack, useRouter } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
 import { showMessage } from 'react-native-flash-message';
-import { useScreenProtection } from '@/src/hooks/useScreenProtection';
+import { useScreenProtection } from '@/hooks/useScreenProtection';
 import api from '@/lib/api';
 
 const METHODS = [

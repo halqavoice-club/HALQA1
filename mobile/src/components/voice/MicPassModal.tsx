@@ -19,7 +19,7 @@
  *     roomId={id}
  *     offeredBy={{ id, name, avatar }}
  *     onClose={() => setShowMicPassIncoming(false)}
- *     onAccepted={() => { setShowMicPassIncoming(false); /* mic promoted */ }}
+ *     onAccepted={() => { setShowMicPassIncoming(false); }} // role updated via socket
  *   />
  */
 import React, { useEffect, useRef } from 'react';

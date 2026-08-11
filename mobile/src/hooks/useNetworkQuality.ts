@@ -28,7 +28,7 @@ export interface NetworkQualityState {
 
 // ─── Quality mapping ──────────────────────────────────────────────────────────
 function toQuality(state: NetInfoState): NetworkQuality {
-  if (!state.isConnected || state.type === NetInfoStateType.none) return 'offline';
+  if (!state.isConnected || (state.type as string) === 'none') return 'offline';
   if (state.type === NetInfoStateType.wifi || state.type === NetInfoStateType.ethernet) {
     // WiFi — check RTT if available
     const rtt = (state as any).details?.linkSpeed ?? null;

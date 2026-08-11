@@ -1,6 +1,5 @@
 import * as Application from 'expo-application';
 import * as Updates from 'expo-updates';
-import * as Performance from 'expo-performance';
 import api from './api';
 import { isOnline } from './offline';
 import { logEvent } from './analytics';
@@ -13,7 +12,7 @@ export async function captureException(error: Error, context?: Record<string, an
     context: context ?? {},
     appVersion: Application.nativeApplicationVersion || Updates.manifest?.version || 'unknown',
     runtimeVersion: Updates.runtimeVersion || 'unknown',
-    platform: Application.platform || 'unknown',
+    platform: Application.nativeApplicationVersion || 'unknown',
     timestamp: new Date().toISOString(),
   };
 
@@ -53,9 +52,8 @@ export function setupCrashReporting() {
 
 export async function initPerformanceMonitoring() {
   try {
-    Performance.mark('app_initialized');
     logEvent('performance_monitoring_enabled');
   } catch {
-    // If expo-performance is unavailable, continue.
+    // If performance monitoring is unavailable, continue.
   }
 }
