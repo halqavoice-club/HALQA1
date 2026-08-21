@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
 // Public routes that don't require authentication
-const PUBLIC_ROUTES = ['/login', '/forgot-password', '/reset-password', '/register']
+const PUBLIC_ROUTES = ['/login', '/forgot-password', '/reset-password', '/register', '/change-password']
 
 // ─── Security headers ─────────────────────────────────────────────────────────
 // FE-007: Add security headers to every response.
@@ -22,7 +22,37 @@ const SECURITY_HEADERS: Record<string, string> = {
   // Restrict Referer leakage on cross-origin navigations
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   // Control browser feature access
-  'Permissions-Policy': 'camera=(), microphone=(self), geolocation=()',
+  // camera=* — required for LiveKit camera in live classes (top-level page access)
+  // microphone=* — required for LiveKit audio in voice club and live classes
+  // geolocation=() — not used, deny it
+  'Permissions-Policy': 'camera=*, microphone=*, geolocation=()',
+  // Step 9 — CSP (Report-Only mode): collects violations without blocking anything.
+  // This allows us to discover any sources we need to allow before switching to
+  // enforcing mode. Review the report-uri endpoint and gradually tighten the policy.
+  // Switch to Content-Security-Policy (enforcing) once no violations are reported.
+  //
+  // Current policy:
+  //   default-src 'self'       — block unknown sources by default
+  //   script-src  'self' + unsafe-inline/eval — required by Next.js (move to nonce later)
+  //   style-src   'self' + unsafe-inline — required by Tailwind/styled-jsx
+  //   img-src     'self' data: blob: https: — allow images from any https source
+  //   font-src    'self' data:             — allow embedded fonts
+  //   connect-src 'self' wss: ws:          — allow WebSocket connections
+  //   media-src   'self' blob: https:      — allow audio/video
+  //   frame-src   'none'                   — no iframes
+  'Content-Security-Policy-Report-Only': [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data:",
+    "connect-src 'self' wss: ws: https:",
+    "media-src 'self' blob: https:",
+    "frame-src 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join('; '),
 }
 
 export function middleware(request: NextRequest) {

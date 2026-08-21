@@ -14,7 +14,7 @@ async function sendMessage(req, res, next) {
         attachments: attachments || [],
         classId,
         isAnnouncement: isAnnouncement || false,
-        schoolId: req.user.schoolId,
+        schoolId: (req.schoolId || req.user.schoolId),
         parentMessageId: parentMessageId || null,
         recipients: {
           create: recipientIds.map(id => ({ recipientId: id }))
@@ -48,7 +48,7 @@ async function sendMessage(req, res, next) {
     await prisma.notification.createMany({
       data: recipientIds.map(userId => ({
         userId,
-        schoolId: req.user.schoolId,
+        schoolId: (req.schoolId || req.user.schoolId),
         type: 'MESSAGE',
         title: `New message from ${req.user.firstName} ${req.user.lastName}`,
         body: subject || body.substring(0, 100),

@@ -118,25 +118,35 @@ router.put('/username', async (req, res, next) => {
   }
 });
 
-// ─── GET /users — list all users (admin only) ─────────────────────────────────
-router.get('/', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res, next) => {
+// ─── GET /users — list all users (admin only, school-scoped) ────────────────
+// Uses school membership context (req.schoolId) when available so that new
+// MEMBER users who are school admins can list their school's users.
+// Falls back to req.user.schoolId for legacy users.
+router.get('/',
+  require('../middleware/educationAuth').eduAdmin[0], // requireSchoolMember
+  require('../middleware/educationAuth').eduAdmin[1], // requireSchoolRole(SCHOOL_ADMIN, SUPER_ADMIN)
+  async (req, res, next) => {
   try {
     const { page = 1, limit = 20, role, search, status } = req.query;
     const { skip, ...pagination } = getPagination(page, limit);
-    const schoolId = req.user.schoolId;
+    // Use req.schoolId (set by requireSchoolMember) — school-scoped and validated
+    const schoolId = req.schoolId || req.user.schoolId;
+    const isGlobalSuperAdmin = req.schoolMembership?.role === 'SUPER_ADMIN' || req.user.role === 'SUPER_ADMIN';
 
     const where = {
       deletedAt: null,
-      ...(schoolId && req.user.role !== 'SUPER_ADMIN' && { schoolId })
+      // Scope to school unless this is a global super admin with no specific school
+      ...(schoolId && !isGlobalSuperAdmin && { schoolId }),
+      ...(schoolId &&  isGlobalSuperAdmin && req.schoolId && { schoolId })
     };
 
-    if (role) where.role = role;
+    if (role)   where.role   = role;
     if (status) where.status = status;
     if (search) {
       where.OR = [
         { firstName: { contains: search } },
-        { lastName: { contains: search } },
-        { email: { contains: search } }
+        { lastName:  { contains: search } },
+        { email:     { contains: search } }
       ];
     }
 
@@ -178,7 +188,8 @@ router.get('/:id', async (req, res, next) => {
 
 // ─── PUT /users/:id/status ────────────────────────────────────────────────────
 router.put('/:id/status',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  require('../middleware/educationAuth').eduAdmin[0],
+  require('../middleware/educationAuth').eduAdmin[1],
   async (req, res, next) => {
     try {
       const { status } = req.body;
@@ -268,7 +279,11 @@ router.delete('/me', async (req, res, next) => {
     if (!isValid) return errorResponse(res, 'Incorrect password', 400);
 
     // 2. Prevent deletion of school admins with active schools (protect data integrity)
-    if (user.role === 'SCHOOL_ADMIN') {
+    // Check both legacy global role and new school membership role
+    const hasAdminMembership = await prisma.schoolMembership.findFirst({
+      where: { userId: user.id, role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] }, status: 'ACTIVE' }
+    });
+    if (user.role === 'SCHOOL_ADMIN' || user.role === 'SUPER_ADMIN' || hasAdminMembership) {
       const school = await prisma.school.findFirst({
         where: { id: user.schoolId ?? '', isActive: true, deletedAt: null }
       });

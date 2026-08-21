@@ -107,9 +107,9 @@ export function disconnectSocket() {
 }
 
 export function joinClass(classId: string) {
-  socket?.emit('join:class', classId)
+  socket?.emit('class:join', classId)
 }
 
 export function leaveClass(classId: string) {
-  socket?.emit('leave:class', classId)
+  socket?.emit('class:leave', classId)
 }

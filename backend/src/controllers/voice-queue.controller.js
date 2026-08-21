@@ -444,7 +444,8 @@ async function getQueueHandler(req, res, next) {
     });
 
     const isHost  = participant?.role === 'HOST' || participant?.role === 'MODERATOR';
-    const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(req.user.role);
+    // NF-6 FIX: Voice queue admin is Social-scoped — host or SUPER_ADMIN only.
+    const isAdmin = req.user.role === 'SUPER_ADMIN';
 
     if (isHost || isAdmin) {
       // Full queue for host

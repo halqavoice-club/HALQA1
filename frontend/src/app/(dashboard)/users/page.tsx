@@ -18,6 +18,8 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useToast } from '@/components/ui/use-toast'
 import { useDebounce } from '@/hooks/useDebounce'
+import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { ErrorState } from '@/components/ui/error-state'
 import { Users, MoreVertical, Shield, CheckCircle, XCircle, AlertCircle, Flag } from 'lucide-react'
@@ -40,6 +42,7 @@ const ROLE_COLORS: Record<string, string> = {
 export default function UsersPage() {
   const { toast } = useToast()
   const queryClient = useQueryClient()
+  const user = useAuthStore(s => s.user)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
   const [roleFilter, setRoleFilter] = useState('')
@@ -81,13 +84,16 @@ export default function UsersPage() {
           </h1>
           <p className="text-gray-500 text-sm">{pagination?.total || 0} total users</p>
         </div>
-        <Link
-          href="/users/reports"
-          className="flex items-center gap-2 px-4 py-2 bg-orange-50 hover:bg-orange-100 text-orange-600 hover:text-orange-700 border border-orange-200 rounded-xl text-sm font-semibold transition-colors"
-        >
-          <Flag className="w-4 h-4" />
-          User Reports
-        </Link>
+        {/* F-1 FIX: User Reports link only visible to SUPER_ADMIN (platform moderation) */}
+        {user?.role === 'SUPER_ADMIN' && (
+          <Link
+            href="/users/reports"
+            className="flex items-center gap-2 px-4 py-2 bg-orange-50 hover:bg-orange-100 text-orange-600 hover:text-orange-700 border border-orange-200 rounded-xl text-sm font-semibold transition-colors"
+          >
+            <Flag className="w-4 h-4" />
+            User Reports
+          </Link>
+        )}
       </div>
 
       {/* Filters */}

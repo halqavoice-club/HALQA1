@@ -159,8 +159,11 @@ async function autoGradeExam(req, res) {
       });
     }
 
+    // F-5 FIX: Use effectiveRole — recognizes MEMBER users with school-scoped TEACHER/ADMIN.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+
     // Check if user is the teacher
-    if (submission.teacherId !== userId && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    if (submission.teacherId !== userId && effectiveRole !== 'SCHOOL_ADMIN' && effectiveRole !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -223,8 +226,11 @@ async function getStudentExamSubmissions(req, res) {
     const { status, gradeId } = req.query;
     const userId = req.user.id;
 
+    // F-5 FIX: Use effectiveRole — recognizes MEMBER users with school-scoped roles.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+
     // Check if user is the student or a teacher/admin
-    if (studentId !== userId && req.user.role !== 'TEACHER' && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    if (studentId !== userId && effectiveRole !== 'TEACHER' && effectiveRole !== 'SCHOOL_ADMIN' && effectiveRole !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -282,8 +288,11 @@ async function getGradeExamSubmissions(req, res) {
     const { status } = req.query;
     const userId = req.user.id;
 
+    // F-5 FIX: Use effectiveRole for grade submissions access.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+
     // Check if user is a teacher/admin
-    if (req.user.role !== 'TEACHER' && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    if (effectiveRole !== 'TEACHER' && effectiveRole !== 'SCHOOL_ADMIN' && effectiveRole !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -355,8 +364,11 @@ async function gradeExamSubmission(req, res) {
       });
     }
 
+    // F-5 FIX: Use effectiveRole for manual grading auth.
+    const effectiveRoleGrade = req.schoolMembership?.role || req.user.role;
+
     // Check if user is the teacher
-    if (submission.teacherId !== userId && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    if (submission.teacherId !== userId && effectiveRoleGrade !== 'SCHOOL_ADMIN' && effectiveRoleGrade !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -437,9 +449,11 @@ async function getExamSubmission(req, res) {
     }
 
     // Check authorization
+    // F-5 FIX: Use effectiveRole — recognizes MEMBER users with school-scoped roles.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
     const isStudent = submission.studentId === userId;
     const isTeacher = submission.teacherId === userId;
-    const isAdmin = req.user.role === 'SCHOOL_ADMIN' || req.user.role === 'SUPER_ADMIN';
+    const isAdmin = effectiveRole === 'SCHOOL_ADMIN' || effectiveRole === 'SUPER_ADMIN';
 
     if (!isStudent && !isTeacher && !isAdmin) {
       return res.status(403).json({

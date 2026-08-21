@@ -7,11 +7,10 @@ import { GiftEarningsWidget } from './GiftEarningsWidget'
 import {
   Mic, MicOff, Video, VideoOff, UserX, ChevronDown,
   ChevronUp, Radio, PenLine, BookOpen, MessageSquare,
-  MessageSquareOff, Hand, HandMetal, Settings, Users,
-  Volume2, VolumeX, RotateCcw, Crown, Clock, BarChart2,
-  Shield, Eye, EyeOff, Slash, Monitor,
+  Hand, HandMetal, Settings, Users,
+  Volume2, VolumeX, Crown,
+  Shield, Slash, Monitor,
 } from 'lucide-react'
-import { cn as _cn } from '@/lib/utils'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface LCParticipant {

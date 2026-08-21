@@ -8,6 +8,9 @@ const logger = require('../utils/logger');
 // ─── User select shape ────────────────────────────────────────────────────────
 // Kept as a constant so authenticate() and optionalAuth() always return
 // the same fields — prevents subtle shape mismatches across controllers.
+// FIX: Added `deletedAt` so the soft-delete check in authenticate() actually works.
+// Previously deletedAt was missing from USER_SELECT, so the `if (user.deletedAt)`
+// guard was dead code — soft-deleted users with valid tokens could still auth.
 const USER_SELECT = {
   id:        true,
   email:     true,
@@ -16,7 +19,8 @@ const USER_SELECT = {
   schoolId:  true,
   firstName: true,
   lastName:  true,
-  avatarUrl: true
+  avatarUrl: true,
+  deletedAt: true   // FIX: required for soft-delete enforcement in authenticate()
 };
 
 // ─── Cache helpers ────────────────────────────────────────────────────────────
@@ -110,6 +114,7 @@ async function authenticate(req, res, next) {
     // The 30s TTL means a suspend takes at most 30s to propagate.
     // For immediate effect, call invalidateUserCache(userId) in the suspend endpoint.
     if (user.status === 'SUSPENDED') return errorResponse(res, 'Account suspended', 403);
+    if (user.status === 'BANNED')    return errorResponse(res, 'Account banned', 403);
     if (user.status === 'INACTIVE')  return errorResponse(res, 'Account inactive', 403);
     if (user.deletedAt)              return errorResponse(res, 'Account not found', 401);
 
@@ -141,9 +146,19 @@ function authorize(...roles) {
   };
 }
 
-// ─── requireSchoolAccess middleware ──────────────────────────────────────────
+// ─── requireSchoolAccess middleware (DEPRECATED) ─────────────────────────────
 /**
- * School tenant isolation — ensures user belongs to the school in the request.
+ * @deprecated Use requireSchoolAccess from schoolAuth.middleware.js instead.
+ *
+ * I-2 FIX: This function only checks user.schoolId (legacy field) and does NOT
+ * consult the SchoolMembership table. A user whose membership was suspended but
+ * whose user.schoolId still matches will pass this check incorrectly.
+ *
+ * The correct implementation is in:
+ *   backend/src/middleware/schoolAuth.middleware.js → requireSchoolAccess()
+ *
+ * This version is kept only for backward compatibility with legacy routes that
+ * have not yet been migrated. Do NOT use in new code.
  */
 function requireSchoolAccess(req, res, next) {
   const schoolId = req.params.schoolId || req.headers['x-school-id'] || req.body.schoolId;

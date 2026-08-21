@@ -166,10 +166,13 @@ describe('12.3 — Group Chat send + reply flow', () => {
       sendFn: (payload: any) => Promise<any>
     ) {
       const payload = { convId, body, ...(replyTo ? { replyToId: replyTo } : {}) }
-      const result = await sendFn(payload)
-      replyTo = null // always clear after send attempt
-      sentMessages.push(result)
-      return result
+      try {
+        const result = await sendFn(payload)
+        sentMessages.push(result)
+        return result
+      } finally {
+        replyTo = null // always clear after send attempt — success OR failure
+      }
     }
 
     function setReplyTo(id: string) { replyTo = id }
@@ -238,6 +241,9 @@ describe('12.3 — Group Chat send + reply flow', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('12.4 — Community join/leave and AdminPanel flows', () => {
+  // Reset the shared mockToast between tests so call counts don't bleed across
+  beforeEach(() => mockToast.mockClear())
+
   function makeCommunityController(toast: jest.Mock) {
     let joinButtonEnabled = true
 

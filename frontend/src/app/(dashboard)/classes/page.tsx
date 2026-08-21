@@ -12,11 +12,15 @@ import { useDebounce } from '@/hooks/useDebounce'
 import { BookOpen, Users, ChevronRight, Plus } from 'lucide-react'
 import Link from 'next/link'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
+import { useSchoolAccess } from '@/hooks/useSchoolAccess'
 import { ErrorState } from '@/components/ui/error-state'
 
 export default function ClassesPage() {
   const [search, setSearch] = useState('')
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
+  const { activeRole } = useSchoolAccess()
   const debouncedSearch = useDebounce(search, 300)
 
   const { data, isLoading, isError, refetch } = useQuery({
@@ -25,7 +29,12 @@ export default function ClassesPage() {
   })
 
   const classes = data?.data || []
-  const canCreate = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
+
+  // Check both legacy User.role and new-arch SchoolMembership.role
+  const canCreate = user?.role === 'SUPER_ADMIN' ||
+                    activeRole === 'SUPER_ADMIN' ||
+                    activeRole === 'SCHOOL_ADMIN' ||
+                    user?.role === 'SCHOOL_ADMIN'
 
   return (
     <div className="space-y-5">

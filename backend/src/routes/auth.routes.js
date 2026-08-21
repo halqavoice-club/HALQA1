@@ -135,15 +135,35 @@ router.post('/2fa/disable',
 );
 
 // Complete login for 2FA-enabled accounts (step 2 after password check)
+// C-1 FIX: challengeToken replaces userId — no client-supplied userId accepted
 router.post('/2fa/authenticate',
   authLimiter,
   strictDeviceLimiter,
   [
-    body('userId').notEmpty(),
+    body('challengeToken').notEmpty().withMessage('challengeToken is required'),
     body('code').isLength({ min: 6, max: 6 }).withMessage('6-digit TOTP code required')
   ],
   validate,
   tfCtrl.authenticate2FA
+);
+
+// ─── Google Sign-In ───────────────────────────────────────────────────────────
+// POST /api/v1/auth/google
+// Accepts a Google ID token, verifies it server-side, finds/creates a HALQA user,
+// and returns the same access+refresh token response as normal login.
+// Rate limited by authLimiter. Role injection is impossible — Google users always
+// get User.role = MEMBER regardless of any other fields in the request body.
+const { googleSignIn } = require('../controllers/googleAuth.controller');
+router.post('/google',
+  authLimiter,
+  strictDeviceLimiter,
+  [
+    // Only accept the credential field — anything else is silently ignored by the controller
+    body('credential').notEmpty().withMessage('Google credential is required').isString()
+  ],
+  validate,
+  enforceSessionLimit,
+  googleSignIn
 );
 
 module.exports = router;

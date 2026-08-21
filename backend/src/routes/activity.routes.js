@@ -1,19 +1,20 @@
+'use strict';
 const router = require('express').Router();
 const { body } = require('express-validator');
 const validate = require('../middleware/validate');
-const { authenticate, authorize } = require('../middleware/auth.middleware');
+const { authenticate } = require('../middleware/auth.middleware');
+const { eduMember, eduStaff } = require('../middleware/educationAuth');
 const prisma = require('../utils/prisma');
 const { successResponse, errorResponse } = require('../utils/response');
 
 router.use(authenticate);
 
-router.get('/', async (req, res, next) => {
+router.get('/', ...eduMember, async (req, res, next) => {
   try {
     const { classId, type } = req.query;
     const where = { deletedAt: null };
     if (classId) where.classId = classId;
-    if (type) where.type = type;
-
+    if (type)    where.type    = type;
     const activities = await prisma.activity.findMany({
       where,
       include: {
@@ -22,13 +23,12 @@ router.get('/', async (req, res, next) => {
       },
       orderBy: { createdAt: 'desc' }
     });
-
     return successResponse(res, activities);
   } catch (error) { next(error); }
 });
 
 router.post('/',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
+  ...eduStaff,
   [
     body('classId').notEmpty(),
     body('type').isIn(['EXAM', 'BREAK', 'LIBRARY', 'PRAYER', 'MEMORIZATION', 'COUNSELING', 'OTHER']),
@@ -39,12 +39,9 @@ router.post('/',
     try {
       const { classId, type, title, description } = req.body;
       const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
-
       const activity = await prisma.activity.create({
         data: {
-          title,
-          type,
-          description: description || null,
+          title, type, description: description || null,
           class: { connect: { id: classId } },
           ...(teacher?.id && { teacher: { connect: { id: teacher.id } } })
         },
@@ -58,42 +55,25 @@ router.post('/',
   }
 );
 
-// Start timer
-router.post('/:id/start',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
-  async (req, res, next) => {
-    try {
-      const activity = await prisma.activity.update({
-        where: { id: req.params.id },
-        data: { startTime: new Date(), isActive: true }
-      });
-      return successResponse(res, activity, 'Activity started');
-    } catch (error) { next(error); }
-  }
-);
+router.post('/:id/start', ...eduStaff, async (req, res, next) => {
+  try {
+    const activity = await prisma.activity.update({ where: { id: req.params.id }, data: { startTime: new Date(), isActive: true } });
+    return successResponse(res, activity, 'Activity started');
+  } catch (error) { next(error); }
+});
 
-// Stop timer
-router.post('/:id/stop',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
-  async (req, res, next) => {
-    try {
-      const activity = await prisma.activity.findUnique({ where: { id: req.params.id } });
-      const endTime = new Date();
-      const duration = activity.startTime
-        ? Math.round((endTime - activity.startTime) / 60000)
-        : 0;
+router.post('/:id/stop', ...eduStaff, async (req, res, next) => {
+  try {
+    const activity = await prisma.activity.findUnique({ where: { id: req.params.id } });
+    const endTime = new Date();
+    const duration = activity.startTime ? Math.round((endTime - activity.startTime) / 60000) : 0;
+    const updated = await prisma.activity.update({ where: { id: req.params.id }, data: { endTime, duration, isActive: false } });
+    return successResponse(res, updated, 'Activity stopped');
+  } catch (error) { next(error); }
+});
 
-      const updated = await prisma.activity.update({
-        where: { id: req.params.id },
-        data: { endTime, duration, isActive: false }
-      });
-      return successResponse(res, updated, 'Activity stopped');
-    } catch (error) { next(error); }
-  }
-);
-
-// Add participant
 router.post('/:id/participants',
+  ...eduMember,
   [body('studentId').notEmpty()],
   validate,
   async (req, res, next) => {
@@ -108,17 +88,14 @@ router.post('/:id/participants',
   }
 );
 
-// Get single activity with participants
-router.get('/:id', async (req, res, next) => {
+router.get('/:id', ...eduMember, async (req, res, next) => {
   try {
     const activity = await prisma.activity.findUnique({
       where: { id: req.params.id },
       include: {
         teacher: { include: { user: { select: { firstName: true, lastName: true } } } },
         participants: {
-          include: {
-            student: { include: { user: { select: { firstName: true, lastName: true, avatarUrl: true } } } }
-          }
+          include: { student: { include: { user: { select: { firstName: true, lastName: true, avatarUrl: true } } } } }
         },
         _count: { select: { participants: true } }
       }
@@ -128,18 +105,11 @@ router.get('/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-// Delete activity
-router.delete('/:id',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
-  async (req, res, next) => {
-    try {
-      await prisma.activity.update({
-        where: { id: req.params.id },
-        data: { deletedAt: new Date() }
-      });
-      return successResponse(res, null, 'Activity deleted');
-    } catch (error) { next(error); }
-  }
-);
+router.delete('/:id', ...eduStaff, async (req, res, next) => {
+  try {
+    await prisma.activity.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
+    return successResponse(res, null, 'Activity deleted');
+  } catch (error) { next(error); }
+});
 
 module.exports = router;

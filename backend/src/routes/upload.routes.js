@@ -3,11 +3,34 @@ const multer = require('multer');
 const path   = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { authenticate } = require('../middleware/auth.middleware');
+const rateLimit = require('express-rate-limit');
 const prisma = require('../utils/prisma');
 const { saveFile, STORAGE_TYPE } = require('../utils/storage');
 const { successResponse, errorResponse } = require('../utils/response');
 const { fromBuffer: fileTypeFromBuffer } = require('file-type');
 const clamav = require('../utils/clamav');
+
+// ─── L-3 FIX: Per-user rate limits on upload endpoints ───────────────────────
+// Single file: 20 uploads per minute per user
+// Multiple files: 4 batch uploads per minute per user
+// These limits prevent storage/bandwidth exhaustion from a single abusive account.
+const singleUploadLimit = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 20,
+  keyGenerator: req => req.user?.id || req.ip,
+  message: { success: false, message: 'Too many uploads, slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const multipleUploadLimit = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 4,
+  keyGenerator: req => req.user?.id || req.ip,
+  message: { success: false, message: 'Too many batch uploads, slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // ─── Allowed MIME types ───────────────────────────────────────────────────────
 const ALLOWED_MIME_TYPES = [
@@ -47,11 +70,27 @@ async function validateFileBuffer(buffer) {
     return `File type not allowed (detected: ${detectedMime || 'unknown'})`;
   }
 
-  // ClamAV scan — only when ClamAV daemon is reachable
+  // ClamAV scan — only when the daemon has been confirmed reachable.
+  // initialize() sets enabled=false if the daemon can't be reached.
+  // We also guard against the case where initialize() was never called
+  // (enabled still true) by treating any connection error as fail-open.
   if (clamav.isEnabled()) {
-    const scanResult = await clamav.scanBuffer(buffer);
-    if (!scanResult.clean) {
-      return 'File rejected: malware detected';
+    try {
+      const scanResult = await clamav.scanBuffer(buffer);
+      // Only block when:
+      //   - clean is explicitly false   (virus found)
+      //   - error is absent/empty       (not a connection failure)
+      //   - viruses array is non-empty  (at least one virus name)
+      const hasVirus = scanResult &&
+        scanResult.clean === false &&
+        !scanResult.error &&          // empty string or undefined → no comms error
+        Array.isArray(scanResult.viruses) &&
+        scanResult.viruses.length > 0;
+      if (hasVirus) {
+        return 'File rejected: malware detected';
+      }
+    } catch {
+      // ClamAV unreachable — fail-open, allow upload to proceed
     }
   }
 
@@ -61,7 +100,7 @@ async function validateFileBuffer(buffer) {
 router.use(authenticate);
 
 // ─── POST /uploads — single file ─────────────────────────────────────────────
-router.post('/', upload.single('file'), async (req, res, next) => {
+router.post('/', singleUploadLimit, upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) return errorResponse(res, 'No file uploaded', 400);
 
@@ -98,7 +137,7 @@ router.post('/', upload.single('file'), async (req, res, next) => {
 });
 
 // ─── POST /uploads/multiple — up to 10 files ─────────────────────────────────
-router.post('/multiple', upload.array('files', 10), async (req, res, next) => {
+router.post('/multiple', multipleUploadLimit, upload.array('files', 10), async (req, res, next) => {
   try {
     if (!req.files || req.files.length === 0) {
       return errorResponse(res, 'No files uploaded', 400);

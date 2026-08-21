@@ -188,14 +188,65 @@ async function disable2FA(req, res) {
 // ─── POST /auth/2fa/authenticate ─────────────────────────────────────────────
 /**
  * Complete login for a 2FA-enabled account.
- * Called after a successful password login that returned { requiresTOTP: true }.
- * Body: { tempToken, code }  (tempToken is a short-lived JWT containing userId only)
+ *
+ * SECURITY FIX (C-1): The old implementation accepted userId directly from
+ * req.body, allowing an attacker to attempt TOTP brute-force against any
+ * known userId. The fix issues a short-lived signed "2FA challenge token"
+ * (valid 5 minutes, single-use) during the password-verified login step,
+ * and validates it here instead of trusting a client-supplied userId.
+ *
+ * Body: { challengeToken, code }
+ *   challengeToken — short-lived JWT issued by auth.controller.js after
+ *                    password verification succeeds and twoFactorEnabled=true.
+ *   code           — 6-digit TOTP code from the authenticator app.
+ *
+ * Backward-compat: if a legacy client sends `userId` with no `challengeToken`,
+ * we reject with a clear 400 (do not fall back to the insecure path).
  */
 async function authenticate2FA(req, res) {
   try {
-    const { userId, code } = req.body;
-    if (!userId || !code) {
-      return errorResponse(res, 'userId and code are required', 400);
+    const { challengeToken, code } = req.body;
+
+    // C-1 FIX: reject legacy userId-based requests entirely
+    if (!challengeToken) {
+      return errorResponse(res,
+        'challengeToken is required. Obtain it from the login response when 2FA is required.',
+        400
+      );
+    }
+    if (!code) return errorResponse(res, 'code is required', 400);
+
+    // Verify and decode the challenge token
+    let challengePayload;
+    try {
+      const { verifyAccessToken } = require('../utils/jwt');
+      challengePayload = verifyAccessToken(challengeToken);
+    } catch (e) {
+      return errorResponse(res, 'Invalid or expired 2FA challenge token. Please log in again.', 401);
+    }
+
+    // The challenge token must have been issued for the 2FA step (type guard)
+    if (challengePayload.type !== '2fa_challenge') {
+      return errorResponse(res, 'Invalid challenge token type', 401);
+    }
+
+    const { userId } = challengePayload;
+
+    // Check this challenge has not already been used (Redis one-time key)
+    let alreadyUsed = false;
+    try {
+      const { isRedisReady, getRedis } = require('../utils/redis');
+      if (isRedisReady()) {
+        const key = `2fa:used:${challengePayload.jti}`;
+        const wasSet = await getRedis().set(key, '1', 'EX', 360, 'NX'); // NX = only if not exists
+        alreadyUsed = wasSet === null; // null means key already existed
+      }
+    } catch {
+      // Redis unavailable — proceed without one-time check (fail-open, logged below)
+      logger.warn('[2fa:authenticate] Redis unavailable — one-time challenge check skipped');
+    }
+    if (alreadyUsed) {
+      return errorResponse(res, 'This 2FA challenge has already been used. Please log in again.', 401);
     }
 
     const user = await prisma.user.findUnique({
@@ -207,7 +258,11 @@ async function authenticate2FA(req, res) {
       return errorResponse(res, 'Invalid request', 400);
     }
 
-    const secret = decryptSecret(user.twoFactorSecret);
+    if (user.status === 'SUSPENDED') return errorResponse(res, 'Account suspended', 403);
+    if (user.status === 'INACTIVE')  return errorResponse(res, 'Account inactive', 403);
+    if (user.deletedAt)              return errorResponse(res, 'Account not found', 401);
+
+    const secret  = decryptSecret(user.twoFactorSecret);
     const isValid = authenticator.verify({ token: code, secret });
 
     if (!isValid) {
@@ -227,6 +282,11 @@ async function authenticate2FA(req, res) {
         ipAddress: req.ip,
         userAgent: req.headers['user-agent']
       }
+    });
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data:  { lastLoginAt: new Date() }
     });
 
     res.cookie('refreshToken', refreshToken, {

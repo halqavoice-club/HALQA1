@@ -105,6 +105,20 @@ async function getStudentGrades(req, res, next) {
     const { studentId } = req.params;
     const { classId, termId, type } = req.query;
 
+    // H-4 FIX: Students can only view their own grades; guardians can only view their linked students.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (effectiveRole === 'STUDENT') {
+      const myStudent = await prisma.student.findFirst({ where: { userId: req.user.id, deletedAt: null }, select: { id: true } });
+      if (!myStudent || myStudent.id !== studentId) return errorResponse(res, 'Access denied', 403);
+    }
+    if (effectiveRole === 'GUARDIAN') {
+      const guardian = await prisma.guardian.findFirst({
+        where: { userId: req.user.id, deletedAt: null },
+        include: { students: { where: { studentId } } }
+      });
+      if (!guardian || guardian.students.length === 0) return errorResponse(res, 'Access denied — not your student', 403);
+    }
+
     const where = { studentId, deletedAt: null };
     if (classId) where.classId = classId;
     if (termId) where.termId = termId;
@@ -177,12 +191,28 @@ async function updateGrade(req, res, next) {
     const { id } = req.params;
     const { score, maxScore, feedback } = req.body;
 
-    const percentage = (score / maxScore) * 100;
+    // H-5 FIX: Verify grade belongs to caller's school and teacher owns it.
+    const existing = await prisma.grade.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) return errorResponse(res, 'Grade not found', 404);
+
+    const schoolId = req.schoolId || req.user.schoolId;
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (effectiveRole !== 'SUPER_ADMIN' && existing.classId) {
+      const cls = await prisma.class.findFirst({ where: { id: existing.classId, ...(schoolId && { schoolId }) }, select: { id: true } });
+      if (!cls) return errorResponse(res, 'Access denied to this school\'s grade', 403);
+    }
+    if (effectiveRole === 'TEACHER') {
+      const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id, deletedAt: null }, select: { id: true } });
+      if (!teacher || existing.teacherId !== teacher.id) return errorResponse(res, 'You can only update grades you created', 403);
+    }
+
+    const safeMax = maxScore && maxScore > 0 ? maxScore : existing.maxScore;
+    const percentage = (score / safeMax) * 100;
     const letterGrade = calculateLetterGrade(percentage);
 
     const grade = await prisma.grade.update({
       where: { id },
-      data: { score, maxScore, percentage, letterGrade, feedback }
+      data: { score, maxScore: safeMax, percentage, letterGrade, feedback }
     });
 
     return successResponse(res, grade, 'Grade updated');
@@ -194,6 +224,27 @@ async function updateGrade(req, res, next) {
 async function deleteGrade(req, res, next) {
   try {
     const { id } = req.params;
+
+    // H-5 FIX: Verify grade belongs to caller's school before deleting.
+    const existing = await prisma.grade.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) return errorResponse(res, 'Grade not found', 404);
+
+    const schoolId = req.schoolId || req.user.schoolId;
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (effectiveRole !== 'SUPER_ADMIN' && existing.classId) {
+      const cls = await prisma.class.findFirst({
+        where: { id: existing.classId, ...(schoolId && { schoolId }) },
+        select: { id: true }
+      });
+      if (!cls) return errorResponse(res, 'Access denied to this school\'s grade', 403);
+    }
+    if (effectiveRole === 'TEACHER') {
+      const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id, deletedAt: null }, select: { id: true } });
+      if (!teacher || existing.teacherId !== teacher.id) {
+        return errorResponse(res, 'You can only delete grades you created', 403);
+      }
+    }
+
     await prisma.grade.update({ where: { id }, data: { deletedAt: new Date() } });
     return successResponse(res, null, 'Grade deleted');
   } catch (error) {
@@ -217,6 +268,16 @@ async function getGradeCategories(req, res, next) {
 async function createGradeCategory(req, res, next) {
   try {
     const { classId, name, type, weight, maxPoints } = req.body;
+    // M-7 FIX: Verify classId belongs to the caller's school before creating category.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (effectiveRole !== 'SUPER_ADMIN' && schoolId) {
+      const cls = await prisma.class.findFirst({
+        where: { id: classId, schoolId, deletedAt: null },
+        select: { id: true }
+      });
+      if (!cls) return errorResponse(res, 'Class not found or not in your school', 404);
+    }
     const category = await prisma.gradeCategory.create({
       data: { classId, name, type, weight, maxPoints }
     });

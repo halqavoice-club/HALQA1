@@ -35,7 +35,7 @@
       },
       "package": "com.halqa.mobile",
       "versionCode": 11,
-      "usesCleartextTraffic": false,
+      "usesCleartextTraffic": true,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",

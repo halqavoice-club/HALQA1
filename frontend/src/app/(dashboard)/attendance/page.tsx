@@ -1,9 +1,10 @@
-﻿'use client'
+'use client'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { addDays, subDays, format, isToday } from 'date-fns'
 import api from '@/lib/api'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { useAttendanceStore, AttendanceStatus } from '@/store/attendance.store'
 import { useAttendanceSync } from '@/hooks/useAttendanceSync'
 import { getSocket } from '@/lib/socket'
@@ -106,9 +107,10 @@ function StudentRow({ student, index, isSelected, onSelect, onLongPress, debounc
 
 export default function AttendancePage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
 
   // Route each role to the correct view â€” no conditional hook calls
-  if (user?.role === 'STUDENT')   return <StudentAttendanceView />
+  if (isStudent)   return <StudentAttendanceView />
   if (user?.role === 'GUARDIAN')  return <GuardianAttendanceView />
 
   return <TeacherAttendancePage />
@@ -118,6 +120,7 @@ export default function AttendancePage() {
 
 function TeacherAttendancePage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const { classId, date, attendance, selectedStudents, setClass, setDate, markAll, clearAll, selectAll, clearSelection, applyToSelected, loadExisting, offlineQueue, toggleSelect } = useAttendanceStore()
@@ -212,7 +215,7 @@ function TeacherAttendancePage() {
   const handleLongPress = (studentId: string) => { setMultiSelect(true); toggleSelect(studentId) }
 
   const toggleOrder = () => setOrder(order === 'asc' ? 'desc' : 'asc')
-  const canMark = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  const canMark = isTeacher
 
   // Bulk save all â€” sends all current statuses in one request
   const handleSaveAll = async () => {

@@ -91,20 +91,36 @@ async function getExploreFeed(req, res, next) {
         take: 10,
       }),
 
-      // Live classes (school-scoped — only show if viewer belongs to same school, or all if SUPER_ADMIN)
-      prisma.liveClass.findMany({
-        where: {
-          status: 'LIVE',
-          deletedAt: null,
-        },
-        include: {
-          teacher: { include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } } } },
-          class:   { select: { id: true, name: true } },
-          _count:  { select: { participants: { where: { isActive: true } } } },
-        },
-        orderBy: { startedAt: 'desc' },
-        take: 6,
-      }),
+      // Live classes (school-scoped — only show classes from the viewer's school,
+      // or all classes for SUPER_ADMIN)
+      (async () => {
+        const viewer = await prisma.user.findUnique({
+          where: { id: viewerId },
+          select: { schoolId: true, role: true },
+        });
+        const isSuperAdmin = viewer?.role === 'SUPER_ADMIN';
+        const schoolFilter = !isSuperAdmin && viewer?.schoolId ? { schoolId: viewer.schoolId } : {};
+
+        // Fetch classes without teacher include to avoid null reference crash
+        const classes = await prisma.liveClass.findMany({
+          where: { status: 'LIVE', deletedAt: null, ...schoolFilter },
+          include: {
+            class:  { select: { id: true, name: true } },
+            _count: { select: { participants: { where: { isActive: true } } } },
+          },
+          orderBy: { startedAt: 'desc' },
+          take: 6,
+        });
+
+        // Fetch teachers separately to handle orphaned references gracefully
+        const teacherIds = [...new Set(classes.map(c => c.teacherId).filter(Boolean))];
+        const teachers = teacherIds.length > 0 ? await prisma.teacher.findMany({
+          where: { id: { in: teacherIds } },
+          include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } } },
+        }) : [];
+        const teacherMap = Object.fromEntries(teachers.map(t => [t.id, t]));
+        return classes.map(c => ({ ...c, teacher: teacherMap[c.teacherId] ?? null }));
+      })(),
 
       // Suggested people — users the viewer doesn't follow yet, globally
       (async () => {

@@ -13,7 +13,7 @@ async function importStudents(req, res, next) {
   try {
     if (!req.file) return errorResponse(res, 'No file uploaded', 400);
 
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet);
@@ -84,6 +84,12 @@ async function importStudents(req, res, next) {
               await tx.enrollment.create({ data: { studentId: student.id, classId } });
             }
           }
+          // GAP FIX: Create SchoolMembership so requireSchoolMember sets effectiveRole.
+          await tx.schoolMembership.upsert({
+            where: { userId_schoolId: { userId: user.id, schoolId } },
+            create: { userId: user.id, schoolId, role: 'STUDENT', status: 'ACTIVE', joinedAt: new Date() },
+            update: { role: 'STUDENT', status: 'ACTIVE', deletedAt: null }
+          });
         });
 
         results.created++;
@@ -104,7 +110,7 @@ async function importStudents(req, res, next) {
  */
 async function exportStudents(req, res, next) {
   try {
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const { classId } = req.query;
 
     const where = { schoolId, deletedAt: null };
@@ -198,7 +204,7 @@ async function downloadTemplate(req, res, next) {
 async function importTeachers(req, res, next) {
   try {
     if (!req.file) return errorResponse(res, 'No file uploaded', 400);
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet);
@@ -241,6 +247,12 @@ async function importTeachers(req, res, next) {
               specialization: String(row.specialization || row['Specialization'] || '').trim() || null
             }
           });
+          // GAP FIX: Create SchoolMembership so requireSchoolMember sets effectiveRole.
+          await tx.schoolMembership.upsert({
+            where: { userId_schoolId: { userId: user.id, schoolId } },
+            create: { userId: user.id, schoolId, role: 'TEACHER', status: 'ACTIVE', joinedAt: new Date() },
+            update: { role: 'TEACHER', status: 'ACTIVE', deletedAt: null }
+          });
         });
         results.created++;
       } catch (err) {
@@ -258,7 +270,7 @@ async function importTeachers(req, res, next) {
  */
 async function exportTeachers(req, res, next) {
   try {
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const teachers = await prisma.teacher.findMany({
       where: { schoolId, deletedAt: null },
       include: {
@@ -297,7 +309,7 @@ async function exportTeachers(req, res, next) {
  */
 async function exportAttendance(req, res, next) {
   try {
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const { classId, startDate, endDate } = req.query;
 
     const where = { ...(schoolId && { schoolId }), ...(classId && { classId }) };
@@ -382,7 +394,7 @@ async function exportGrades(req, res, next) {
  */
 async function exportBehavior(req, res, next) {
   try {
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const { classId, startDate, endDate } = req.query;
 
     const where = { deletedAt: null };
@@ -428,7 +440,7 @@ module.exports = { importStudents, exportStudents, downloadTemplate, importTeach
 async function importGuardians(req, res, next) {
   try {
     if (!req.file) return errorResponse(res, 'No file uploaded', 400);
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheet    = workbook.Sheets[workbook.SheetNames[0]];
     const rows     = XLSX.utils.sheet_to_json(sheet);
@@ -483,6 +495,12 @@ async function importGuardians(req, res, next) {
               }
             }
           }
+          // GAP FIX: Create SchoolMembership so requireSchoolMember sets effectiveRole.
+          await tx.schoolMembership.upsert({
+            where: { userId_schoolId: { userId: user.id, schoolId } },
+            create: { userId: user.id, schoolId, role: 'GUARDIAN', status: 'ACTIVE', joinedAt: new Date() },
+            update: { role: 'GUARDIAN', status: 'ACTIVE', deletedAt: null }
+          });
         });
         results.created++;
       } catch (err) {
@@ -505,7 +523,7 @@ async function importGuardians(req, res, next) {
 async function importClasses(req, res, next) {
   try {
     if (!req.file) return errorResponse(res, 'No file uploaded', 400);
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const sheet    = workbook.Sheets[workbook.SheetNames[0]];
     const rows     = XLSX.utils.sheet_to_json(sheet);

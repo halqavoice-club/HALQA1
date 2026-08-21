@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { Plus, Clock, BookOpen, Loader2, Trash2 } from 'lucide-react'
 import { ErrorState } from '@/components/ui/error-state'
 
@@ -44,6 +45,7 @@ interface ScheduleSlot {
 
 export default function SchedulePage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [showAdd, setShowAdd] = useState(false)
@@ -116,7 +118,7 @@ export default function SchedulePage() {
     onError: () => toast({ title: 'Failed to remove slot', variant: 'destructive' })
   })
 
-  const canEdit = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  const canEdit = isTeacher
   const slots = scheduleData || []
 
   const getSlotsForDay = (dayIndex: number) =>

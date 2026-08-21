@@ -84,9 +84,14 @@ async function getLiveKitToken(req, res, next) {
 /**
  * POST /livekit/token
  *
- * Generic token — no DB room/participant checks.
+ * Generic token — no DB room/participant checks for non-Live-Class rooms.
  * Identity and display name come from the authenticated user (req.user).
  * Caller controls canPublish / canSubscribe via request body.
+ *
+ * SECURITY: If roomId starts with "liveclass-" the caller must be an
+ * active LiveClassParticipant in that class (Task 1 — P2-A hardening).
+ * This prevents any authenticated user from obtaining a LiveKit token for
+ * a live class they have not legitimately joined.
  */
 async function generateToken(req, res, next) {
   try {
@@ -99,6 +104,69 @@ async function generateToken(req, res, next) {
 
     const { roomId, canPublish = true, canSubscribe = true } = req.body;
     const userId = req.user.id;
+
+    // ── Task 1 (P2-A): Live class room protection ──────────────────────────
+    // Room names for live classes follow the pattern: "liveclass-{uuid}"
+    // Any request for such a room MUST go through the full Live Class authorization
+    // chain: school isolation + enrollment + active participant.
+    // The dedicated /live-classes/:id/token endpoint is the correct path and already
+    // enforces all of these. The generic endpoint must not bypass that chain.
+    if (roomId && roomId.startsWith('liveclass-')) {
+      // Extract the live class ID from the room name
+      const liveClassId = roomId.replace(/^liveclass-/, '');
+
+      // 1. Verify the live class exists
+      const lc = await prisma.liveClass.findFirst({
+        where: { id: liveClassId, deletedAt: null },
+        select: { id: true, schoolId: true, status: true },
+      });
+      if (!lc) return errorResponse(res, 'Live class not found', 404);
+      if (lc.status === 'ENDED') return errorResponse(res, 'Class has ended', 400);
+      if (lc.status === 'CANCELLED') return errorResponse(res, 'Class was cancelled', 400);
+
+      // 2. School isolation (H-10 FIX): use SchoolMembership table instead of
+      // legacy user.schoolId. A user whose membership was suspended but whose
+      // user.schoolId still points to the school would previously pass this check.
+      if (req.user.role !== 'SUPER_ADMIN') {
+        // First do the fast legacy check — if schoolId doesn't match at all, reject immediately
+        // without hitting the DB (same cost as before for the common cross-school case)
+        const legacyMatch = req.user.schoolId === lc.schoolId;
+
+        if (!legacyMatch) {
+          // schoolId mismatch — check SchoolMembership as fallback for MEMBER users
+          // whose user.schoolId may differ from their active membership schoolId
+          const membership = await prisma.schoolMembership.findUnique({
+            where: { userId_schoolId: { userId, schoolId: lc.schoolId } },
+            select: { status: true }
+          });
+          if (!membership || membership.status !== 'ACTIVE') {
+            return errorResponse(res, 'Access denied to this school\'s resource', 403);
+          }
+          // membership is ACTIVE — user is allowed through
+        } else {
+          // schoolId matches — also verify membership is not suspended
+          // (only DB-check when Redis cache misses, which is the common production path)
+          const membership = await prisma.schoolMembership.findUnique({
+            where: { userId_schoolId: { userId, schoolId: lc.schoolId } },
+            select: { status: true }
+          });
+          // If a membership record exists and is suspended/inactive — deny
+          if (membership && membership.status !== 'ACTIVE') {
+            return errorResponse(res, 'Access denied — your school membership is not active', 403);
+          }
+          // No membership record + schoolId matches → legacy user, allow through
+        }
+      }
+
+      // 3. Verify active participant membership
+      const participant = await prisma.liveClassParticipant.findFirst({
+        where: { liveClassId: lc.id, userId, isActive: true },
+        select: { id: true },
+      });
+      if (!participant) {
+        return errorResponse(res, 'You are not an active participant in this live class. Use POST /live-classes/:id/token instead.', 403);
+      }
+    }
 
     const at = new AccessToken(apiKey, apiSecret, {
       identity: userId,

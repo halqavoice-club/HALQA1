@@ -1,58 +1,46 @@
+'use strict';
 const router = require('express').Router();
 const { body } = require('express-validator');
 const validate = require('../middleware/validate');
-const { authenticate, authorize } = require('../middleware/auth.middleware');
+const { authenticate } = require('../middleware/auth.middleware');
+const { eduMember, eduStaff } = require('../middleware/educationAuth');
 const prisma = require('../utils/prisma');
 const { successResponse, errorResponse } = require('../utils/response');
 const { notifySchool } = require('../services/notification.service');
 
 router.use(authenticate);
 
-// List announcements for current school
-router.get('/', async (req, res, next) => {
+// List announcements — any active school member sees their school's announcements
+router.get('/', ...eduMember, async (req, res, next) => {
   try {
     const now = new Date();
-    // SUPER_ADMIN sees all announcements across all schools;
-    // all other roles are scoped to their own school.
-    // Guard: if non-super-admin has no schoolId (shouldn't happen but be safe)
+    // Use req.schoolId (set by requireSchoolMember) — school-scoped, not user.schoolId
+    const schoolId = req.schoolId || req.user.schoolId;
     const where = {
       deletedAt: null,
       publishAt: { lte: now },
-      OR: [
-        { expiresAt: null },
-        { expiresAt: { gt: now } }
-      ]
+      OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+      ...(schoolId && { schoolId })
     };
-    if (req.user.role !== 'SUPER_ADMIN') {
-      if (!req.user.schoolId) return successResponse(res, []);
-      where.schoolId = req.user.schoolId;
-    }
 
     const announcements = await prisma.announcement.findMany({
       where,
       orderBy: [{ isPinned: 'desc' }, { publishAt: 'desc' }]
     });
-
     return successResponse(res, announcements);
   } catch (error) { next(error); }
 });
 
-// Create announcement
+// Create announcement — staff only
 router.post('/',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
-  [
-    body('title').trim().notEmpty(),
-    body('content').trim().notEmpty()
-  ],
+  ...eduStaff,
+  [body('title').trim().notEmpty(), body('content').trim().notEmpty()],
   validate,
   async (req, res, next) => {
     try {
       const { title, content, targetRoles, isPinned, expiresAt } = req.body;
-      // SUPER_ADMIN may pass schoolId in body; other roles use their own schoolId
-      const schoolId = req.user.role === 'SUPER_ADMIN'
-        ? (req.body.schoolId || req.user.schoolId)
-        : req.user.schoolId;
-      if (!schoolId) return errorResponse(res, 'schoolId required for SUPER_ADMIN', 400);
+      const schoolId = req.schoolId || req.user.schoolId;
+      if (!schoolId) return errorResponse(res, 'School context required', 400);
 
       const announcement = await prisma.announcement.create({
         data: {
@@ -66,11 +54,7 @@ router.post('/',
         }
       });
 
-      // Notify target roles
-      const roles = targetRoles?.length > 0
-        ? targetRoles
-        : ['TEACHER', 'STUDENT', 'GUARDIAN'];
-
+      const roles = targetRoles?.length > 0 ? targetRoles : ['TEACHER', 'STUDENT', 'GUARDIAN'];
       await notifySchool(schoolId, roles, {
         type: 'ANNOUNCEMENT',
         title: `📢 ${title}`,
@@ -83,9 +67,9 @@ router.post('/',
   }
 );
 
-// Update announcement
+// Update — staff; teacher can only update own announcements
 router.put('/:id',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
+  ...eduStaff,
   [
     body('title').optional().trim().notEmpty(),
     body('content').optional().trim().notEmpty(),
@@ -96,17 +80,18 @@ router.put('/:id',
   validate,
   async (req, res, next) => {
     try {
-      // Ownership check: only the author or admin can update
       const existing = await prisma.announcement.findUnique({ where: { id: req.params.id } });
       if (!existing) return errorResponse(res, 'Announcement not found', 404);
-      if (
-        req.user.role === 'TEACHER' &&
-        existing.authorId !== req.user.id
-      ) {
+      // School isolation: ensure announcement belongs to same school
+      const schoolId = req.schoolId || req.user.schoolId;
+      if (existing.schoolId !== schoolId && req.schoolMembership?.role !== 'SUPER_ADMIN') {
+        return errorResponse(res, 'Access denied to this announcement', 403);
+      }
+      // Teachers can only edit their own announcements
+      if (req.schoolMembership?.role === 'TEACHER' && existing.authorId !== req.user.id) {
         return errorResponse(res, 'You can only update your own announcements', 403);
       }
 
-      // Explicit field extraction — prevents mass assignment of authorId, schoolId, deletedAt
       const { title, content, isPinned, expiresAt, targetRoles } = req.body;
       const data = {};
       if (title       !== undefined) data.title       = title;
@@ -115,27 +100,18 @@ router.put('/:id',
       if (expiresAt   !== undefined) data.expiresAt   = expiresAt ? new Date(expiresAt) : null;
       if (targetRoles !== undefined) data.targetRoles = targetRoles || [];
 
-      const announcement = await prisma.announcement.update({
-        where: { id: req.params.id },
-        data
-      });
+      const announcement = await prisma.announcement.update({ where: { id: req.params.id }, data });
       return successResponse(res, announcement, 'Announcement updated');
     } catch (error) { next(error); }
   }
 );
 
-// Delete announcement
-router.delete('/:id',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
-  async (req, res, next) => {
-    try {
-      await prisma.announcement.update({
-        where: { id: req.params.id },
-        data: { deletedAt: new Date() }
-      });
-      return successResponse(res, null, 'Announcement deleted');
-    } catch (error) { next(error); }
-  }
-);
+// Delete — staff
+router.delete('/:id', ...eduStaff, async (req, res, next) => {
+  try {
+    await prisma.announcement.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
+    return successResponse(res, null, 'Announcement deleted');
+  } catch (error) { next(error); }
+});
 
 module.exports = router;

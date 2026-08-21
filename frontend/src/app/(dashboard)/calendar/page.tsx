@@ -13,6 +13,7 @@ import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { Plus, Calendar, ChevronLeft, ChevronRight, Trash2, Filter } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ErrorState } from '@/components/ui/error-state'
@@ -37,6 +38,7 @@ const EVENT_COLORS: Record<string, string> = {
 export default function CalendarPage() {
   const { toast } = useToast()
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const queryClient = useQueryClient()
 
   const [currentMonth, setCurrentMonth] = useState(new Date())
@@ -48,7 +50,7 @@ export default function CalendarPage() {
     title: '', type: 'CLASS', startDate: '', endDate: '', description: '', allDay: true,
   })
 
-  const canCreate = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  const canCreate = isTeacher
   const monthStart = startOfMonth(currentMonth)
   const monthEnd = endOfMonth(currentMonth)
 

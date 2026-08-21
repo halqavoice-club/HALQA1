@@ -372,7 +372,16 @@ const defaultFlags = {
   
   // Environment-specific
   debugMode: { enabled: true, environments: ['development', 'staging'] },
-  maintenanceMode: { enabled: false, environments: ['production'] }
+  maintenanceMode: { enabled: false, environments: ['production'] },
+
+  // ── PK Battle System (additive) ──────────────────────────────────────────
+  PK_ENABLED:             true,
+  PK_MATCHMAKING_ENABLED: true,
+  PK_TOURNAMENT_ENABLED:  true,
+  PK_RANKING_ENABLED:     true,
+  PK_VOTING_ENABLED:      true,
+  PK_TEAM_ENABLED:        true,
+  PK_CLUB_ENABLED:        true,
 };
 
 module.exports = {

@@ -1,16 +1,21 @@
+'use strict';
 const router = require('express').Router();
 const { body } = require('express-validator');
 const validate = require('../middleware/validate');
-const { authenticate, authorize } = require('../middleware/auth.middleware');
+const { authenticate } = require('../middleware/auth.middleware');
+const { eduMember, eduAdmin } = require('../middleware/educationAuth');
+const auditLog = require('../middleware/audit.middleware');
 const ctrl = require('../controllers/student.controller');
 
 router.use(authenticate);
 
-router.get('/', ctrl.listStudents);
-router.get('/:id', ctrl.getStudent);
+// Any active school member can list/view students in their school
+router.get('/',    ...eduMember, ctrl.listStudents);
+router.get('/:id', ...eduMember, ctrl.getStudent);
 
+// Admin-only mutations — all audited
 router.post('/',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  ...eduAdmin,
   [
     body('email').isEmail().normalizeEmail(),
     body('firstName').trim().notEmpty(),
@@ -18,20 +23,35 @@ router.post('/',
     body('studentId').trim().notEmpty()
   ],
   validate,
+  auditLog('CREATE', 'students'),
   ctrl.createStudent
 );
 
-router.put('/:id', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), ctrl.updateStudent);
+router.put('/:id',
+  ...eduAdmin,
+  auditLog('UPDATE', 'students'),
+  ctrl.updateStudent
+);
 
 router.post('/:id/enroll',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
-  [body('classId').notEmpty()],
-  validate,
+  ...eduAdmin,
+  [body('classId').notEmpty()], validate,
+  auditLog('CREATE', 'enrollments'),
   ctrl.enrollStudent
 );
 
-router.delete('/:id/enroll/:classId', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), ctrl.unenrollStudent);
-router.post('/:id/regenerate-qr', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), ctrl.regenerateQr);
-router.delete('/:id', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), ctrl.deleteStudent);
+router.delete('/:id/enroll/:classId',
+  ...eduAdmin,
+  auditLog('DELETE', 'enrollments'),
+  ctrl.unenrollStudent
+);
+
+router.post('/:id/regenerate-qr', ...eduAdmin, ctrl.regenerateQr);
+
+router.delete('/:id',
+  ...eduAdmin,
+  auditLog('DELETE', 'students'),
+  ctrl.deleteStudent
+);
 
 module.exports = router;

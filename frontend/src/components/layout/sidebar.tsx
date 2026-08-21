@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth.store'
 import { useThemeStore } from '@/store/theme.store'
+import { useSchoolAccess } from '@/hooks/useSchoolAccess'
 import {
   LayoutDashboard, Users, GraduationCap, BookOpen, ClipboardCheck,
   Star, BarChart3, MessageSquare, Calendar, Settings,
@@ -14,7 +15,7 @@ import {
   CalendarDays, LayoutGrid, Headphones, DollarSign, Radio,
   UserPlus, MessagesSquare, Video, Wallet, Rss, UsersRound,
   Compass, Sparkles, Bell, Home, GraduationCap as EduIcon,
-  Wrench, QrCode, Trophy,
+  Wrench, QrCode, Trophy, PlusCircle, Activity,
 } from 'lucide-react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { getAvatarUrl } from '@/lib/avatar'
@@ -212,6 +213,7 @@ export function Sidebar() {
     social:        true,
     education:     false,
     administration: false,
+    platform:      false,
   })
 
   const pathname    = usePathname()
@@ -225,103 +227,200 @@ export function Sidebar() {
     s.conversations.reduce((sum, c) => sum + (c.unread ?? 0), 0)
   )
 
-  const role = user?.role || ''
+  const role = user?.role || ''   // kept for legacy footer display only
 
   const toggleGroup = useCallback((id: string) => {
     setOpenGroups(prev => ({ ...prev, [id]: !prev[id] }))
   }, [])
 
-  // ── Navigation groups ──────────────────────────────────────────────────────
-  const groups: NavGroup[] = useMemo(() => [
-    {
-      id: 'home',
-      label: 'Home',
-      icon: Home,
-      items: [
-        { label: t.dashboard,     href: '/dashboard',     icon: LayoutDashboard },
-        { label: 'Notifications', href: '/notifications', icon: Bell },
-      ]
-    },
-    {
-      id: 'social',
-      label: 'Social',
-      icon: Rss,
-      items: [
-        { label: 'Feed',        href: '/feed',        icon: Rss },
-        { label: 'Explore',     href: '/explore',     icon: Compass },
-        { label: 'Communities', href: '/communities', icon: UsersRound },
-        { label: t.voiceClub,   href: '/voice-club',  icon: Radio },
-        { label: 'Live Rooms',  href: '/live-class',  icon: Video },
-        { label: 'Chat',        href: '/dm',          icon: MessagesSquare, badge: 'dm' },
-        { label: 'Groups',      href: '/group-chat',  icon: Users,         badge: 'group' },
-        { label: t.messages,    href: '/messages',    icon: MessageSquare },
-        { label: 'Friends',     href: '/social',      icon: UserPlus, badge: 'social' },
-        { label: 'Creator',     href: '/creator',     icon: Sparkles },
-        { label: 'Wallet',      href: '/wallet',       icon: Wallet },
-        { label: 'Payout',      href: '/wallet/payout', icon: DollarSign },
-        { label: 'Marketplace', href: '/marketplace',  icon: DollarSign, future: true },
-      ]
-    },
-    {
-      id: 'education',
-      label: 'Education',
-      icon: EduIcon,
-      items: [
-        { label: t.schools,        href: '/schools',            icon: School,         roles: ['SUPER_ADMIN'] },
-        { label: t.students,       href: '/students',           icon: GraduationCap,  roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER'] },
-        { label: t.teachers,       href: '/teachers',           icon: UserCheck,      roles: ['SUPER_ADMIN','SCHOOL_ADMIN'] },
-        { label: t.guardians,      href: '/guardians',          icon: Users,          roles: ['SUPER_ADMIN','SCHOOL_ADMIN'] },
-        { label: t.classes,        href: '/classes',            icon: BookOpen,       roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER'] },
-        { label: 'Class Schedule', href: '/schedule',           icon: LayoutGrid,     roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER'] },
-        { label: t.attendance,       href: '/attendance',          icon: ClipboardCheck, roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER','STUDENT','GUARDIAN'] },
-        { label: 'QR Check-in',      href: '/attendance/qr-checkin',icon: QrCode,         roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER','STUDENT'] },
-        { label: t.attendanceReport, href: '/attendance/report',   icon: BarChart3,      roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER'] },
-        { label: t.grades,         href: '/grades',             icon: BookMarked,     roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER','STUDENT','GUARDIAN'] },
-        { label: t.behavior,       href: '/behavior',           icon: Star,           roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER','STUDENT'] },
-        { label: 'Live Classes',   href: '/live-class',         icon: Video },
-        { label: t.audio,          href: '/audio',              icon: Headphones,     roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER','STUDENT'] },
-        { label: t.calendar,       href: '/calendar',           icon: Calendar },
-        { label: t.announcements,  href: '/announcements',      icon: Megaphone },
-        { label: t.notes,          href: '/notes',              icon: StickyNote,     roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER','STUDENT'] },
-        { label: t.library,        href: '/library',            icon: BookOpen,       roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER','STUDENT'] },
-        { label: t.fees,           href: '/fees',               icon: DollarSign,     roles: ['SUPER_ADMIN','SCHOOL_ADMIN'] },
-        { label: t.terms,          href: '/terms',              icon: CalendarDays,   roles: ['SUPER_ADMIN','SCHOOL_ADMIN'] },
-        { label: t.reports,        href: '/reports',            icon: BarChart3,      roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER'] },
-        { label: t.schedule,       href: '/activities',         icon: Clock,          roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER'] },
-        { label: 'Analytics',     href: '/analytics',          icon: BarChart3 },
-        { label: 'Leaderboard',   href: '/leaderboard',        icon: Trophy },
-        { label: 'Assignments',   href: '/assignments',        icon: ClipboardCheck },
-        { label: 'Exams',          href: '/exams',              icon: BookMarked },
-        { label: 'Certificates',   href: '/certificates',       icon: Star,           future: true },
-      ]
-    },
-    {
-      id: 'administration',
-      label: 'Administration',
-      icon: Wrench,
-      items: [
-        { label: t.users,    href: '/users',    icon: Users,       roles: ['SUPER_ADMIN','SCHOOL_ADMIN'] },
-        { label: t.import,   href: '/import',   icon: Upload,      roles: ['SUPER_ADMIN','SCHOOL_ADMIN'] },
-        { label: t.audit,    href: '/audit',    icon: Shield,      roles: ['SUPER_ADMIN','SCHOOL_ADMIN'] },
-        { label: t.settings, href: '/settings', icon: Settings,    roles: ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER'] },
-        { label: 'Roles',      href: '/roles',    icon: Shield,    future: true },
-        { label: 'Analytics',  href: '/analytics',icon: BarChart3, future: true },
-      ]
-    },
-  ], [t, role])
+  // ── School access (Education domain) ──────────────────────────────────────
+  const {
+    hasSchools,
+    activeSchool,
+    activeRole,
+    memberships,
+    canEducation,
+    switchSchool
+  } = useSchoolAccess()
 
-  // Filter items by role — deduplicate by href within each group (href must be unique per group)
+  // ── Navigation groups ──────────────────────────────────────────────────────
+  const groups: NavGroup[] = useMemo(() => {
+    // ── Education items — dynamically built from active school role ──────────
+    // These are shown ONLY when the user has an active school membership.
+    // Each item's visibility is controlled by canEducation() to respect the
+    // school-scoped role (not the global user.role).
+    const educationItems: NavItem[] = hasSchools ? [
+      // My School — all members can see their school (using VIEW_SCHOOL permission)
+      ...(canEducation('VIEW_SCHOOL') ? [
+        { label: 'My School', href: '/schools', icon: School }
+      ] : []),
+      // School management — admin only (uses MANAGE_SCHOOL)
+      ...(canEducation('VIEW_STUDENTS') ? [
+        { label: t.students, href: '/students', icon: GraduationCap }
+      ] : []),
+      ...(canEducation('VIEW_TEACHERS') ? [
+        { label: t.teachers, href: '/teachers', icon: UserCheck }
+      ] : []),
+      ...(canEducation('VIEW_GUARDIANS') ? [
+        { label: t.guardians, href: '/guardians', icon: Users }
+      ] : []),
+      ...(canEducation('VIEW_CLASSES') ? [
+        { label: t.classes, href: '/classes', icon: BookOpen }
+      ] : []),
+      ...(canEducation('VIEW_SCHEDULE') ? [
+        { label: 'Class Schedule', href: '/schedule', icon: LayoutGrid }
+      ] : []),
+      ...(canEducation('VIEW_ATTENDANCE') ? [
+        { label: t.attendance, href: '/attendance', icon: ClipboardCheck }
+      ] : []),
+      ...(canEducation('VIEW_ATTENDANCE') && activeRole !== 'GUARDIAN' ? [
+        { label: 'QR Check-in', href: '/attendance/qr-checkin', icon: QrCode }
+      ] : []),
+      ...(canEducation('VIEW_ATTENDANCE') && (activeRole === 'TEACHER' || activeRole === 'SCHOOL_ADMIN' || activeRole === 'SUPER_ADMIN') ? [
+        { label: t.attendanceReport, href: '/attendance/report', icon: BarChart3 }
+      ] : []),
+      ...(canEducation('VIEW_GRADES') ? [
+        { label: t.grades, href: '/grades', icon: BookMarked }
+      ] : []),
+      ...(canEducation('VIEW_BEHAVIOR') ? [
+        { label: t.behavior, href: '/behavior', icon: Star }
+      ] : []),
+      { label: 'Live Classes', href: '/live-class', icon: Video },
+      ...(canEducation('VIEW_AUDIO_LESSONS') ? [
+        { label: t.audio, href: '/audio', icon: Headphones }
+      ] : []),
+      { label: t.calendar, href: '/calendar', icon: Calendar },
+      { label: t.announcements, href: '/announcements', icon: Megaphone },
+      ...(canEducation('VIEW_ASSIGNMENTS') ? [
+        { label: 'Assignments', href: '/assignments', icon: ClipboardCheck }
+      ] : []),
+      ...(canEducation('VIEW_EXAMS') ? [
+        { label: 'Exams', href: '/exams', icon: BookMarked }
+      ] : []),
+      { label: 'Leaderboard', href: '/leaderboard', icon: Trophy },
+      ...(canEducation('VIEW_LIBRARY') ? [
+        { label: t.library, href: '/library', icon: BookOpen }
+      ] : []),
+      ...(canEducation('VIEW_FEES') ? [
+        { label: t.fees, href: '/fees', icon: DollarSign }
+      ] : []),
+      ...(canEducation('MANAGE_TERMS') ? [
+        { label: t.terms, href: '/terms', icon: CalendarDays }
+      ] : []),
+      ...(canEducation('VIEW_REPORTS') ? [
+        { label: t.reports, href: '/reports', icon: BarChart3 }
+      ] : []),
+      ...(canEducation('VIEW_SCHEDULE') ? [
+        { label: t.schedule, href: '/activities', icon: Clock }
+      ] : []),
+      ...(canEducation('VIEW_ANALYTICS') ? [
+        { label: 'Analytics', href: '/analytics', icon: BarChart3 }
+      ] : []),
+      ...(canEducation('VIEW_ASSIGNMENTS') ? [
+        { label: 'Certificates', href: '/certificates', icon: Star, future: true }
+      ] : []),
+    ] : []
+
+    // ── Administration items (Education admin only) ──────────────────────────
+    // Administration = school management tools, NOT global HALQA platform admin.
+    // Shown only to users with admin roles in their active school.
+    const administrationItems: NavItem[] = hasSchools && (activeRole === 'SUPER_ADMIN' || activeRole === 'SCHOOL_ADMIN') ? [
+      { label: 'Members',  href: '/school-memberships/manage', icon: Users },
+      { label: t.users,    href: '/users',    icon: Users },
+      { label: t.import,   href: '/import',   icon: Upload },
+      { label: t.audit,    href: '/audit',    icon: Shield },
+      { label: t.settings, href: '/settings', icon: Settings },
+    ] : (activeRole === 'TEACHER' ? [
+      { label: t.settings, href: '/settings', icon: Settings },
+    ] : [])
+
+    return [
+      {
+        id: 'home',
+        label: 'Home',
+        icon: Home,
+        items: [
+          { label: t.dashboard, href: '/dashboard', icon: LayoutDashboard },
+          { label: 'Notifications', href: '/notifications', icon: Bell },
+        ]
+      },
+      // ── SOCIAL section — available to ALL authenticated users ──────────────
+      // No school required. Every HALQA user can use these features.
+      {
+        id: 'social',
+        label: 'Social',
+        icon: Rss,
+        items: [
+          { label: 'Feed', href: '/feed', icon: Rss },
+          { label: 'Explore', href: '/explore', icon: Compass },
+          { label: 'Communities', href: '/communities', icon: UsersRound },
+          { label: t.voiceClub, href: '/voice-club', icon: Radio },
+          { label: 'Live Rooms', href: '/live-class', icon: Video },
+          { label: 'Chat', href: '/dm', icon: MessagesSquare, badge: 'dm' as const },
+          { label: 'Groups', href: '/group-chat', icon: Users, badge: 'group' as const },
+          { label: t.messages, href: '/messages', icon: MessageSquare },
+          { label: 'Friends', href: '/social', icon: UserPlus, badge: 'social' as const },
+          { label: 'Creator', href: '/creator', icon: Sparkles },
+          { label: 'Wallet', href: '/wallet', icon: Wallet },
+          { label: 'Payout', href: '/wallet/payout', icon: DollarSign },
+          { label: 'Marketplace', href: '/marketplace', icon: DollarSign, future: true },
+        ]
+      },
+      // ── EDUCATION section — only shown when user has school membership ──────
+      // If no school: show prompts to join or create a school.
+      // If has school: show role-appropriate education navigation.
+      {
+        id: 'education',
+        label: 'Education',
+        icon: EduIcon,
+        items: hasSchools ? educationItems : [
+          // No school membership → show onboarding prompts
+          { label: 'Join a School', href: '/schools/join', icon: School },
+          { label: 'Create a School', href: '/school-memberships/create', icon: PlusCircle },
+        ]
+      },
+      // ── ADMINISTRATION — school admin tools (only for admin roles) ──────────
+      ...(administrationItems.length > 0 ? [{
+        id: 'administration',
+        label: 'Administration',
+        icon: Wrench,
+        items: administrationItems
+      }] : []),
+      // ── PLATFORM ADMIN — SUPER_ADMIN global controls ──────────────────────
+      ...(user?.role === 'SUPER_ADMIN' ? [{
+        id: 'platform',
+        label: 'Platform Admin',
+        icon: Shield,
+        items: [
+          { label: 'Admin Dashboard',   href: '/admin',               icon: LayoutDashboard },
+          { label: 'Users',             href: '/admin/users',          icon: Users },
+          { label: 'Schools',           href: '/admin/schools',        icon: School },
+          { label: 'Moderation',        href: '/admin/moderation',     icon: Shield },
+          { label: 'Live & Voice',      href: '/admin/live-voice',     icon: Radio },
+          { label: 'Payments',          href: '/admin/payments',       icon: DollarSign },
+          { label: 'Gifts & Coins',     href: '/admin/gifts',          icon: Sparkles },
+          { label: 'Security',          href: '/admin/security',       icon: Shield },
+          { label: 'Audit Logs',        href: '/admin/audit-logs',     icon: Shield },
+          { label: 'Announcements',     href: '/admin/announcements',  icon: Megaphone },
+          { label: 'Analytics',         href: '/admin/analytics',      icon: BarChart3 },
+          { label: 'System Health',     href: '/admin/system-health',  icon: Activity },
+          { label: 'Platform Settings', href: '/admin/settings',       icon: Settings },
+          { label: 'Admin Provisioning',href: '/admin/admins',         icon: Shield },
+        ]
+      }] : []),
+    ]
+  }, [t, hasSchools, activeRole, canEducation])
+
+  // Filter items — deduplicate by href within each group
   const filteredGroups = useMemo(() =>
     groups.map(group => ({
       ...group,
       items: group.items.filter((item, idx, arr) => {
-        const hasRole = !item.roles || item.roles.includes(role)
         // Keep only the first occurrence of each href within this group
-        const isFirstHref = arr.findIndex(x => x.href === item.href) === idx
-        return hasRole && isFirstHref
+        return arr.findIndex(x => x.href === item.href) === idx
       })
     })).filter(g => g.items.length > 0)
-  , [groups, role])
+  , [groups])
 
   // Auto-open group when navigating to a route inside it (useEffect avoids render-time state writes)
   useEffect(() => {
@@ -344,28 +443,50 @@ export function Sidebar() {
       )}>
         {!collapsed && (
           <div className="flex items-center gap-2 min-w-0">
-            {user?.school?.logoUrl ? (
-              <img
-                src={resolveMediaUrl(user.school.logoUrl)}
-                alt={user.school.name}
-                className="w-8 h-8 rounded-lg object-contain bg-white/10 p-0.5 flex-shrink-0"
-              />
+            {/* FIX (HALQA-UI-01): SUPER_ADMIN is a platform role — show HALQA Platform,
+                NOT the school name/logo. School name is only shown for school-scoped roles. */}
+            {user?.role === 'SUPER_ADMIN' ? (
+              <>
+                <div className="w-8 h-8 bg-gradient-to-br from-red-600 to-red-700 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <Shield className="w-4 h-4 text-white" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-bold leading-none truncate">HALQA</p>
+                  <p className="text-[10px] text-halqa-300 leading-none mt-0.5">Platform Administration</p>
+                </div>
+              </>
+            ) : user?.school?.logoUrl ? (
+              <>
+                <img
+                  src={resolveMediaUrl(user.school.logoUrl)}
+                  alt={user.school.name}
+                  className="w-8 h-8 rounded-lg object-contain bg-white/10 p-0.5 flex-shrink-0"
+                />
+                <div className="min-w-0">
+                  <p className="text-sm font-bold leading-none truncate">
+                    {user?.school?.name || 'HALQA'}
+                  </p>
+                  <p className="text-[10px] text-halqa-300 leading-none mt-0.5">Social Platform</p>
+                </div>
+              </>
             ) : (
-              <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center flex-shrink-0">
-                <Rss className="w-4 h-4 text-white" />
-              </div>
+              <>
+                <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <Rss className="w-4 h-4 text-white" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-bold leading-none truncate">HALQA</p>
+                  <p className="text-[10px] text-halqa-300 leading-none mt-0.5">Social Platform</p>
+                </div>
+              </>
             )}
-            <div className="min-w-0">
-              <p className="text-sm font-bold leading-none truncate">
-                {user?.school?.name || 'HALQA'}
-              </p>
-              <p className="text-[10px] text-halqa-300 leading-none mt-0.5">Social Platform</p>
-            </div>
           </div>
         )}
         {collapsed && (
           <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center">
-            {user?.school?.logoUrl
+            {user?.role === 'SUPER_ADMIN' ? (
+              <Shield className="w-4 h-4 text-white" />
+            ) : user?.school?.logoUrl
               ? <img src={resolveMediaUrl(user.school.logoUrl)} alt="" className="w-7 h-7 rounded object-contain" />
               : <Rss className="w-4 h-4 text-white" />
             }
@@ -382,6 +503,43 @@ export function Sidebar() {
           }
         </button>
       </div>
+
+      {/* Active school selector — only shown when user has multiple schools.
+          FIX (HALQA-UI-02): SUPER_ADMIN is a platform role — never show school context.
+          Managing schools (/admin/schools) is different from operating inside a school. */}
+      {!collapsed && hasSchools && memberships.length > 1 && user?.role !== 'SUPER_ADMIN' && (
+        <div className="px-3 py-2 border-b border-halqa-700">
+          <p className="text-[9px] font-bold uppercase tracking-wider text-halqa-500 mb-1">Education Context</p>
+          <select
+            value={activeSchool?.id || ''}
+            onChange={(e) => switchSchool(e.target.value)}
+            className="w-full bg-halqa-800 text-white text-xs rounded px-2 py-1 border border-halqa-600 focus:outline-none focus:border-indigo-500"
+            aria-label="Switch active school"
+          >
+            {memberships.map(m => (
+              <option key={m.schoolId} value={m.schoolId}>
+                {m.school.name} ({m.role.replace(/_/g, ' ')})
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {/* Active school indicator — single school.
+          FIX (HALQA-UI-02): Hidden for SUPER_ADMIN — platform role, not school role. */}
+      {!collapsed && hasSchools && memberships.length === 1 && user?.role !== 'SUPER_ADMIN' && (
+        <div className="px-3 py-1.5 border-b border-halqa-700 flex items-center gap-2">
+          {activeSchool?.logoUrl ? (
+            <img src={resolveMediaUrl(activeSchool.logoUrl)} alt="" className="w-4 h-4 rounded object-contain flex-shrink-0" />
+          ) : (
+            <EduIcon className="w-3.5 h-3.5 text-halqa-400 flex-shrink-0" />
+          )}
+          <div className="min-w-0">
+            <p className="text-[10px] text-halqa-300 truncate">{activeSchool?.name}</p>
+            <p className="text-[9px] text-halqa-500 capitalize">{activeRole?.replace(/_/g, ' ').toLowerCase()}</p>
+          </div>
+        </div>
+      )}
 
       {/* Navigation groups */}
       <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-1" aria-label="Main navigation">
@@ -416,7 +574,11 @@ export function Sidebar() {
             </Avatar>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium truncate">{user?.firstName} {user?.lastName}</p>
-              <p className="text-xs text-halqa-400 truncate capitalize">{user?.role?.replace(/_/g, ' ').toLowerCase()}</p>
+              {user?.role === 'SUPER_ADMIN' ? (
+                <p className="text-xs text-red-400 font-semibold truncate">Platform Admin</p>
+              ) : (
+                <p className="text-xs text-halqa-400 truncate capitalize">{user?.role?.replace(/_/g, ' ').toLowerCase()}</p>
+              )}
             </div>
             <button
               onClick={logout}

@@ -13,6 +13,7 @@ import { Modal } from '@/components/ui/modal'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { Plus, Clock, Play, Square, Timer, Users, Trash2 } from 'lucide-react'
 import { ErrorState } from '@/components/ui/error-state'
 import { format, differenceInSeconds } from 'date-fns'
@@ -53,6 +54,7 @@ function LiveTimer({ startTime }: { startTime: string }) {
 
 export default function ActivitiesPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
 
@@ -110,7 +112,7 @@ export default function ActivitiesPage() {
     onError: () => toast({ title: 'Delete failed', variant: 'destructive' }),
   })
 
-  const canCreate = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  const canCreate = isTeacher
   const activeCount = (activities || []).filter((a: any) => a.isActive).length
 
   return (

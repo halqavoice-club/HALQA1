@@ -62,6 +62,13 @@ export default function CreatePostScreen() {
     if (result.canceled || !result.assets?.[0]) return;
     const asset = result.assets[0];
     const isVideo = asset.type === 'video';
+
+    // Client-side guard: 50 MB max (matches backend multer limit)
+    if (asset.fileSize && asset.fileSize > 50 * 1024 * 1024) {
+      showMessage({ message: 'File too large (max 50 MB)', type: 'warning' });
+      return;
+    }
+
     setMedia({
       uri: asset.uri,
       type: isVideo ? 'VIDEO' : 'IMAGE',
@@ -82,41 +89,47 @@ export default function CreatePostScreen() {
     }
     setUploading(true);
     try {
-      let postData: any;
+      let mediaPayload: { url: string; type: string; mimeType: string }[] = [];
 
       if (media) {
-        // Multipart form upload for media posts
+        // Step 1: Upload the media file to /upload — get back a URL
         const form = new FormData();
-        form.append('body', body.trim());
-        form.append('type', media.type);
-        form.append('visibility', visibility);
-        if (location.trim()) form.append('location', location.trim());
-        form.append('media', {
+        form.append('file', {
           uri: media.uri,
           type: media.mimeType,
           name: media.name,
         } as any);
 
-        const res = await api.post('/posts', form, {
+        const uploadRes = await api.post('/upload', form, {
           headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 120_000, // 2 min for large videos
         });
-        postData = res.data;
-      } else {
-        // Plain text post
-        const res = await api.post('/posts', {
-          body: body.trim(),
-          type: 'TEXT',
-          visibility,
-          ...(location.trim() ? { location: location.trim() } : {}),
-        });
-        postData = res.data;
+
+        const uploadedUrl: string = uploadRes.data?.data?.url;
+        if (!uploadedUrl) throw new Error('Upload failed — no URL returned');
+
+        mediaPayload = [{
+          url:      uploadedUrl,
+          type:     media.type,      // 'IMAGE' | 'VIDEO'
+          mimeType: media.mimeType,
+        }];
       }
+
+      // Step 2: Create the post with the uploaded media URL(s)
+      await api.post('/posts', {
+        body:       body.trim() || undefined,
+        type:       mediaPayload.length > 0 ? mediaPayload[0].type : 'TEXT',
+        visibility,
+        media:      mediaPayload,
+        ...(location.trim() ? { location: location.trim() } : {}),
+      });
 
       showMessage({ message: '✅ Posted!', type: 'success' });
       queryClient.invalidateQueries({ queryKey: ['feed'] });
       router.back();
     } catch (e: any) {
-      showMessage({ message: e?.response?.data?.message ?? 'Failed to post', type: 'danger' });
+      const msg = e?.response?.data?.message ?? e?.message ?? 'Failed to post';
+      showMessage({ message: msg, type: 'danger' });
     } finally {
       setUploading(false);
     }

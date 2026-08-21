@@ -180,6 +180,7 @@ export default function LiveClassScreen() {
   const [isJoined,      setIsJoined]      = useState(false);
   const [isConnecting,  setIsConnecting]  = useState(false);
   const [isMuted,       setIsMuted]       = useState(true);
+  const [isCameraOn,    setIsCameraOn]    = useState(false);
   const [chatText,      setChatText]      = useState('');
   const [chatMessages,  setChatMessages]  = useState<ChatMessage[]>([]);
   const [activeTab,     setActiveTab]     = useState<'video'|'chat'|'whiteboard'|'quran'|'polls'|'controls'>('video');
@@ -753,13 +754,34 @@ export default function LiveClassScreen() {
   }, [id]);
 
   // Toggle screen sharing (requires native LiveKit build)
+  // P2-05 (PLAT-02): Check platform capability before attempting setScreenShareEnabled.
+  // - lk.connected: must have a live LiveKit connection
+  // - (lk as any).room: audio-only hook; video/screen share requires full Room instance
+  // - setScreenShareEnabled: available in @livekit/react-native v2+ native builds only
+  //   It is NOT available in Expo Go — throws synchronously with "not implemented"
+  //   On iOS it additionally requires a Broadcast Extension target (native build only)
+  // Detection: probe for the function at call time; show a clear message if absent.
   const handleToggleScreenShare = useCallback(async () => {
     if (!lk.connected) {
-      showMessage({ message: 'Not connected via LiveKit', type: 'warning' }); return;
+      showMessage({ message: 'Audio not connected', type: 'warning', duration: 2000 }); return;
+    }
+    const participant = (lk as any).room?.localParticipant;
+    if (!participant || typeof participant.setScreenShareEnabled !== 'function') {
+      // Screen share requires a native custom build with @livekit/react-native-webrtc.
+      // It is not available in Expo Go or in audio-only builds.
+      showMessage({
+        message: '📵 Screen share not available',
+        description: Platform.OS === 'ios'
+          ? 'Screen share requires a custom iOS build with a Broadcast Extension.'
+          : 'Screen share requires a custom native build (not available in Expo Go).',
+        type: 'info',
+        duration: 4000,
+      });
+      return;
     }
     try {
       const next = !isScreenSharing;
-      await (lk as any).room?.localParticipant?.setScreenShareEnabled(next);
+      await participant.setScreenShareEnabled(next);
       setIsScreenSharing(next);
       const socket = getSocket();
       if (socket) {
@@ -767,9 +789,69 @@ export default function LiveClassScreen() {
           { liveClassId: id });
       }
     } catch (e: any) {
-      showMessage({ message: 'Screen share not available in this build', type: 'info', duration: 2500 });
+      // Catch runtime errors (permission denied, platform restriction, etc.)
+      setIsScreenSharing(false); // reset state to avoid stuck UI
+      const msg = e?.message?.toLowerCase() ?? '';
+      if (msg.includes('permission') || msg.includes('denied')) {
+        showMessage({ message: '📵 Screen share permission denied', type: 'warning', duration: 3000 });
+      } else if (msg.includes('not supported') || msg.includes('not implemented')) {
+        showMessage({
+          message: '📵 Screen share not supported on this device/build',
+          type: 'info',
+          duration: 4000,
+        });
+      } else {
+        showMessage({ message: 'Screen share failed', type: 'danger', duration: 2500 });
+      }
     }
   }, [id, lk, isScreenSharing]);
+
+  // ── Camera toggle ─────────────────────────────────────────────────────────
+  const handleToggleCamera = useCallback(async () => {
+    if (!lk.connected) {
+      showMessage({ message: 'Join the class first', type: 'warning', duration: 2000 });
+      return;
+    }
+    const participant = (lk as any).room?.localParticipant;
+    if (!participant || typeof participant.setCameraEnabled !== 'function') {
+      showMessage({
+        message: '📷 Camera requires native build',
+        description: 'Run "eas build" or "expo run:android" to enable camera in live classes.',
+        type: 'info',
+        duration: 5000,
+      });
+      return;
+    }
+    try {
+      const next = !isCameraOn;
+      await participant.setCameraEnabled(next);
+      setIsCameraOn(next);
+      // Notify other participants via API + socket
+      if (user?.id) {
+        await api.patch(`/live-classes/${id}/participants/${user.id}/video`, { isVideoOn: next }).catch(() => {});
+      }
+      const socket = getSocket();
+      socket?.emit('liveclass:video_changed', { liveClassId: id, isVideoOn: next });
+      showMessage({
+        message: next ? '📷 Camera on' : '📷 Camera off',
+        type: 'info',
+        duration: 1500,
+      });
+    } catch (e: any) {
+      const msg = (e?.message ?? '').toLowerCase();
+      if (msg.includes('permission') || msg.includes('denied')) {
+        showMessage({
+          message: '📷 Camera permission denied',
+          description: 'Go to Settings → Apps → HALQA → Permissions → Camera → Allow',
+          type: 'danger',
+          duration: 6000,
+        });
+      } else {
+        showMessage({ message: `Camera error: ${e?.message ?? 'unknown'}`, type: 'danger', duration: 3000 });
+      }
+      setIsCameraOn(false);
+    }
+  }, [id, lk, isCameraOn, user?.id]);
 
   if (isLoading) return <View style={styles.centered}><ActivityIndicator size="large" color="#4f46e5" /></View>;
   if (!liveClass) return <View style={styles.centered}><Text style={styles.errorText}>Class not found</Text></View>;
@@ -854,7 +936,7 @@ export default function LiveClassScreen() {
                       <View style={styles.livePill}><View style={styles.liveDot} /><Text style={styles.liveText}>LIVE</Text></View>
                       {isOpenMic && <Text allowFontScaling={false} style={styles.openMicBadge}>🎤 Open Mic</Text>}
                     </View>
-                    <Text style={styles.videoNote}>📱 Full video requires native build</Text>
+                    <Text style={styles.videoNote}>📱 Camera available — tap the Camera button below to enable</Text>
                     <View style={styles.participantCount}>
                       <Ionicons name="people-outline" size={14} color="#a5b4fc" />
                       <Text style={styles.participantCountText}>{participants.length || liveClass.participantsCount} joined</Text>
@@ -1134,6 +1216,14 @@ export default function LiveClassScreen() {
               }}>
                 <Ionicons name={isMuted ? 'mic-off' : 'mic'} size={22} color={isMuted ? '#6b7280' : '#4f46e5'} />
                 <Text style={styles.ctrlLabel}>{isMuted ? 'Unmute' : 'Mute'}</Text>
+              </TouchableOpacity>
+              {/* Camera toggle */}
+              <TouchableOpacity
+                style={[styles.ctrlBtn, isCameraOn && styles.ctrlBtnActive]}
+                onPress={handleToggleCamera}
+              >
+                <Ionicons name={isCameraOn ? 'videocam' : 'videocam-off'} size={22} color={isCameraOn ? '#4f46e5' : '#6b7280'} />
+                <Text style={styles.ctrlLabel}>{isCameraOn ? 'Cam On' : 'Camera'}</Text>
               </TouchableOpacity>
               {/* Emoji reactions */}
               <TouchableOpacity style={[styles.ctrlBtn, showReactions && styles.ctrlBtnActive]} onPress={() => setShowReactions(r => !r)}>

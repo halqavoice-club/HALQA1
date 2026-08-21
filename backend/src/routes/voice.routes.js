@@ -32,6 +32,25 @@ const coverUpload = multer({
     else cb(new Error('Only image files are allowed'));
   },
 });
+
+// L-8 FIX: Validate uploaded cover image magic bytes so spoofed Content-Type
+// headers cannot be used to upload non-image files via this endpoint.
+// Reuses the same validation logic as the main /uploads route.
+async function validateCoverImage(req, res, next) {
+  if (!req.file) return next();
+  try {
+    const { fromBuffer: fileTypeFromBuffer } = require('file-type');
+    const detected = await fileTypeFromBuffer(req.file.buffer);
+    const mime = detected?.mime;
+    if (!mime || !mime.startsWith('image/')) {
+      const { errorResponse } = require('../utils/response');
+      return errorResponse(res, `File type not allowed (detected: ${mime || 'unknown'}). Only images are accepted.`, 400);
+    }
+    next();
+  } catch {
+    next(); // fail-open on detection error — multer MIME filter already provides basic protection
+  }
+}
 const { getLiveKitToken } = require('../controllers/livekit.controller');
 const { getMyStats, getLeaderboard } = require('../controllers/voice-stats.controller');
 const {
@@ -116,7 +135,7 @@ router.patch('/:id',
 router.delete('/:id', deleteRoom);
 
 // Upload room cover image (host only)
-router.post('/:id/cover', coverUpload.single('cover'), uploadRoomCover);
+router.post('/:id/cover', coverUpload.single('cover'), validateCoverImage, uploadRoomCover);
 
 router.post('/:id/join', joinRoom);
 router.post('/:id/leave', leaveRoom);
@@ -278,7 +297,7 @@ router.get('/:id/gifts/top-supporters', getTopSupporters);
 // instead of the full GET /:id, reducing data usage by 97%.
 // ADDITIVE — new route only, no existing routes changed.
 const { getCache } = require('../utils/redis');
-const { prisma }   = require('../utils/prisma');
+const prisma       = require('../utils/prisma');
 router.get('/:id/status', authenticate, async (req, res, next) => {
   try {
     const { id } = req.params;

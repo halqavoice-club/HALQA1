@@ -37,8 +37,10 @@ const prismaMock = {
   $disconnect: jest.fn().mockResolvedValue(undefined),
   $on:         jest.fn(),   // event emitter (query, error, warn)
   $use:        jest.fn(),   // middleware (N+1 detector in dev)
-  $queryRaw:   jest.fn().mockResolvedValue([{ 1: 1 }]),
-  $executeRaw: jest.fn().mockResolvedValue(1),
+  $queryRaw:        jest.fn().mockResolvedValue([{ 1: 1 }]),
+  $executeRaw:      jest.fn().mockResolvedValue(1),
+  $queryRawUnsafe:  jest.fn().mockResolvedValue([]),
+  $executeRawUnsafe: jest.fn().mockResolvedValue(1),
 
   // $transaction — default delegates to the callback; tests override as needed
   $transaction: jest.fn().mockImplementation(async (opsOrFn) => {
@@ -87,6 +89,8 @@ const prismaMock = {
   liveClass:             modelMock(),
   liveClassParticipant:  modelMock(),
   liveClassMessage:      modelMock(),
+  liveClassAttendance:   modelMock(),
+  liveClassHandQueue:    modelMock(),
   groupConversation:     modelMock(),
   groupMember:           modelMock(),
   groupMessage:          modelMock(),

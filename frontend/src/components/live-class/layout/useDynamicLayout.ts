@@ -24,7 +24,7 @@ import {
   type TrackPublication,
   Track,
 } from 'livekit-client'
-import { io, type Socket } from 'socket.io-client'
+import { getSocket as getAppSocket } from '@/lib/socket'
 import { useDynamicLayoutStore } from './useDynamicLayoutStore'
 import type {
   SpeakerSlot,
@@ -102,21 +102,6 @@ function mapParticipantToSlot(
     isOnline: true,
     connectionQuality: mapQuality(p.connectionQuality as string),
   }
-}
-
-// ---------------------------------------------------------------------------
-// Module-level socket singleton (one per API URL)
-// ---------------------------------------------------------------------------
-
-let _socket: Socket | null = null
-
-function getSocket(): Socket {
-  if (!_socket) {
-    const url =
-      (process.env.NEXT_PUBLIC_API_URL as string | undefined) ?? ''
-    _socket = io(url, { autoConnect: false })
-  }
-  return _socket
 }
 
 // ---------------------------------------------------------------------------
@@ -218,8 +203,9 @@ export function useDynamicLayout(roomId: string): UseDynamicLayoutReturn {
   // Socket.IO events
   // -------------------------------------------------------------------------
   useEffect(() => {
-    const socket = getSocket()
-    if (!socket.connected) socket.connect()
+    const socket = getAppSocket()
+    // Shared socket may not be initialised yet (before login); skip gracefully.
+    if (!socket) return
 
     const onSeatChanged = ({
       userId,

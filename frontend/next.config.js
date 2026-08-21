@@ -43,6 +43,34 @@ const nextConfig = {
   experimental: {
     optimizePackageImports: ['lucide-react', '@radix-ui/react-icons'],
   },
+  // ── Permissions-Policy header for camera/mic/screen share ───────────────────
+  // Use camera=* — this allows camera access for both the top-level page AND
+  // same-origin iframes (LiveKit embeds).
+  //
+  // WHY NOT camera=(self):
+  //   In the Permissions Policy spec, allowlist tokens like `self` ONLY apply to
+  //   embedded browsing contexts (iframes). For the TOP-LEVEL document, any
+  //   non-`*` allowlist results in the policy being "not delegated to the top
+  //   level" in some Chrome versions — effectively blocking camera.
+  //   This is the root cause of NotAllowedError even when the browser shows
+  //   camera as "Allowed" in site settings.
+  //
+  // chrome://flags/#enable-experimental-web-platform-features confirmed:
+  //   camera=(self)  →  top-level page camera BLOCKED by policy
+  //   camera=*       →  top-level page camera ALLOWED
+  async headers() {
+    return [
+      {
+        source: '/(.*)',
+        headers: [
+          {
+            key: 'Permissions-Policy',
+            value: 'camera=*, microphone=*, display-capture=*',
+          },
+        ],
+      },
+    ]
+  },
 };
 
 module.exports = withPWA(nextConfig);

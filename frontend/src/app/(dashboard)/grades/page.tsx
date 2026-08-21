@@ -1,9 +1,10 @@
-﻿'use client'
+'use client'
 
 import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { useToast } from '@/components/ui/use-toast'
 import { downloadFile, buildFilename } from '@/lib/download'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -153,12 +154,11 @@ const TYPE_LABELS: Record<GradeType, string> = {
 
 export default function GradesPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
 
-  const isStudent = user?.role === 'STUDENT'
-  const isGuardian = user?.role === 'GUARDIAN'
-  const canManage = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  const canManage = isTeacher
 
   // ── State ──
   const [selectedClassId, setSelectedClassId] = useState<string>('')

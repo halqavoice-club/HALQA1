@@ -100,3 +100,24 @@ login_test.json
 __pycache__/
 *.pyc
 *.pyo
+
+# ─── BUILD ARTIFACTS ─────────────────────────────────────────────────────────
+
+# TypeScript incremental build cache — regenerated on every build
+frontend/tsconfig.tsbuildinfo
+
+# Lint output artifacts
+frontend/lint-output.txt
+
+# SSL certificates — should be provisioned by the server, not committed
+frontend/certificates/
+
+# Windows shortcuts
+*.lnk
+
+# Jest cache directories
+mobile/.jest/
+.jest/
+
+# Demo seed scripts — contain hardcoded credentials, never for production
+backend/prisma/seed-demo-accounts.js

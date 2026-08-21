@@ -68,7 +68,15 @@ async function listStudents(req, res, next) {
     }
 
     const { skip, ...pagination } = getPagination(page, limit);
-    const schoolId = req.user.schoolId;
+    const schoolId = req.schoolId || req.user.schoolId;
+
+    // Safety: non-SUPER_ADMIN users must always be scoped to a school.
+    // req.schoolId is set by requireSchoolMember() from the SchoolMembership table.
+    // req.user.schoolId is the legacy single-school fallback.
+    // If neither is present, refuse the request — returning all-school data is not safe.
+    if (!schoolId && req.user.role !== 'SUPER_ADMIN') {
+      return errorResponse(res, 'School context required', 400);
+    }
 
     const where = {
       deletedAt: null,
@@ -131,8 +139,16 @@ async function listStudents(req, res, next) {
 
 async function getStudent(req, res, next) {
   try {
-    const student = await prisma.student.findUnique({
-      where: { id: req.params.id },
+    // C-4 FIX: Verify the student belongs to the requester's school.
+    // Previously only the list endpoint was school-scoped; individual fetch was not,
+    // allowing cross-school data access via guessed/discovered UUIDs.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const student = await prisma.student.findFirst({
+      where: {
+        id: req.params.id,
+        deletedAt: null,
+        ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId })
+      },
       include: {
         user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true, avatarUrl: true, dateOfBirth: true, gender: true, status: true, emailVerified: true, lastLoginAt: true } },
         enrollments: {
@@ -156,9 +172,15 @@ async function getStudent(req, res, next) {
 async function createStudent(req, res, next) {
   try {
     const { email, firstName, lastName, studentId, phone, dateOfBirth, gender, gradeLevel, classId, guardianId } = req.body;
-    const schoolId = req.user.schoolId || req.body.schoolId;
+    // H-2 FIX: Never trust req.body.schoolId — always use the school resolved from
+    // the authenticated context (set by requireSchoolMember middleware).
+    const schoolId = req.schoolId || req.user.schoolId;
+    if (!schoolId) return errorResponse(res, 'School context required', 400);
 
-    const passwordHash = await bcrypt.hash('Halqa@2024', 12);
+    // Generate a cryptographically random temporary password instead of a hardcoded default (L-1 fix)
+    const crypto = require('crypto');
+    const tempPassword = crypto.randomBytes(12).toString('hex'); // 24-char hex — user must reset via email
+    const passwordHash = await bcrypt.hash(tempPassword, 12);
     const qrCode = `STU-${uuidv4().split('-')[0].toUpperCase()}`;
 
     const student = await prisma.$transaction(async (tx) => {
@@ -170,7 +192,8 @@ async function createStudent(req, res, next) {
           role: 'STUDENT',
           schoolId,
           status: 'ACTIVE',
-          emailVerified: true
+          emailVerified: true,
+          mustChangePassword: true  // Step 8: force password reset on first login
         }
       });
 
@@ -187,6 +210,13 @@ async function createStudent(req, res, next) {
           data: { guardianId, studentId: s.id, isPrimary: true }
         });
       }
+
+      // GAP FIX: Create SchoolMembership so requireSchoolMember() sets effectiveRole correctly.
+      await tx.schoolMembership.upsert({
+        where: { userId_schoolId: { userId: user.id, schoolId } },
+        create: { userId: user.id, schoolId, role: 'STUDENT', status: 'ACTIVE', joinedAt: new Date() },
+        update: { role: 'STUDENT', status: 'ACTIVE', deletedAt: null }
+      });
 
       return s;
     });
@@ -209,7 +239,15 @@ async function createStudent(req, res, next) {
 async function updateStudent(req, res, next) {
   try {
     const { firstName, lastName, phone, dateOfBirth, gender, gradeLevel, medicalNotes, emergencyContact } = req.body;
-    const student = await prisma.student.findUnique({ where: { id: req.params.id } });
+    // C-4 FIX: Verify the student belongs to the requester's school before updating.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const student = await prisma.student.findFirst({
+      where: {
+        id: req.params.id,
+        deletedAt: null,
+        ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId })
+      }
+    });
     if (!student) return errorResponse(res, 'Student not found', 404);
 
     await prisma.user.update({
@@ -228,6 +266,15 @@ async function updateStudent(req, res, next) {
 
 async function enrollStudent(req, res, next) {
   try {
+    // H-9 FIX: Verify both student and class belong to the caller's school.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const [student, cls] = await Promise.all([
+      prisma.student.findFirst({ where: { id: req.params.id, deletedAt: null, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) }, select: { id: true } }),
+      prisma.class.findFirst({ where: { id: req.body.classId, deletedAt: null, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) }, select: { id: true } })
+    ]);
+    if (!student) return errorResponse(res, 'Student not found or not in your school', 404);
+    if (!cls) return errorResponse(res, 'Class not found or not in your school', 404);
+
     const enrollment = await prisma.enrollment.upsert({
       where: { studentId_classId: { studentId: req.params.id, classId: req.body.classId } },
       update: { isActive: true, droppedAt: null },
@@ -239,6 +286,21 @@ async function enrollStudent(req, res, next) {
 
 async function unenrollStudent(req, res, next) {
   try {
+    // C-4 FIX: Verify both student and class belong to the caller's school before unenrolling.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const [student, cls] = await Promise.all([
+      prisma.student.findFirst({
+        where: { id: req.params.id, deletedAt: null, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) },
+        select: { id: true }
+      }),
+      prisma.class.findFirst({
+        where: { id: req.params.classId, deletedAt: null, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) },
+        select: { id: true }
+      })
+    ]);
+    if (!student) return errorResponse(res, 'Student not found or not in your school', 404);
+    if (!cls)     return errorResponse(res, 'Class not found or not in your school', 404);
+
     await prisma.enrollment.update({
       where: { studentId_classId: { studentId: req.params.id, classId: req.params.classId } },
       data: { isActive: false, droppedAt: new Date() }
@@ -249,6 +311,13 @@ async function unenrollStudent(req, res, next) {
 
 async function deleteStudent(req, res, next) {
   try {
+    // C-4 FIX: Verify school ownership before soft-delete.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const student = await prisma.student.findFirst({
+      where: { id: req.params.id, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) },
+      select: { id: true }
+    });
+    if (!student) return errorResponse(res, 'Student not found', 404);
     await prisma.student.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
     return successResponse(res, null, 'Student deleted');
   } catch (error) { next(error); }

@@ -53,7 +53,7 @@ async function markAttendance(req, res, next) {
           checkInLng,
           notes,
           teacherId,
-          schoolId: req.user.schoolId
+          schoolId: (req.schoolId || req.user.schoolId)
         },
         include: {
           student: {
@@ -106,7 +106,7 @@ async function markAttendance(req, res, next) {
               checkInLng,
               notes,
               teacherId,
-              schoolId: req.user.schoolId
+              schoolId: (req.schoolId || req.user.schoolId)
             },
             include: {
               student: {
@@ -217,14 +217,28 @@ async function bulkMarkAttendance(req, res, next) {
       return errorResponse(res, 'records must be a non-empty array', 400);
     }
 
-    // records: [{ studentId, status, notes }]
-
     const attendanceDate = new Date(date);
     attendanceDate.setUTCHours(0, 0, 0, 0);
 
-    // Resolve the Teacher record for the authenticated user (if they are a TEACHER)
+    const schoolId = req.schoolId || req.user.schoolId;
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+
+    // M-6 FIX: Validate that all studentIds belong to the caller's school.
+    if (effectiveRole !== 'SUPER_ADMIN' && schoolId) {
+      const studentIds = [...new Set(records.map(r => r.studentId))];
+      const validStudents = await prisma.student.findMany({
+        where: { id: { in: studentIds }, schoolId, deletedAt: null },
+        select: { id: true }
+      });
+      const validIds = new Set(validStudents.map(s => s.id));
+      const invalid = studentIds.filter(id => !validIds.has(id));
+      if (invalid.length > 0) {
+        return errorResponse(res, `Students not found in your school: ${invalid.join(', ')}`, 400);
+      }
+    }
+
     let teacherId = null;
-    if (req.user.role === 'TEACHER') {
+    if (effectiveRole === 'TEACHER') {
       const teacher = await prisma.teacher.findUnique({ where: { userId: req.user.id }, select: { id: true } });
       teacherId = teacher?.id ?? null;
     }
@@ -252,7 +266,7 @@ async function bulkMarkAttendance(req, res, next) {
             notes: record.notes,
             checkInMethod: 'manual',
             teacherId,
-            schoolId: req.user.schoolId
+            schoolId: (req.schoolId || req.user.schoolId)
           }
         })
       )
@@ -275,8 +289,22 @@ async function qrCheckIn(req, res, next) {
       where: { qrCode },
       include: { user: { select: { firstName: true, lastName: true } } }
     });
-
     if (!student) return errorResponse(res, 'Invalid QR code', 404);
+
+    // H-7 FIX: Verify the student belongs to the same school as the caller,
+    // and that the classId also belongs to that school.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (effectiveRole !== 'SUPER_ADMIN' && schoolId) {
+      if (student.schoolId !== schoolId) {
+        return errorResponse(res, 'QR code does not belong to a student in your school', 403);
+      }
+      const cls = await prisma.class.findFirst({
+        where: { id: classId, schoolId, deletedAt: null },
+        select: { id: true }
+      });
+      if (!cls) return errorResponse(res, 'Class not found in your school', 404);
+    }
 
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
@@ -322,6 +350,17 @@ async function getClassAttendance(req, res, next) {
     const { classId } = req.params;
     const { date, startDate, endDate, status } = req.query;
 
+    // M-2 FIX: Verify classId belongs to the caller's school.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (effectiveRole !== 'SUPER_ADMIN' && schoolId) {
+      const cls = await prisma.class.findFirst({
+        where: { id: classId, schoolId, deletedAt: null },
+        select: { id: true }
+      });
+      if (!cls) return errorResponse(res, 'Class not found in your school', 404);
+    }
+
     const where = { classId };
 
     if (date) {
@@ -360,6 +399,28 @@ async function getStudentAttendance(req, res, next) {
     const { studentId } = req.params;
     const { classId, startDate, endDate, page = 1, limit = 30 } = req.query;
     const { skip, ...pagination } = getPagination(page, limit);
+
+    // H-4 FIX: Students can only view their own attendance records.
+    // Guardians can only view their linked students' records.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (effectiveRole === 'STUDENT') {
+      const myStudent = await prisma.student.findFirst({
+        where: { userId: req.user.id, deletedAt: null },
+        select: { id: true }
+      });
+      if (!myStudent || myStudent.id !== studentId) {
+        return errorResponse(res, 'Access denied — you can only view your own attendance', 403);
+      }
+    }
+    if (effectiveRole === 'GUARDIAN') {
+      const guardian = await prisma.guardian.findFirst({
+        where: { userId: req.user.id, deletedAt: null },
+        include: { students: { where: { studentId } } }
+      });
+      if (!guardian || guardian.students.length === 0) {
+        return errorResponse(res, 'Access denied — not your linked student', 403);
+      }
+    }
 
     const where = { studentId };
     if (classId) where.classId = classId;
@@ -401,11 +462,13 @@ async function getStudentAttendance(req, res, next) {
 async function getAttendanceAnalytics(req, res, next) {
   try {
     const { classId, startDate, endDate } = req.query;
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
 
     const where = {};
     if (classId) where.classId = classId;
-    if (schoolId && req.user.role !== 'SUPER_ADMIN') where.schoolId = schoolId;
+    // NF-7 FIX: Use effectiveRole for SUPER_ADMIN bypass check.
+    const effectiveRoleAnalytics = req.schoolMembership?.role || req.user.role;
+    if (schoolId && effectiveRoleAnalytics !== 'SUPER_ADMIN') where.schoolId = schoolId;
     if (startDate && endDate) {
       where.date = { gte: new Date(startDate), lte: new Date(endDate) };
     }
@@ -449,8 +512,15 @@ async function updateAttendance(req, res, next) {
     });
     if (!existing) return errorResponse(res, 'Attendance record not found', 404);
 
+    // H-3 FIX: School isolation check — verify the record belongs to the caller's school.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (effectiveRole !== 'SUPER_ADMIN' && schoolId && existing.schoolId && existing.schoolId !== schoolId) {
+      return errorResponse(res, 'Access denied to this school\'s attendance record', 403);
+    }
+
     // Role-based ownership: teacher can only update their own records
-    if (req.user.role === 'TEACHER') {
+    if (effectiveRole === 'TEACHER') {
       const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
       if (!teacher || existing.teacherId !== teacher.id) {
         return errorResponse(res, 'You can only update your own attendance records', 403);
@@ -490,8 +560,15 @@ async function deleteAttendance(req, res, next) {
     const existing = await prisma.attendance.findUnique({ where: { id } });
     if (!existing) return errorResponse(res, 'Attendance record not found', 404);
 
+    // H-3 FIX: School isolation — verify record belongs to caller's school.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (effectiveRole !== 'SUPER_ADMIN' && schoolId && existing.schoolId && existing.schoolId !== schoolId) {
+      return errorResponse(res, 'Access denied to this school\'s attendance record', 403);
+    }
+
     // Role-based ownership: teacher can only delete their own records
-    if (req.user.role === 'TEACHER') {
+    if (effectiveRole === 'TEACHER') {
       const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
       if (!teacher || existing.teacherId !== teacher.id) {
         return errorResponse(res, 'You can only delete your own attendance records', 403);
@@ -507,7 +584,7 @@ async function deleteAttendance(req, res, next) {
 async function getAttendanceReport(req, res, next) {
   try {
     const { classId, studentId, startDate, endDate, status } = req.query;
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
 
     const where = {};
     if (schoolId && req.user.role !== 'SUPER_ADMIN') where.schoolId = schoolId;
@@ -519,14 +596,17 @@ async function getAttendanceReport(req, res, next) {
     }
 
     // For students — only their own records
-    if (req.user.role === 'STUDENT') {
+    // NF-7 FIX: Use effectiveRole so MEMBER users with STUDENT membership are correctly scoped.
+    const effectiveRoleReport = req.schoolMembership?.role || req.user.role;
+    if (effectiveRoleReport === 'STUDENT') {
       const student = await prisma.student.findFirst({ where: { userId: req.user.id } });
       if (!student) return errorResponse(res, 'Student profile not found', 404);
       where.studentId = student.id;
     }
 
     // For guardians — only linked students
-    if (req.user.role === 'GUARDIAN') {
+    // NF-7 FIX: Use effectiveRole for guardian check too.
+    if (effectiveRoleReport === 'GUARDIAN') {
       const guardian = await prisma.guardian.findFirst({
         where: { userId: req.user.id },
         include: { students: { select: { studentId: true } } }

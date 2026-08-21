@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { ErrorState } from '@/components/ui/error-state'
 import { Plus, Calendar, CheckCircle, Loader2, Star, Trash2 } from 'lucide-react'
@@ -18,6 +19,7 @@ import { format } from 'date-fns'
 
 export default function TermsPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
@@ -56,7 +58,7 @@ export default function TermsPage() {
     }
   })
 
-  const canManage = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
+  const canManage = isAdmin
 
   return (
     <div className="space-y-6 max-w-3xl">

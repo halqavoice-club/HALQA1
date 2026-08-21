@@ -1,16 +1,18 @@
+'use strict';
 const router = require('express').Router();
 const { body } = require('express-validator');
 const validate = require('../middleware/validate');
-const { authenticate, authorize } = require('../middleware/auth.middleware');
+const { authenticate } = require('../middleware/auth.middleware');
+const { eduMember, eduAdmin } = require('../middleware/educationAuth');
 const ctrl = require('../controllers/guardian.controller');
 
 router.use(authenticate);
 
-router.get('/', ctrl.listGuardians);
-router.get('/:id', ctrl.getGuardian);
+router.get('/',    ...eduMember, ctrl.listGuardians);
+router.get('/:id', ...eduMember, ctrl.getGuardian);
 
 router.post('/',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  ...eduAdmin,
   [
     body('email').isEmail().normalizeEmail(),
     body('firstName').trim().notEmpty(),
@@ -20,16 +22,12 @@ router.post('/',
   ctrl.createGuardian
 );
 
-router.put('/:id', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), ctrl.updateGuardian);
-
-router.post('/:id/students',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
-  [body('studentId').notEmpty()],
-  validate,
+router.put('/:id',                         ...eduAdmin, ctrl.updateGuardian);
+router.post('/:id/students',               ...eduAdmin,
+  [body('studentId').notEmpty()], validate,
   ctrl.linkStudent
 );
-
-router.delete('/:id/students/:studentId', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), ctrl.unlinkStudent);
-router.delete('/:id', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), ctrl.deleteGuardian);
+router.delete('/:id/students/:studentId',  ...eduAdmin, ctrl.unlinkStudent);
+router.delete('/:id',                      ...eduAdmin, ctrl.deleteGuardian);
 
 module.exports = router;

@@ -1,6 +1,7 @@
 ﻿'use client'
 
 import { useEffect, useRef, useState, useCallback } from 'react'
+import * as React from 'react'
 import { useRouter } from 'next/navigation'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -27,9 +28,9 @@ import { LiveClassWhiteboard, type DrawEvent, type WhiteboardHandle } from './Li
 import { LiveClassPollPanel, type Poll, type PollEvent } from './LiveClassPoll'
 import { LiveClassHostControls, type ClassSettings } from './LiveClassHostControls'
 import { SpeakerGrid } from './layout/SpeakerGrid'
+import { useDynamicLayoutStore } from './layout/useDynamicLayoutStore'
 import { GiftPanel } from '../voice/GiftPanel'
 import { LiveClassGiftOverlay } from './LiveClassGiftOverlay'
-import { GiftEarningsWidget } from './GiftEarningsWidget'
 import { useVoiceStore } from '@/store/voice.store'
 import { useGiftEngine, useIsLowEndDevice } from '@/hooks/useGiftEngine'
 import { createLiveClassAdapter } from '@/lib/giftAdapter'
@@ -106,25 +107,28 @@ function detachAllAudio(onCount?: (n: number) => void) {
 }
 
 // ─── RemoteVideoTile ──────────────────────────────────────────────────────────
-// Renders a LIVE remote video track using a React ref callback.
-// This is the correct pattern — LiveKit tracks must be attached to actual DOM
-// <video> elements. Using document.createElement() stores them in detached nodes
-// that are never visible. ref callbacks guarantee the element is in the DOM first.
+// Uses useRef + useEffect to attach/detach remote video tracks.
+// The <video> element is always in the DOM (never conditionally rendered) so
+// videoElRef.current is guaranteed non-null when the effect runs.
 function RemoteVideoTile({ p, isSpeaking, track, onClick }: {
   p: LCParticipant
   isSpeaking: boolean
   track: RemoteVideoTrack | null
   onClick?: (e: React.MouseEvent) => void
 }) {
-  const videoRef = useCallback((el: HTMLVideoElement | null) => {
-    if (el && track) {
+  const videoElRef = useRef<HTMLVideoElement | null>(null)
+
+  useEffect(() => {
+    const el = videoElRef.current
+    if (!el) return
+    if (track) {
       track.attach(el)
       el.play().catch(() => {})
     }
     return () => {
-      if (el && track) track.detach(el)
+      if (track) track.detach(el)
     }
-  }, [track]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [track])
 
   const initials  = (p.user.firstName[0] + p.user.lastName[0]).toUpperCase()
   const avatarSrc = getAvatarUrl(p.user.avatarUrl)
@@ -138,14 +142,13 @@ function RemoteVideoTile({ p, isSpeaking, track, onClick }: {
       )}
       onClick={onClick}
     >
-      {/* Always render the video element — it's hidden when no track */}
-      {track && (
-        <video
-          ref={videoRef}
-          autoPlay playsInline
-          className="w-full h-full object-cover"
-        />
-      )}
+      {/* Always render <video> so videoElRef is always populated when effect runs.
+          Visibility is controlled by CSS — avatar shown on top when no track. */}
+      <video
+        ref={videoElRef}
+        autoPlay playsInline
+        className={cn('absolute inset-0 w-full h-full object-cover', !track && 'invisible')}
+      />
 
       {/* Fallback avatar when no video track */}
       {!track && (
@@ -178,19 +181,19 @@ function RemoteVideoTile({ p, isSpeaking, track, onClick }: {
 
 // ─── ScreenShareTile — renders a remote screen share track ───────────────────
 function ScreenShareTile({ track }: { track: RemoteVideoTrack }) {
-  const videoRef = useCallback((el: HTMLVideoElement | null) => {
-    if (el && track) {
-      track.attach(el)
-      el.play().catch(() => {})
-    }
-    return () => {
-      if (el && track) track.detach(el)
-    }
-  }, [track]) // eslint-disable-line react-hooks/exhaustive-deps
+  const videoElRef = useRef<HTMLVideoElement | null>(null)
+
+  useEffect(() => {
+    const el = videoElRef.current
+    if (!el || !track) return
+    track.attach(el)
+    el.play().catch(() => {})
+    return () => { track.detach(el) }
+  }, [track])
 
   return (
     <video
-      ref={videoRef}
+      ref={videoElRef}
       autoPlay playsInline
       className="w-full h-full object-contain bg-black"
     />
@@ -198,41 +201,69 @@ function ScreenShareTile({ track }: { track: RemoteVideoTrack }) {
 }
 
 // ─── LocalScreenTile — renders the HOST's own screen share track ──────────────
-// WHY: The old approach used `screenVideoRef.current.attach(track)` inside the
-// LocalTrackPublished event handler, but screenVideoRef.current was null because
-// the <video> element was conditionally rendered (only visible when screenOn=true)
-// and didn't exist in the DOM yet when the event fired.
-//
-// Solution: store the local track in React state (`localScreenTrack`), then use
-// a useCallback ref here to attach it when the <video> element actually mounts.
-// This is the same correct pattern used for RemoteVideoTile.
+// Uses useRef + useEffect (same as all other video tiles) so the track is
+// correctly attached when the <video> element mounts and detached on cleanup.
 function LocalScreenTile({ track }: { track: import('livekit-client').LocalVideoTrack }) {
-  const videoRef = useCallback((el: HTMLVideoElement | null) => {
-    if (el && track) {
-      track.attach(el)
-      el.play().catch(() => {})
-    }
-    return () => {
-      if (el && track) track.detach(el)
-    }
-  }, [track]) // eslint-disable-line react-hooks/exhaustive-deps
+  const videoElRef = useRef<HTMLVideoElement | null>(null)
+
+  useEffect(() => {
+    const el = videoElRef.current
+    if (!el || !track) return
+    track.attach(el)
+    el.play().catch(() => {})
+    return () => { track.detach(el) }
+  }, [track])
 
   return (
     <video
-      ref={videoRef}
-      autoPlay playsInline muted   // muted — own audio, no echo
+      ref={videoElRef}
+      autoPlay playsInline muted
       className="w-full h-full object-contain bg-black"
     />
   )
 }
 
 // ─── Local video tile ─────────────────────────────────────────────────────────
-function LocalVideoTile({ p, isSpeaking, videoRef, videoOn }: {
-  p: LCParticipant; isSpeaking: boolean
-  videoRef: React.RefObject<HTMLVideoElement>; videoOn: boolean
+// The parent passes videoRef so LocalTrackPublished can imperatively attach
+// the track. The tile also re-attaches the track on mount in case LocalTrackPublished
+// fired before this tile was rendered (e.g. late participant list load).
+function LocalVideoTile({ p, isSpeaking, videoRef, videoOn, room }: {
+  p: LCParticipant
+  isSpeaking: boolean
+  videoRef: React.RefObject<HTMLVideoElement>
+  videoOn: boolean
+  room: Room | null
 }) {
   const initials  = (p.user.firstName[0] + p.user.lastName[0]).toUpperCase()
   const avatarSrc = getAvatarUrl(p.user.avatarUrl)
+
+  // Single authoritative camera track attach path.
+  //
+  // This effect runs when:
+  //   1. The tile first mounts (room + videoOn already true after reconnect)
+  //   2. videoOn becomes true (LocalTrackPublished fired, state updated)
+  //   3. roomConnected changes (LiveKit reconnect — new room object)
+  //
+  // We use requestAnimationFrame to ensure the video element has been painted
+  // by the browser before calling attach(). This prevents the race where:
+  //   setVideoOn(true) → re-render starts → effect runs → element still hidden
+  // By deferring one frame, the element is visible and play() succeeds.
+  React.useEffect(() => {
+    if (!room || !videoRef.current || !videoOn) return
+    const el = videoRef.current
+    const raf = requestAnimationFrame(() => {
+      const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera)
+      if (camPub?.track) {
+        // Detach from any previous elements to prevent duplicate streams
+        camPub.track.detach()
+        // Attach to this tile's video element
+        camPub.track.attach(el)
+      }
+    })
+    return () => cancelAnimationFrame(raf)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room, videoOn])
+
   return (
     <div
       className={cn(
@@ -240,8 +271,11 @@ function LocalVideoTile({ p, isSpeaking, videoRef, videoOn }: {
         isSpeaking && 'ring-2 ring-green-400'
       )}
     >
-      <video ref={videoRef} autoPlay playsInline muted
-        className={cn('w-full h-full object-cover', !videoOn && 'hidden')} />
+      <video
+        ref={videoRef}
+        autoPlay playsInline muted
+        className={cn('w-full h-full object-cover', !videoOn && 'hidden')}
+      />
       {!videoOn && (
         <div className="flex flex-col items-center gap-2">
           <div className="w-16 h-16 rounded-full overflow-hidden bg-indigo-900 flex items-center justify-center font-bold text-indigo-300 text-xl">
@@ -317,18 +351,22 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
   const roomRef           = useRef<Room | null>(null)
   const isUnmounted       = useRef(false)
-  const localVideoRef     = useRef<HTMLVideoElement>(null)
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const localVideoRef     = useRef<HTMLVideoElement>(null)       // tile's visible <video>
+  const localVideoFallbackRef = useRef<HTMLVideoElement>(null)   // hidden 0×0 fallback
+  const cameraOpInProgressRef = useRef(false)                    // concurrency guard
   const connectLiveKitRef = useRef<(() => void) | null>(null)
   const whiteboardRef     = useRef<WhiteboardHandle>(null)
+  // roomConnected state — triggers re-render of LocalVideoTile when LiveKit connects,
+  // so the useEffect(room, videoOn) in LocalVideoTile runs with a non-null room.
+  const [roomConnected,  setRoomConnected]  = useState<Room | null>(null)
 
   // ── Remote video tracks — keyed by participant identity (userId) ──────────
   const [remoteVideoTracks, setRemoteVideoTracks] = useState<Map<string, RemoteVideoTrack>>(new Map())
   const [screenTrack,       setScreenTrack]       = useState<RemoteVideoTrack | null>(null)
 
-  // ── Local screen share track — stored in state so the ref callback in
-  // LocalScreenTile attaches it after the <video> element is rendered in DOM.
-  // The old screenVideoRef approach failed because the <video> was conditionally
-  // rendered and didn't exist in DOM yet when LocalTrackPublished fired.
+  // ── Local screen share track — stored in state so LocalScreenTile attaches
+  // it after the <video> element is rendered in DOM.
   const [localScreenTrack, setLocalScreenTrack] = useState<import('livekit-client').LocalVideoTrack | null>(null)
 
   const [connState,        setConnState]        = useState<ConnectionState>(ConnectionState.Disconnected)
@@ -400,7 +438,33 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     setVideoPage(p => Math.min(p, Math.max(0, pages - 1)))
   }, [participants.length])
 
-  // ── Join the class socket room so we receive liveclass:started notifications ─
+  // ── Sync live class participants → useDynamicLayoutStore (for SpeakerGrid in audio mode) ──
+  // useDynamicLayout subscribes to LiveKit events, but when SpeakerGrid is used in the
+  // live class audio view the participant source of truth is the liveclass socket events
+  // (liveclass:user_joined / liveclass:user_left / liveclass:mute_changed) that feed the
+  // `participants` state array above. We bridge the two here: whenever `participants`
+  // changes, map them to SpeakerSlot format and push into the store so SpeakerGrid
+  // renders the correct seats without needing a separate socket subscription.
+  const dynamicLayoutStore = useDynamicLayoutStore()
+  useEffect(() => {
+    if (!joined) return  // only sync when inside the room
+    dynamicLayoutStore.setSpeakers(
+      participants.map((p, i) => ({
+        userId:            p.userId,
+        seatIndex:         i,
+        role:              p.role === 'HOST' ? 'owner' : 'speaker',
+        displayName:       `${p.user.firstName} ${p.user.lastName}`,
+        avatarUrl:         p.user.avatarUrl ?? undefined,
+        isMuted:           p.isMuted,
+        isSpeaking:        activeSpeakers.has(p.userId),
+        isOnline:          true,
+        connectionQuality: 'unknown' as const,
+      }))
+    )
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [participants, activeSpeakers, joined])
+
+
   // The backend emits `liveclass:started` to both `school:{id}` and `class:{classId}`.
   // Students sitting on the lobby page need to be in the class room to be notified.
   useEffect(() => {
@@ -535,6 +599,18 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     socket.on('liveclass:unmute_all',      () => setParticipants(prev => prev.map(p => p.role !== 'HOST' ? { ...p, isMuted: false } : p)))
     socket.on('liveclass:hand_raised',     onHand)
     socket.on('liveclass:hand_lowered',    onHandLow)
+    // Hand approved: lower hand + unmute for the approved user; non-host clients update their own state
+    socket.on('liveclass:hand_approved',   (d: any) => {
+      setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, handRaised: false, isMuted: false } : p))
+    })
+    // Hand rejected: lower hand for the rejected user across all clients
+    socket.on('liveclass:hand_rejected',   (d: any) => {
+      setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, handRaised: false } : p))
+    })
+    // Speak request: host sees a toast prompt so they know a student wants to speak
+    socket.on('liveclass:speak_request',   (d: any) => {
+      if (isHost) toast({ title: `🎙 ${d.firstName || 'A student'} wants to speak` })
+    })
     // New: all hands lowered
     socket.on('liveclass:all_hands_lowered', () => setParticipants(prev => prev.map(p => ({ ...p, handRaised: false }))))
     socket.on('liveclass:message',         onMsg)
@@ -567,6 +643,9 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       socket.off('liveclass:unmute_all')
       socket.off('liveclass:hand_raised',     onHand)
       socket.off('liveclass:hand_lowered',    onHandLow)
+      socket.off('liveclass:hand_approved')
+      socket.off('liveclass:hand_rejected')
+      socket.off('liveclass:speak_request')
       socket.off('liveclass:all_hands_lowered')
       socket.off('liveclass:message',         onMsg)
       socket.off('liveclass:message_deleted')
@@ -598,6 +677,19 @@ export function LiveClassRoomPage({ id }: { id: string }) {
         adaptiveStream: false,
         dynacast: true,
         audioCaptureDefaults: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        // Relaxed video constraints so any webcam works — no OverconstrainedError.
+        // LiveKit's default of 1280×720 @ 30fps fails on many integrated/school webcams.
+        // Use VideoPresets which LiveKit supports, or plain numbers as fallback.
+        videoCaptureDefaults: {
+          resolution: { width: 640, height: 480, frameRate: 15 },
+        },
+        // Exponential back-off reconnect: 1s, 2s, 4s, 8s, 16s — stop after 5 attempts
+        reconnectPolicy: {
+          nextRetryDelayInMs: (context) => {
+            if (context.retryCount >= 5) return null
+            return Math.min(1000 * Math.pow(2, context.retryCount), 16_000)
+          },
+        },
       })
       roomRef.current = room
 
@@ -607,8 +699,18 @@ export function LiveClassRoomPage({ id }: { id: string }) {
         // Auto-reconnect: if LiveKit fully disconnects while the class is
         // still live (user didn't press Leave), try reconnecting after 3 s.
         // This handles network blips, laptop sleep, etc.
+        //
+        // P2-04 FIX (PERF-05): Use reconnectTimerRef to prevent timer accumulation.
+        // The old code did `return () => clearTimeout(retryTimer)` inside a room.on()
+        // callback — that return value goes to the LiveKit event emitter, NOT to
+        // React's useEffect cleanup slot. React never called it, so timers piled up
+        // on every disconnect. Now we cancel the previous timer before scheduling
+        // a new one, and the unmount cleanup also cancels via the ref.
         if (s === ConnectionState.Disconnected && !isUnmounted.current) {
-          const retryTimer = setTimeout(() => {
+          setRoomConnected(null)
+          if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
+          reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null
             if (isUnmounted.current) return
             // Only retry if room object is still ours (not replaced by a newer call)
             if (roomRef.current === room) {
@@ -616,8 +718,16 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               connectLiveKitRef.current?.()
             }
           }, 3000)
-          // Store timer so cleanup can cancel it
-          return () => clearTimeout(retryTimer)
+        }
+
+        // Clear the timer when connection succeeds — no retry needed
+        if (s === ConnectionState.Connected) {
+          if (reconnectTimerRef.current) {
+            clearTimeout(reconnectTimerRef.current)
+            reconnectTimerRef.current = null
+          }
+          // Update state so LocalVideoTile re-renders with the connected room
+          if (!isUnmounted.current) setRoomConnected(room)
         }
       })
 
@@ -696,13 +806,15 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       room.on(RoomEvent.LocalTrackPublished, (pub) => {
         if (pub.source === Track.Source.Microphone) setMicOn(!pub.isMuted)
         if (pub.source === Track.Source.Camera) {
+          // [Camera] LocalTrackPublished → update state only.
+          // The actual track attachment is handled by LocalVideoTile's useEffect,
+          // which runs after setVideoOn(true) triggers a re-render and the
+          // video element is guaranteed to be in the DOM at that point.
+          // Attaching here (before the tile re-renders) risks attaching to a
+          // stale or wrong element reference.
           setVideoOn(true)
-          if (localVideoRef.current && pub.track) pub.track.attach(localVideoRef.current)
         }
         if (pub.source === Track.Source.ScreenShare) {
-          // Store track in state — LocalScreenTile attaches it via ref callback
-          // once the <video> element is rendered in the DOM (conditional render).
-          // Do NOT try to attach to a ref here — the element doesn't exist yet.
           setLocalScreenTrack(pub.track as import('livekit-client').LocalVideoTrack ?? null)
           setScreenOn(true)
           setScreenSharer(room.localParticipant.identity)
@@ -712,11 +824,12 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       room.on(RoomEvent.LocalTrackUnpublished, (pub) => {
         if (pub.source === Track.Source.Microphone) setMicOn(false)
         if (pub.source === Track.Source.Camera) {
+          // [Camera] LocalTrackUnpublished → update state.
+          // The video element stops showing because videoOn becomes false (CSS hidden).
+          // LiveKit also calls detach() internally when the track is stopped.
           setVideoOn(false)
-          if (localVideoRef.current && pub.track) pub.track.detach(localVideoRef.current)
         }
         if (pub.source === Track.Source.ScreenShare) {
-          // Clear the track state — LocalScreenTile will unmount and detach
           setLocalScreenTrack(null)
           setScreenOn(false)
           setScreenSharer(null)
@@ -815,9 +928,14 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     isUnmounted.current = false
     return () => {
       isUnmounted.current = true
+      // P2-04: cancel any pending reconnect timer on unmount
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current)
+        reconnectTimerRef.current = null
+      }
       roomRef.current?.disconnect()
       detachAllAudio(setAudioTrackCount)
-      setLocalScreenTrack(null)   // detach local screen track on unmount
+      setLocalScreenTrack(null)
     }
   }, [])
 
@@ -833,12 +951,81 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   }
 
   const toggleVideo = async () => {
-    const room = roomRef.current; if (!room) return
+    const room = roomRef.current
+    if (!room) {
+      toast({ title: '📷 Not connected', description: 'LiveKit connection not ready. Try leaving and rejoining.', variant: 'destructive' })
+      return
+    }
+    if (connState !== ConnectionState.Connected) {
+      toast({ title: '📷 Connecting…', description: `Room state: ${connState}. Please wait for the green "Connected" indicator.`, variant: 'destructive' })
+      return
+    }
+
     const next = !room.localParticipant.isCameraEnabled
-    await room.localParticipant.setCameraEnabled(next)
-    setVideoOn(next)
-    const socket = getSocket()
-    if (socket) socket.emit('liveclass:video_changed', { liveClassId: id, userId: user?.id, isVideoOn: next })
+
+    // Concurrency guard — use a ref so it persists across async operations
+    if (cameraOpInProgressRef.current) {
+      console.debug('[Camera] action=toggle SKIPPED — operation already in progress')
+      return
+    }
+    cameraOpInProgressRef.current = true
+
+    try {
+      console.debug(`[Camera] action=toggle requestedState=${next ? 'ON' : 'OFF'}`)
+      await room.localParticipant.setCameraEnabled(next)
+      console.debug(`[Camera] action=setCameraEnabled success state=${next ? 'ON' : 'OFF'}`)
+      // NOTE: Do NOT call setVideoOn here.
+      // LocalTrackPublished/LocalTrackUnpublished are the single source of truth.
+      // They set videoOn AND attach/detach the track to the visible <video> element.
+      // If setVideoOn is called here (optimistically), the useEffect in LocalVideoTile
+      // runs while the track publication is still in progress → getTrackPublication
+      // returns null → attach is skipped → video never shows.
+
+      // Persist to DB + notify participants (fire-and-forget, non-fatal)
+      if (user?.id) {
+        api.patch('/live-classes/' + id + '/participants/' + user.id + '/video', { isVideoOn: next }).catch(() => {})
+      }
+      const socket = getSocket()
+      if (socket) socket.emit('liveclass:video_changed', { liveClassId: id, isVideoOn: next })
+
+    } catch (e: any) {
+      const name = (e?.name  || '').toLowerCase()
+      const msg  = (e?.message || '').toLowerCase()
+      console.error('[Camera] action=setCameraEnabled failed:', e?.name, e?.message)
+
+      if (name === 'notallowederror' || msg.includes('permission') || msg.includes('not allowed') || msg.includes('denied')) {
+        toast({
+          title: '📷 Camera permission denied',
+          description: 'Click the camera icon in your browser address bar → Allow → then try again. Or open /live-class/camera-test to diagnose.',
+          variant: 'destructive',
+          duration: 12000,
+        })
+      } else if (name === 'notfounderror' || msg.includes('not found') || msg.includes('no camera')) {
+        toast({ title: '📷 No camera found', description: 'Make sure your camera is connected and not in use by another app.', variant: 'destructive', duration: 8000 })
+      } else if (name === 'notreadableerror' || msg.includes('in use') || msg.includes('hardware')) {
+        toast({ title: '📷 Camera busy', description: 'Your camera is being used by another app (Zoom, Teams, etc.). Close it first.', variant: 'destructive', duration: 8000 })
+      } else if (name === 'overconstrainederror' || msg.includes('overconstrained')) {
+        toast({ title: '📷 Camera not supported', description: 'Try a different camera or browser.', variant: 'destructive', duration: 8000 })
+      } else if (name === 'securityerror') {
+        toast({ title: '📷 Blocked by security policy', description: 'Camera requires HTTPS. Make sure you\'re on https://.', variant: 'destructive', duration: 10000 })
+      } else {
+        const isInsecure = typeof window !== 'undefined' &&
+          window.location.protocol === 'http:' &&
+          !['localhost', '127.0.0.1'].includes(window.location.hostname)
+        if (isInsecure) {
+          toast({
+            title: '🔒 HTTPS Required',
+            description: `Camera requires HTTPS. Open http://localhost:3000 instead of http://${window.location.hostname}.`,
+            variant: 'destructive',
+            duration: 15000,
+          })
+        } else {
+          toast({ title: '📷 Camera error', description: e?.message || 'Could not start camera. Check console (F12) for details.', variant: 'destructive' })
+        }
+      }
+    } finally {
+      cameraOpInProgressRef.current = false
+    }
   }
 
   const toggleScreen = async () => {
@@ -852,7 +1039,13 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   }
 
   const handleLeave = async () => {
-    setJoined(false)                             // immediate UX feedback
+    setJoined(false)
+    // Task 6 (P3-C): cancel any pending reconnect timer before disconnecting
+    // so a voluntary Leave cannot accidentally schedule a reconnect attempt
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
     roomRef.current?.disconnect()
     detachAllAudio(setAudioTrackCount)
     setLocalScreenTrack(null)
@@ -1214,6 +1407,21 @@ export function LiveClassRoomPage({ id }: { id: string }) {
         </>
       )}
 
+      {/* ── HTTPS warning — shown when camera/mic won't work due to HTTP ──── */}
+      {typeof window !== 'undefined' &&
+        window.location.protocol === 'http:' &&
+        !['localhost', '127.0.0.1'].includes(window.location.hostname) && (
+        <div className="flex items-start gap-3 px-4 py-3 bg-yellow-600/20 border-b border-yellow-600/30 text-yellow-300 text-xs flex-shrink-0">
+          <span className="text-lg leading-none flex-shrink-0">🔒</span>
+          <div>
+            <span className="font-bold">Camera &amp; microphone require HTTPS. </span>
+            You are on <code className="bg-yellow-900/40 px-1 rounded">http://{window.location.hostname}</code>.
+            {' '}Fix: open <code className="bg-yellow-900/40 px-1 rounded">http://localhost:3000</code> in your browser instead,
+            or restart the frontend with <code className="bg-yellow-900/40 px-1 rounded">npm run dev</code> (HTTPS enabled).
+          </div>
+        </div>
+      )}
+
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800 flex-shrink-0">
         <div className="flex items-center gap-3">
@@ -1222,7 +1430,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
           </button>
           <div>
             <h1 className="font-semibold text-sm">{lc.title}</h1>
-            <p className="text-xs text-gray-400">{lc.class.name}</p>
+            <p className="text-xs text-gray-400">{lc.class?.name ?? lc.title}</p>
           </div>
           {lc.status === 'LIVE' && (
             <span className="flex items-center gap-1 text-xs font-bold text-red-400 bg-red-900/30 px-2 py-0.5 rounded-full">
@@ -1346,7 +1554,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               </div>
               <div className="text-center">
                 <h2 className="text-xl font-bold">{lc.title}</h2>
-                <p className="text-gray-400 text-sm mt-1">{lc.class.name} — {lc.duration} min</p>
+                <p className="text-gray-400 text-sm mt-1">{lc.class?.name ? `${lc.class.name} — ` : ''}{lc.duration ? `${lc.duration} min` : 'Open stream'}</p>
                 {lc.status === 'SCHEDULED' && <p className="text-yellow-400 text-sm mt-2">Class not started yet</p>}
                 {lc.status === 'ENDED'     && <p className="text-gray-500 text-sm mt-2">This class has ended</p>}
                 {/* Show capacity warning when class is live and near/at limit */}
@@ -1390,6 +1598,19 @@ export function LiveClassRoomPage({ id }: { id: string }) {
             /* ── VIDEO VIEW ─────────────────────────────────────────────────── */
             <div className="flex-1 overflow-y-auto p-3 space-y-3">
 
+              {/* Always-mounted fallback video element — kept in DOM so
+                  localVideoFallbackRef.current is never null. Not used for
+                  camera display — only present to avoid null-ref crashes.
+                  The actual camera video renders inside LocalVideoTile. */}
+              <video
+                ref={localVideoFallbackRef}
+                autoPlay
+                playsInline
+                muted
+                style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
+                aria-hidden="true"
+              />
+
               {/* Screen share panel — uses screenTrack state via ScreenShareTile */}
               <div className={cn('w-full rounded-xl overflow-hidden bg-gray-900 relative', screenOn ? 'block' : 'hidden')}>
                 <button onClick={() => setScreenFullscreen(f => !f)}
@@ -1423,10 +1644,42 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                 </div>
               </div>
 
-              {/* Participant video grid — each remote participant gets a RemoteVideoTile
-                  that attaches its LiveKit track via a ref callback to a real <video> element.
-                  Uses pagedParticipants for 17+ participant pagination (16 per page). */}
+              {/* Participant video grid */}
               <div className={'grid gap-2 ' + videoCols}>
+                {/* Always show the current user's own tile first, even if participants
+                    list hasn't loaded yet — ensures localVideoRef is always in DOM */}
+                {(() => {
+                  const meInGrid = pagedParticipants.find(p => p.userId === user?.id)
+                  if (!meInGrid) {
+                    // Synthetic "me" tile while participant list loads
+                    const meSynth = participants.find(p => p.userId === user?.id) || {
+                      id: user?.id ?? '',
+                      userId: user?.id ?? '',
+                      role: 'HOST' as const,
+                      isMuted: !micOn,
+                      isVideoOn: videoOn,
+                      handRaised: false,
+                      user: {
+                        id: user?.id ?? '',
+                        firstName: user?.firstName ?? '',
+                        lastName: user?.lastName ?? '',
+                        avatarUrl: user?.avatarUrl ?? null,
+                      }
+                    }
+                    return (
+                      <div key="me-fallback">
+                        <LocalVideoTile
+                          p={meSynth as any}
+                          isSpeaking={activeSpeakers.has(user?.id ?? '')}
+                          videoRef={localVideoRef}
+                          videoOn={videoOn}
+                          room={roomConnected}
+                        />
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
                 {pagedParticipants.map(p => {
                   const isMe = p.userId === user?.id
                   if (isMe) {
@@ -1437,6 +1690,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                           isSpeaking={activeSpeakers.has(p.userId)}
                           videoRef={localVideoRef}
                           videoOn={videoOn}
+                          room={roomConnected}
                         />
                       </div>
                     )
@@ -1654,6 +1908,22 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               {/* Single scrollable row — no wrapping, buttons never jump positions */}
               <div className="flex items-center justify-center gap-2 px-3 py-3 overflow-x-auto scrollbar-none">
 
+                {/* ── Reconnect button — shown when disconnected ──────────── */}
+                {!isConnected && (
+                  <button
+                    onClick={() => connectLiveKitRef.current?.()}
+                    title="Reconnect to LiveKit"
+                    aria-label="Reconnect to LiveKit"
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-yellow-600 hover:bg-yellow-500 text-white text-xs font-bold transition-colors flex-shrink-0"
+                  >
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                    </svg>
+                    {connState === 'connecting' || connState === 'reconnecting' ? 'Connecting…' : 'Reconnect'}
+                  </button>
+                )}
+
                 {/* ── Primary controls (always visible) ───────────────────── */}
 
                 {/* Mic */}
@@ -1675,9 +1945,11 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                     onClick={toggleVideo}
                     title={videoOn ? 'Stop camera' : 'Start camera'}
                     aria-label={videoOn ? 'Stop camera' : 'Start camera'}
+                    disabled={!isConnected}
                     className={cn(
                       'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
                       videoOn ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-700 hover:bg-gray-600',
+                      !isConnected && 'opacity-40 cursor-not-allowed',
                     )}
                   >
                     {videoOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
@@ -1697,8 +1969,17 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   {viewMode === 'audio' ? <Radio className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
                 </button>
 
-                {/* Screen share — video mode, host always + students when enabled */}
-                {viewMode === 'video' && (isHost || lc.screenShareEnabled !== false) && (
+                {/* Screen share — video mode, host always + students when enabled.
+                    PLAT-02 FIX: Only render when navigator.mediaDevices?.getDisplayMedia
+                    is available. iOS Safari and mobile Chrome do not support getDisplayMedia,
+                    so clicking the button on those platforms threw an unhandled runtime error.
+                    The check is evaluated at render time — SSR-safe because `typeof window`
+                    guard ensures it runs only in the browser. */}
+                {viewMode === 'video' &&
+                  (isHost || lc.screenShareEnabled !== false) &&
+                  typeof window !== 'undefined' &&
+                  typeof navigator !== 'undefined' &&
+                  !!(navigator.mediaDevices?.getDisplayMedia) && (
                   <button
                     onClick={toggleScreen}
                     title={iAmSharing ? 'Stop sharing' : 'Share screen'}

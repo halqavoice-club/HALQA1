@@ -26,6 +26,12 @@ import api, { getBaseURL } from '@/lib/api';
 import { getAvatarUrl, getAvatarInitials, avatarColor } from '@/lib/avatar';
 import { useAuthStore } from '@/store/auth.store';
 
+// Social API helpers (inline to avoid extra lib dep on mobile)
+const socialApi = {
+  follow:   (userId: string) => api.post(`/social/follow/${userId}`),
+  unfollow: (userId: string) => api.delete(`/social/follow/${userId}`),
+};
+
 const { width: SCREEN_W } = Dimensions.get('window');
 const CARD_W = SCREEN_W - 24;
 const BASE = getBaseURL().replace('/api/v1', '');
@@ -46,6 +52,7 @@ export interface Post {
   media: PostMedia[]; reactions: { type: string }[]; bookmarks: { id: string }[];
   _count: { reactions: number; comments: number };
   shareCount?: number; viewCount?: number; createdAt: string;
+  isFollowing?: boolean;
 }
 
 interface Props { post: Post; onNavigateToDetail?: () => void }
@@ -269,18 +276,40 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
   const queryClient = useQueryClient();
   const router      = useRouter();
 
-  const myReaction   = post.reactions?.[0]?.type as ReactionType | undefined;
   const isBookmarked = (post.bookmarks?.length ?? 0) > 0;
   const avatarSrc    = getAvatarUrl(post.author.avatarUrl);
   const initials     = getAvatarInitials(post.author.firstName, post.author.lastName);
   const bgColor      = avatarColor(`${post.author.firstName}${post.author.lastName}`);
+  const isOwn        = user?.id === post.authorId;
 
-  const [showReactions, setShowReactions] = useState(false);
-  const [commentsOpen, setCommentsOpen]   = useState(false);
-  const [showShare,    setShowShare]      = useState(false);
-  // Local view count — starts from server value, increments once on render
-  const [viewCount, setViewCount] = useState(post.viewCount ?? 0);
+  const [isFollowing,    setIsFollowing]    = useState(post.isFollowing ?? false);
+
+  const [showReactions, setShowReactions]         = useState(false);
+  const [commentsOpen,  setCommentsOpen]           = useState(false);
+  const [showShare,     setShowShare]              = useState(false);
+  // Local counters — update immediately on tap (optimistic)
+  const [viewCount,          setViewCount]          = useState(post.viewCount ?? 0);
+  const [localMyReaction,    setLocalMyReaction]    = useState<ReactionType | undefined>(
+    post.reactions?.[0]?.type as ReactionType | undefined
+  );
+  const [localReactionCount, setLocalReactionCount] = useState(post._count.reactions);
   const viewedRef = useRef(false);
+
+  // Sync from server when feed refetches
+  const serverReaction = post.reactions?.[0]?.type as ReactionType | undefined;
+  const serverCount    = post._count.reactions;
+  const prevServerReaction = useRef(serverReaction);
+  const prevServerCount    = useRef(serverCount);
+  useEffect(() => {
+    if (prevServerReaction.current !== serverReaction) {
+      setLocalMyReaction(serverReaction);
+      prevServerReaction.current = serverReaction;
+    }
+    if (prevServerCount.current !== serverCount) {
+      setLocalReactionCount(serverCount);
+      prevServerCount.current = serverCount;
+    }
+  }, [serverReaction, serverCount]);
 
   // Record view after post has been visible for 1.5 seconds
   useEffect(() => {
@@ -294,11 +323,75 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
     return () => clearTimeout(timer);
   }, [post.id]);
 
+  // ── Helper: get current post from cache ───────────────────────────────────
+  const getCachedPost = (): Post | null => {
+    const data: any = queryClient.getQueryData(['feed']);
+    if (!data?.pages) return null;
+    for (const page of data.pages) {
+      const found = page.items?.find((p: Post) => p.id === post.id);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  // ── Optimistic cache patcher ───────────────────────────────────────────────
+  const patchPost = (updater: (p: Post) => Post) => {
+    queryClient.setQueryData(['feed'], (old: any) => {
+      if (!old?.pages) return old;
+      return {
+        ...old,
+        pages: old.pages.map((page: any) => ({
+          ...page,
+          items: page.items.map((p: Post) => p.id === post.id ? updater(p) : p),
+        })),
+      };
+    });
+  };
+
   // ── React mutation ─────────────────────────────────────────────────────────
   const reactMutation = useMutation({
     mutationFn: (type: ReactionType) => api.post(`/posts/${post.id}/react`, { type }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['feed'] }),
-    onError:   () => showMessage({ message: 'Failed to react', type: 'danger' }),
+    onMutate: async (type: ReactionType) => {
+      await queryClient.cancelQueries({ queryKey: ['feed'] });
+      const prev = queryClient.getQueryData(['feed']);
+      const cached          = getCachedPost();
+      const currentReaction = cached?.reactions?.[0]?.type as ReactionType | undefined;
+      const wasReacted      = !!currentReaction;
+      const sameType        = currentReaction === type;
+      const prevCount       = cached?._count.reactions ?? localReactionCount;
+
+      // Update local state immediately
+      setLocalMyReaction(sameType ? undefined : type);
+      setLocalReactionCount(
+        sameType
+          ? Math.max(0, prevCount - 1)
+          : wasReacted
+          ? prevCount
+          : prevCount + 1
+      );
+
+      // Patch cache
+      patchPost(p => ({
+        ...p,
+        reactions: sameType ? [] : [{ type }],
+        _count: {
+          ...p._count,
+          reactions: sameType
+            ? Math.max(0, p._count.reactions - 1)
+            : wasReacted ? p._count.reactions : p._count.reactions + 1,
+        },
+      }));
+      return { prev, prevReaction: currentReaction, prevCount };
+    },
+    onError: (_e: any, _v: any, ctx: any) => {
+      if (ctx?.prev) {
+        queryClient.setQueryData(['feed'], ctx.prev);
+        setLocalMyReaction(ctx.prevReaction);
+        setLocalReactionCount(ctx.prevCount);
+      }
+      showMessage({ message: 'Failed to react', type: 'danger' });
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['feed'] }),
   });
 
   // ── Bookmark mutation ──────────────────────────────────────────────────────
@@ -317,6 +410,22 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
       showMessage({ message: 'Shared to your feed!', type: 'success' });
     },
     onError: () => showMessage({ message: 'Failed to share', type: 'danger' }),
+  });
+
+  // ── Follow mutation ────────────────────────────────────────────────────────
+  const followMutation = useMutation({
+    mutationFn: () => isFollowing
+      ? socialApi.unfollow(post.authorId)
+      : socialApi.follow(post.authorId),
+    onMutate: () => setIsFollowing(v => !v),
+    onError:  () => {
+      setIsFollowing(v => !v);
+      showMessage({ message: 'Failed to update follow', type: 'danger' });
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['feed'] });
+      queryClient.invalidateQueries({ queryKey: ['feed-following'] });
+    },
   });
 
   const handleReact = (type: ReactionType) => {
@@ -344,14 +453,76 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
         </View>
       )}
 
-      {/* Repost banner */}
-      {post.type === 'REPOST' && post.originalPost && (
-        <View style={s.repostBanner}>
-          <Ionicons name="repeat" size={13} color="#6b7280" />
-          <Text style={s.repostTxt}>{post.author.firstName} reposted</Text>
-        </View>
-      )}
+      {/* Repost: reposter attribution + original post card */}
+      {post.type === 'REPOST' && post.originalPost && (() => {
+        const orig = post.originalPost;
+        const origAvatarSrc = getAvatarUrl(orig.author.avatarUrl);
+        const origInitials = getAvatarInitials(orig.author.firstName, orig.author.lastName);
+        const origBgColor  = avatarColor(`${orig.author.firstName}${orig.author.lastName}`);
+        return (
+          <>
+            {/* Reposter attribution */}
+            <View style={s.repostBanner}>
+              <View style={[s.avatar, { backgroundColor: bgColor, width: 18, height: 18, borderRadius: 9 }]}>
+                {avatarSrc
+                  ? <Image source={{ uri: avatarSrc }} style={{ width: 18, height: 18, borderRadius: 9 }} />
+                  : <Text allowFontScaling={false} style={{ fontSize: 8, fontWeight: '700', color: '#fff' }}>{initials}</Text>}
+              </View>
+              <Ionicons name="repeat" size={13} color="#16a34a" />
+              <Text allowFontScaling={false} style={s.repostTxt}>
+                {post.author.firstName} {post.author.lastName} reposted
+              </Text>
+            </View>
 
+            {/* Original post card */}
+            <View style={s.origCard}>
+              {/* Original author */}
+              <TouchableOpacity
+                style={s.header}
+                onPress={() => router.push(`/profile/${orig.author.id}` as any)}
+                activeOpacity={0.7}
+              >
+                <View style={[s.avatar, { backgroundColor: origBgColor }]}>
+                  {origAvatarSrc
+                    ? <Image source={{ uri: origAvatarSrc }} style={s.avatarImg} />
+                    : <Text allowFontScaling={false} style={s.avatarTxt}>{origInitials}</Text>}
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text allowFontScaling={false} style={s.authorName}>
+                    {orig.author.firstName} {orig.author.lastName}
+                  </Text>
+                  <Text allowFontScaling={false} style={s.time}>
+                    {formatDistanceToNow(new Date(orig.createdAt), { addSuffix: true })}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              {/* Original body */}
+              {orig.body ? (
+                <Text allowFontScaling={false} style={s.body} numberOfLines={6}>
+                  {orig.body.split(/(\s+)/).map((word: string, i: number) => {
+                    if (word.startsWith('#')) return <Text key={i} style={s.hashtag}>{word}</Text>;
+                    if (word.startsWith('@')) return <Text key={i} style={s.mention}>{word}</Text>;
+                    return word;
+                  })}
+                </Text>
+              ) : null}
+
+              {/* Original media */}
+              {orig.media?.length > 0 && (
+                <MediaGrid
+                  media={orig.media}
+                  onPress={() => onNavigateToDetail ? onNavigateToDetail() : router.push(`/post/${post.id}` as any)}
+                />
+              )}
+            </View>
+          </>
+        );
+      })()}
+
+      {/* Non-REPOST: standard author row + body + media */}
+      {post.type !== 'REPOST' && (
+        <>
       {/* Author row */}
       <TouchableOpacity
         style={s.header}
@@ -364,9 +535,28 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
             : <Text allowFontScaling={false} style={s.avatarTxt}>{initials}</Text>}
         </View>
         <View style={{ flex: 1 }}>
-          <Text allowFontScaling={false} style={s.authorName}>
-            {post.author.firstName} {post.author.lastName}
-          </Text>
+          <View style={s.authorNameRow}>
+            <Text allowFontScaling={false} style={s.authorName}>
+              {post.author.firstName} {post.author.lastName}
+            </Text>
+            {/* Inline Follow button — only for other users' non-repost posts */}
+            {!isOwn && post.type !== 'REPOST' && (
+              <TouchableOpacity
+                onPress={() => followMutation.mutate()}
+                disabled={followMutation.isPending}
+                style={[s.followBtn, isFollowing && s.followBtnActive]}
+              >
+                <Ionicons
+                  name={isFollowing ? 'person-remove-outline' : 'person-add-outline'}
+                  size={11}
+                  color={isFollowing ? '#6b7280' : '#4f46e5'}
+                />
+                <Text allowFontScaling={false} style={[s.followBtnTxt, isFollowing && { color: '#6b7280' }]}>
+                  {isFollowing ? 'Following' : 'Follow'}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
           <View style={s.metaRow}>
             <Text allowFontScaling={false} style={s.time}>
               {formatDistanceToNow(new Date(post.createdAt), { addSuffix: true })}
@@ -419,47 +609,79 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
           </Text>
         </View>
       )}
+      </>)}
 
-      {/* Reaction + comment + view counts */}
-      {(post._count.reactions > 0 || post._count.comments > 0 || viewCount > 0) && (
+      {/* Facebook-style counts row */}
+      {(localReactionCount > 0 || post._count.comments > 0 || (post.shareCount ?? 0) > 0 || viewCount > 0) && (
         <View style={s.counts}>
-          {post._count.reactions > 0 && (
-            <Text allowFontScaling={false} style={s.countTxt}>
-              {post._count.reactions} reaction{post._count.reactions !== 1 ? 's' : ''}
-            </Text>
-          )}
-          {post._count.comments > 0 && (
-            <TouchableOpacity onPress={() => setCommentsOpen(v => !v)}>
-              <Text allowFontScaling={false} style={s.countTxt}>
-                {post._count.comments} comment{post._count.comments !== 1 ? 's' : ''}
+          {/* Left: emoji stack + reaction count */}
+          <View style={s.countsLeft}>
+            {localReactionCount > 0 && (
+              <View style={s.reactionStack}>
+                {(['👍','❤️','🎉'] as const).map((em, i) => (
+                  <View key={i} style={[s.reactionBubble, { zIndex: 3 - i, marginLeft: i === 0 ? 0 : -4 }]}>
+                    <Text style={s.reactionBubbleEmoji}>{em}</Text>
+                  </View>
+                ))}
+                <Text allowFontScaling={false} style={s.countTxt}>
+                  {' '}{localReactionCount >= 1000
+                    ? `${(localReactionCount / 1000).toFixed(1)}K`
+                    : localReactionCount}
+                </Text>
+              </View>
+            )}
+            {viewCount > 0 && (
+              <View style={[s.viewCount, localReactionCount > 0 && { marginLeft: 6 }]}>
+                <Ionicons name="eye-outline" size={12} color="#9ca3af" />
+                <Text allowFontScaling={false} style={s.viewCountTxt}>
+                  {viewCount >= 1_000_000
+                    ? `${(viewCount / 1_000_000).toFixed(1)}M`
+                    : viewCount >= 1000
+                    ? `${(viewCount / 1000).toFixed(1)}K`
+                    : viewCount}
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* Right: comments · shares */}
+          <View style={s.countsRight}>
+            {post._count.comments > 0 && (
+              <TouchableOpacity onPress={() => setCommentsOpen(v => !v)}>
+                <Text allowFontScaling={false} style={s.countTxt}>
+                  {post._count.comments >= 1000
+                    ? `${(post._count.comments / 1000).toFixed(1)}K`
+                    : post._count.comments}{' '}
+                  {post._count.comments === 1 ? 'comment' : 'comments'}
+                </Text>
+              </TouchableOpacity>
+            )}
+            {(post.shareCount ?? 0) > 0 && (
+              <Text allowFontScaling={false} style={[s.countTxt, { marginLeft: 8 }]}>
+                {(post.shareCount ?? 0) >= 1000
+                  ? `${((post.shareCount ?? 0) / 1000).toFixed(1)}K`
+                  : post.shareCount}{' '}
+                {post.shareCount === 1 ? 'share' : 'shares'}
               </Text>
-            </TouchableOpacity>
-          )}
-          {viewCount > 0 && (
-            <View style={s.viewCount}>
-              <Ionicons name="eye-outline" size={12} color="#d1d5db" />
-              <Text allowFontScaling={false} style={s.viewCountTxt}>
-                {viewCount >= 1000 ? `${(viewCount / 1000).toFixed(1)}k` : viewCount}
-              </Text>
-            </View>
-          )}
+            )}
+          </View>
         </View>
       )}
 
-      {/* Action bar */}
+      {/* Facebook-style action bar — 4 equal buttons */}
       <View style={s.actions}>
         {/* Like / Reaction */}
         <Pressable
-          onPress={() => reactMutation.mutate(myReaction ?? 'LIKE')}
+          onPress={() => reactMutation.mutate(localMyReaction ?? 'LIKE')}
           onLongPress={() => setShowReactions(true)}
-          style={[s.actionBtn, myReaction && s.actionBtnActive]}
+          style={[s.actionBtn, localMyReaction && s.actionBtnActive]}
           disabled={reactMutation.isPending}
         >
           <Text style={s.reactionEmoji}>
-            {myReaction ? REACTION_EMOJI[myReaction] : '👍'}
+            {localMyReaction ? REACTION_EMOJI[localMyReaction] : '👍'}
           </Text>
-          <Text allowFontScaling={false} style={[s.actionTxt, myReaction && { color: '#4f46e5' }]}>
-            {myReaction ? myReaction.charAt(0) + myReaction.slice(1).toLowerCase() : 'Like'}
+          <Text allowFontScaling={false} style={[s.actionTxt, localMyReaction && { color: '#4f46e5' }]}>
+            {localMyReaction ? localMyReaction.charAt(0) + localMyReaction.slice(1).toLowerCase() : 'Like'}
           </Text>
         </Pressable>
 
@@ -480,9 +702,9 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
           <Text allowFontScaling={false} style={s.actionTxt}>Share</Text>
         </TouchableOpacity>
 
-        {/* Bookmark */}
+        {/* Bookmark / Save */}
         <TouchableOpacity
-          style={s.actionBtn}
+          style={[s.actionBtn, isBookmarked && s.actionBtnActive]}
           onPress={() => bookmarkMutation.mutate()}
           disabled={bookmarkMutation.isPending}
         >
@@ -491,6 +713,9 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
             size={16}
             color={isBookmarked ? '#4f46e5' : '#6b7280'}
           />
+          <Text allowFontScaling={false} style={[s.actionTxt, isBookmarked && { color: '#4f46e5' }]}>
+            Save
+          </Text>
         </TouchableOpacity>
       </View>
 
@@ -549,6 +774,10 @@ const s = StyleSheet.create({
   avatarImg:         { width: 40, height: 40, borderRadius: 20 },
   avatarTxt:         { fontSize: 14, fontWeight: '700', color: '#fff' },
   authorName:        { fontSize: 14, fontWeight: '700', color: '#111827' },
+  authorNameRow:     { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+  followBtn:         { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 12, borderWidth: 1, borderColor: '#a5b4fc' },
+  followBtnActive:   { borderColor: '#d1d5db', backgroundColor: '#f9fafb' },
+  followBtnTxt:      { fontSize: 11, fontWeight: '600', color: '#4f46e5' },
   metaRow:           { flexDirection: 'row', alignItems: 'center', gap: 3, flexWrap: 'wrap' },
   time:              { fontSize: 11, color: '#9ca3af' },
   metaDot:           { fontSize: 11, color: '#d1d5db' },
@@ -557,16 +786,22 @@ const s = StyleSheet.create({
   hashtag:           { color: '#4f46e5', fontWeight: '600' },
   mention:           { color: '#7c3aed', fontWeight: '500' },
   quotedCard:        { borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 12, padding: 10, marginBottom: 10, backgroundColor: '#f9fafb' },
+  origCard:          { borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 12, overflow: 'hidden', marginBottom: 10, backgroundColor: '#f9fafb' },
   quotedAuthor:      { fontSize: 12, fontWeight: '700', color: '#374151', marginBottom: 2 },
   quotedBody:        { fontSize: 12, color: '#6b7280', lineHeight: 18 },
-  counts:            { flexDirection: 'row', gap: 12, paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: '#f3f4f6', marginBottom: 2 },
+  counts:            { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: '#f3f4f6', marginBottom: 2 },
+  countsLeft:        { flexDirection: 'row', alignItems: 'center' },
+  countsRight:       { flexDirection: 'row', alignItems: 'center' },
+  reactionStack:     { flexDirection: 'row', alignItems: 'center' },
+  reactionBubble:    { width: 18, height: 18, borderRadius: 9, backgroundColor: '#fff', borderWidth: 1, borderColor: '#e5e7eb', justifyContent: 'center', alignItems: 'center' },
+  reactionBubbleEmoji: { fontSize: 10, lineHeight: 13 },
   countTxt:          { fontSize: 12, color: '#9ca3af' },
-  viewCount:         { flexDirection: 'row', alignItems: 'center', gap: 3, marginLeft: 'auto' as any },
-  viewCountTxt:      { fontSize: 11, color: '#d1d5db' },
-  actions:           { flexDirection: 'row', alignItems: 'center', paddingTop: 6 },
-  actionBtn:         { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3, paddingVertical: 6, borderRadius: 8 },
+  viewCount:         { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  viewCountTxt:      { fontSize: 11, color: '#9ca3af' },
+  actions:           { flexDirection: 'row', alignItems: 'center', paddingTop: 4, borderTopWidth: 1, borderTopColor: '#f3f4f6' },
+  actionBtn:         { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 8, borderRadius: 8 },
   actionBtnActive:   { backgroundColor: '#ede9fe' },
-  actionTxt:         { fontSize: 11, color: '#6b7280', fontWeight: '500' },
+  actionTxt:         { fontSize: 12, color: '#6b7280', fontWeight: '500' },
   reactionEmoji:     { fontSize: 16 },
   // Media
   videoPlayIcon:     { position: 'absolute', inset: 0, justifyContent: 'center', alignItems: 'center' },

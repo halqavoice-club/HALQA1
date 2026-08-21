@@ -28,6 +28,10 @@ if (!process.env.DATABASE_URL) {
 
 // ─── Stripe (disabled — no real Stripe calls in unit tests) ───────────────────
 // Tests that need Stripe configured set STRIPE_SECRET_KEY themselves
+// M-9 FIX: Explicitly enable signature bypass for tests (replaces NODE_ENV check).
+// This is safe because NODE_ENV=test is already set above and this var is
+// only respected when NODE_ENV !== 'production'.
+process.env.STRIPE_SKIP_SIGNATURE = 'true';
 
 // ─── LiveKit ──────────────────────────────────────────────────────────────────
 process.env.LIVEKIT_URL         = 'wss://test.livekit.cloud';

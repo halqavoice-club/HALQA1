@@ -181,7 +181,21 @@ function roomListCacheKey(schoolId, status, privacy, page, limit) {
 async function listRooms(req, res, next) {
   try {
     const { status, privacy, limit = 50, page = 1 } = req.query;
-    const schoolId = req.user.schoolId;
+    // ARCHITECTURE FIX (HALQA-ARCH-03): Use SchoolMembership as authoritative source.
+    // user.schoolId is null for new MEMBER users who joined via SchoolMembership;
+    // they would only see global rooms. Resolve their school from SchoolMembership.
+    let resolvedSchoolId = req.user.schoolId || null;
+    if (!resolvedSchoolId) {
+      try {
+        const firstMembership = await prisma.schoolMembership.findFirst({
+          where: { userId: req.user.id, status: 'ACTIVE' },
+          select: { schoolId: true },
+          orderBy: { createdAt: 'asc' },
+        });
+        if (firstMembership) resolvedSchoolId = firstMembership.schoolId;
+      } catch { /* non-fatal — fall through to global-only */ }
+    }
+    const schoolId = resolvedSchoolId;
     const { skip, ...pagination } = getPagination(page, limit);
 
     // BE-008: Try list cache first
@@ -193,11 +207,45 @@ async function listRooms(req, res, next) {
       }
     } catch { /* cache miss — fall through to DB */ }
 
+    // SOC-P0-01 FIX: Voice Club is a Social platform feature — room listing must
+    // work correctly for ALL authenticated users regardless of school membership.
+    //
+    // Previous behaviour was broken in two ways:
+    //   1. User WITH schoolId: only saw rooms from their school + schoolless rooms.
+    //      School-specific PUBLIC rooms from other schools were hidden.
+    //   2. User WITHOUT schoolId: the schoolId filter was skipped entirely, exposing
+    //      ALL rooms including school-scoped rooms not intended for global users.
+    //
+    // Correct Social behaviour:
+    //   - PUBLIC rooms with NO schoolId (global): visible to everyone
+    //   - PUBLIC rooms WITH a schoolId (school-scoped): visible only to users who
+    //     belong to that school, OR to SUPER_ADMIN
+    //   - PRIVATE rooms: visible to everyone in the list (join is gated separately)
+    //
+    // Implementation: show global rooms always + own-school rooms if user has a school.
+    // This preserves school privacy while keeping Voice Club open to all social users.
+    let schoolWhere;
+    if (req.user.role === 'SUPER_ADMIN') {
+      // Platform admin sees everything
+      schoolWhere = {};
+    } else if (schoolId) {
+      // User belongs to a school: show global rooms + their own school's rooms
+      schoolWhere = {
+        OR: [
+          { schoolId: null },        // global rooms (no school affiliation)
+          { schoolId: schoolId },    // user's own school rooms
+        ]
+      };
+    } else {
+      // User has no school: show only global rooms (schoolId is null)
+      schoolWhere = { schoolId: null };
+    }
+
     const where = {
       deletedAt: null,
       status:    status  ? status  : { not: STATUS.ENDED },
       ...(privacy  && { privacy }),
-      ...(schoolId && { AND: [{ OR: [{ schoolId }, { schoolId: null }] }] }),
+      ...schoolWhere,
     };
 
     const [rooms, total] = await Promise.all([
@@ -268,7 +316,19 @@ async function createRoom(req, res, next) {
       coverEmoji = '???', maxSpeakers = 10, scheduledAt
     } = req.body;
     const hostId  = req.user.id;
-    const schoolId = req.user.schoolId;
+    // ARCHITECTURE FIX (HALQA-ARCH-03): Resolve school from SchoolMembership for new-arch users.
+    let resolvedSchoolId = req.user.schoolId || null;
+    if (!resolvedSchoolId) {
+      try {
+        const firstMembership = await prisma.schoolMembership.findFirst({
+          where: { userId: req.user.id, status: 'ACTIVE' },
+          select: { schoolId: true },
+          orderBy: { createdAt: 'asc' },
+        });
+        if (firstMembership) resolvedSchoolId = firstMembership.schoolId;
+      } catch { /* non-fatal */ }
+    }
+    const schoolId = resolvedSchoolId;
 
     // BUG FIX: wrap room + host participant creation in a transaction
     // so we never end up with a room that has no host participant
@@ -565,8 +625,9 @@ async function endRoom(req, res, next) {
     if (!room) return errorResponse(res, 'Room not found', 404);
     if (room.status === STATUS.ENDED) return errorResponse(res, 'Room already ended', 400);
 
-    // Only host or admin can end
-    const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(req.user.role);
+    // NF-6 FIX: Voice rooms are a Social feature — SCHOOL_ADMIN must not end rooms
+    // belonging to users from other schools. Only the host or SUPER_ADMIN (platform admin).
+    const isAdmin = req.user.role === 'SUPER_ADMIN';
     if (room.hostId !== userId && !isAdmin) {
       return errorResponse(res, 'Only the host can end this room', 403);
     }
@@ -1197,7 +1258,8 @@ async function uploadRoomCover(req, res, next) {
     const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
 
-    const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(req.user.role);
+    // NF-6 FIX: Only host or SUPER_ADMIN can update room cover image.
+    const isAdmin = req.user.role === 'SUPER_ADMIN';
     if (room.hostId !== userId && !isAdmin) {
       return errorResponse(res, 'Only the host can update the room image', 403);
     }
@@ -1289,7 +1351,8 @@ async function updateRoom(req, res, next) {
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
     if (room.status === STATUS.ENDED) return errorResponse(res, 'Cannot edit an ended room', 400);
 
-    const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(req.user.role);
+    // NF-6 FIX: Only host, moderator, or SUPER_ADMIN can edit room settings.
+    const isAdmin = req.user.role === 'SUPER_ADMIN';
     const participant = await prisma.voiceParticipant.findUnique({
       where: { roomId_userId: { roomId, userId } }
     });
@@ -1378,7 +1441,8 @@ async function deleteRoom(req, res, next) {
     const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
 
-    const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(req.user.role);
+    // NF-6 FIX: Only host or SUPER_ADMIN can delete a voice room.
+    const isAdmin = req.user.role === 'SUPER_ADMIN';
     if (room.hostId !== userId && !isAdmin) {
       return errorResponse(res, 'Only the host can delete this room', 403);
     }

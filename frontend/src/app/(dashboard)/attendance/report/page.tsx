@@ -16,6 +16,7 @@ import { Progress } from '@/components/ui/progress'
 import { Breadcrumb } from '@/components/ui/breadcrumb'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import {
   CheckCircle, XCircle, Clock, AlertCircle, Download,
   FileSpreadsheet, Users, TrendingUp, Calendar, ArrowLeft
@@ -35,6 +36,7 @@ const STATUS_COLORS = {
 
 export default function AttendanceReportPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const [classId, setClassId] = useState('')
   const [studentId, setStudentId] = useState('')
@@ -42,11 +44,6 @@ export default function AttendanceReportPage() {
   const [endDate, setEndDate] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [downloading, setDownloading] = useState(false)
-
-  const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
-  const isTeacher = user?.role === 'TEACHER'
-  const isStudent = user?.role === 'STUDENT'
-  const isGuardian = user?.role === 'GUARDIAN'
 
   const { data: classes } = useQuery({
     queryKey: ['classes'],

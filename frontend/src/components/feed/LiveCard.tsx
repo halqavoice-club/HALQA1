@@ -39,7 +39,7 @@ export function LiveCard({ post, liveParticipants }: Props) {
     : '?'
 
   const handleJoin = () => {
-    if (isVoice) router.push(`/voice-club`)
+    if (isVoice) router.push(`/voice-club/${post.refEntityId}`)
     else         router.push(`/live-class/${post.refEntityId}`)
   }
 

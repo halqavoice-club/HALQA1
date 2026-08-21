@@ -30,6 +30,7 @@ router.get('/feed',     ctrl.getFeed);
 router.get('/live',     ctrl.getLiveSessions);  // currently active live rooms/classes
 router.get('/trending', ctrl.getTrendingHashtags);
 router.get('/search',   ctrl.searchPosts);
+router.get('/reels',    ctrl.getReels);          // TikTok-style video feed
 
 // ─── User posts ───────────────────────────────────────────────────────────────
 router.get('/user/:userId', ctrl.getUserPosts);
@@ -117,5 +118,22 @@ router.post('/:id/report',
   validate,
   ctrl.reportPost
 );
+
+// ─── Poll vote ────────────────────────────────────────────────────────────────
+router.post('/:id/poll/vote',
+  [body('optionId').notEmpty().withMessage('optionId required')],
+  validate,
+  ctrl.votePoll
+);
+
+// ─── Link preview scrape ──────────────────────────────────────────────────────
+// GET /api/v1/posts/link-preview?url=https://...
+// Scrapes OG / meta tags from the given URL. Rate-limited. No auth required beyond session.
+const previewLimit = rateLimit({
+  windowMs: 60 * 1000, max: 30,
+  keyGenerator: req => req.user?.id || req.ip,
+  message: { success: false, message: 'Too many preview requests' },
+});
+router.get('/link-preview', previewLimit, ctrl.getLinkPreview);
 
 module.exports = router;

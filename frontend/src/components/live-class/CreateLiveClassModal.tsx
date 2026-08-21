@@ -8,31 +8,31 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import api from '@/lib/api'
 import { useToast } from '@/components/ui/use-toast'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { X, Loader2, Video, ImagePlus, Clock, Calendar, Infinity, Timer } from 'lucide-react'
+import { X, Loader2, Video, ImagePlus, Clock, Calendar, Infinity, Timer, Globe, GraduationCap } from 'lucide-react'
 import { cn } from '@/lib/utils'
+
+// ─── Stream mode ──────────────────────────────────────────────────────────────
+type StreamMode = 'SCHOOL' | 'PUBLIC'
 
 // ─── Room type ────────────────────────────────────────────────────────────────
 type RoomType = 'immediate' | 'scheduled' | 'permanent' | 'limited'
 
-const ROOM_TYPES: {
-  id: RoomType
-  label: string
-  sub: string
-  icon: React.ReactNode
-}[] = [
-  { id: 'immediate', label: 'Immediate',  sub: 'Start now',                         icon: <Video className="w-5 h-5" /> },
-  { id: 'scheduled', label: 'Scheduled',  sub: 'Choose a future date and time',     icon: <Calendar className="w-5 h-5" /> },
-  { id: 'permanent', label: 'Permanent',  sub: 'Always available',                  icon: <Infinity className="w-5 h-5" /> },
+const ROOM_TYPES: { id: RoomType; label: string; sub: string; icon: React.ReactNode }[] = [
+  { id: 'immediate', label: 'Immediate',  sub: 'Start now',                          icon: <Video className="w-5 h-5" /> },
+  { id: 'scheduled', label: 'Scheduled',  sub: 'Choose a future date and time',      icon: <Calendar className="w-5 h-5" /> },
+  { id: 'permanent', label: 'Permanent',  sub: 'Always available, no auto-end',      icon: <Infinity className="w-5 h-5" /> },
   { id: 'limited',   label: 'Limited',    sub: 'Auto-end after a selected duration', icon: <Timer className="w-5 h-5" /> },
 ]
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 const schema = z.object({
-  classId:            z.string().min(1, 'Select a class'),
+  streamType:         z.enum(['SCHOOL', 'PUBLIC']).default('SCHOOL'),
+  classId:            z.string().optional(),
   title:              z.string().min(1, 'Title required').max(120),
   description:        z.string().optional(),
   scheduledAt:        z.string().optional(),
@@ -57,20 +57,28 @@ interface Props {
 // ─── Component ────────────────────────────────────────────────────────────────
 export function CreateLiveClassModal({ onClose, onCreated }: Props) {
   const { toast } = useToast()
+  const { isTeacher, isAdmin } = useEducationRole()
   const coverInputRef = useRef<HTMLInputElement>(null)
-  const [step, setStep] = useState<'type' | 'details'>('type')
-  const [roomType, setRoomType] = useState<RoomType>('immediate')
-  const [coverPreview, setCoverPreview] = useState<string | null>(null)
-  const [coverFile, setCoverFile] = useState<File | null>(null)
 
+  // Step flow: mode → type → details
+  const [step, setStep]             = useState<'mode' | 'type' | 'details'>('mode')
+  const [streamMode, setStreamMode] = useState<StreamMode>('PUBLIC')
+  const [roomType, setRoomType]     = useState<RoomType>('immediate')
+  const [coverPreview, setCoverPreview] = useState<string | null>(null)
+  const [coverFile, setCoverFile]   = useState<File | null>(null)
+
+  // Only fetch classes if the user has a school role
+  const canUseSchoolStreams = isTeacher || isAdmin
   const { data: classes = [] } = useQuery({
     queryKey: ['classes-for-liveclass'],
     queryFn: () => api.get('/classes').then(r => r.data.data || []),
+    enabled: canUseSchoolStreams,
   })
 
   const { register, handleSubmit, setValue, watch, formState: { errors } } = useForm<Form>({
     resolver: zodResolver(schema),
     defaultValues: {
+      streamType: 'PUBLIC',
       duration: 60, privacy: 'PUBLIC',
       chatEnabled: true, handRaiseEnabled: true,
       quranPanelEnabled: false, whiteboardEnabled: true,
@@ -80,17 +88,12 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
 
   const mutation = useMutation({
     mutationFn: async (data: Form) => {
-      // Map roomType to the fields the backend understands:
-      // - immediate: no scheduledAt, normal duration
-      // - scheduled: scheduledAt set, normal duration
-      // - permanent: no scheduledAt, duration=9999 (effectively unlimited)
-      // - limited:   no scheduledAt, duration = user-chosen value (auto-end)
-      const payload = {
-        classId:            data.classId,
+      const payload: Record<string, any> = {
+        streamType:         data.streamType,
         title:              data.title,
         description:        data.description,
         duration:           roomType === 'permanent' ? null : data.duration,
-        scheduledAt:        roomType === 'scheduled'  ? data.scheduledAt : undefined,
+        scheduledAt:        roomType === 'scheduled' ? data.scheduledAt : undefined,
         privacy:            data.privacy,
         maxParticipants:    data.maxParticipants,
         chatEnabled:        data.chatEnabled,
@@ -100,6 +103,11 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
         screenShareEnabled: data.screenShareEnabled,
         isRecorded:         data.isRecorded,
       }
+      // Only include classId for school streams
+      if (data.streamType === 'SCHOOL' && data.classId) {
+        payload.classId = data.classId
+      }
+
       const res = await api.post('/live-classes', payload)
       const lc = res.data.data
 
@@ -113,7 +121,7 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
       return res
     },
     onSuccess: () => {
-      toast({ title: '✅ Live class created' })
+      toast({ title: '✅ Live stream created' })
       onCreated()
     },
     onError: (e: any) => {
@@ -130,6 +138,15 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
     reader.readAsDataURL(file)
   }
 
+  const handleModeSelect = (mode: StreamMode) => {
+    setStreamMode(mode)
+    setValue('streamType', mode)
+    setStep('type')
+  }
+
+  const selectedClassId = watch('classId')
+  const selectedClass = classes.find((c: any) => c.id === selectedClassId)
+
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center p-4">
       <motion.div
@@ -141,11 +158,12 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
         {/* Header */}
         <div className="flex items-center justify-between p-5 border-b sticky top-0 bg-white z-10">
           <div className="flex items-center gap-2">
-            {step === 'details' && (
+            {step !== 'mode' && (
               <button
                 type="button"
-                onClick={() => setStep('type')}
+                onClick={() => setStep(step === 'details' ? 'type' : 'mode')}
                 className="p-1.5 rounded-lg hover:bg-gray-100 mr-1"
+                aria-label="Go back"
               >
                 <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -153,16 +171,80 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
               </button>
             )}
             <Video className="w-5 h-5 text-indigo-600" />
-            <h2 className="font-bold text-gray-900">Create Live Class Room</h2>
+            <h2 className="font-bold text-gray-900">Go Live</h2>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100">
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100" aria-label="Close">
             <X className="w-4 h-4 text-gray-500" />
           </button>
         </div>
 
         <AnimatePresence mode="wait">
-          {step === 'type' ? (
-            /* ── Step 1: Room Type ──────────────────────────────────────── */
+
+          {/* ── Step 0: Stream Mode ──────────────────────────────────────────── */}
+          {step === 'mode' && (
+            <motion.div
+              key="mode"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="p-5 space-y-4"
+            >
+              <p className="text-sm font-semibold text-gray-700">Who is this stream for?</p>
+
+              <div className="space-y-3">
+                {/* Public Stream — available to everyone */}
+                <button
+                  type="button"
+                  onClick={() => handleModeSelect('PUBLIC')}
+                  className="w-full flex items-center gap-4 p-4 rounded-xl border-2 border-gray-200 hover:border-indigo-400 hover:bg-indigo-50 transition-all text-left group"
+                >
+                  <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center flex-shrink-0">
+                    <Globe className="w-6 h-6 text-white" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="font-semibold text-gray-900 group-hover:text-indigo-700">Public Live Stream</p>
+                    <p className="text-xs text-gray-500 mt-0.5">Anyone can watch. No school required. Like TikTok Live.</p>
+                  </div>
+                  <svg className="w-5 h-5 text-gray-300 group-hover:text-indigo-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                  </svg>
+                </button>
+
+                {/* School Class Stream — requires school membership */}
+                {canUseSchoolStreams ? (
+                  <button
+                    type="button"
+                    onClick={() => handleModeSelect('SCHOOL')}
+                    className="w-full flex items-center gap-4 p-4 rounded-xl border-2 border-gray-200 hover:border-indigo-400 hover:bg-indigo-50 transition-all text-left group"
+                  >
+                    <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-indigo-500 to-blue-600 flex items-center justify-center flex-shrink-0">
+                      <GraduationCap className="w-6 h-6 text-white" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-semibold text-gray-900 group-hover:text-indigo-700">School Live Class</p>
+                      <p className="text-xs text-gray-500 mt-0.5">For your enrolled class. Includes attendance, whiteboard, polls.</p>
+                    </div>
+                    <svg className="w-5 h-5 text-gray-300 group-hover:text-indigo-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+                ) : (
+                  <div className="w-full flex items-center gap-4 p-4 rounded-xl border-2 border-gray-100 bg-gray-50 opacity-60 cursor-not-allowed">
+                    <div className="w-11 h-11 rounded-xl bg-gray-200 flex items-center justify-center flex-shrink-0">
+                      <GraduationCap className="w-6 h-6 text-gray-400" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-semibold text-gray-500">School Live Class</p>
+                      <p className="text-xs text-gray-400 mt-0.5">Join a school as a teacher or admin to create school classes.</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+
+          {/* ── Step 1: Room Type ──────────────────────────────────────────── */}
+          {step === 'type' && (
             <motion.div
               key="type"
               initial={{ opacity: 0, x: -20 }}
@@ -170,6 +252,15 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
               exit={{ opacity: 0, x: -20 }}
               className="p-5 space-y-4"
             >
+              {/* Mode badge */}
+              <div className={cn(
+                'flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium',
+                streamMode === 'PUBLIC' ? 'bg-purple-50 text-purple-700' : 'bg-indigo-50 text-indigo-700'
+              )}>
+                {streamMode === 'PUBLIC' ? <Globe className="w-4 h-4" /> : <GraduationCap className="w-4 h-4" />}
+                {streamMode === 'PUBLIC' ? 'Public Live Stream' : 'School Live Class'}
+              </div>
+
               <p className="text-sm font-semibold text-gray-700">Room Type</p>
 
               <div className="space-y-2">
@@ -185,30 +276,17 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                         : 'border-gray-200 hover:border-gray-300 bg-white',
                     )}
                   >
-                    {/* Radio indicator */}
                     <span className={cn(
                       'w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0',
                       roomType === rt.id ? 'border-indigo-600' : 'border-gray-400',
                     )}>
-                      {roomType === rt.id && (
-                        <span className="w-2.5 h-2.5 rounded-full bg-indigo-600" />
-                      )}
+                      {roomType === rt.id && <span className="w-2.5 h-2.5 rounded-full bg-indigo-600" />}
                     </span>
-
-                    {/* Icon */}
-                    <span className={cn(
-                      'flex-shrink-0',
-                      roomType === rt.id ? 'text-indigo-600' : 'text-gray-400',
-                    )}>
+                    <span className={cn('flex-shrink-0', roomType === rt.id ? 'text-indigo-600' : 'text-gray-400')}>
                       {rt.icon}
                     </span>
-
-                    {/* Text */}
                     <div>
-                      <p className={cn(
-                        'font-semibold text-sm',
-                        roomType === rt.id ? 'text-indigo-700' : 'text-gray-800',
-                      )}>
+                      <p className={cn('font-semibold text-sm', roomType === rt.id ? 'text-indigo-700' : 'text-gray-800')}>
                         {rt.label}
                       </p>
                       <p className="text-xs text-gray-500 mt-0.5">{rt.sub}</p>
@@ -218,18 +296,14 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
               </div>
 
               <div className="pt-2 border-t border-gray-100" />
-
-              <Button
-                type="button"
-                className="w-full bg-indigo-600 hover:bg-indigo-700"
-                onClick={() => setStep('details')}
-              >
+              <Button type="button" className="w-full bg-indigo-600 hover:bg-indigo-700" onClick={() => setStep('details')}>
                 Continue
               </Button>
             </motion.div>
+          )}
 
-          ) : (
-            /* ── Step 2: Room Details ───────────────────────────────────── */
+          {/* ── Step 2: Room Details ───────────────────────────────────────── */}
+          {step === 'details' && (
             <motion.div
               key="details"
               initial={{ opacity: 0, x: 20 }}
@@ -237,56 +311,66 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
               exit={{ opacity: 0, x: 20 }}
             >
               <form onSubmit={handleSubmit(d => mutation.mutate(d))} className="p-5 space-y-4">
-                {/* Room type badge */}
-                <div className="flex items-center gap-2 px-3 py-2 bg-indigo-50 rounded-xl text-indigo-700 text-sm font-medium">
-                  {ROOM_TYPES.find(r => r.id === roomType)?.icon}
-                  {ROOM_TYPES.find(r => r.id === roomType)?.label} room
+                {/* Mode + type badge */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <div className={cn(
+                    'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium',
+                    streamMode === 'PUBLIC' ? 'bg-purple-50 text-purple-700' : 'bg-indigo-50 text-indigo-700'
+                  )}>
+                    {streamMode === 'PUBLIC' ? <Globe className="w-3.5 h-3.5" /> : <GraduationCap className="w-3.5 h-3.5" />}
+                    {streamMode === 'PUBLIC' ? 'Public Stream' : 'School Class'}
+                  </div>
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-100 text-gray-600 text-sm font-medium">
+                    {ROOM_TYPES.find(r => r.id === roomType)?.icon}
+                    {ROOM_TYPES.find(r => r.id === roomType)?.label}
+                  </div>
                 </div>
 
-                {/* Class */}
-                <div>
-                  <Label>Class *</Label>
-                  <Select onValueChange={v => setValue('classId', v)}>
-                    <SelectTrigger className="mt-1">
-                      <SelectValue placeholder="Select a class" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {classes.map((c: any) => (
-                        <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {errors.classId && <p className="text-xs text-red-500 mt-1">{errors.classId.message}</p>}
-                </div>
+                {/* Class picker — only for school streams */}
+                {streamMode === 'SCHOOL' && (
+                  <div>
+                    <Label>Class *</Label>
+                    <Select onValueChange={v => setValue('classId', v)}>
+                      <SelectTrigger className="mt-1">
+                        <SelectValue placeholder="Select a class" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {classes.map((c: any) => (
+                          <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {errors.classId && <p className="text-xs text-red-500 mt-1">{errors.classId.message}</p>}
+                  </div>
+                )}
 
-                {/* Room name / title */}
+                {/* Title */}
                 <div>
-                  <Label>Room Name *</Label>
-                  <Input className="mt-1" placeholder="e.g. Quran Recitation — Surah Al-Baqarah" {...register('title')} />
+                  <Label>{streamMode === 'PUBLIC' ? 'Stream Title *' : 'Class Title *'}</Label>
+                  <Input
+                    className="mt-1"
+                    placeholder={streamMode === 'PUBLIC' ? 'e.g., Arabic Conversation Practice' : 'e.g., Quran Recitation — Surah Al-Baqarah'}
+                    {...register('title')}
+                  />
                   {errors.title && <p className="text-xs text-red-500 mt-1">{errors.title.message}</p>}
                 </div>
 
-                {/* Category (description) */}
+                {/* Description */}
                 <div>
-                  <Label>Category</Label>
+                  <Label>Description</Label>
                   <textarea
                     className="mt-1 w-full px-3 py-2 border border-gray-200 rounded-xl text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-400"
                     rows={2}
-                    placeholder="Optional description or category..."
+                    placeholder="Optional description..."
                     {...register('description')}
                   />
                 </div>
 
-                {/* Public / Private */}
+                {/* Visibility */}
                 <div>
                   <Label>Visibility</Label>
-                  <Select
-                    defaultValue="PUBLIC"
-                    onValueChange={v => setValue('privacy', v as 'PUBLIC' | 'PRIVATE')}
-                  >
-                    <SelectTrigger className="mt-1">
-                      <SelectValue />
-                    </SelectTrigger>
+                  <Select defaultValue="PUBLIC" onValueChange={v => setValue('privacy', v as 'PUBLIC' | 'PRIVATE')}>
+                    <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="PUBLIC">🌐 Public — anyone can join</SelectItem>
                       <SelectItem value="PRIVATE">🔒 Private — invite only</SelectItem>
@@ -294,7 +378,7 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                   </Select>
                 </div>
 
-                {/* Scheduled date/time — only for 'scheduled' type */}
+                {/* Scheduled date/time */}
                 {roomType === 'scheduled' && (
                   <div>
                     <Label>Scheduled At *</Label>
@@ -302,30 +386,21 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                   </div>
                 )}
 
-                {/* Duration — hidden for 'permanent' */}
+                {/* Duration */}
                 {roomType !== 'permanent' && (
                   <div>
-                    <Label>
-                      {roomType === 'limited' ? 'Auto-end after (min)' : 'Duration (min)'}
-                    </Label>
-                    <Input
-                      type="number" min={1} max={480} className="mt-1"
-                      {...register('duration', { valueAsNumber: true })}
-                    />
+                    <Label>{roomType === 'limited' ? 'Auto-end after (min)' : 'Duration (min)'}</Label>
+                    <Input type="number" min={1} max={480} className="mt-1" {...register('duration', { valueAsNumber: true })} />
                   </div>
                 )}
 
-                {/* Maximum Members */}
+                {/* Max participants */}
                 <div>
-                  <Label>Maximum Members</Label>
-                  <Input
-                    type="number" min={1} max={1000} className="mt-1"
-                    placeholder="100"
-                    {...register('maxParticipants', { valueAsNumber: true })}
-                  />
+                  <Label>Max Viewers</Label>
+                  <Input type="number" min={1} max={1000} className="mt-1" placeholder="100" {...register('maxParticipants', { valueAsNumber: true })} />
                 </div>
 
-                {/* Cover Image */}
+                {/* Cover image */}
                 <div>
                   <Label>Cover Image (optional)</Label>
                   <div className="mt-1 flex items-center gap-3">
@@ -343,11 +418,7 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                         <img src={coverPreview} alt="Cover" className="w-full h-full object-cover" />
                         <button
                           type="button"
-                          onClick={() => {
-                            setCoverPreview(null)
-                            setCoverFile(null)
-                            if (coverInputRef.current) coverInputRef.current.value = ''
-                          }}
+                          onClick={() => { setCoverPreview(null); setCoverFile(null); if (coverInputRef.current) coverInputRef.current.value = '' }}
                           className="absolute top-0.5 right-0.5 w-4 h-4 bg-black/60 rounded-full flex items-center justify-center"
                         >
                           <X className="w-2.5 h-2.5 text-white" />
@@ -364,10 +435,12 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                   {[
                     { key: 'chatEnabled',        label: '💬 Chat' },
                     { key: 'handRaiseEnabled',   label: '✋ Hand raise queue' },
-                    { key: 'quranPanelEnabled',  label: '📖 Quran panel' },
-                    { key: 'whiteboardEnabled',  label: '🖊️ Whiteboard' },
-                    { key: 'screenShareEnabled', label: '🖥️ Screen sharing for all' },
-                    { key: 'isRecorded',         label: '🔴 Record class' },
+                    ...(streamMode === 'SCHOOL' ? [
+                      { key: 'quranPanelEnabled',  label: '📖 Quran panel' },
+                      { key: 'whiteboardEnabled',  label: '🖊️ Whiteboard' },
+                    ] : []),
+                    { key: 'screenShareEnabled', label: '🖥️ Screen sharing' },
+                    { key: 'isRecorded',         label: '🔴 Record stream' },
                   ].map(({ key, label }) => (
                     <label key={key} className="flex items-center gap-2 cursor-pointer">
                       <input type="checkbox" className="w-4 h-4 rounded accent-indigo-600" {...register(key as keyof Form)} />
@@ -378,9 +451,7 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
 
                 {/* Actions */}
                 <div className="flex gap-3 pt-2">
-                  <Button type="button" variant="outline" className="flex-1" onClick={onClose}>
-                    Cancel
-                  </Button>
+                  <Button type="button" variant="outline" className="flex-1" onClick={onClose}>Cancel</Button>
                   <Button
                     type="submit"
                     className="flex-1 bg-indigo-600 hover:bg-indigo-700 gap-2"
@@ -388,7 +459,8 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                   >
                     {mutation.isPending
                       ? <><Loader2 className="w-4 h-4 animate-spin" /> Creating...</>
-                      : <><Video className="w-4 h-4" /> Create Class</>}
+                      : <><Video className="w-4 h-4" /> Go Live</>
+                    }
                   </Button>
                 </div>
               </form>

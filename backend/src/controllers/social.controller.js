@@ -315,20 +315,21 @@ async function searchUsers(req, res, next) {
   try {
     const { q, limit = 20 } = req.query;
     const meId = req.user.id;
-    const mySchoolId = req.user.schoolId;
 
     if (!q || q.trim().length < 2) return successResponse(res, []);
 
-    // School isolation: only show users from same school (or global users with no school)
-    const schoolFilter = mySchoolId
-      ? { OR: [{ schoolId: mySchoolId }, { schoolId: null }] }
-      : {};
+    // SOC-P1-01 FIX: Social user search is a PLATFORM-WIDE feature.
+    // The previous code applied a school filter that restricted search results
+    // to only users from the same school. This violated the Social/Education
+    // boundary — a MEMBER with no school couldn't find MEMBER users with a school,
+    // and a MEMBER with school A couldn't find MEMBER users at school B.
+    // Social discovery must be platform-wide — no schoolId filter here.
+    // Education-scoped search (students/teachers/classes) lives at GET /api/v1/search.
 
     const users = await prisma.user.findMany({
       where: {
         deletedAt: null,
         id: { not: meId },
-        ...schoolFilter,
         OR: [
           { firstName: { contains: q.trim() } },
           { lastName:  { contains: q.trim() } },

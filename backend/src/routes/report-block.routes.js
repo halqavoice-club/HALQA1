@@ -38,15 +38,18 @@ router.post(
 );
 
 // Admin only: view and manage reports
+// F-1 FIX: Social report moderation is a PLATFORM-LEVEL operation.
+// SCHOOL_ADMIN should NOT have access to reports filed about users at other schools.
+// Only SUPER_ADMIN (HALQA platform admin) should moderate platform-wide social reports.
 router.get(
   '/reports',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  authorize('SUPER_ADMIN'),
   ctrl.listReports
 );
 
 router.patch(
   '/reports/:id/review',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  authorize('SUPER_ADMIN'),
   [body('status').notEmpty().withMessage('status is required')],
   validate,
   ctrl.reviewReport

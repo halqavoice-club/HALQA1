@@ -6,7 +6,7 @@ async function listTeachers(req, res, next) {
   try {
     const { page = 1, limit = 20, search } = req.query;
     const { skip, ...pagination } = getPagination(page, limit);
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
 
     const where = {
       deletedAt: null,
@@ -43,8 +43,14 @@ async function listTeachers(req, res, next) {
 
 async function getTeacher(req, res, next) {
   try {
-    const teacher = await prisma.teacher.findUnique({
-      where: { id: req.params.id },
+    // C-4 FIX: Verify the teacher belongs to the requester's school.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const teacher = await prisma.teacher.findFirst({
+      where: {
+        id: req.params.id,
+        deletedAt: null,
+        ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId })
+      },
       include: {
         user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true, avatarUrl: true, status: true, lastLoginAt: true } },
         teacherClasses: {
@@ -60,26 +66,53 @@ async function getTeacher(req, res, next) {
 async function createTeacher(req, res, next) {
   try {
     const { email, firstName, lastName, phone, department, specialization, hireDate, employeeId } = req.body;
-    const schoolId = req.user.schoolId || req.body.schoolId;
+    // H-2 FIX: Never trust req.body.schoolId for school context.
+    const schoolId = req.schoolId || req.user.schoolId;
+    if (!schoolId) return errorResponse(res, 'School context required', 400);
 
-    const passwordHash = await bcrypt.hash('Halqa@2024', 12);
+    // L-1 FIX: Random temp password instead of hardcoded default.
+    const crypto = require('crypto');
+    const tempPassword = crypto.randomBytes(12).toString('hex');
+    const passwordHash = await bcrypt.hash(tempPassword, 12);
 
     const teacher = await prisma.$transaction(async (tx) => {
       const user = await tx.user.create({
         data: {
           email, firstName, lastName, phone,
           passwordHash, role: 'TEACHER',
-          schoolId, status: 'ACTIVE', emailVerified: true
+          schoolId, status: 'ACTIVE', emailVerified: true,
+          mustChangePassword: true  // Step 8: force password reset on first login
         }
       });
 
-      return tx.teacher.create({
+      const teacherRecord = await tx.teacher.create({
         data: {
           userId: user.id, schoolId,
           department, specialization, employeeId,
           hireDate: hireDate ? new Date(hireDate) : null
         }
       });
+
+      // GAP FIX: Also create SchoolMembership so requireSchoolMember() grants access.
+      // Without this, legacy-created teachers pass middleware only via user.schoolId
+      // fallback which doesn't set req.schoolMembership.role — breaking effectiveRole.
+      await tx.schoolMembership.upsert({
+        where: { userId_schoolId: { userId: user.id, schoolId } },
+        create: {
+          userId: user.id,
+          schoolId,
+          role: 'TEACHER',
+          status: 'ACTIVE',
+          joinedAt: new Date()
+        },
+        update: {
+          role: 'TEACHER',
+          status: 'ACTIVE',
+          deletedAt: null
+        }
+      });
+
+      return teacherRecord;
     });
 
     return successResponse(res, teacher, 'Teacher created', 201);
@@ -89,7 +122,11 @@ async function createTeacher(req, res, next) {
 async function updateTeacher(req, res, next) {
   try {
     const { firstName, lastName, phone, department, specialization } = req.body;
-    const teacher = await prisma.teacher.findUnique({ where: { id: req.params.id } });
+    // C-4 FIX: Verify school ownership before updating.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const teacher = await prisma.teacher.findFirst({
+      where: { id: req.params.id, deletedAt: null, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) }
+    });
     if (!teacher) return errorResponse(res, 'Teacher not found', 404);
 
     await prisma.user.update({
@@ -128,6 +165,13 @@ async function unassignClass(req, res, next) {
 
 async function deleteTeacher(req, res, next) {
   try {
+    // C-4 FIX: Verify school ownership before soft-delete.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const teacher = await prisma.teacher.findFirst({
+      where: { id: req.params.id, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) },
+      select: { id: true }
+    });
+    if (!teacher) return errorResponse(res, 'Teacher not found', 404);
     await prisma.teacher.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
     return successResponse(res, null, 'Teacher deleted');
   } catch (error) { next(error); }

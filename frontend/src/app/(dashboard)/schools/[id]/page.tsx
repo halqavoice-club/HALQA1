@@ -18,6 +18,7 @@ import {
   BarChart3, AlertTriangle,
 } from 'lucide-react'
 import Link from 'next/link'
+import { useAuthStore } from '@/store/auth.store'
 
 const SCHOOL_TYPES = ['school', 'academy', 'college', 'daycare', 'camp', 'sports']
 
@@ -110,6 +111,13 @@ export default function SchoolManagePage() {
   const router      = useRouter()
   const { toast }   = useToast()
   const queryClient = useQueryClient()
+  const user        = useAuthStore(s => s.user)
+
+  // F-4 FIX: SCHOOL_ADMIN can only edit/delete their own school.
+  // SUPER_ADMIN can manage all schools (platform admin).
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN'
+  const isOwnSchool  = user?.schoolId === id
+  const canEdit      = isSuperAdmin || (user?.role === 'SCHOOL_ADMIN' && isOwnSchool)
 
   const [tab, setTab] = useState<'overview' | 'settings' | 'danger'>('overview')
   const [editForm, setEditForm] = useState<Partial<SchoolData>>({})
@@ -239,12 +247,14 @@ export default function SchoolManagePage() {
         </div>
       )}
 
-      {/* Tabs */}
+      {/* Tabs — Settings and Danger only shown to users who can edit this school */}
       <div className="flex bg-gray-100 rounded-xl p-1 gap-1">
         {[
           { id: 'overview', label: '🏫 Overview' },
-          { id: 'settings', label: '⚙️ Settings'  },
-          { id: 'danger',   label: '⚠️ Danger'    },
+          ...(canEdit ? [
+            { id: 'settings', label: '⚙️ Settings' },
+            { id: 'danger',   label: '⚠️ Danger'   },
+          ] : []),
         ].map(t => (
           <button
             key={t.id}
@@ -337,7 +347,7 @@ export default function SchoolManagePage() {
             </div>
           </div>
 
-          {isDirty && (
+          {isDirty && canEdit && (
             <div className="mt-5 flex justify-end">
               <Button
                 onClick={() => updateMutation.mutate(editForm)}
@@ -350,6 +360,11 @@ export default function SchoolManagePage() {
                 }
                 Save Changes
               </Button>
+            </div>
+          )}
+          {isDirty && !canEdit && (
+            <div className="mt-5 p-3 bg-yellow-50 border border-yellow-200 rounded-xl text-xs text-yellow-700">
+              You can only edit your own school settings.
             </div>
           )}
         </Section>

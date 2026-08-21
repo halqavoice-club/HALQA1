@@ -283,7 +283,7 @@ export default function ImportPage() {
             </p>
             {importType !== 'classes' && (
               <p className="mt-1 text-xs">
-                Max <strong>500 rows</strong> per import. Default password: <strong>Halqa@2024</strong>
+                Max <strong>500 rows</strong> per import. Users receive a secure temporary password via email.
               </p>
             )}
             {importType === 'classes' && (
@@ -378,7 +378,7 @@ export default function ImportPage() {
                   <CheckCircle className="w-5 h-5 text-green-500 flex-shrink-0" />
                   <p className="text-sm text-green-700">
                     <strong>{result.created}</strong> {importType} imported successfully.
-                    {importType !== 'classes' && <> Default password: <strong>Halqa@2024</strong></>}
+                    {importType !== 'classes' && <> Temporary passwords have been emailed to each user.</>}
                   </p>
                 </div>
               )}

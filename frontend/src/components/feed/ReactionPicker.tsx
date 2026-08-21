@@ -75,16 +75,16 @@ export function ReactionPicker({ postId, current, count, onReact, disabled }: Pr
   const emoji    = current ? REACTION_EMOJI[current] : null
 
   return (
-    <div className="relative" onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
+    <div className="relative flex flex-1" onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
       <button
         ref={btnRef}
         disabled={disabled}
         onClick={() => { if (!open) onReact(current ?? 'LIKE') }}
         className={cn(
-          'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium transition-colors select-none',
+          'flex flex-1 items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-colors select-none',
           isActive
             ? 'text-indigo-600 bg-indigo-50 hover:bg-indigo-100'
-            : 'text-gray-500 hover:text-indigo-600 hover:bg-indigo-50',
+            : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50',
           disabled && 'opacity-50 cursor-not-allowed'
         )}
       >
@@ -93,7 +93,6 @@ export function ReactionPicker({ postId, current, count, onReact, disabled }: Pr
           : <ThumbsUp className="w-4 h-4" />
         }
         <span>{isActive ? (current!.charAt(0) + current!.slice(1).toLowerCase()) : 'Like'}</span>
-        {count > 0 && <span className="text-xs text-gray-400">{count}</span>}
       </button>
 
       {/* Portal-rendered picker */}

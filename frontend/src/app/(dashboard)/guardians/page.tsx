@@ -14,12 +14,14 @@ import { useDebounce } from '@/hooks/useDebounce'
 import { Users, Plus, Mail, Phone, ChevronRight } from 'lucide-react'
 import Link from 'next/link'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { ErrorState } from '@/components/ui/error-state'
 
 export default function GuardiansPage() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const debouncedSearch = useDebounce(search, 300)
 
   const { data, isLoading, isError, refetch } = useQuery({
@@ -29,7 +31,7 @@ export default function GuardiansPage() {
 
   const guardians = data?.data || []
   const pagination = data?.pagination
-  const canCreate = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
+  const canCreate = isAdmin
 
   return (
     <div className="space-y-5">

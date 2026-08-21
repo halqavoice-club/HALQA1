@@ -70,6 +70,13 @@ async function main() {
     }
   });
 
+  // School Admin membership
+  await prisma.schoolMembership.upsert({
+    where: { userId_schoolId: { userId: schoolAdmin.id, schoolId: school.id } },
+    update: { role: 'SCHOOL_ADMIN', status: 'ACTIVE', deletedAt: null },
+    create: { userId: schoolAdmin.id, schoolId: school.id, role: 'SCHOOL_ADMIN', status: 'ACTIVE', joinedAt: new Date() }
+  });
+
   // Create Teacher
   const teacherHash = await bcrypt.hash('Teacher@2024', 12);
   const teacherUser = await prisma.user.upsert({
@@ -97,6 +104,13 @@ async function main() {
       department: 'Quran Studies',
       specialization: 'Tajweed & Memorization'
     }
+  });
+
+  // Teacher membership
+  await prisma.schoolMembership.upsert({
+    where: { userId_schoolId: { userId: teacherUser.id, schoolId: school.id } },
+    update: { role: 'TEACHER', status: 'ACTIVE', deletedAt: null },
+    create: { userId: teacherUser.id, schoolId: school.id, role: 'TEACHER', status: 'ACTIVE', joinedAt: new Date() }
   });
 
   // Create Term
@@ -174,6 +188,20 @@ async function main() {
       await prisma.enrollment.create({
         data: { studentId: student.id, classId: class1.id }
       });
+
+      // Student membership — required for Education access in new architecture
+      await prisma.schoolMembership.upsert({
+        where: { userId_schoolId: { userId: sUser.id, schoolId: school.id } },
+        update: { role: 'STUDENT', status: 'ACTIVE', deletedAt: null },
+        create: { userId: sUser.id, schoolId: school.id, role: 'STUDENT', status: 'ACTIVE', joinedAt: new Date() }
+      });
+    } else {
+      // Ensure existing student users also have a SchoolMembership record
+      await prisma.schoolMembership.upsert({
+        where: { userId_schoolId: { userId: existing.id, schoolId: school.id } },
+        update: { role: 'STUDENT', status: 'ACTIVE', deletedAt: null },
+        create: { userId: existing.id, schoolId: school.id, role: 'STUDENT', status: 'ACTIVE', joinedAt: new Date() }
+      });
     }
   }
 
@@ -203,6 +231,30 @@ async function main() {
       relationship: 'parent'
     }
   });
+
+  // Guardian membership — required for Education access in new architecture
+  await prisma.schoolMembership.upsert({
+    where: { userId_schoolId: { userId: guardianUser.id, schoolId: school.id } },
+    update: { role: 'GUARDIAN', status: 'ACTIVE', deletedAt: null },
+    create: { userId: guardianUser.id, schoolId: school.id, role: 'GUARDIAN', status: 'ACTIVE', joinedAt: new Date() }
+  });
+
+  // Link guardian to first student (Abdullah Hassan)
+  const firstStudent = await prisma.student.findFirst({
+    where: { schoolId: school.id, studentId: 'STU-001' },
+    select: { id: true }
+  });
+  if (firstStudent) {
+    await prisma.guardianStudent.upsert({
+      where: { guardianId_studentId: { guardianId: (await prisma.guardian.findFirst({ where: { userId: guardianUser.id } })).id, studentId: firstStudent.id } },
+      update: {},
+      create: {
+        guardianId: (await prisma.guardian.findFirst({ where: { userId: guardianUser.id } })).id,
+        studentId: firstStudent.id,
+        isPrimary: true
+      }
+    }).catch(() => {}); // non-fatal if already linked
+  }
 
   console.log('✅ Seed data created successfully!');
   console.log('\n📋 Test Credentials:');

@@ -71,6 +71,10 @@ const leaderboardRoutes   = require('./routes/leaderboard.routes');      // Phas
 const searchIndexRoutes   = require('./routes/searchIndex.routes');      // Phase C-8: Search Index
 const backupRoutes        = require('./routes/backup.routes');           // Phase C-9: Backup
 const reportBlockRoutes   = require('./routes/report-block.routes');     // Fix 3: Report & Block
+const pkRoutes            = require('./routes/pk.routes');                // PK Battle System
+const pkAdminRoutes       = require('./routes/pk.admin.routes');           // PK Admin Management
+const schoolMembershipRoutes = require('./routes/schoolMembership.routes'); // School Memberships
+const internalRoutes      = require('./routes/internal.routes');           // Internal Platform Admin Provisioning
 
 // Import middleware
 const errorHandler = require('./middleware/errorHandler');
@@ -135,8 +139,9 @@ io.use(async (socket, next) => {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error('Authentication required'));
     const decoded = verifyAccessToken(token);
-    socket.userId = decoded.userId;
-    socket.userRole = decoded.role;
+    socket.userId     = decoded.userId;
+    socket.userRole   = decoded.role;
+    socket.userSchoolId = decoded.schoolId ?? null; // Task 2: available for school:join guard
     next();
   } catch (err) {
     next(new Error('Invalid token'));
@@ -215,18 +220,33 @@ io.on('connection', (socket) => {
   }
 
   // ── Role room — admin broadcast events (report alerts, system notices) ───
-  // report-block.controller.js emits to role:SUPER_ADMIN and role:SCHOOL_ADMIN
+  // report-block.controller.js emits to role:SUPER_ADMIN only (SOC-P0-03 fixed).
   if (userRole) {
     socket.join(`role:${userRole}`);
     logger.debug(`User ${userId} joined role room role:${userRole}`);
   }
 
   // ── Voice room presence ──────────────────────────────────────────────────
-  socket.on('voice:join_room', (roomId) => {
+  // SOC-P1-05 FIX: Verify active DB participation before joining the socket room.
+  // Previously any authenticated user could join voice:{roomId} without being
+  // an active participant — kicked users could rejoin the socket room and continue
+  // receiving all room events (speaking, reactions, messages, gift events).
+  // Now requires an active VoiceParticipant record, matching the liveclass:join_room
+  // pattern that was already fixed.
+  socket.on('voice:join_room', async (roomId) => {
     const id = typeof roomId === 'object' ? roomId?.roomId : roomId;
-    if (!id) return;
-    socket.join(`voice:${id}`);
-    logger.info(`User ${userId} joined voice room voice:${id}`);
+    if (!id || !userId) return;
+    try {
+      const participant = await prisma.voiceParticipant.findUnique({
+        where: { roomId_userId: { roomId: id, userId } },
+        select: { isActive: true },
+      });
+      if (!participant?.isActive) return; // not an active participant — silently refuse
+      socket.join(`voice:${id}`);
+      logger.info(`User ${userId} joined voice room voice:${id}`);
+    } catch (err) {
+      logger.warn(`[socket] voice:join_room participation check failed: ${err.message}`);
+    }
   });
 
   socket.on('voice:leave_room', (roomId) => {
@@ -256,8 +276,15 @@ io.on('connection', (socket) => {
   });
 
   // ── School room presence (lobby real-time updates) ───────────────────────
+  // Task 2 (P2-B): Validate school membership before joining the school socket room.
+  // Previously any authenticated user could join any school's room and receive
+  // live class start/schedule notifications for that school.
+  // Allow: same school as authenticated user, or SUPER_ADMIN.
+  // Never trust the client-supplied schoolId for authorization.
   socket.on('school:join', (schoolId) => {
     if (!schoolId) return;
+    // userSchoolId comes from JWT (set in auth middleware above) — never from client payload
+    if (userRole !== 'SUPER_ADMIN' && socket.userSchoolId !== schoolId) return; // silently reject
     socket.join(`school:${schoolId}`);
   });
 
@@ -267,11 +294,36 @@ io.on('connection', (socket) => {
   });
 
   // ── Class room presence (live class notifications) ────────────────────────
-  // live-class.controller.js emits to `class:{classId}` for liveclass:started
-  socket.on('class:join', (classId) => {
-    if (!classId) return;
-    socket.join(`class:${classId}`);
-    logger.debug(`User ${userId} joined class room class:${classId}`);
+  // L-6 FIX: Validate school membership before joining class notification room.
+  // Previously any authenticated user could subscribe to any class's events
+  // (liveclass:started, schedule changes) for any class in any school.
+  socket.on('class:join', async (classId) => {
+    if (!classId || !userId) return;
+    try {
+      // SUPER_ADMIN global bypass
+      if (userRole === 'SUPER_ADMIN') {
+        socket.join(`class:${classId}`);
+        return;
+      }
+      // Check user has an active enrollment, teacher assignment, or school membership
+      // for the school that owns this class
+      const cls = await prisma.class.findFirst({
+        where: { id: classId, deletedAt: null },
+        select: { schoolId: true }
+      });
+      if (!cls) return; // class not found
+      // Verify school membership
+      const membership = await prisma.schoolMembership.findUnique({
+        where: { userId_schoolId: { userId, schoolId: cls.schoolId } },
+        select: { status: true }
+      });
+      // Legacy fallback: also check user.schoolId
+      if ((!membership || membership.status !== 'ACTIVE') && socket.userSchoolId !== cls.schoolId) return;
+      socket.join(`class:${classId}`);
+      logger.debug(`User ${userId} joined class room class:${classId}`);
+    } catch (err) {
+      logger.warn(`[socket] class:join membership check failed: ${err.message}`);
+    }
   });
 
   socket.on('class:leave', (classId) => {
@@ -294,10 +346,22 @@ io.on('connection', (socket) => {
 
   // ── Live class room relay events ─────────────────────────────────────────
   // These are lightweight client→server→room broadcasts that don't need DB writes.
-  socket.on('liveclass:join_room', (liveClassId) => {
-    if (!liveClassId) return;
-    socket.join(`liveclass:${liveClassId}`);
-    logger.debug(`User ${userId} joined live class room liveclass:${liveClassId}`);
+  // P0-04 (RT-05): Verify active DB participation before joining the socket room.
+  // Previously any authenticated socket could join any live class room and receive
+  // all events (mute, hand-raise, whiteboard, poll, chat) without being a participant.
+  socket.on('liveclass:join_room', async (liveClassId) => {
+    if (!liveClassId || !userId) return;
+    try {
+      const participant = await prisma.liveClassParticipant.findFirst({
+        where: { liveClassId, userId, isActive: true },
+        select: { id: true },
+      });
+      if (!participant) return; // not an active participant — silently refuse
+      socket.join(`liveclass:${liveClassId}`);
+      logger.debug(`User ${userId} joined live class room liveclass:${liveClassId}`);
+    } catch (err) {
+      logger.warn(`[socket] liveclass:join_room participation check failed: ${err.message}`);
+    }
   });
 
   socket.on('liveclass:leave_room', (liveClassId) => {
@@ -306,40 +370,78 @@ io.on('connection', (socket) => {
   });
 
   // Host broadcasts view mode change to all participants
-  socket.on('liveclass:viewmode_changed', ({ liveClassId, viewMode }) => {
-    if (!liveClassId || !viewMode) return;
-    // Relay to everyone in the room including sender (so all clients switch)
-    io.to(`liveclass:${liveClassId}`).emit('liveclass:viewmode_changed', { liveClassId, viewMode });
-    logger.debug(`User ${userId} set live class ${liveClassId} viewMode to ${viewMode}`);
+  // P1-02 (BUG-04): Verify the emitting socket belongs to an active HOST participant.
+  // Previously any student in the room could force a global view-mode change.
+  // Server reads role from DB — never trusts client-supplied role/isHost fields.
+  socket.on('liveclass:viewmode_changed', async ({ liveClassId, viewMode }) => {
+    if (!liveClassId || !viewMode || !userId) return;
+    try {
+      const host = await prisma.liveClassParticipant.findFirst({
+        where: { liveClassId, userId, isActive: true, role: 'HOST' },
+        select: { id: true },
+      });
+      if (!host) return; // not the host — silently drop
+      // Relay to everyone in the room including sender (so all clients switch)
+      io.to(`liveclass:${liveClassId}`).emit('liveclass:viewmode_changed', { liveClassId, viewMode });
+      logger.debug(`Host ${userId} set live class ${liveClassId} viewMode to ${viewMode}`);
+    } catch (err) {
+      logger.warn(`[socket] liveclass:viewmode_changed host check failed: ${err.message}`);
+    }
   });
 
   // Speaking indicator relay (client→room)
-  socket.on('liveclass:speaking', ({ liveClassId, speaking, userId: speakerId }) => {
+  // P0-02 (BUG-03): Use socket.userId — never trust client-supplied userId.
+  // The old code used `speakerId || userId`, allowing any client to impersonate
+  // another participant's speaking state by sending a fake userId in the payload.
+  socket.on('liveclass:speaking', ({ liveClassId, speaking }) => {
     if (!liveClassId) return;
     if (!socketAllow('liveclass:speaking')) return; // rate limit
-    // NOTE: speakerId from client is used for display only — cannot affect auth
-    socket.to(`liveclass:${liveClassId}`).emit('liveclass:speaking', { userId: speakerId || userId, speaking });
+    // userId is captured from socket.userId at connection time (JWT-verified)
+    socket.to(`liveclass:${liveClassId}`).emit('liveclass:speaking', { userId, speaking });
   });
 
   // Video on/off relay (client→room)
-  socket.on('liveclass:video_changed', ({ liveClassId, userId: vid, isVideoOn }) => {
+  // P0-03 (RT-02): Use socket.userId — never trust client-supplied userId.
+  socket.on('liveclass:video_changed', ({ liveClassId, isVideoOn }) => {
     if (!liveClassId) return;
     if (!socketAllow('liveclass:video_changed')) return; // rate limit
-    socket.to(`liveclass:${liveClassId}`).emit('liveclass:video_changed', { userId: vid || userId, isVideoOn });
+    // userId is captured from socket.userId at connection time (JWT-verified)
+    socket.to(`liveclass:${liveClassId}`).emit('liveclass:video_changed', { userId, isVideoOn });
   });
 
   // Emoji reaction relay (client→room)
-  socket.on('liveclass:reaction', ({ liveClassId, emoji }) => {
+  // Task 5 (P3-B): Strip client-supplied display names from the relay.
+  // The receiver's frontend can resolve firstName from its local participant state using
+  // the server-verified userId. This prevents display name spoofing in reaction overlays.
+  // targetUserId is kept (it's a data field, not an identity field — spoofing it only
+  // affects UI targeting, not authorization).
+  socket.on('liveclass:reaction', ({ liveClassId, emoji, targetUserId }) => {
     if (!liveClassId || !userId) return;
     if (!socketAllow('liveclass:reaction')) return; // rate limit
-    socket.to(`liveclass:${liveClassId}`).emit('liveclass:reaction', { userId, emoji });
+    socket.to(`liveclass:${liveClassId}`).emit('liveclass:reaction', {
+      userId,        // server-verified
+      emoji,
+      targetUserId,  // UI data only — does not affect authorization
+      // firstName and targetName are intentionally stripped — clients resolve from participant state
+    });
   });
 
   // ── Group Chat room presence (Phase C-1) ────────────────────────────────────
-  // Clients emit group:join on mount so they receive group:message, group:reaction etc.
-  socket.on('group:join', (convId) => {
-    if (!convId) return;
-    socket.join(`conversation:${convId}`);
+  // C-2 FIX: Validate DB membership before joining a group conversation room.
+  // Previously any authenticated socket could join any convId and receive
+  // all group messages, reactions, and typing events for that conversation.
+  socket.on('group:join', async (convId) => {
+    if (!convId || !userId) return;
+    try {
+      const member = await prisma.groupMember.findFirst({
+        where: { conversationId: convId, userId, isActive: true },
+        select: { id: true },
+      });
+      if (!member) return; // silently reject — not a member of this conversation
+      socket.join(`conversation:${convId}`);
+    } catch (err) {
+      logger.warn(`[socket] group:join membership check failed: ${err.message}`);
+    }
   });
 
   socket.on('group:leave', (convId) => {
@@ -348,14 +450,18 @@ io.on('connection', (socket) => {
   });
 
   // Group typing indicators
-  socket.on('group:typing_start', ({ convId, userId: tid, name }) => {
+  // M-5 FIX: Always use socket.userId (JWT-verified) — never relay client-supplied userId.
+  // Previously `tid || userId` allowed any user to spoof another user's typing indicator.
+  socket.on('group:typing_start', ({ convId, name }) => {
     if (!convId) return;
-    socket.to(`conversation:${convId}`).emit('group:typing_start', { convId, userId: tid || userId, name });
+    // userId is captured from socket.userId at connection time (JWT-verified)
+    socket.to(`conversation:${convId}`).emit('group:typing_start', { convId, userId, name });
   });
 
-  socket.on('group:typing_stop', ({ convId, userId: tid }) => {
+  socket.on('group:typing_stop', ({ convId }) => {
     if (!convId) return;
-    socket.to(`conversation:${convId}`).emit('group:typing_stop', { convId, userId: tid || userId });
+    // userId is captured from socket.userId at connection time (JWT-verified)
+    socket.to(`conversation:${convId}`).emit('group:typing_stop', { convId, userId });
   });
 
   // ── Feed socket rooms (Phase B-1) ───────────────────────────────────────────
@@ -372,8 +478,19 @@ io.on('connection', (socket) => {
   });
 
   // School-scoped feed rooms for SCHOOL_ONLY posts
+  // C-3 FIX: Validate school membership before joining school feed rooms.
+  // Previously any authenticated user could subscribe to any school's real-time feed
+  // by emitting feed:join:school with an arbitrary schoolId.
   socket.on('feed:join:school', ({ schoolId } = {}) => {
-    if (schoolId) socket.join(`feed:school:${schoolId}`);
+    if (!schoolId) return;
+    // SUPER_ADMIN global bypass (legacy)
+    if (userRole === 'SUPER_ADMIN') {
+      socket.join(`feed:school:${schoolId}`);
+      return;
+    }
+    // socket.userSchoolId is set from the JWT at connection time — never from client payload
+    if (socket.userSchoolId !== schoolId) return; // silently reject
+    socket.join(`feed:school:${schoolId}`);
   });
 
   socket.on('feed:leave:school', ({ schoolId } = {}) => {
@@ -393,6 +510,70 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     logger.info(`Client disconnected: ${socket.id} (userId: ${userId})`);
+  });
+
+  // ── PK Battle System socket events ─────────────────────────────────────────
+  // Clients join a PK room to receive real-time battle events.
+  // pk:{pkMatchId} — broadcast events (scores, timer, gifts, votes)
+  const pkService = require('./services/pk.service');
+
+  socket.on('pk:join', async (pkMatchId) => {
+    if (!pkMatchId || !userId) return;
+
+    // SOC-P1-04 FIX: Verify the user is a participant or spectator of this PK match.
+    // Previously any authenticated user could join pk:{pkMatchId} and receive
+    // real-time battle state (scores, timer, gifts, votes) for any match — this
+    // could be used for timing attacks or cheating during voting.
+    try {
+      const isParticipant = await prisma.pKParticipant.findFirst({
+        where: { matchId: pkMatchId, userId },
+        select: { id: true },
+      }).catch(() => null);
+
+      // If not a direct participant, check if the match is publicly viewable
+      // (LIVE or ENDED matches can be spectated — spectators need battle state too).
+      // For matches in PENDING/WAITING state, only participants may join.
+      if (!isParticipant) {
+        const match = await prisma.pKMatch.findFirst({
+          where: { id: pkMatchId, state: { in: ['LIVE', 'ENDED', 'PAUSED'] } },
+          select: { id: true },
+        }).catch(() => null);
+        // Neither a participant nor watching a live/ended match — refuse
+        if (!match) return;
+      }
+    } catch (err) {
+      logger.warn(`[socket] pk:join check failed: ${err.message}`);
+      return;
+    }
+
+    socket.join(`pk:${pkMatchId}`);
+    logger.debug(`User ${userId} joined pk room pk:${pkMatchId}`);
+
+    // Send reconnect state immediately
+    try {
+      const state = await pkService.getReconnectState(pkMatchId, userId);
+      if (state) socket.emit('pk:state', state);
+    } catch {}
+  });
+
+  socket.on('pk:leave', (pkMatchId) => {
+    if (!pkMatchId) return;
+    socket.leave(`pk:${pkMatchId}`);
+  });
+
+  // Timer sync request — client asks for authoritative remaining time
+  socket.on('pk:timer:sync', async (pkMatchId) => {
+    if (!pkMatchId || !userId) return;
+    try {
+      const timer = await pkService.getTimerState(pkMatchId);
+      if (timer) {
+        socket.emit('pk:timer', {
+          pkMatchId,
+          remainingSeconds: pkService.getRemainingSeconds(timer),
+          serverTime: Date.now(),
+        });
+      }
+    } catch {}
   });
 });
 
@@ -635,6 +816,12 @@ app.use('/api/v1/leaderboard',    leaderboardRoutes);      // Phase C-7: Leaderb
 app.use('/api/v1/search-index',   searchIndexRoutes);      // Phase C-8: Search Index
 app.use('/api/v1/backups',        backupRoutes);           // Phase C-9: Backup
 app.use('/api/v1/report-block',  reportBlockRoutes);      // Fix 3: Report & Block (was missing)
+app.use('/api/v1/pk',            pkRoutes);               // PK Battle System
+app.use('/api/v1/admin/pk',      pkAdminRoutes);           // PK Admin Management
+app.use('/api/v1/internal',      internalRoutes);          // Internal Platform Admin Provisioning (SUPER_ADMIN only)
+const adminStatsRoutes = require('./routes/admin-stats.routes');
+app.use('/api/v1/admin/stats',   adminStatsRoutes);        // Super Admin platform statistics
+app.use('/api/v1/school-memberships', schoolMembershipRoutes); // School Memberships (Education domain)
 app.use('/api/v1/stories',        storyRoutes);           // Phase B-3: Stories
 app.use('/api/v1/communities',    communityRoutes);       // Phase B-4: Communities
 app.use('/api/v1/explore',        exploreRoutes);         // Phase B-5: Discovery
@@ -983,6 +1170,65 @@ async function startServer() {
       }
     }
 
+    // ── Task 7 (P3-D): Ensure duration auto-end cron runs regardless of Redis ────
+    // The duration enforcement only uses the DB ($queryRaw) and needs no Redis.
+    // If Redis connected above, the cron is already registered (step 7 inside Redis block).
+    // If Redis was unavailable (dev mode), register it here so classes still auto-end.
+    if (!redisConnected) {
+      try {
+        const jobScheduler = require('./utils/jobScheduler');
+        // Only initialize if not already done (Redis block skipped)
+        await jobScheduler.initialize();
+        jobScheduler.scheduleCron(
+          'live-class-duration-auto-end',
+          '* * * * *',
+          async () => {
+            const _prisma = require('./utils/prisma');
+            const _io = global.io;
+            const { broadcastLiveEnd: _ble } = require('./utils/feedLive');
+            const now = new Date();
+            const overdueLiveClasses = await _prisma.$queryRaw`
+              SELECT id, startedAt, duration, classId
+              FROM live_classes
+              WHERE status = 'LIVE'
+                AND deletedAt IS NULL
+                AND startedAt IS NOT NULL
+                AND duration IS NOT NULL
+                AND DATE_ADD(startedAt, INTERVAL duration MINUTE) < ${now}
+            `;
+            for (const lc of overdueLiveClasses) {
+              try {
+                const endedAt = now;
+                const active = await _prisma.liveClassParticipant.findMany({ where: { liveClassId: lc.id, isActive: true } });
+                await _prisma.$transaction([
+                  _prisma.liveClass.update({ where: { id: lc.id }, data: { status: 'ENDED', endedAt } }),
+                  ...active.map(p => _prisma.liveClassParticipant.update({
+                    where: { id: p.id },
+                    data: { isActive: false, leftAt: endedAt, totalDuration: p.totalDuration + Math.floor((endedAt.getTime() - new Date(p.joinedAt).getTime()) / 1000) }
+                  }))
+                ]);
+                const MIN_PRESENT_MINUTES = 10;
+                const attendances = await _prisma.liveClassAttendance.findMany({ where: { liveClassId: lc.id, leftAt: null } });
+                await Promise.all(attendances.map(a => {
+                  const mins = Math.floor((endedAt.getTime() - new Date(a.joinedAt).getTime()) / 60000);
+                  return _prisma.liveClassAttendance.update({ where: { id: a.id }, data: { leftAt: endedAt, totalMinutes: mins, status: mins >= MIN_PRESENT_MINUTES ? 'PRESENT' : 'PARTIAL' } });
+                }));
+                if (_io) _io.to(`liveclass:${lc.id}`).emit('liveclass:ended', { liveClassId: lc.id, reason: 'duration_exceeded' });
+                _ble('live_class', lc.id);
+                logger.info(`[scheduler] Live class ${lc.id} auto-ended (duration exceeded, no-Redis mode)`);
+              } catch (err) {
+                logger.warn(`[scheduler] Auto-end failed for live class ${lc.id}: ${err.message}`);
+              }
+            }
+          },
+          { persist: false }
+        );
+        logger.info('✅ Live class duration auto-end cron registered (no-Redis fallback)');
+      } catch (err) {
+        logger.warn(`[scheduler] Failed to register duration auto-end cron in no-Redis mode: ${err.message}`);
+      }
+    }
+
     // ── 4. Start HTTP server ───────────────────────────────────────────────
     await new Promise((resolve, reject) => {
       httpServer.once('error', reject);
@@ -995,6 +1241,23 @@ async function startServer() {
 
         // Mark startup complete so /health/startup returns 200
         health.markStartupComplete();
+
+        // ── Periodic memory monitoring & GC hint ─────────────────────────
+        // Log a warning when heap usage exceeds 85% so operators know to restart.
+        // If global.gc is available (--expose-gc flag), nudge the GC to reclaim
+        // memory accumulated during startup (module loads, prisma warming, etc).
+        if (global.gc) {
+          global.gc();
+          logger.info('[memory] Initial GC run completed after startup');
+        }
+        setInterval(() => {
+          const { heapUsed, heapTotal } = process.memoryUsage();
+          const pct = Math.round((heapUsed / heapTotal) * 100);
+          if (pct > 85) {
+            logger.warn(`[memory] Heap at ${pct}% (${Math.round(heapUsed/1024/1024)}MB/${Math.round(heapTotal/1024/1024)}MB). Consider restarting with --max-old-space-size=512`);
+            if (global.gc) global.gc(); // nudge GC if available
+          }
+        }, 60_000); // check every minute
 
         resolve();
       });

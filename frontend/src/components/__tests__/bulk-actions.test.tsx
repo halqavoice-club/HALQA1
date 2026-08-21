@@ -1,6 +1,19 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { BulkActions, commonBulkActions } from '../ui/bulk-actions'
 
+// Radix DropdownMenu renders into a portal — mock it to render inline.
+jest.mock('@/components/ui/dropdown-menu', () => {
+  const React = require('react')
+  return {
+    DropdownMenu: ({ children }: any) => <div>{children}</div>,
+    DropdownMenuTrigger: ({ children, asChild }: any) => <div>{children}</div>,
+    DropdownMenuContent: ({ children }: any) => <div data-testid="dropdown-content">{children}</div>,
+    DropdownMenuItem: ({ children, onClick, className }: any) => (
+      <div role="menuitem" onClick={onClick} className={className}>{children}</div>
+    ),
+  }
+})
+
 describe('BulkActions', () => {
   const mockItems = [
     { id: '1', name: 'Item 1' },
@@ -70,7 +83,7 @@ describe('BulkActions', () => {
     )
     const selectAllCheckbox = screen.getAllByRole('checkbox')[0]
     fireEvent.click(selectAllCheckbox)
-    fireEvent.click(screen.getByText('Actions'))
+    // With mocked DropdownMenu, the Delete item renders inline — click it directly
     fireEvent.click(screen.getByText('Delete'))
     expect(actionHandler).toHaveBeenCalledWith(['1', '2', '3'])
   })

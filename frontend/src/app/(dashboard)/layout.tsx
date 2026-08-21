@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, usePathname } from 'next/navigation'
 import { useAuthStore } from '@/store/auth.store'
 import { Sidebar } from '@/components/layout/sidebar'
 import { Header } from '@/components/layout/header'
@@ -27,8 +27,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 }
 
 function DashboardContent({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, user } = useAuthStore()
+  const { isAuthenticated, user, mustChangePassword, fetchMe } = useAuthStore()
   const router = useRouter()
+  const pathname = usePathname()
   useRoleAccess()
   useSocialSocket()
   useDmSocket()
@@ -52,13 +53,30 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
     },
   ])
 
+  // Hydrate the full user profile (including schoolMemberships) on mount.
+  // The login response includes schoolMemberships, but after a page refresh
+  // only the persisted user metadata is restored from localStorage — the
+  // schoolMemberships array is not persisted for security reasons.
+  // This single call ensures the Education sidebar section appears correctly
+  // after any page reload without the user having to log out and back in.
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchMe()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated])
+
   useEffect(() => {
     if (!isAuthenticated) {
       router.push('/login')
+    } else if (mustChangePassword) {
+      // Step 8: Admin-created accounts must change their temporary password
+      // before accessing any dashboard content.
+      router.replace('/change-password')
     } else {
       trackPageView(window.location.pathname, { userId: user?.id })
     }
-  }, [isAuthenticated, router, user, trackPageView])
+  }, [isAuthenticated, mustChangePassword, router, user, trackPageView])
 
   if (!isAuthenticated || !user) {
     return (
@@ -72,28 +90,36 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen bg-gray-50 overflow-hidden" dir="ltr">
       {/* dir="ltr" on the shell keeps sidebar-left layout consistent.
           Individual text content uses the html dir attribute for RTL text. */}
-      <Sidebar />
+
+      {/* FIX: On /admin/* routes, the admin layout renders its own sidebar.
+          Suppress the standard Sidebar and Header here to avoid double navigation.
+          This only applies to SUPER_ADMIN — school roles never see /admin routes. */}
+      {!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) && <Sidebar />}
+
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <Header>
-          <NotificationCenter
-            notifications={notifications}
-            onMarkAsRead={markAsRead}
-            onMarkAllAsRead={markAllAsRead}
-            onDelete={deleteNotification}
-            onClearAll={clearAll}
-          />
-        </Header>
-        <main className="flex-1 overflow-y-auto p-4 md:p-6 pb-20 md:pb-6">
+        {!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) && (
+          <Header>
+            <NotificationCenter
+              notifications={notifications}
+              onMarkAsRead={markAsRead}
+              onMarkAllAsRead={markAllAsRead}
+              onDelete={deleteNotification}
+              onClearAll={clearAll}
+            />
+          </Header>
+        )}
+        <main className={`flex-1 overflow-y-auto ${!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) ? 'p-4 md:p-6 pb-20 md:pb-6' : ''}`}>
           <ErrorBoundary>
             {children}
           </ErrorBoundary>
         </main>
       </div>
-      <MobileNav />
+
+      {!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) && <MobileNav />}
       <SessionTimeout />
       <NotificationPermissionBanner />
       <OfflineBanner />
-      <FloatingActionButton />
+      {!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) && <FloatingActionButton />}
     </div>
   )
 }

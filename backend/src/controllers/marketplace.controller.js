@@ -107,8 +107,8 @@ async function getSellerProducts(req, res) {
     const { sellerId } = req.params;
     const userId = req.user.id;
 
-    // Check if user is the seller or admin
-    if (sellerId !== userId && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    // NF-4 FIX: SUPER_ADMIN only for cross-user product access. Marketplace is a Social feature.
+    if (sellerId !== userId && req.user.role !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -222,8 +222,8 @@ async function updateProduct(req, res) {
       });
     }
 
-    // Check if user is the seller
-    if (product.sellerId !== userId && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    // NF-4 FIX: Seller or SUPER_ADMIN only — SCHOOL_ADMIN cannot manage other users' products.
+    if (product.sellerId !== userId && req.user.role !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -293,8 +293,8 @@ async function deleteProduct(req, res) {
       });
     }
 
-    // Check if user is the seller
-    if (product.sellerId !== userId && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    // NF-4 FIX: Seller or SUPER_ADMIN only — SCHOOL_ADMIN cannot delete other users' products.
+    if (product.sellerId !== userId && req.user.role !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -426,8 +426,8 @@ async function getBuyerOrders(req, res) {
     const { status } = req.query;
     const userId = req.user.id;
 
-    // Check if user is the buyer or admin
-    if (buyerId !== userId && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    // NF-4 FIX: Buyer or SUPER_ADMIN only for cross-user order access.
+    if (buyerId !== userId && req.user.role !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -487,8 +487,8 @@ async function getSellerOrders(req, res) {
     const { status } = req.query;
     const userId = req.user.id;
 
-    // Check if user is the seller or admin
-    if (sellerId !== userId && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    // NF-4 FIX: Seller or SUPER_ADMIN only for cross-user order access.
+    if (sellerId !== userId && req.user.role !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -557,10 +557,10 @@ async function updateOrderStatus(req, res) {
       });
     }
 
-    // Check if user is the seller or buyer
+    // NF-4 FIX: Seller, buyer, or SUPER_ADMIN only for order status updates.
+    const isAdmin = req.user.role === 'SUPER_ADMIN';
     const isSeller = order.sellerId === userId;
     const isBuyer = order.buyerId === userId;
-    const isAdmin = req.user.role === 'SCHOOL_ADMIN' || req.user.role === 'SUPER_ADMIN';
 
     if (!isSeller && !isBuyer && !isAdmin) {
       return res.status(403).json({

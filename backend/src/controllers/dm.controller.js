@@ -44,22 +44,73 @@ async function getOrCreateConversation(userAId, userBId) {
   });
 }
 
-/** Check if two users are friends OR share a school (teachers ↔ students) */
+/** Check if two users are friends OR share a school via SchoolMembership (teachers ↔ students) */
 async function areFriends(userA, userB) {
   if (ALLOW_NON_FRIENDS) return true;
 
-  // School-role bypass: TEACHER / SCHOOL_ADMIN / SUPER_ADMIN can message anyone
-  // in the same school without needing a friend relationship.
+  // SOC-P1-02 FIX: Use SchoolMembership.role for school-staff DM bypass.
+  // The previous code checked User.role for TEACHER/SCHOOL_ADMIN/SUPER_ADMIN,
+  // but the current dual-domain architecture stores Education roles exclusively
+  // in SchoolMembership.role — User.role only holds MEMBER or SUPER_ADMIN.
+  // A user invited as TEACHER has User.role = MEMBER (unchanged) but
+  // SchoolMembership.role = TEACHER, so the old User.role check failed for them.
+  // SUPER_ADMIN (platform admin) uses User.role = SUPER_ADMIN — kept as-is.
   const [uA, uB] = await Promise.all([
-    prisma.user.findUnique({ where: { id: userA }, select: { role: true, schoolId: true } }),
-    prisma.user.findUnique({ where: { id: userB }, select: { role: true, schoolId: true } }),
+    prisma.user.findUnique({ where: { id: userA }, select: { role: true } }),
+    prisma.user.findUnique({ where: { id: userB }, select: { role: true } }),
   ]);
 
-  const staffRoles = ['TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'];
-  const eitherIsStaff = staffRoles.includes(uA?.role) || staffRoles.includes(uB?.role);
-  const sameSchool = uA?.schoolId && uB?.schoolId && uA.schoolId === uB.schoolId;
+  // ARCHITECTURE FIX (HALQA-ARCH-01):
+  // SUPER_ADMIN is a platform-management role, NOT a social identity.
+  // Platform admins must NOT have unrestricted DM access to all users.
+  // A SUPER_ADMIN who needs to contact a user should use the announcement
+  // system or a support channel — not the private DM system.
+  //
+  // If internal staff need to DM users, they should use their personal MEMBER
+  // account (separate from their admin identity) which follows normal social rules.
+  //
+  // REMOVED: if (uA?.role === 'SUPER_ADMIN' || uB?.role === 'SUPER_ADMIN') return true
 
-  if (eitherIsStaff && sameSchool) return true;
+  // School-staff bypass via SchoolMembership: check if either user holds a staff
+  // role (TEACHER or SCHOOL_ADMIN) in a school that both users share.
+  // Both must belong to the same school with ACTIVE status.
+  const staffMembershipRoles = ['TEACHER', 'SCHOOL_ADMIN'];
+  const sharedStaffAccess = await prisma.schoolMembership.findFirst({
+    where: {
+      userId:   userA,
+      status:   'ACTIVE',
+      role:     { in: staffMembershipRoles },
+      school: {
+        memberships: {
+          some: {
+            userId: userB,
+            status: 'ACTIVE',
+          }
+        }
+      }
+    },
+    select: { id: true },
+  }).catch(() => null);
+
+  // Also check the reverse — userB might be the staff member
+  const sharedStaffAccessReverse = sharedStaffAccess ? null : await prisma.schoolMembership.findFirst({
+    where: {
+      userId:   userB,
+      status:   'ACTIVE',
+      role:     { in: staffMembershipRoles },
+      school: {
+        memberships: {
+          some: {
+            userId: userA,
+            status: 'ACTIVE',
+          }
+        }
+      }
+    },
+    select: { id: true },
+  }).catch(() => null);
+
+  if (sharedStaffAccess || sharedStaffAccessReverse) return true;
 
   // Guardian ↔ their linked students — always allowed
   const isGuardianLink = await prisma.guardianStudent.findFirst({

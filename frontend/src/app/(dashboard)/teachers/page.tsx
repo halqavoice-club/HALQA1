@@ -14,6 +14,7 @@ import { CardSkeleton } from '@/components/ui/skeleton-card'
 import { UserCheck, Plus, ChevronRight, BookOpen } from 'lucide-react'
 import Link from 'next/link'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { useAnalytics } from '@/lib/analytics'
 
 export default function TeachersPage() {
@@ -21,6 +22,7 @@ export default function TeachersPage() {
   const [filters, setFilters] = useState<Record<string, any>>({})
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const { user } = useAuthStore()
+  const { isAdmin } = useEducationRole()
   const { trackEvent } = useAnalytics()
 
   const { data, isLoading, isError, refetch } = useQuery({
@@ -29,7 +31,7 @@ export default function TeachersPage() {
   })
 
   const teachers = data?.data || []
-  const canCreate = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
+  const canCreate = isAdmin
 
   const handleSearch = (query: string, activeFilters: Record<string, any>) => {
     setSearch(query)

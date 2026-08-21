@@ -13,7 +13,7 @@ import { getSocket } from '@/lib/socket'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Sparkles, TrendingUp, ArrowUp, RefreshCw, AlertCircle,
-  Hash, Flame,
+  Hash, Flame, Users,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useToast } from '@/components/ui/use-toast'
@@ -77,16 +77,17 @@ function FeedContent() {
   const { incomingPosts, addIncoming, clearIncoming, removePost, updatePost } = useFeedStore()
   const [showNew, setShowNew] = useState(false)
   const [retryCount, setRetryCount] = useState(0)
-  const loaderRef = useRef<HTMLDivElement>(null)
+  const loaderRef          = useRef<HTMLDivElement>(null)
+  const loaderFollowingRef = useRef<HTMLDivElement>(null)
 
-  // ── Infinite feed ──────────────────────────────────────────────────────────
+  // ── Infinite feed — "For You" (all public posts) ───────────────────────────
   const {
     data, fetchNextPage, hasNextPage, isFetchingNextPage,
     isLoading, isError, refetch,
   } = useInfiniteQuery({
     queryKey: ['feed', retryCount],
     queryFn:  ({ pageParam }) =>
-      postsApi.getFeed(pageParam as string | undefined).then(r => r.data.data),
+      postsApi.getFeed(pageParam as string | undefined, 20, 'all').then(r => r.data.data),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.nextCursor ?? undefined,
     staleTime: 0,
@@ -94,7 +95,27 @@ function FeedContent() {
     enabled: activeTab === 'feed',
   })
 
-  const posts = data?.pages.flatMap(p => p.items) ?? []
+  // ── Infinite feed — "Following" (only people you follow) ───────────────────
+  const {
+    data: followingData,
+    fetchNextPage: fetchNextFollowing,
+    hasNextPage: hasNextFollowing,
+    isFetchingNextPage: isFetchingNextFollowing,
+    isLoading: isLoadingFollowing,
+    isError: isErrorFollowing,
+  } = useInfiniteQuery({
+    queryKey: ['feed-following', retryCount],
+    queryFn:  ({ pageParam }) =>
+      postsApi.getFeed(pageParam as string | undefined, 20, 'following').then(r => r.data.data),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    staleTime: 0,
+    refetchOnMount: true,
+    enabled: activeTab === 'following',
+  })
+
+  const posts          = data?.pages.flatMap(p => p.items) ?? []
+  const followingPosts = followingData?.pages.flatMap(p => p.items) ?? []
 
   // ── Intersection observer for infinite scroll ──────────────────────────────
   useEffect(() => {
@@ -107,6 +128,18 @@ function FeedContent() {
     obs.observe(loaderRef.current)
     return () => obs.disconnect()
   }, [hasNextPage, isFetchingNextPage, fetchNextPage])
+
+  // ── Intersection observer — Following tab ──────────────────────────────────
+  useEffect(() => {
+    if (!loaderFollowingRef.current) return
+    const obs = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting && hasNextFollowing && !isFetchingNextFollowing) {
+        fetchNextFollowing()
+      }
+    }, { threshold: 0.1 })
+    obs.observe(loaderFollowingRef.current)
+    return () => obs.disconnect()
+  }, [hasNextFollowing, isFetchingNextFollowing, fetchNextFollowing])
 
   // ── Socket.IO — real-time feed events ──────────────────────────────────────
   useEffect(() => {
@@ -159,7 +192,6 @@ function FeedContent() {
   const allPosts = [...incomingPosts, ...posts].filter(
     (p, idx, self) => self.findIndex(x => x.id === p.id) === idx
   )
-
   return (
     <div className="max-w-2xl mx-auto pb-10">
       {/* Page header */}
@@ -169,8 +201,17 @@ function FeedContent() {
           <h1 className="text-xl font-bold text-gray-900">Feed</h1>
         </div>
 
-        {/* Tab switcher */}
-        <div className="flex items-center gap-1 bg-gray-100 rounded-xl p-1">
+        <div className="flex items-center gap-2">
+          {/* Reels shortcut */}
+          <Link
+            href="/reels"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-pink-500 to-red-500 text-white text-xs font-bold rounded-xl hover:opacity-90 transition-opacity"
+          >
+            <span>▶</span> Reels
+          </Link>
+
+          {/* Tab switcher */}
+          <div className="flex items-center gap-1 bg-gray-100 rounded-xl p-1">
           <button
             onClick={() => router.push('/feed')}
             className={cn(
@@ -180,7 +221,18 @@ function FeedContent() {
                 : 'text-gray-500 hover:text-gray-700'
             )}
           >
-            <Sparkles className="w-3.5 h-3.5" /> Feed
+            <Sparkles className="w-3.5 h-3.5" /> For You
+          </button>
+          <button
+            onClick={() => router.push('/feed?tab=following')}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors',
+              activeTab === 'following'
+                ? 'bg-white text-indigo-600 shadow-sm'
+                : 'text-gray-500 hover:text-gray-700'
+            )}
+          >
+            <Users className="w-3.5 h-3.5" /> Following
           </button>
           <button
             onClick={() => router.push('/feed?tab=trending')}
@@ -193,6 +245,7 @@ function FeedContent() {
           >
             <TrendingUp className="w-3.5 h-3.5" /> Trending
           </button>
+          </div>
         </div>
       </div>
 
@@ -203,6 +256,83 @@ function FeedContent() {
           <p className="text-center text-xs text-gray-400 py-4">
             Tap a hashtag to explore all posts with that tag
           </p>
+        </div>
+      )}
+
+      {/* ── FOLLOWING TAB ────────────────────────────────────────────────────── */}
+      {activeTab === 'following' && (
+        <div className="space-y-4">
+          {/* Composer */}
+          <PostComposer />
+
+          {/* Skeletons */}
+          {isLoadingFollowing && (
+            <div className="space-y-4">
+              {[1, 2, 3].map(i => (
+                <div key={i} className="bg-white rounded-2xl border border-gray-100 p-4 space-y-3">
+                  <div className="flex items-center gap-3">
+                    <Skeleton className="w-10 h-10 rounded-full" />
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-32 rounded" />
+                      <Skeleton className="h-2.5 w-20 rounded" />
+                    </div>
+                  </div>
+                  <Skeleton className="h-4 w-full rounded" />
+                  <Skeleton className="h-32 w-full rounded-xl" />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Empty state */}
+          {!isLoadingFollowing && !isErrorFollowing && followingPosts.length === 0 && (
+            <div className="text-center py-16 text-gray-400">
+              <Users className="w-12 h-12 mx-auto mb-3 opacity-30" />
+              <p className="font-medium text-gray-500">No posts from people you follow yet</p>
+              <p className="text-sm mt-1">Follow people to see their posts here</p>
+              <Link
+                href="/social/people"
+                className="mt-4 inline-block px-4 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-xl hover:bg-indigo-700 transition-colors"
+              >
+                Find people to follow →
+              </Link>
+            </div>
+          )}
+
+          {/* Posts */}
+          <div className="space-y-4">
+            {followingPosts.map(post => (
+              <PostCard key={post.id} post={post} />
+            ))}
+          </div>
+
+          {/* Error state */}
+          {isErrorFollowing && (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <AlertCircle className="w-12 h-12 text-red-400 mb-3" />
+              <p className="text-gray-600 mb-4">Failed to load following feed</p>
+              <button
+                onClick={handleRetry}
+                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+              >
+                <RefreshCw className="w-4 h-4" />
+                Retry
+              </button>
+            </div>
+          )}
+
+          {/* Infinite scroll sentinel */}
+          <div ref={loaderFollowingRef} className="h-8 flex items-center justify-center">
+            {isFetchingNextFollowing && (
+              <div className="flex items-center gap-2 text-sm text-gray-400">
+                <div className="w-4 h-4 border-2 border-gray-200 border-t-indigo-500 rounded-full animate-spin" />
+                Loading more…
+              </div>
+            )}
+            {!hasNextFollowing && followingPosts.length > 0 && !isErrorFollowing && (
+              <p className="text-xs text-gray-300">You're all caught up ✓</p>
+            )}
+          </div>
         </div>
       )}
 

@@ -121,13 +121,17 @@ async function handleWebhook(req, res) {
     if (secret && !secret.startsWith('whsec_REPLACE') && sig) {
       // Production / CLI: verify Stripe signature
       event = stripe.webhooks.constructEvent(req.body, sig, secret);
-    } else if (process.env.NODE_ENV !== 'production') {
-      // Development: parse without signature (test simulator)
+    } else if (process.env.STRIPE_SKIP_SIGNATURE === 'true' && process.env.NODE_ENV !== 'production') {
+      // M-9 FIX: Signature bypass now requires an EXPLICIT opt-in env var
+      // (STRIPE_SKIP_SIGNATURE=true) AND must NOT be production.
+      // Previously, ANY non-production NODE_ENV allowed unauthenticated webhook calls.
+      // This prevents staging environments that forget to set NODE_ENV=production
+      // from accepting forged Stripe events (e.g. fake coin credits).
       const payload = req.body instanceof Buffer ? req.body.toString() : req.body;
       event = typeof payload === 'string' ? JSON.parse(payload) : payload;
-      logger.warn('[stripe] Webhook signature skipped — development mode');
+      logger.warn('[stripe] Webhook signature skipped — STRIPE_SKIP_SIGNATURE=true (dev only)');
     } else {
-      logger.error('[stripe] Webhook secret not configured in production');
+      logger.error('[stripe] Webhook secret not configured or signature bypass not explicitly enabled');
       return res.status(400).json({ error: 'Webhook secret not configured' });
     }
   } catch (err) {

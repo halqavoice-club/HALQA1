@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge'
 import { Modal } from '@/components/ui/modal'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { Megaphone, Plus, Pin, Trash2, Loader2, Calendar } from 'lucide-react'
 import { ErrorState } from '@/components/ui/error-state'
 import { format } from 'date-fns'
@@ -63,6 +64,8 @@ export default function AnnouncementsPage() {
   })
 
   const canCreate = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  const { isTeacher } = useEducationRole()
+  const canCreateAnnouncement = isTeacher
 
   const toggleRole = (role: string) => {
     setForm(f => ({

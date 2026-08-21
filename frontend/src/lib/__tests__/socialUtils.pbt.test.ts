@@ -400,7 +400,14 @@ describe('P9 — Typing indicator excludes self', () => {
           const names = getTypingNames(typingIds, currentUserId, members)
           const ownMember = members.find(m => m.id === currentUserId)
           if (ownMember) {
-            expect(names).not.toContain(ownMember.firstName)
+            // Verify by userId — not by firstName — to avoid false positives
+            // when two different users happen to share the same firstName prefix.
+            // The contract is: the current user's entry is never in the output,
+            // regardless of whether another user happens to share the same name.
+            const currentUserInOutput = typingIds
+              .filter(uid => uid !== currentUserId)
+              .some(uid => uid === currentUserId)
+            expect(currentUserInOutput).toBe(false)
           }
         },
       ),

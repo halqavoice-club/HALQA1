@@ -60,16 +60,36 @@ interface User {
   student?: { id: string; studentId: string; qrCode: string | null }
   teacher?: { id: string; employeeId: string | null; department: string | null }
   guardian?: { id: string; relationship: string }
+  // Education domain: school-scoped memberships
+  // Each membership contains the user's role in a specific school.
+  // This is the authoritative source for Education authorization.
+  schoolMemberships?: SchoolMembership[]
+}
+
+export interface SchoolMembership {
+  id: string
+  userId: string
+  schoolId: string
+  role: string   // SUPER_ADMIN | SCHOOL_ADMIN | TEACHER | STUDENT | GUARDIAN
+  status: string // ACTIVE | PENDING | SUSPENDED
+  joinedAt: string
+  school: {
+    id: string
+    name: string
+    slug: string
+    logoUrl: string | null
+    type: string
+  }
 }
 
 interface AuthState {
   user: User | null
-  // NOTE: accessToken is intentionally NOT in this interface's persisted shape.
-  // It lives in _accessTokenMemory above. getAccessToken() is the accessor.
+  mustChangePassword: boolean
   isLoading: boolean
   isAuthenticated: boolean
   getAccessToken: () => string | null
   login: (email: string, password: string) => Promise<void>
+  googleSignIn: (credential: string) => Promise<{ mustChangePassword: boolean; isNewUser: boolean; user: User }>
   logout: () => Promise<void>
   refreshToken: () => Promise<void>
   fetchMe: () => Promise<void>
@@ -81,6 +101,7 @@ export const useAuthStore = create<AuthState>()(
   persist(
     (set, get) => ({
       user: null,
+      mustChangePassword: false,
       isLoading: false,
       isAuthenticated: false,
 
@@ -91,16 +112,35 @@ export const useAuthStore = create<AuthState>()(
         set({ isLoading: true })
         try {
           const response = await api.post('/auth/login', { email, password })
-          const { user, accessToken } = response.data.data
+          const { user, accessToken, mustChangePassword = false } = response.data.data
           // Clear ALL cached queries before setting new user so stale data
           // from a previous session never leaks into the new account's view.
           getQueryClient()?.clear()
           // FE-001: store token in memory only, never in localStorage
           setMemoryToken(accessToken)
-          set({ user, isAuthenticated: true, isLoading: false })
+          set({ user, isAuthenticated: true, isLoading: false, mustChangePassword })
         } catch (error: any) {
           set({ isLoading: false })
           throw new Error(error.response?.data?.message || 'Login failed')
+        }
+      },
+
+      // ── Google Sign-In ─────────────────────────────────────────────────────
+      // Sends the Google ID token to HALQA backend for server-side verification.
+      // Returns the same session shape as password login — reuses all existing
+      // token management (memory-only access token, httpOnly refresh cookie).
+      googleSignIn: async (credential: string) => {
+        set({ isLoading: true })
+        try {
+          const response = await api.post('/auth/google', { credential })
+          const { user, accessToken, mustChangePassword = false, isNewUser = false } = response.data.data
+          getQueryClient()?.clear()
+          setMemoryToken(accessToken)
+          set({ user, isAuthenticated: true, isLoading: false, mustChangePassword })
+          return { mustChangePassword, isNewUser, user }
+        } catch (error: any) {
+          set({ isLoading: false })
+          throw new Error(error.response?.data?.message || 'Google Sign-In failed')
         }
       },
 
@@ -112,7 +152,7 @@ export const useAuthStore = create<AuthState>()(
         getQueryClient()?.clear()
         // FE-001: wipe memory token on logout
         setMemoryToken(null)
-        set({ user: null, isAuthenticated: false })
+        set({ user: null, isAuthenticated: false, mustChangePassword: false })
         if (typeof window !== 'undefined') {
           window.location.href = '/login'
         }
@@ -174,7 +214,8 @@ export const useAuthStore = create<AuthState>()(
       // restore the memory token using the httpOnly refreshToken cookie.
       partialize: (state) => ({
         user: state.user,
-        isAuthenticated: state.isAuthenticated
+        isAuthenticated: state.isAuthenticated,
+        mustChangePassword: state.mustChangePassword,
       }),
       skipHydration: true
     }

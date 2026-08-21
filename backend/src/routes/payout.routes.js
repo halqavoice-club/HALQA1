@@ -36,16 +36,19 @@ router.post('/request',
 
 router.delete('/:id/cancel', ctrl.cancelPayout);
 
-// ── Admin endpoints (SCHOOL_ADMIN and SUPER_ADMIN only) ────────────────────────
+// ── Admin endpoints (SUPER_ADMIN only — platform-wide financial operations) ───
+// H-8 FIX: SCHOOL_ADMIN can no longer approve platform-wide payout requests.
+// Payout processing is a platform-level financial operation, not a school-scoped
+// Education operation. Only SUPER_ADMIN (platform owner) should approve payouts.
 router.get('/admin/list',
-  authorize('SCHOOL_ADMIN', 'SUPER_ADMIN'),
+  authorize('SUPER_ADMIN'),
   [query('status').optional().isIn(['PENDING', 'APPROVED', 'PROCESSING', 'COMPLETED', 'REJECTED', 'CANCELLED'])],
   validate,
   ctrl.listPayoutsAdmin
 );
 
 router.patch('/admin/:id',
-  authorize('SCHOOL_ADMIN', 'SUPER_ADMIN'),
+  authorize('SUPER_ADMIN'),
   [
     body('action').isIn(['approve', 'reject', 'complete']),
     body('adminNote').optional().isString().isLength({ max: 500 }),

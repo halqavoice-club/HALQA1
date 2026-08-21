@@ -93,6 +93,13 @@ services:
       # ── Rate limiting ─────────────────────────────────────────────────────────
       RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-900000}
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-100}
+      # ── Security ──────────────────────────────────────────────────────────────
+      # ADMIN_IP_ALLOWLIST: restrict /api/v1/internal and /api/v1/admin/* to
+      # specific IPs (office/VPN). Leave empty to allow all IPs (dev only).
+      # Example: 203.0.113.10,10.0.0.0/8
+      ADMIN_IP_ALLOWLIST: ${ADMIN_IP_ALLOWLIST:-}
+      # ── Gift economy ──────────────────────────────────────────────────────────
+      GIFT_DAILY_CAP: ${GIFT_DAILY_CAP:-50000}
       # ── Monitoring ───────────────────────────────────────────────────────────
       METRICS_TOKEN: ${METRICS_TOKEN}
       SERVICE_NAME: ${SERVICE_NAME:-halqa-api}

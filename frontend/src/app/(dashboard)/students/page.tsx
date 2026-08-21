@@ -15,6 +15,7 @@ import { useInfiniteScroll } from '@/hooks/useInfiniteScroll'
 import { Plus, GraduationCap, ChevronRight, Download } from 'lucide-react'
 import Link from 'next/link'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { useAnalytics } from '@/lib/analytics'
 
 export default function StudentsPage() {
@@ -22,6 +23,7 @@ export default function StudentsPage() {
   const [filters, setFilters] = useState<Record<string, any>>({})
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const { user } = useAuthStore()
+  const { isAdmin } = useEducationRole()
   const { trackEvent } = useAnalytics()
 
   const { data, isLoading, isError, refetch } = useQuery({
@@ -30,7 +32,7 @@ export default function StudentsPage() {
   })
 
   const students = data?.data || []
-  const canCreate = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
+  const canCreate = isAdmin
 
   const handleSearch = (query: string, activeFilters: Record<string, any>) => {
     setSearch(query)

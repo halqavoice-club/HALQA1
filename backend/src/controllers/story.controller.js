@@ -246,7 +246,10 @@ async function deleteStory(req, res, next) {
       where: { id: req.params.id, deletedAt: null }
     });
     if (!story) return errorResponse(res, 'Story not found', 404);
-    const can = story.authorId === req.user.id || ['SUPER_ADMIN','SCHOOL_ADMIN'].includes(req.user.role);
+    // F-2 FIX: Story deletion restricted to author + SUPER_ADMIN only (not SCHOOL_ADMIN).
+    // SCHOOL_ADMIN is a school-scoped Education role and must not have platform-wide
+    // content moderation privileges over Social content.
+    const can = story.authorId === req.user.id || req.user.role === 'SUPER_ADMIN';
     if (!can) return errorResponse(res, 'Not authorized', 403);
 
     await prisma.story.update({ where: { id: story.id }, data: { deletedAt: new Date() } });

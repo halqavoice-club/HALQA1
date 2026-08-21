@@ -47,13 +47,29 @@ node seed-check.js --add-coins
 
 ## Step 3 — Start Backend
 
+> ⚠️ **Important:** Always start the backend with `npm run dev` (not `node src/app.js` directly).
+> The `nodemon.json` config sets `--max-old-space-size=512` so Node gets 512MB heap instead
+> of the default ~93MB. Without this, the backend will hit memory limits under normal load.
+
 ```bash
 cd backend
 npm run dev
 ```
 
 ✅ API running at: `http://localhost:5000`  
+✅ Health check: `http://localhost:5000/health/liveness`  
 ✅ Swagger docs: `http://localhost:5000/api-docs`
+
+**If the admin dashboard shows "Failed to load admin stats":**
+
+1. Check backend memory: open `http://localhost:5000/health/detailed`
+   - If `memory.heapUsagePercent > 90%` → restart the backend
+2. Stop backend (`Ctrl+C` in backend terminal)
+3. Run: `npm run dev` (picks up 512MB heap from nodemon.json)
+4. After restart, in a separate terminal: `npx prisma generate`
+
+**Quick restart** (Windows): double-click `backend/restart-backend.bat`
+This script kills port 5000, regenerates Prisma client, then restarts with 512MB heap.
 
 ---
 
@@ -80,6 +96,16 @@ npm run dev
 | Teacher | teacher@halqa-academy.com | Teacher@2024 |
 | Student | student1@halqa.com | Student@2024 |
 | Guardian | parent@halqa.com | Guardian@2024 |
+
+### Demo Accounts (Halqa Academy Demo school)
+
+| Role | Email | Password |
+|------|-------|----------|
+| Super Admin | super.admin@demo.halqa.app | Demo@1234 |
+| School Admin | admin@demo.halqa.app | Demo@1234 |
+| Teacher | teacher@demo.halqa.app | Demo@1234 |
+| Student | student@demo.halqa.app | Demo@1234 |
+| Guardian | guardian@demo.halqa.app | Demo@1234 |
 
 ---
 
@@ -125,6 +151,36 @@ Voice Club and Live Classes require a LiveKit server. For local development, use
 
 Without LiveKit configured, Voice Club and Live Classes will not work.
 
+## Camera & Microphone in Live Classes
+
+Browsers block `getUserMedia()` (camera/mic) on HTTP except on `localhost`.
+
+### ✅ Easiest fix — use localhost
+
+Open the app at **`http://localhost:3000`** (not via IP address). Browsers treat `localhost` as a secure context.
+
+**If you currently open the app via IP (e.g. `http://192.168.1.x:3000`), change to `http://localhost:3000` — camera will work immediately.**
+
+### ✅ HTTPS dev server (needed for phone/tablet access)
+
+The frontend `npm run dev` now starts with HTTPS automatically (`--experimental-https` flag):
+
+```bash
+cd frontend
+npm run dev
+# App runs at https://localhost:3000
+```
+
+Accept the self-signed certificate warning in your browser (click "Advanced → Proceed").
+
+For phone access: open `https://<your-PC-IP>:3000` and accept the cert warning.
+
+Update `frontend/.env.local` API URL when using phone:
+```
+NEXT_PUBLIC_API_URL=http://<your-PC-IP>:5000/api/v1
+NEXT_PUBLIC_SOCKET_URL=http://<your-PC-IP>:5000
+```
+
 ---
 
 **backend/.env** — already configured for XAMPP:
@@ -143,6 +199,13 @@ NEXT_PUBLIC_SOCKET_URL=http://localhost:5000
 ---
 
 ## Troubleshooting
+
+**Admin dashboard shows "Failed to load admin stats":**
+- Open `http://localhost:5000/health/detailed` in browser
+- If `memory.heapUsagePercent > 90%`: backend ran out of heap
+- Fix: **Ctrl+C** the backend terminal, then `npm run dev` again
+- `nodemon.json` has `"exec": "node --max-old-space-size=512"` → 512MB heap
+- After restart, run `npx prisma generate` in a separate terminal
 
 **Backend won't start:**
 - Make sure XAMPP MySQL is running
@@ -183,6 +246,24 @@ After the messaging audit sessions, also run:
 ```bash
 cd backend
 npx prisma db push   # applies isPinned + parentMessageId schema changes
+```
+
+## ✅ Fix Log (August 2026)
+
+### Public Live Stream feature
+The `stream_type` and `host_user_id` columns were added to `live_classes` via migration
+`20260819_add_public_livestream`. These columns ARE in the database but the Prisma
+client binary needs regeneration to use them via ORM.
+
+**The controller uses raw SQL as a workaround** — the feature works without any restart.
+
+**To complete the upgrade properly** (one-time, after next backend restart):
+```bash
+cd backend
+# Stop the backend server first, then:
+npx prisma generate    # regenerates the Prisma client binary
+npm run dev            # restart backend
+node test-live-create.js  # verify everything works
 ```
 
 ### Backend fixes
@@ -329,4 +410,119 @@ cd mobile && npm test
 
 # Frontend E2E tests (requires running backend + frontend)
 cd frontend && npm run test:e2e
+```
+
+---
+
+## 🚀 Production Deployment
+
+### Step 1 — Prepare your server
+
+Any Linux VPS with:
+- Docker + Docker Compose installed
+- Port 80 and 443 open
+- At least 2GB RAM (4GB recommended)
+- Domain pointed to server IP
+
+### Step 2 — Set up environment
+
+```bash
+# On your production server
+git clone <your-repo> /opt/halqa
+cd /opt/halqa
+
+# Create your production env file from the template
+cp .env.docker .env.docker.local
+
+# Fill in ALL values (open with nano/vim)
+nano .env.docker.local
+```
+
+### Step 3 — Validate all secrets before deploying
+
+```bash
+# Run the validator script — catches placeholder values before they cause issues
+node scripts/validate-prod-env.js .env.docker.local
+```
+
+You must see: `✅ All required environment variables look good.`
+
+If there are errors, fix them before continuing.
+
+### Step 4 — Deploy
+
+```bash
+docker-compose -f docker-compose.prod.yml --env-file .env.docker.local up -d --build
+```
+
+This will:
+1. Build the backend image (runs `npx prisma generate` + installs deps)
+2. Build the frontend image (runs `npm run build`)
+3. Start MySQL, Redis, backend, frontend, nginx, certbot, db-backup
+4. Run `npx prisma migrate deploy` automatically on backend startup
+5. Backend starts with `--max-old-space-size=512` (512MB heap)
+
+### Step 5 — Verify
+
+```bash
+# Check all containers are running
+docker-compose -f docker-compose.prod.yml ps
+
+# Check backend health
+curl https://yourdomain.com/api/v1/health
+
+# Check logs if something fails
+docker-compose -f docker-compose.prod.yml logs --tail=50 backend
+docker-compose -f docker-compose.prod.yml logs --tail=50 frontend
+```
+
+### Step 6 — Create first SUPER_ADMIN
+
+```bash
+# On the server, get a shell into the backend container
+docker exec -it halqa-backend sh
+
+# Inside the container, run the seed
+node src/prisma/seed-demo-accounts.js
+
+# Or promote an existing user directly via DB:
+# docker exec -it halqa-mysql mysql -u halqa_user -p halqa_db
+# UPDATE users SET role='SUPER_ADMIN' WHERE email='your@email.com';
+```
+
+### Production Checklist
+
+Before going live, confirm every item:
+
+```
+[ ] node scripts/validate-prod-env.js .env.docker.local → passes with 0 errors
+[ ] CLIENT_URL is your real domain (https://yourdomain.com)
+[ ] STRIPE_SECRET_KEY starts with sk_live_
+[ ] STRIPE_WEBHOOK_SECRET starts with whsec_ (from Stripe dashboard, not placeholder)
+[ ] ADMIN_IP_ALLOWLIST is set to your VPN/office IP
+[ ] JWT_SECRET and JWT_REFRESH_SECRET are 64+ char random strings, different from each other
+[ ] MYSQL_ROOT_PASSWORD and MYSQL_PASSWORD are strong unique passwords
+[ ] REDIS_PASSWORD is set
+[ ] R2_* values point to your real Cloudflare R2 bucket
+[ ] docker-compose ps shows all containers healthy
+[ ] https://yourdomain.com/api/v1/health returns {"status":"ready"}
+[ ] Login works at https://yourdomain.com
+[ ] /admin works for SUPER_ADMIN
+[ ] School dashboard works for SCHOOL_ADMIN
+```
+
+### Updating production after code changes
+
+```bash
+cd /opt/halqa
+git pull origin main
+
+# Run the env validator first
+node scripts/validate-prod-env.js .env.docker.local
+
+# Deploy (migrations run automatically before backend starts)
+docker-compose -f docker-compose.prod.yml --env-file .env.docker.local up -d --build --no-deps backend frontend
+
+# Watch logs
+docker-compose -f docker-compose.prod.yml logs -f backend
 ```
