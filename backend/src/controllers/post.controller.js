@@ -32,6 +32,23 @@ const POST_INCLUDE = (viewerId) => ({
   }
 });
 
+// ─── Helper: stamp isFollowing on each post ───────────────────────────────────
+// One extra query per feed page — fetches the viewer's full following set once,
+// then stamps each post with `isFollowing: true/false` so the client can show
+// an inline Follow / Unfollow button without a separate API call.
+async function stampFollowing(posts, viewerId) {
+  if (!posts.length || !viewerId) return posts;
+
+  const authorIds = [...new Set(posts.map(p => p.authorId))];
+  const follows   = await prisma.follow.findMany({
+    where:  { followerId: viewerId, followingId: { in: authorIds } },
+    select: { followingId: true },
+  });
+  const followingSet = new Set(follows.map(f => f.followingId));
+
+  return posts.map(p => ({ ...p, isFollowing: followingSet.has(p.authorId) }));
+}
+
 // ─── Helper: extract & upsert hashtags ───────────────────────────────────────
 async function syncHashtags(postId, body) {
   if (!body) return;
@@ -297,7 +314,12 @@ async function deletePost(req, res, next) {
   try {
     const post = await prisma.post.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!post) return errorResponse(res, 'Post not found', 404);
-    const canDelete = post.authorId === req.user.id || ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(req.user.role);
+    // F-2 FIX: Content deletion must be restricted to:
+    //   1. The post author (content ownership)
+    //   2. SUPER_ADMIN only (HALQA platform admin — not SCHOOL_ADMIN)
+    // Previously SCHOOL_ADMIN could delete any user's post platform-wide, including
+    // posts by MEMBER users with no school affiliation.
+    const canDelete = post.authorId === req.user.id || req.user.role === 'SUPER_ADMIN';
     if (!canDelete) return errorResponse(res, 'Not authorized', 403);
 
     // FIX: Decrement hashtag post counts before soft-deleting the post.
@@ -336,20 +358,107 @@ async function deletePost(req, res, next) {
   } catch (e) { next(e); }
 }
 
+// ─── Helper: enrich live posts (LIVE_ROOM_SHARE / LIVE_CLASS_SHARE) with liveData ──
+// POST_INCLUDE does not include liveData because it is computed from the related
+// VoiceRoom or LiveClass entity. This helper fetches those in a single batch and
+// attaches the field so LiveCard can render correctly in the feed.
+async function enrichLivePosts(posts) {
+  const voiceIds = posts.filter(p => p.type === 'LIVE_ROOM_SHARE' && p.refEntityId).map(p => p.refEntityId);
+  const classIds = posts.filter(p => p.type === 'LIVE_CLASS_SHARE' && p.refEntityId).map(p => p.refEntityId);
+
+  if (voiceIds.length === 0 && classIds.length === 0) return posts;
+
+  const [voiceRooms, liveClasses] = await Promise.all([
+    voiceIds.length > 0 ? prisma.voiceRoom.findMany({
+      where: { id: { in: voiceIds } },
+      select: {
+        id: true, title: true, description: true,
+        coverEmoji: true, coverImageUrl: true, status: true,
+        _count: { select: { participants: { where: { isActive: true } } } },
+      },
+    }) : [],
+    classIds.length > 0 ? prisma.liveClass.findMany({
+      where: { id: { in: classIds } },
+      select: {
+        id: true, title: true, description: true, coverImageUrl: true, status: true,
+        class: { select: { name: true } },
+        _count: { select: { participants: { where: { isActive: true } } } },
+      },
+    }).catch(() => []) : [],
+  ]);
+
+  const voiceMap = Object.fromEntries(voiceRooms.map(r => [r.id, r]));
+  const classMap = Object.fromEntries(liveClasses.map(c => [c.id, c]));
+
+  return posts.map(post => {
+    if (post.type === 'LIVE_ROOM_SHARE' && post.refEntityId) {
+      const room = voiceMap[post.refEntityId];
+      if (room) {
+        post.liveData = {
+          title:            room.title,
+          description:      room.description ?? null,
+          coverEmoji:       room.coverEmoji ?? '🎙️',
+          coverImageUrl:    room.coverImageUrl ?? null,
+          participantCount: room._count.participants,
+          isLive:           room.status === 'LIVE',
+        };
+      }
+    } else if (post.type === 'LIVE_CLASS_SHARE' && post.refEntityId) {
+      const lc = classMap[post.refEntityId];
+      if (lc) {
+        post.liveData = {
+          title:            lc.title,
+          description:      lc.description ?? null,
+          coverEmoji:       '📹',
+          coverImageUrl:    lc.coverImageUrl ?? null,
+          participantCount: lc._count.participants,
+          className:        lc.class?.name ?? null,
+          isLive:           lc.status === 'LIVE',
+        };
+      }
+    }
+    return post;
+  });
+}
+
 // ─── HOME FEED ───────────────────────────────────────────────────────────────
-// Algorithm: posts from followed users + own posts, newest first, cursor pagination
+// ─── HOME FEED ───────────────────────────────────────────────────────────────
+// filter=following → only show posts from people the viewer follows (+ own posts)
+// filter=all (default) → full public feed
 async function getFeed(req, res, next) {
   try {
-    const { cursor, limit = 20 } = req.query;
+    const { cursor, limit = 20, filter = 'all' } = req.query;
     const take = Math.min(50, Math.max(1, parseInt(limit)));
     const viewerId = req.user.id;
 
-    const where = await visibilityFilter(viewerId);
+    let where;
+
+    if (filter === 'following') {
+      // Pure following feed: only posts from people the viewer follows + own posts
+      const following = await prisma.follow.findMany({
+        where: { followerId: viewerId },
+        select: { followingId: true }
+      });
+      const followingIds = following.map(f => f.followingId);
+
+      where = {
+        deletedAt: null,
+        isDraft:   false,
+        OR: [
+          // Posts by people you follow (any visibility they've set)
+          { authorId: { in: followingIds } },
+          // Your own posts
+          { authorId: viewerId },
+        ]
+      };
+    } else {
+      // Default: full public feed (existing behaviour)
+      where = await visibilityFilter(viewerId);
+    }
 
     // Cursor pagination (createdAt + id for stable sort)
     if (cursor) {
       const [cursorTime, cursorId] = cursor.split('_');
-      where.OR = where.OR || [];
       where.createdAt = { lte: new Date(cursorTime) };
       where.NOT = { id: cursorId };
     }
@@ -362,7 +471,11 @@ async function getFeed(req, res, next) {
     });
 
     const hasMore = posts.length > take;
-    const items = hasMore ? posts.slice(0, take) : posts;
+    let items = hasMore ? posts.slice(0, take) : posts;
+
+    items = await enrichLivePosts(items);
+    items = await stampFollowing(items, viewerId);
+
     const nextCursor = hasMore && items.length > 0
       ? `${items[items.length - 1].createdAt.toISOString()}_${items[items.length - 1].id}`
       : null;
@@ -414,10 +527,11 @@ async function getUserPosts(req, res, next) {
     });
 
     const hasMore = posts.length > take;
-    const items = hasMore ? posts.slice(0, take) : posts;
-    const nextCursor = hasMore && items.length > 0 ? `${items[items.length - 1].createdAt.toISOString()}_${items[items.length - 1].id}` : null;
+    const items   = hasMore ? posts.slice(0, take) : posts;
+    const stamped = await stampFollowing(items, viewerId);
+    const nextCursor = hasMore && stamped.length > 0 ? `${stamped[stamped.length - 1].createdAt.toISOString()}_${stamped[stamped.length - 1].id}` : null;
 
-    return successResponse(res, { items, nextCursor, hasMore });
+    return successResponse(res, { items: stamped, nextCursor, hasMore });
   } catch (e) { next(e); }
 }
 
@@ -440,17 +554,24 @@ async function reactToPost(req, res, next) {
     let action, delta;
     if (existing) {
       if (existing.type === type) {
-        // Same reaction — remove it (toggle off)
-        await prisma.postReaction.delete({ where: { postId_userId: { postId, userId } } });
-        delta = -1; action = 'removed';
+        // Same reaction — remove it (toggle off), atomic with counter decrement
+        await prisma.$transaction([
+          prisma.postReaction.delete({ where: { postId_userId: { postId, userId } } }),
+          prisma.post.update({ where: { id: postId }, data: { likeCount: { decrement: 1 } } })
+        ]);
+        delta = 0; action = 'removed'; // delta=0 to skip the second update below
       } else {
-        // Different reaction — update type
+        // Different reaction — update type only (count unchanged)
         await prisma.postReaction.update({ where: { postId_userId: { postId, userId } }, data: { type } });
         delta = 0; action = 'updated';
       }
     } else {
-      await prisma.postReaction.create({ data: { id: uuidv4(), postId, userId, type } });
-      delta = 1; action = 'added';
+      // New reaction — atomic with counter increment
+      await prisma.$transaction([
+        prisma.postReaction.create({ data: { id: uuidv4(), postId, userId, type } }),
+        prisma.post.update({ where: { id: postId }, data: { likeCount: { increment: 1 } } })
+      ]);
+      delta = 0; action = 'added'; // delta=0: counter already updated inside transaction
     }
 
     if (delta !== 0) {
@@ -605,7 +726,8 @@ async function deleteComment(req, res, next) {
   try {
     const comment = await prisma.postComment.findFirst({ where: { id: req.params.commentId, deletedAt: null } });
     if (!comment) return errorResponse(res, 'Comment not found', 404);
-    const can = comment.authorId === req.user.id || ['SUPER_ADMIN','SCHOOL_ADMIN'].includes(req.user.role);
+    // F-2 FIX: Comment deletion restricted to author + SUPER_ADMIN only (not SCHOOL_ADMIN).
+    const can = comment.authorId === req.user.id || req.user.role === 'SUPER_ADMIN';
     if (!can) return errorResponse(res, 'Not authorized', 403);
     await prisma.postComment.update({ where: { id: comment.id }, data: { deletedAt: new Date() } });
     await prisma.post.update({ where: { id: comment.postId }, data: { commentCount: { decrement: 1 } } });
@@ -836,6 +958,48 @@ async function reportPost(req, res, next) {
   } catch (e) { next(e); }
 }
 
+// ─── REELS — TikTok-style video feed ─────────────────────────────────────────
+// Returns posts that have at least one VIDEO media item, cursor-paginated.
+// Ordered by newest first. Only PUBLIC posts.
+async function getReels(req, res, next) {
+  try {
+    const { cursor, limit = 10 } = req.query;
+    const take      = Math.min(20, Math.max(1, parseInt(limit)));
+    const viewerId  = req.user.id;
+
+    const where = {
+      deletedAt:  null,
+      isDraft:    false,
+      visibility: 'PUBLIC',
+      // Must have at least one VIDEO media item
+      media: { some: { type: 'VIDEO' } },
+    };
+
+    if (cursor) {
+      const [cursorTime, cursorId] = cursor.split('_');
+      where.createdAt = { lte: new Date(cursorTime) };
+      where.NOT = { id: cursorId };
+    }
+
+    const posts = await prisma.post.findMany({
+      where,
+      include: POST_INCLUDE(viewerId),
+      orderBy: { createdAt: 'desc' },
+      take: take + 1,
+    });
+
+    const hasMore = posts.length > take;
+    let items = hasMore ? posts.slice(0, take) : posts;
+    items = await stampFollowing(items, viewerId);
+
+    const nextCursor = hasMore && items.length > 0
+      ? `${items[items.length - 1].createdAt.toISOString()}_${items[items.length - 1].id}`
+      : null;
+
+    return successResponse(res, { items, nextCursor, hasMore });
+  } catch (e) { next(e); }
+}
+
 // ─── GET LIVE SESSIONS ────────────────────────────────────────────────────────
 // Returns currently active voice rooms + live classes as feed cards.
 // Called by FeedPage on mount and after feed:live socket events.
@@ -855,20 +1019,30 @@ async function getLiveSessions(req, res, next) {
         orderBy: { lastActivityAt: 'desc' },
         take: 10,
       }),
-      prisma.liveClass.findMany({
-        where: {
-          status: 'LIVE',
-          deletedAt: null,
-          ...(viewer?.schoolId ? { schoolId: viewer.schoolId } : {}),
-        },
-        include: {
-          teacher: { include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } } } },
-          class: { select: { id: true, name: true } },
-          _count: { select: { participants: { where: { isActive: true } } } }
-        },
-        orderBy: { startedAt: 'desc' },
-        take: 10,
-      }),
+      // Use a safe two-step approach: fetch live classes first, then filter
+      // out any whose teacher relation is broken (deleted teacher records).
+      // This avoids Prisma's "Field teacher is required, got null" crash.
+      (async () => {
+        const schoolFilter = viewer?.schoolId ? { schoolId: viewer.schoolId } : {};
+        const classes = await prisma.liveClass.findMany({
+          where: { status: 'LIVE', deletedAt: null, ...schoolFilter },
+          include: {
+            class: { select: { id: true, name: true } },
+            _count: { select: { participants: { where: { isActive: true } } } },
+          },
+          orderBy: { startedAt: 'desc' },
+          take: 10,
+        });
+        // Fetch teacher users separately to handle orphaned references
+        const teacherIds = [...new Set(classes.map(c => c.teacherId).filter(Boolean))];
+        const teachers = teacherIds.length > 0 ? await prisma.teacher.findMany({
+          where: { id: { in: teacherIds } },
+          include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } } },
+        }) : [];
+        const teacherMap = Object.fromEntries(teachers.map(t => [t.id, t]));
+        // Attach teacher info (may be null for orphaned records — handled in mapping below)
+        return classes.map(c => ({ ...c, teacher: teacherMap[c.teacherId] ?? null }));
+      })(),
     ]);
 
     // Shape into unified feed cards
@@ -963,12 +1137,270 @@ async function recordView(req, res, next) {
   } catch (e) { next(e); }
 }
 
+// ─── LINK PREVIEW SCRAPE ─────────────────────────────────────────────────────
+// Fetches OG/meta tags from a URL. Uses Node built-in https/http — no extra deps.
+// Results cached in Redis for 1 hour (same URL will never be re-fetched during that window).
+//
+// L-7 FIX: Added SSRF protection. The endpoint previously allowed fetching
+// any URL including internal services (localhost, AWS metadata, Redis, DB).
+// Now blocked: private IP ranges (RFC 1918), loopback, link-local, and
+// any non-https in production.
+async function getLinkPreview(req, res, next) {
+  try {
+    const { url } = req.query;
+    if (!url) return errorResponse(res, 'url required', 400);
+
+    // Validate URL format
+    let parsed;
+    try { parsed = new URL(url); } catch { return errorResponse(res, 'Invalid URL', 400); }
+
+    // L-7 FIX: Only allow https (not http) to prevent plaintext credential sniffing
+    // Allow http in development for local testing convenience
+    const allowHttp = process.env.NODE_ENV !== 'production';
+    if (parsed.protocol === 'http:' && !allowHttp) {
+      return errorResponse(res, 'Only https URLs are supported in production', 400);
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return errorResponse(res, 'Only http/https URLs supported', 400);
+    }
+
+    // L-7 FIX: Block SSRF by resolving the hostname and checking against
+    // private/reserved IP ranges before making the outbound request.
+    const { resolve4, resolve6 } = require('dns').promises;
+    const isPrivateIp = (ip) => {
+      // IPv4 private ranges (RFC 1918), loopback, link-local, APIPA, metadata
+      const BLOCKED_PATTERNS = [
+        /^127\./,                       // Loopback
+        /^10\./,                        // RFC 1918
+        /^192\.168\./,                  // RFC 1918
+        /^172\.(1[6-9]|2\d|3[01])\./,  // RFC 1918 (172.16–172.31)
+        /^169\.254\./,                  // Link-local / APIPA
+        /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,  // RFC 6598 shared
+        /^::1$/,                        // IPv6 loopback
+        /^fc00:/i,                      // IPv6 unique local
+        /^fe80:/i,                      // IPv6 link-local
+        /^fd/i,                         // IPv6 unique local (fd00::/8)
+      ];
+      return BLOCKED_PATTERNS.some(p => p.test(ip));
+    };
+
+    const hostname = parsed.hostname;
+
+    // Block hostnames that are obviously internal without DNS
+    if (hostname === 'localhost' || hostname === '0.0.0.0' ||
+        hostname.endsWith('.local') || hostname.endsWith('.internal') ||
+        hostname.endsWith('.localhost')) {
+      return errorResponse(res, 'URL not allowed', 400);
+    }
+
+    // Resolve hostname to IP(s) and check each
+    try {
+      const ips = await Promise.allSettled([resolve4(hostname), resolve6(hostname)]);
+      const resolvedIps = ips.flatMap(r => r.status === 'fulfilled' ? r.value : []);
+      if (resolvedIps.some(isPrivateIp)) {
+        logger.warn(`[getLinkPreview] SSRF attempt blocked: ${url} resolved to private IP`);
+        return errorResponse(res, 'URL not allowed', 400);
+      }
+    } catch {
+      // DNS resolution failed — reject the request (fail closed)
+      return errorResponse(res, 'Could not resolve URL', 400);
+    }
+
+    // Serve from Redis cache if available (1h TTL)
+    const cacheKey = `link-preview:${Buffer.from(url).toString('base64').slice(0, 80)}`;
+    try {
+      const { isRedisReady, getCache } = require('../utils/redis');
+      if (isRedisReady()) {
+        const cached = await getCache(cacheKey);
+        if (cached) return successResponse(res, cached);
+      }
+    } catch { /* non-fatal */ }
+
+    // Fetch the page HTML — 5s timeout, follow up to 3 redirects, max 200 KB
+    // L-7 FIX: Re-validate redirect destinations against SSRF blocklist
+    const html = await new Promise((resolve, reject) => {
+      const lib     = parsed.protocol === 'https:' ? require('https') : require('http');
+      let body      = '';
+      let redirects = 0;
+
+      const fetchUrl = async (targetUrl) => {
+        let targetParsed;
+        try { targetParsed = new URL(targetUrl); } catch { return reject(new Error('Invalid redirect URL')); }
+
+        // Re-check redirect destination against SSRF blocklist
+        if (!['http:', 'https:'].includes(targetParsed.protocol)) return reject(new Error('Invalid redirect protocol'));
+        try {
+          const ips = await Promise.allSettled([resolve4(targetParsed.hostname), resolve6(targetParsed.hostname)]);
+          const resolvedIps = ips.flatMap(r => r.status === 'fulfilled' ? r.value : []);
+          if (resolvedIps.some(isPrivateIp)) return reject(new Error('Redirect to private IP blocked'));
+        } catch { return reject(new Error('Redirect DNS resolution failed')); }
+
+        const targetLib = targetParsed.protocol === 'https:' ? require('https') : require('http');
+        const reqHandle = targetLib.get(targetUrl, {
+          timeout: 5000,
+          headers: {
+            'User-Agent': 'HalqaBot/1.0 (link preview)',
+            'Accept':     'text/html',
+          },
+        }, (response) => {
+          // Follow redirects
+          if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
+            if (++redirects > 3) return reject(new Error('Too many redirects'));
+            return fetchUrl(response.headers.location);
+          }
+          if (response.statusCode !== 200) return reject(new Error(`HTTP ${response.statusCode}`));
+
+          response.setEncoding('utf8');
+          response.on('data', chunk => {
+            body += chunk;
+            if (body.length > 200_000) { response.destroy(); resolve(body); } // cap at 200 KB
+          });
+          response.on('end', () => resolve(body));
+        });
+        reqHandle.on('error',   reject);
+        reqHandle.on('timeout', () => { reqHandle.destroy(); reject(new Error('Timeout')); });
+      };
+      fetchUrl(url);
+    });
+
+    // Extract OG / Twitter / fallback meta tags with simple regex (no cheerio needed)
+    const getMeta = (property) => {
+      const patterns = [
+        new RegExp(`<meta[^>]+property=["']og:${property}["'][^>]+content=["']([^"']+)["']`, 'i'),
+        new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:${property}["']`, 'i'),
+        new RegExp(`<meta[^>]+name=["']twitter:${property}["'][^>]+content=["']([^"']+)["']`, 'i'),
+        new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:${property}["']`, 'i'),
+      ];
+      for (const pat of patterns) {
+        const m = html.match(pat);
+        if (m) return m[1].trim();
+      }
+      return null;
+    };
+
+    const titleTag = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+
+    const preview = {
+      url,
+      title:       getMeta('title') || (titleTag ? titleTag[1].trim() : parsed.hostname),
+      description: getMeta('description') || null,
+      image:       getMeta('image') || null,
+    };
+
+    // Cache for 1 hour
+    try {
+      const { isRedisReady, setCache } = require('../utils/redis');
+      if (isRedisReady()) await setCache(cacheKey, preview, 3600);
+    } catch { /* non-fatal */ }
+
+    return successResponse(res, preview);
+  } catch (e) {
+    // Non-fatal — return empty preview rather than 500
+    logger.warn(`[getLinkPreview] Failed to fetch preview: ${e.message}`);
+    return successResponse(res, { url: req.query.url, title: null, description: null, image: null });
+  }
+}
+
+// ─── POLL VOTE ───────────────────────────────────────────────────────────────
+// Stores vote in pollData JSON. One vote per user per poll (enforced via PostView upsert trick
+// — we reuse the PostView table: a "view" here represents a vote cast).
+// After voting, recalculate vote counts from scratch and update pollData.
+async function votePoll(req, res, next) {
+  try {
+    const { id: postId } = req.params;
+    const { optionId }   = req.body;
+    const userId         = req.user.id;
+
+    if (!optionId) return errorResponse(res, 'optionId required', 400);
+
+    const post = await prisma.post.findFirst({
+      where: { id: postId, deletedAt: null, type: 'POLL' },
+    });
+    if (!post) return errorResponse(res, 'Poll not found', 404);
+
+    const pollData = post.pollData;
+    if (!pollData || !Array.isArray(pollData.options)) {
+      return errorResponse(res, 'Invalid poll data', 422);
+    }
+
+    // Check expiry
+    if (pollData.endsAt && new Date(pollData.endsAt) < new Date()) {
+      return errorResponse(res, 'Poll has ended', 400);
+    }
+
+    // Check option exists
+    const optionExists = pollData.options.some(o =>
+      (typeof o === 'object' ? o.id : String(pollData.options.indexOf(o))) === String(optionId)
+    );
+    if (!optionExists) return errorResponse(res, 'Invalid option', 400);
+
+    // Use PostView as "poll vote" record (postId + userId unique) — avoids new table migration
+    const existingVote = await prisma.postView.findUnique({
+      where: { postId_userId: { postId, userId } },
+    });
+    if (existingVote) return errorResponse(res, 'You have already voted', 409);
+
+    // Record vote
+    await prisma.postView.create({
+      data: { id: uuidv4(), postId, userId, votedOptionId: optionId }
+    }).catch(async () => {
+      // votedOptionId column may not exist — fall back to plain upsert
+      await prisma.postView.upsert({
+        where:  { postId_userId: { postId, userId } },
+        create: { id: uuidv4(), postId, userId },
+        update: {},
+      });
+    });
+
+    // Recalculate votes by counting all PostView rows for this post
+    // grouped by votedOptionId (best effort — falls back to simple increment)
+    try {
+      const votes = await prisma.$queryRaw`
+        SELECT votedOptionId, COUNT(*) as cnt
+        FROM PostView
+        WHERE postId = ${postId} AND votedOptionId IS NOT NULL
+        GROUP BY votedOptionId
+      `;
+      const voteMap = {};
+      (votes || []).forEach(r => { voteMap[r.votedOptionId] = Number(r.cnt); });
+
+      const updatedOptions = pollData.options.map(o => {
+        const id = typeof o === 'object' ? o.id : String(pollData.options.indexOf(o));
+        return typeof o === 'object'
+          ? { ...o, votes: voteMap[id] ?? o.votes ?? 0 }
+          : o;
+      });
+      const totalVotes = Object.values(voteMap).reduce((a, b) => a + b, 0);
+
+      await prisma.post.update({
+        where: { id: postId },
+        data:  { pollData: { ...pollData, options: updatedOptions, totalVotes } },
+      });
+    } catch {
+      // Non-fatal — increment the selected option's vote count directly
+      const updatedOptions = pollData.options.map(o => {
+        if (typeof o !== 'object') return o;
+        return o.id === optionId ? { ...o, votes: (o.votes ?? 0) + 1 } : o;
+      });
+      await prisma.post.update({
+        where: { id: postId },
+        data:  { pollData: { ...pollData, options: updatedOptions, totalVotes: (pollData.totalVotes ?? 0) + 1 } },
+      });
+    }
+
+    const io = getIo();
+    if (io) io.to('feed:public').emit('post:poll_vote', { postId, optionId, userId });
+
+    return successResponse(res, { voted: true, optionId });
+  } catch (e) { next(e); }
+}
+
 // ─── MODULE EXPORTS ──────────────────────────────────────────────────────────
 module.exports = {
   createPost, getPost, updatePost, deletePost,
-  getFeed, getUserPosts,
+  getFeed, getUserPosts, getReels,
   reactToPost, getReactions,
   addComment, getComments, editComment, deleteComment, reactToComment,
   toggleBookmark, pinPost, recordView, getLiveSessions,
-  searchPosts, getTrendingHashtags, reportPost
+  searchPosts, getTrendingHashtags, reportPost, votePoll, getLinkPreview
 };

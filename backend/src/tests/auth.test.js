@@ -76,10 +76,14 @@ describe('POST /api/v1/auth/register', () => {
     expect(res.body.success).toBe(true);
   });
 
-  test('SECURITY: role from body is always STUDENT', async () => {
+  test('SECURITY: role from body is always MEMBER (social-only, no privilege escalation)', async () => {
+    // Architecture change: new registrations default to MEMBER (Social-only).
+    // Education roles (TEACHER, STUDENT, etc.) are assigned via SchoolMembership
+    // when a user joins/creates a school — never at registration time.
+    // This prevents privilege escalation (self-registering as SUPER_ADMIN etc.)
     await request(app).post('/api/v1/auth/register')
       .send({ email: 'admin@halqa.app', password: 'Test1234', firstName: 'A', lastName: 'B', role: 'SUPER_ADMIN' });
-    expect(prisma.user.create.mock.calls[0][0].data.role).toBe('STUDENT');
+    expect(prisma.user.create.mock.calls[0][0].data.role).toBe('MEMBER');
   });
 
   test('rejects duplicate email with 409', async () => {

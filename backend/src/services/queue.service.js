@@ -143,13 +143,30 @@ function startWorkers() {
 
         if (wallet && wallet.coins >= sub.tier.priceCoins) {
           // Sufficient balance — auto-renew
-          const newExpiry    = new Date(sub.expiresAt.getTime() + 30 * 24 * 60 * 60 * 1000);
-          const diamonds     = Math.floor(sub.tier.priceCoins * 0.5);
+
+          // Idempotency guard: skip if already renewed in this billing period.
+          // The billing period start is defined as expiresAt minus 30 days.
+          const periodStart = new Date(sub.expiresAt.getTime() - 30 * 24 * 60 * 60 * 1000);
+          const alreadyRenewed = await prisma.walletTransaction.findFirst({
+            where: {
+              userId:         sub.subscriberId,
+              type:           'SUBSCRIPTION',
+              subscriptionId: sub.id,
+              createdAt:      { gte: periodStart }
+            }
+          });
+          if (alreadyRenewed) {
+            logger.info(`[social-cleanup] Subscription ${sub.id} already renewed this period — skipping`);
+            continue;
+          }
+
+          const newExpiry = new Date(sub.expiresAt.getTime() + 30 * 24 * 60 * 60 * 1000);
+          const diamonds  = Math.floor(sub.tier.priceCoins * 0.5);
 
           await prisma.$transaction([
-            // Deduct coins from subscriber
+            // Deduct coins from subscriber — optimistic lock prevents race
             prisma.wallet.update({
-              where: { userId: sub.subscriberId },
+              where: { userId: sub.subscriberId, coins: { gte: sub.tier.priceCoins } },
               data:  { coins: { decrement: sub.tier.priceCoins }, totalSpent: { increment: sub.tier.priceCoins } }
             }),
             // Credit diamonds to creator
@@ -163,7 +180,7 @@ function startWorkers() {
               where: { id: sub.id },
               data:  { expiresAt: newExpiry, renewedAt: now, coinsCharged: { increment: sub.tier.priceCoins } }
             }),
-            // Wallet ledger entry
+            // Wallet ledger entry (debit)
             prisma.walletTransaction.create({
               data: {
                 userId:         sub.subscriberId,
@@ -172,6 +189,11 @@ function startWorkers() {
                 description:    `Auto-renewal: ${sub.tier.name}`,
                 subscriptionId: sub.id
               }
+            }),
+            // Creator profile totalEarned counter — inside transaction for atomicity
+            prisma.creatorProfile.update({
+              where: { id: sub.creatorId },
+              data:  { totalEarned: { increment: diamonds } }
             })
           ]);
 

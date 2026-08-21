@@ -215,6 +215,20 @@ jobs:
         env:
           DATABASE_URL: 'mysql://halqa:halqa_test_pw@localhost:3306/halqa_test'
 
+      - name: Verify no pending migrations (drift detection)
+        run: |
+          STATUS=$(npx prisma migrate status 2>&1)
+          echo "$STATUS"
+          if echo "$STATUS" | grep -q "have not yet been applied"; then
+            echo "ERROR: Unapplied migrations detected. Schema and migrations are out of sync."
+            echo "Run 'npx prisma migrate dev --name fix_drift' to generate a migration for schema changes."
+            exit 1
+          fi
+          echo "Migration drift check passed — database schema is up to date."
+        working-directory: backend
+        env:
+          DATABASE_URL: 'mysql://halqa:halqa_test_pw@localhost:3306/halqa_test'
+
       - name: Run integration tests
         run: npm run test:integration -- --ci
         working-directory: backend
@@ -226,6 +240,39 @@ jobs:
           JWT_REFRESH_SECRET: 'ci_integration_refresh_secret_32_chars!!'
           PORT: '5002'
           SERVICE_NAME: 'halqa-integration-ci'
+
+      - name: Verify backup and restore procedure
+        # Proves that mysqldump + restore works against the test DB.
+        # This is the minimal bar for production restore readiness.
+        # Steps: dump → drop → recreate → restore → count tables.
+        run: |
+          echo "=== Step 1: Create backup of test database ==="
+          mysqldump -u halqa -phalqa_test_pw halqa_test > /tmp/halqa_test_backup.sql
+          echo "Backup size: $(wc -c < /tmp/halqa_test_backup.sql) bytes"
+
+          echo "=== Step 2: Verify backup file is non-empty ==="
+          if [ ! -s /tmp/halqa_test_backup.sql ]; then
+            echo "ERROR: Backup file is empty"
+            exit 1
+          fi
+
+          echo "=== Step 3: Drop and recreate the test database ==="
+          mysql -u halqa -phalqa_test_pw -e "DROP DATABASE halqa_test; CREATE DATABASE halqa_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+
+          echo "=== Step 4: Restore from backup ==="
+          mysql -u halqa -phalqa_test_pw halqa_test < /tmp/halqa_test_backup.sql
+
+          echo "=== Step 5: Verify table count is non-zero ==="
+          TABLE_COUNT=$(mysql -u halqa -phalqa_test_pw halqa_test --skip-column-names -e \
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='halqa_test' AND table_type='BASE TABLE';")
+          echo "Tables restored: $TABLE_COUNT"
+          if [ "$TABLE_COUNT" -lt "10" ]; then
+            echo "ERROR: Restore failed — too few tables ($TABLE_COUNT)"
+            exit 1
+          fi
+
+          echo "=== Backup/restore verification PASSED — $TABLE_COUNT tables restored ==="
+          rm -f /tmp/halqa_test_backup.sql
 
   # ─── Docker Build Test ─────────────────────────────────────────────────────
   docker:

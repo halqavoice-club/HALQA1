@@ -223,6 +223,51 @@ Get-ChildItem -Path $BackupRoot -Directory | Where-Object {
 }
 Write-OK "Kept backups from last 30 days"
 
+# ── 7. Record backup metadata in database ─────────────────────────────────
+Write-Step "Recording backup metadata"
+
+$mysqlPaths = @(
+    "C:\xampp\mysql\bin\mysql.exe",
+    "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe",
+    "mysql"
+)
+$mysql = $null
+foreach ($path in $mysqlPaths) {
+    if ($path -eq "mysql") {
+        try { $null = Get-Command mysql -ErrorAction Stop; $mysql = "mysql"; break }
+        catch { }
+    } elseif (Test-Path $path) { $mysql = $path; break }
+}
+
+if ($mysql -and (Test-Path $SqlFile)) {
+    try {
+        $fileSize    = (Get-Item $SqlFile).Length
+        $checksum    = (Get-FileHash $SqlFile -Algorithm SHA256).Hash.ToLower()
+        $backupStart = (Get-Date).AddSeconds(-30).ToString("yyyy-MM-dd HH:mm:ss")  # approximate
+        $nowStr      = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        $sqlFileName = [System.IO.Path]::GetFileName($SqlFile)
+        $sqlFilePath = $SqlFile.Replace("\", "/")
+
+        $insertSql = "INSERT INTO backup_metadata " +
+            "(id, backupType, backupMethod, fileName, fileSize, filePath, checksum, status, " +
+            "startedAt, completedAt, retentionDays, createdBy, createdAt, updatedAt) " +
+            "VALUES (UUID(), 'FULL', 'SCHEDULED', '$sqlFileName', $fileSize, '$sqlFilePath', " +
+            "'$checksum', 'COMPLETED', '$backupStart', '$nowStr', 30, 'backup-daily.ps1', '$nowStr', '$nowStr');"
+
+        if ($DBPassword -ne "") {
+            echo $insertSql | & $mysql "-h$DBHost" "-P$DBPort" "-u$DBUser" "-p$DBPassword" $DBName 2>&1
+        } else {
+            echo $insertSql | & $mysql "-h$DBHost" "-P$DBPort" "-u$DBUser" $DBName 2>&1
+        }
+        Write-OK "Backup metadata recorded in database (backup_metadata table)"
+    } catch {
+        Write-WARN "Could not record backup metadata: $_"
+        Write-WARN "Backup file is safe — metadata recording is best-effort"
+    }
+} else {
+    Write-WARN "Skipping metadata recording (no mysql client or no SQL file)"
+}
+
 # ── Summary ───────────────────────────────────────────────────────────────
 Write-Host @"
 

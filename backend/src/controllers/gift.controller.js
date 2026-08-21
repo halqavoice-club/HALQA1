@@ -173,9 +173,11 @@ async function sendGift(req, res) {
           throw new Error(`INSUFFICIENT_COINS:${sw.coins}:${totalCoins}`);
         }
 
-        // 2. Deduct coins from sender
+        // 2. Deduct coins from sender — optimistic lock prevents race conditions:
+        // WHERE coins >= totalCoins means if a concurrent tx already deducted coins,
+        // this update affects 0 rows, Prisma throws RecordNotFound, and the tx rolls back.
         const updatedSender = await tx.wallet.update({
-          where: { userId: senderId },
+          where: { userId: senderId, coins: { gte: totalCoins } },
           data:  {
             coins:      { decrement: totalCoins },
             totalSpent: { increment: totalCoins }
@@ -353,6 +355,31 @@ async function sendGift(req, res) {
         ...payload,
         newDiamondBalance: null,
       });
+    }
+
+    // ── PK Gift Scoring Hook ───────────────────────────────────────────────
+    // If this gift was sent inside a PK room (roomType = 'pk'), process PK scoring.
+    // The gift transaction is already committed — scoring is derived, never financial.
+    // Non-fatal: PK scoring failure must never fail the gift response.
+    if (roomType === 'pk') {
+      try {
+        const pkService = require('../services/pk.service');
+        // Find the active PK match for this room
+        const pkMatch = await prisma.pKMatch.findFirst({
+          where: {
+            state: 'LIVE',
+            OR: [{ roomIdA: roomId }, { roomIdB: roomId }]
+          },
+          include: { participants: { select: { userId: true, side: true } } }
+        });
+        if (pkMatch) {
+          const recvParticipant = pkMatch.participants.find(p => p.userId === receiverId);
+          const side            = recvParticipant?.side || (pkMatch.roomIdA === roomId ? 'A' : 'B');
+          await pkService.processPKGift(pkMatch.id, transaction, side, receiverId);
+        }
+      } catch (pkErr) {
+        logger.error(`[gift:pk] PK scoring failed for tx ${transaction.id}: ${pkErr.message}`);
+      }
     }
 
     return successResponse(res, {
@@ -564,9 +591,9 @@ async function sendGiftToAll(req, res) {
           throw new Error(`INSUFFICIENT_COINS:${sw.coins}:${totalCoinsNeeded}`);
         }
 
-        // 2. Deduct total coins from sender
+        // 2. Deduct total coins from sender — optimistic lock prevents race conditions
         const updatedSender = await tx.wallet.update({
-          where: { userId: senderId },
+          where: { userId: senderId, coins: { gte: totalCoinsNeeded } },
           data:  {
             coins:      { decrement: totalCoinsNeeded },
             totalSpent: { increment: totalCoinsNeeded }

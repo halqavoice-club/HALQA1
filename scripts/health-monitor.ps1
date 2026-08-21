@@ -120,6 +120,41 @@ if (Test-Path $backupDir) {
     Write-Log "Backup: no backup folder found" "WARN"
 }
 
+# ── 6b. Database backup_metadata table check ──────────────────────────────
+# Cross-check: verify the backup_metadata table in MySQL also reflects a recent backup.
+# This catches cases where the file system backup exists but wasn't recorded,
+# or where the DB is the source of truth for backup monitoring dashboards.
+$mysqlPaths = @("C:\xampp\mysql\bin\mysql.exe", "mysql")
+foreach ($mysqlBin in $mysqlPaths) {
+    $mysqlAvail = if ($mysqlBin -eq "mysql") {
+        Get-Command mysql -ErrorAction SilentlyContinue
+    } else {
+        if (Test-Path $mysqlBin) { $mysqlBin } else { $null }
+    }
+    if ($mysqlAvail) {
+        try {
+            $query = "SELECT TIMESTAMPDIFF(HOUR, MAX(completedAt), NOW()) as hoursAgo FROM backup_metadata WHERE status='COMPLETED';"
+            $result = echo $query | & $mysqlBin -u root halqa_db --skip-column-names 2>&1
+            if ($result -match '^\d+$') {
+                $hoursAgo = [int]$result.Trim()
+                if ($hoursAgo -gt 48) {
+                    Write-Log "BackupMetadata: last DB-recorded backup ${hoursAgo}h ago — STALE" "ERROR"
+                    $issues += "backup_metadata: no recorded backup in 48h"
+                } elseif ($hoursAgo -gt 25) {
+                    Write-Log "BackupMetadata: last DB-recorded backup ${hoursAgo}h ago" "WARN"
+                } else {
+                    Write-Log "BackupMetadata: last recorded backup ${hoursAgo}h ago" "OK"
+                }
+            } else {
+                Write-Log "BackupMetadata: no completed backup records found" "WARN"
+            }
+        } catch {
+            Write-Log "BackupMetadata: could not query backup_metadata table: $_" "WARN"
+        }
+        break
+    }
+}
+
 # ── 7. Git sync check ──────────────────────────────────────────────────────
 $projectRoot = Split-Path -Parent $PSScriptRoot
 if (Test-Path "$projectRoot\.git") {

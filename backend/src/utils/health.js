@@ -16,7 +16,7 @@
  */
 
 const prisma = require('./prisma');
-const { isRedisReady, getRedis } = require('./redis');
+const redisModule = require('./redis');
 const logger = require('./logger');
 
 let isStartupComplete = false;
@@ -197,14 +197,14 @@ async function checkDatabase() {
 async function checkRedis() {
   const start = Date.now();
   try {
-    if (!isRedisReady()) {
+    if (!redisModule.isRedisReady()) {
       return {
         status: 'disconnected',
         error: 'Redis not ready'
       };
     }
 
-    await getRedis().ping();
+    await redisModule.getRedis().ping();
     return {
       status: 'ok',
       latencyMs: Date.now() - start
