@@ -178,9 +178,10 @@ describe('Database Hardening — Role Write Path Regression Tests', () => {
       const fs = require('fs');
       const path = require('path');
       const src = fs.readFileSync(path.join(__dirname, '../routes/user.routes.js'), 'utf8');
-      // Find status update block
+      // Find status update block — use 1500 chars to cover P1-001 validation code
+      // added before the prisma.user.update call
       const statusIdx = src.indexOf("PUT /users/:id/status");
-      const statusBlock = src.substring(statusIdx, statusIdx + 500);
+      const statusBlock = src.substring(statusIdx, statusIdx + 1500);
       expect(statusBlock).toMatch(/data:\s*\{\s*status\s*\}/);
       expect(statusBlock).not.toMatch(/role/);
     });

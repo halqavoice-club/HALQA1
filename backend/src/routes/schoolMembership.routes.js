@@ -280,10 +280,14 @@ router.put('/:id/status',
         where: { userId_schoolId: { userId: req.user.id, schoolId: membership.schoolId } }
       });
       const isLegacySuperAdmin = req.user.role === 'SUPER_ADMIN';
-      const isAdmin = callerMembership && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(callerMembership.role);
+      // P1-002 FIX (SEC-MED-005): caller membership must be ACTIVE, not just admin role.
+      // A PENDING or SUSPENDED SCHOOL_ADMIN must not be able to approve/change memberships.
+      const isAdmin = callerMembership &&
+        ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(callerMembership.role) &&
+        callerMembership.status === 'ACTIVE';
 
       if (!isLegacySuperAdmin && !isAdmin) {
-        return errorResponse(res, 'Only school admins can update membership status', 403);
+        return errorResponse(res, 'Only active school admins can update membership status', 403);
       }
 
       const updated = await prisma.schoolMembership.update({
@@ -329,10 +333,14 @@ router.put('/:id/role',
         where: { userId_schoolId: { userId: req.user.id, schoolId: membership.schoolId } }
       });
       const isLegacySuperAdmin = req.user.role === 'SUPER_ADMIN';
-      const isAdmin = callerMembership && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(callerMembership.role);
+      // P1-002 FIX (SEC-MED-005): caller membership must be ACTIVE, not just admin role.
+      // A PENDING or SUSPENDED SCHOOL_ADMIN must not be able to change member roles.
+      const isAdmin = callerMembership &&
+        ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(callerMembership.role) &&
+        callerMembership.status === 'ACTIVE';
 
       if (!isLegacySuperAdmin && !isAdmin) {
-        return errorResponse(res, 'Only school admins can change membership roles', 403);
+        return errorResponse(res, 'Only active school admins can change membership roles', 403);
       }
 
       // Prevent self-demotion of the only SUPER_ADMIN

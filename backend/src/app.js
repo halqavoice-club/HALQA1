@@ -722,27 +722,43 @@ app.get('/health/detailed', health.detailed);
 //               or query param:      ?token=<token>
 app.get('/metrics', async (req, res) => {
   const configuredToken = process.env.METRICS_TOKEN;
-  const IS_PROD = process.env.NODE_ENV === 'production';
-  const DEFAULT_TOKEN = 'halqa_metrics_dev_token_change_in_production';
+  const DEFAULT_TOKEN   = 'halqa_metrics_dev_token_change_in_production';
+  const IS_PROD         = process.env.NODE_ENV === 'production';
 
-  // In production, a token MUST be configured and must not be the default.
+  // P1-004 FIX (SEC-CRIT-004): Always require authorization — never open regardless of environment.
+  //
+  // Previous behaviour: if NODE_ENV was not 'production' AND the token was missing
+  // or still set to the default placeholder, the endpoint was open to anyone.
+  // This exposed DB latency, request rates, error counts, and circuit breaker states
+  // to unauthenticated callers on staging or accidentally-public dev servers.
+  //
+  // New behaviour:
+  //   - Production: token MUST be set and not be the default. Returns 503 otherwise.
+  //   - All environments: if a METRICS_TOKEN is set (even in dev), it is enforced.
+  //   - Development without any token: returns 401 (endpoint is not open).
+  //     Developers who need metrics locally must set METRICS_TOKEN in their .env.
+  //
+  // Token is supplied via:  Authorization: Bearer <token>
+  //                     or: ?token=<token>
+
   if (IS_PROD) {
+    // Production: non-default token required
     if (!configuredToken || configuredToken === DEFAULT_TOKEN) {
       logger.error('[metrics] METRICS_TOKEN is not set or is still the default value. Endpoint blocked.');
       return res.status(503).json({ error: 'Metrics endpoint is not configured for production. Set METRICS_TOKEN.' });
     }
-    const supplied = (req.headers.authorization || '').replace('Bearer ', '') || req.query.token;
-    if (supplied !== configuredToken) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-  } else if (configuredToken && configuredToken !== DEFAULT_TOKEN) {
-    // Development with a custom token set: still enforce it.
-    const supplied = (req.headers.authorization || '').replace('Bearer ', '') || req.query.token;
-    if (supplied !== configuredToken) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
   }
-  // Development with no token or default token: allow freely (local dev convenience).
+
+  // All environments: require the token to be set AND match
+  if (!configuredToken) {
+    // No token configured at all — deny access
+    return res.status(401).json({ error: 'Unauthorized. Set METRICS_TOKEN to access this endpoint.' });
+  }
+
+  const supplied = (req.headers.authorization || '').replace('Bearer ', '').trim() || req.query.token;
+  if (!supplied || supplied !== configuredToken) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
 
   try {
     const prom = require('./utils/prometheus');

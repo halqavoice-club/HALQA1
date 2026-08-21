@@ -57,9 +57,46 @@ router.post('/avatar', avatarUpload.single('avatar'), async (req, res, next) => 
 
 // ─── PUT /users/profile — update personal info ────────────────────────────────
 // Must come BEFORE /:id to avoid Express matching "profile" as an ID
+
+// P1-003 FIX (SEC-HIGH-003): Validate avatarUrl to prevent XSS and SSRF.
+// Allowed values:
+//   null / undefined / '' — clear the avatar (valid)
+//   /uploads/...          — local dev storage URL (relative path)
+//   https://...           — HTTPS CDN/R2 URL (production)
+// Rejected values:
+//   javascript:...        — stored XSS
+//   data:...              — stored XSS via data URI
+//   file:...              — local filesystem disclosure
+//   http://...            — plain HTTP (insecure, not used by storage layer)
+//   arbitrary strings     — not a URL
+function validateAvatarUrl(avatarUrl) {
+  if (avatarUrl === null || avatarUrl === undefined || avatarUrl === '') {
+    return true; // explicit clear is allowed
+  }
+  if (typeof avatarUrl !== 'string') return false;
+
+  // Relative local path from STORAGE_TYPE=local (e.g. /uploads/avatars/uuid.jpg)
+  if (avatarUrl.startsWith('/uploads/')) return true;
+
+  // Must be a valid HTTPS URL for production CDN/R2
+  try {
+    const parsed = new URL(avatarUrl);
+    if (parsed.protocol !== 'https:') return false; // only HTTPS
+    return true;
+  } catch {
+    return false; // not a URL at all
+  }
+}
+
 router.put('/profile', async (req, res, next) => {
   try {
     const { firstName, lastName, phone, dateOfBirth, gender, address, language, timezone, avatarUrl, bio } = req.body;
+
+    // Validate avatarUrl before any database operation
+    if (avatarUrl !== undefined && !validateAvatarUrl(avatarUrl)) {
+      return errorResponse(res, 'avatarUrl must be a valid HTTPS URL, a /uploads/ path, or null', 400);
+    }
+
     const user = await prisma.user.update({
       where: { id: req.user.id },
       data: {
@@ -67,7 +104,7 @@ router.put('/profile', async (req, res, next) => {
         dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : undefined,
         gender, address, language, timezone,
         ...(bio !== undefined && { bio: bio?.trim() || null }),
-        ...(avatarUrl !== undefined && { avatarUrl })
+        ...(avatarUrl !== undefined && { avatarUrl: avatarUrl || null })
       },
       select: { id: true, firstName: true, lastName: true, email: true, phone: true, avatarUrl: true, bio: true, username: true }
     });
@@ -238,12 +275,29 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // ─── PUT /users/:id/status ────────────────────────────────────────────────────
+// P1-001 FIX (SEC-HIGH-001): Validate status against the exact UserStatus enum.
+// Previously any string could be written to the status column.
+// Valid values mirror the Prisma UserStatus enum: ACTIVE | INACTIVE | SUSPENDED | PENDING | BANNED
+// PENDING is included because admins may need to reset a user to pending state.
+// Invalid values are rejected with HTTP 400 before any DB operation.
+const VALID_USER_STATUSES = ['ACTIVE', 'INACTIVE', 'SUSPENDED', 'PENDING', 'BANNED'];
+
 router.put('/:id/status',
   require('../middleware/educationAuth').eduAdmin[0],
   require('../middleware/educationAuth').eduAdmin[1],
   async (req, res, next) => {
     try {
       const { status } = req.body;
+
+      // Validate status before touching the database
+      if (!status || !VALID_USER_STATUSES.includes(status)) {
+        return errorResponse(
+          res,
+          `Invalid status. Must be one of: ${VALID_USER_STATUSES.join(', ')}`,
+          400
+        );
+      }
+
       const user = await prisma.user.update({
         where: { id: req.params.id },
         data:  { status },
