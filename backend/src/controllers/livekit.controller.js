@@ -168,6 +168,67 @@ async function generateToken(req, res, next) {
       }
     }
 
+    // ── SEC-CRIT-003 FIX: Voice room participant check ─────────────────────
+    // Room names for voice rooms follow the pattern: "voice-{uuid}" OR just the
+    // raw UUID that was used when creating the VoiceRoom in LiveKit.
+    // The dedicated /voice/:id/livekit-token endpoint already verifies active
+    // VoiceParticipant membership. This generic endpoint must enforce the same
+    // check to prevent:
+    //   1. Kicked users reconnecting to the SFU using a cached generic token
+    //   2. Any authenticated user joining a PRIVATE/INVITE_ONLY voice room
+    //      they were never admitted to
+    //
+    // Detection: roomId is the voice room's DB id (UUID), which LiveKit uses
+    // directly as the room name in createRoom() and joinRoom().
+    // We check VoiceRoom existence first so non-existent IDs fail fast.
+    //
+    // Non-voice, non-liveclass rooms (e.g. PK rooms, custom rooms) are NOT
+    // subject to this check — they use their own authorization paths.
+    if (roomId && !roomId.startsWith('liveclass-')) {
+      // Check if this is a voice room by looking it up in the DB
+      // Only apply restriction when the room exists in the voice_rooms table
+      let voiceRoom = null;
+      try {
+        voiceRoom = await prisma.voiceRoom.findUnique({
+          where: { id: roomId },
+          select: { id: true, status: true, deletedAt: true },
+        });
+      } catch {
+        // DB lookup failed — skip voice room check (graceful degradation)
+        // The dedicated /voice/:id/livekit-token endpoint is always the recommended path
+        voiceRoom = null;
+      }
+
+      if (voiceRoom) {
+        // It IS a voice room — enforce active participant check
+        if (voiceRoom.deletedAt) {
+          return errorResponse(res, 'Room not found', 404);
+        }
+        if (voiceRoom.status === 'ENDED') {
+          return errorResponse(res, 'Room has ended', 400);
+        }
+
+        let voiceParticipant = null;
+        try {
+          voiceParticipant = await prisma.voiceParticipant.findUnique({
+            where: { roomId_userId: { roomId, userId } },
+            select: { isActive: true },
+          });
+        } catch {
+          voiceParticipant = null;
+        }
+
+        if (!voiceParticipant?.isActive) {
+          return errorResponse(
+            res,
+            'You are not an active participant in this voice room. Use POST /voice/:id/livekit-token instead.',
+            403
+          );
+        }
+      }
+      // Not a voice room (PK, custom, etc.) — allow through (no DB restriction applies)
+    }
+
     const at = new AccessToken(apiKey, apiSecret, {
       identity: userId,
       name:     `${req.user.firstName} ${req.user.lastName}`,

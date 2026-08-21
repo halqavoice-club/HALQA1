@@ -170,18 +170,69 @@ router.get('/',
 });
 
 // ─── GET /users/:id ───────────────────────────────────────────────────────────
+// SEC-CRIT-002 FIX: Restrict PII in cross-user profile lookups.
+//
+// BEFORE: Any authenticated user could fetch full PII of any other user,
+//         including email, phone, dateOfBirth, gender, address, emailVerified.
+//
+// AFTER:
+//   - Own profile request (id === req.user.id): returns full profile
+//   - SUPER_ADMIN or same-school SCHOOL_ADMIN: returns full profile
+//   - Any other authenticated user: returns public profile only
+//     (no email, phone, dateOfBirth, gender, address, emailVerified, lastLoginAt)
+//
+// Public profile = what any user should be able to see about another user
+// on their profile page: name, avatar, username, bio, role (for display), joinDate.
+const PUBLIC_PROFILE_SELECT = {
+  id: true, firstName: true, lastName: true,
+  avatarUrl: true, bio: true, username: true,
+  role: true, createdAt: true, schoolId: true
+};
+
+// Full profile — own profile or admin view
+const FULL_PROFILE_SELECT = {
+  id: true, email: true, firstName: true, lastName: true,
+  role: true, status: true, avatarUrl: true, phone: true,
+  bio: true, username: true, dateOfBirth: true, gender: true, address: true,
+  lastLoginAt: true, createdAt: true, schoolId: true, emailVerified: true
+};
+
 router.get('/:id', async (req, res, next) => {
   try {
+    const targetId = req.params.id;
+    const isOwnProfile = targetId === req.user.id;
+    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+    // SCHOOL_ADMIN can see full profiles of users in their school
+    const isSchoolAdmin = req.user.role === 'SCHOOL_ADMIN';
+
+    // Choose select fields based on requester relationship to target
+    let selectFields;
+    if (isOwnProfile || isSuperAdmin) {
+      selectFields = FULL_PROFILE_SELECT;
+    } else if (isSchoolAdmin) {
+      // School admin sees full profile only if target is in same school
+      // We check schoolId after lookup — use full select, strip if needed
+      selectFields = FULL_PROFILE_SELECT;
+    } else {
+      selectFields = PUBLIC_PROFILE_SELECT;
+    }
+
     const user = await prisma.user.findUnique({
-      where: { id: req.params.id },
-      select: {
-        id: true, email: true, firstName: true, lastName: true,
-        role: true, status: true, avatarUrl: true, phone: true,
-        bio: true, username: true, dateOfBirth: true, gender: true, address: true,
-        lastLoginAt: true, createdAt: true, schoolId: true, emailVerified: true
-      }
+      where: { id: targetId },
+      select: selectFields
     });
     if (!user) return errorResponse(res, 'User not found', 404);
+
+    // For SCHOOL_ADMIN: only return full profile if target is in same school
+    if (isSchoolAdmin && !isOwnProfile && user.schoolId !== req.user.schoolId) {
+      // Different school — return public profile only (re-select public fields)
+      const publicUser = await prisma.user.findUnique({
+        where: { id: targetId },
+        select: PUBLIC_PROFILE_SELECT
+      });
+      return successResponse(res, publicUser);
+    }
+
     return successResponse(res, user);
   } catch (error) { next(error); }
 });

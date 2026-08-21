@@ -552,3 +552,125 @@ describe('E2E attack scenarios', () => {
     expect(relayed.userId).toBe('real-user');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEC-CRIT-003: Generic LiveKit token guards voice-* rooms
+// (P0 fix — voice room participant check in generateToken)
+// ─────────────────────────────────────────────────────────────────────────────
+describe('SEC-CRIT-003: generateToken guards voice-* rooms (P0 fix)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  const VOICE_ROOM_ID = '11111111-2222-3333-4444-555555555555';
+
+  test('active voice room participant gets token via generic endpoint', async () => {
+    // Room exists and user is an active participant
+    prisma.voiceRoom.findUnique.mockResolvedValue({
+      id: VOICE_ROOM_ID, status: 'LIVE', deletedAt: null
+    });
+    prisma.voiceParticipant.findUnique.mockResolvedValue({
+      isActive: true
+    });
+    const req = makeReq({
+      body: { roomId: VOICE_ROOM_ID },
+      user: { id: 'user-1', role: 'MEMBER', schoolId: null, firstName: 'T', lastName: 'T' }
+    });
+    const res = makeRes();
+    await livekitCtrl.generateToken(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+  });
+
+  test('non-participant of voice room gets 403 from generic endpoint', async () => {
+    // Room exists but user is NOT a participant
+    prisma.voiceRoom.findUnique.mockResolvedValue({
+      id: VOICE_ROOM_ID, status: 'LIVE', deletedAt: null
+    });
+    prisma.voiceParticipant.findUnique.mockResolvedValue(null); // not a participant
+    const req = makeReq({
+      body: { roomId: VOICE_ROOM_ID },
+      user: { id: 'outsider', role: 'MEMBER', schoolId: null, firstName: 'O', lastName: 'O' }
+    });
+    const res = makeRes();
+    await livekitCtrl.generateToken(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('not an active participant in this voice room')
+    }));
+  });
+
+  test('inactive participant (isActive=false) gets 403', async () => {
+    // Room exists but participant was kicked (isActive=false)
+    prisma.voiceRoom.findUnique.mockResolvedValue({
+      id: VOICE_ROOM_ID, status: 'LIVE', deletedAt: null
+    });
+    prisma.voiceParticipant.findUnique.mockResolvedValue({
+      isActive: false  // kicked
+    });
+    const req = makeReq({
+      body: { roomId: VOICE_ROOM_ID },
+      user: { id: 'kicked-user', role: 'MEMBER', schoolId: null, firstName: 'K', lastName: 'K' }
+    });
+    const res = makeRes();
+    await livekitCtrl.generateToken(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(403);
+  });
+
+  test('ended voice room returns 400', async () => {
+    prisma.voiceRoom.findUnique.mockResolvedValue({
+      id: VOICE_ROOM_ID, status: 'ENDED', deletedAt: null
+    });
+    const req = makeReq({
+      body: { roomId: VOICE_ROOM_ID },
+      user: { id: 'user-1', role: 'MEMBER', schoolId: null, firstName: 'T', lastName: 'T' }
+    });
+    const res = makeRes();
+    await livekitCtrl.generateToken(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+
+  test('deleted voice room returns 404', async () => {
+    prisma.voiceRoom.findUnique.mockResolvedValue({
+      id: VOICE_ROOM_ID, status: 'LIVE', deletedAt: new Date()
+    });
+    const req = makeReq({
+      body: { roomId: VOICE_ROOM_ID },
+      user: { id: 'user-1', role: 'MEMBER', schoolId: null, firstName: 'T', lastName: 'T' }
+    });
+    const res = makeRes();
+    await livekitCtrl.generateToken(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  test('room ID that is NOT in voice_rooms passes without participant check', async () => {
+    // If voiceRoom.findUnique returns null, it's a custom/PK room — allow through
+    prisma.voiceRoom.findUnique.mockResolvedValue(null);
+    const req = makeReq({
+      body: { roomId: 'pk-custom-battle-room-xyz' },
+      user: { id: 'user-1', role: 'MEMBER', schoolId: null, firstName: 'T', lastName: 'T' }
+    });
+    const res = makeRes();
+    await livekitCtrl.generateToken(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+    // No participant check for non-voice rooms
+    expect(prisma.voiceParticipant.findUnique).not.toHaveBeenCalled();
+  });
+
+  test('liveclass-* rooms still go through liveclass check, not voice check', async () => {
+    // This is the existing guard — ensure the new voice check doesn't intercept liveclass rooms
+    prisma.liveClass.findFirst.mockResolvedValue(LC_LIVE);
+    prisma.liveClassParticipant.findFirst.mockResolvedValue({ id: 'p-1' });
+    // voiceRoom should NOT be called for liveclass rooms
+    prisma.voiceRoom.findUnique.mockResolvedValue(null); // should not be called
+    const req = makeReq({
+      body: { roomId: 'liveclass-class-1' },
+      user: { id: 'user-1', role: 'TEACHER', schoolId: 'school-a', firstName: 'T', lastName: 'T' }
+    });
+    const res = makeRes();
+    await livekitCtrl.generateToken(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+    // voiceRoom check must NOT have been called (liveclass is handled before voice)
+    expect(prisma.voiceRoom.findUnique).not.toHaveBeenCalled();
+  });
+});
