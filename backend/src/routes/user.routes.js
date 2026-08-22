@@ -380,6 +380,13 @@ router.delete('/me', async (req, res, next) => {
     if (!user) return errorResponse(res, 'User not found', 404);
 
     const bcrypt   = require('bcryptjs');
+
+    // SEC-MED-004 FIX: OAuth users have no passwordHash — bcrypt.compare(password, null)
+    // throws a TypeError that causes a 500 crash. Return a clear 400 instead.
+    if (!user.passwordHash) {
+      return errorResponse(res, 'This account uses Google Sign-In. To delete your account, please contact support.', 400);
+    }
+
     const isValid  = await bcrypt.compare(password, user.passwordHash);
     if (!isValid) return errorResponse(res, 'Incorrect password', 400);
 

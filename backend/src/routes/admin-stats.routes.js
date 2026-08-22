@@ -394,7 +394,7 @@ router.get('/gifts', async (req, res, next) => {
       include: {
         sender:   { select: { id: true, firstName: true, lastName: true } },
         receiver: { select: { id: true, firstName: true, lastName: true } },
-        gift:     { select: { id: true, name: true, coinCost: true } },
+        gift:     { select: { id: true, name: true, priceCoins: true } },
       },
       orderBy: { createdAt: 'desc' },
       take: 50,
@@ -402,7 +402,7 @@ router.get('/gifts', async (req, res, next) => {
 
     // Gift catalog
     const catalog = await prisma.gift.findMany({
-      orderBy: { coinCost: 'asc' },
+      orderBy: { priceCoins: 'asc' },
     }).catch(() => []);
 
     return successResponse(res, {

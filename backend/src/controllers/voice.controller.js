@@ -284,11 +284,30 @@ async function listRooms(req, res, next) {
 }
 
 // --- GET SINGLE ROOM ----------------------------------------------------------
+// SEC-HIGH-002 FIX: PRIVATE and INVITE_ONLY rooms must not expose room data
+// (including participant list) to users who are not active participants.
+// HOST and SUPER_ADMIN always bypass this check.
+// PUBLIC rooms remain readable by any authenticated user.
 async function getRoom(req, res, next) {
   try {
     const { id } = req.params;
     const room = await getRoomWithParticipants(id);
     if (!room) return errorResponse(res, 'Room not found', 404);
+
+    // Privacy check for non-public rooms
+    if (room.privacy === 'PRIVATE' || room.privacy === 'INVITE_ONLY') {
+      const isHost       = room.hostId === req.user.id;
+      const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+      if (!isHost && !isSuperAdmin) {
+        const participant = await prisma.voiceParticipant.findUnique({
+          where: { roomId_userId: { roomId: id, userId: req.user.id } }
+        });
+        if (!participant || !participant.isActive) {
+          return errorResponse(res, 'You do not have access to this room', 403);
+        }
+      }
+    }
+
     return successResponse(res, room);
   } catch (error) { next(error); }
 }
@@ -890,9 +909,32 @@ async function kickParticipant(req, res, next) {
 }
 
 // --- GET MESSAGES -------------------------------------------------------------
+// SEC-HIGH-002 FIX: Apply the same privacy guard as getRoom — PRIVATE and
+// INVITE_ONLY rooms must not expose message history to non-participants.
 async function getMessages(req, res, next) {
   try {
     const { id: roomId } = req.params;
+
+    // Privacy check — must happen before reading message data
+    const room = await prisma.voiceRoom.findUnique({
+      where: { id: roomId },
+      select: { privacy: true, hostId: true }
+    });
+    if (!room) return errorResponse(res, 'Room not found', 404);
+
+    if (room.privacy === 'PRIVATE' || room.privacy === 'INVITE_ONLY') {
+      const isHost       = room.hostId === req.user.id;
+      const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+      if (!isHost && !isSuperAdmin) {
+        const participant = await prisma.voiceParticipant.findUnique({
+          where: { roomId_userId: { roomId, userId: req.user.id } }
+        });
+        if (!participant || !participant.isActive) {
+          return errorResponse(res, 'You do not have access to this room', 403);
+        }
+      }
+    }
+
     const { limit = 50, before } = req.query;
 
     const where = { roomId };
