@@ -402,6 +402,10 @@ async function listLiveClasses(req, res, next) {
     const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
 
     // Build WHERE clause
+    // P3-003 VERIFIED: all strings pushed into `conditions` are hardcoded literals
+    // ('PUBLIC', 'SCHOOL', etc.) — no user-supplied input enters the SQL string
+    // unescaped. Dynamic values (schoolId, classId, status) are always bound via
+    // parameterized `?` placeholders collected in the `params` array.
     const conditions = ['lc.deletedAt IS NULL'];
     const params = [];
 
@@ -620,6 +624,10 @@ async function updateLiveClass(req, res, next) {
     const allowed = ['title','description','scheduledAt','duration','chatEnabled',
       'handRaiseEnabled','whiteboardEnabled','quranPanelEnabled','maxParticipants',
       'isRecorded','isOpenMic','screenShareEnabled'];
+    // P3-002 VERIFIED: column names in the raw SQL UPDATE come exclusively from the
+    // `allowed` array above — never from req.body keys directly. User-supplied field
+    // names are filtered through `allowed.forEach`, so only known-safe column names
+    // reach the `${k} = ?` interpolation. Values are always parameterized with ?.
     const data = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) data[k] = req.body[k]; });
     if (data.scheduledAt) data.scheduledAt = new Date(data.scheduledAt);

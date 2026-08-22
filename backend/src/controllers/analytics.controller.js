@@ -10,12 +10,75 @@
 const prisma = require('../utils/prisma');
 const logger = require('../utils/logger');
 
+// ─── Shared error response helper ────────────────────────────────────────────
+// Respects err.status from thrown authorization errors (403) so they are not
+// swallowed and re-returned as 500.
+function handleError(res, error, fallbackMessage) {
+  const status = error.status || 500;
+  if (status !== 500) {
+    return res.status(status).json({ success: false, message: error.message });
+  }
+  logger.error(fallbackMessage, error);
+  res.status(500).json({
+    success: false,
+    error: { code: 'INT_001', message: fallbackMessage, statusCode: 500 }
+  });
+}
+
+// ─── Authorization helpers ────────────────────────────────────────────────────
+// P3-001 FIX: Analytics endpoints accept :schoolId and :userId as route params.
+// Without scoping guards any authenticated user could read or write another
+// user's stats or another school's stats.
+//
+// Rules:
+//   School stats  — caller must belong to that school, or be SUPER_ADMIN.
+//   User stats    — caller must be that user, or be SUPER_ADMIN.
+//   Write/mutate  — additionally require SCHOOL_ADMIN/SUPER_ADMIN for school stats,
+//                   or own-user for user stats.
+
+function assertSchoolStatsAccess(req, schoolId) {
+  if (req.user.role === 'SUPER_ADMIN') return; // global admin bypass
+  if (req.user.schoolId !== schoolId) {
+    const err = new Error('Access denied to this school\'s analytics');
+    err.status = 403;
+    throw err;
+  }
+}
+
+function assertUserStatsAccess(req, userId) {
+  if (req.user.role === 'SUPER_ADMIN') return; // global admin bypass
+  if (req.user.id !== userId) {
+    const err = new Error('Access denied to this user\'s analytics');
+    err.status = 403;
+    throw err;
+  }
+}
+
+function assertSchoolStatsWriteAccess(req, schoolId) {
+  if (req.user.role === 'SUPER_ADMIN') return;
+  const effectiveRole = req.schoolMembership?.role || req.user.role;
+  if (!['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(effectiveRole)) {
+    const err = new Error('Only school admins can update school analytics');
+    err.status = 403;
+    throw err;
+  }
+  if (req.user.role !== 'SUPER_ADMIN' && req.user.schoolId !== schoolId) {
+    const err = new Error('Access denied to this school\'s analytics');
+    err.status = 403;
+    throw err;
+  }
+}
+
 /**
  * Get daily school statistics
  */
 async function getDailySchoolStats(req, res) {
   try {
     const { schoolId } = req.params;
+
+    // P3-001: scope to caller's school
+    assertSchoolStatsAccess(req, schoolId);
+
     const { startDate, endDate } = req.query;
 
     const where = { schoolId };
@@ -32,15 +95,7 @@ async function getDailySchoolStats(req, res) {
       data: stats
     });
   } catch (error) {
-    logger.error('Failed to get daily school stats:', error);
-    res.status(500).json({
-      success: false,
-      error:({
-        code: 'INT_001',
-        message: 'Failed to get school statistics',
-        statusCode: 500
-      })
-    });
+    handleError(res, error, 'Failed to get school statistics');
   }
 }
 
@@ -50,6 +105,10 @@ async function getDailySchoolStats(req, res) {
 async function getOrCreateDailySchoolStats(req, res) {
   try {
     const { schoolId, date } = req.params;
+
+    // P3-001: scope to caller's school (admin only — creates data)
+    assertSchoolStatsWriteAccess(req, schoolId);
+
     const targetDate = new Date(date);
 
     let stats = await prisma.dailySchoolStats.findUnique({
@@ -114,15 +173,7 @@ async function getOrCreateDailySchoolStats(req, res) {
       data: stats
     });
   } catch (error) {
-    logger.error('Failed to get or create daily school stats:', error);
-    res.status(500).json({
-      success: false,
-      error:({
-        code: 'INT_001',
-        message: 'Failed to get school statistics',
-        statusCode: 500
-      })
-    });
+    handleError(res, error, 'Failed to get school statistics');
   }
 }
 
@@ -132,6 +183,10 @@ async function getOrCreateDailySchoolStats(req, res) {
 async function updateDailySchoolStats(req, res) {
   try {
     const { schoolId, date } = req.params;
+
+    // P3-001: only school admins and SUPER_ADMIN can mutate school stats
+    assertSchoolStatsWriteAccess(req, schoolId);
+
     const { studentCount, teacherCount, classCount, attendanceRate, averageGrade, behaviorScore, totalPosts, totalMessages, totalGifts, totalCoins } = req.body;
 
     const stats = await prisma.dailySchoolStats.upsert({
@@ -176,15 +231,7 @@ async function updateDailySchoolStats(req, res) {
       data: stats
     });
   } catch (error) {
-    logger.error('Failed to update daily school stats:', error);
-    res.status(500).json({
-      success: false,
-      error:({
-        code: 'INT_001',
-        message: 'Failed to update school statistics',
-        statusCode: 500
-      })
-    });
+    handleError(res, error, 'Failed to update school statistics');
   }
 }
 
@@ -194,6 +241,10 @@ async function updateDailySchoolStats(req, res) {
 async function getDailyUserStats(req, res) {
   try {
     const { userId } = req.params;
+
+    // P3-001: users can only read their own stats
+    assertUserStatsAccess(req, userId);
+
     const { startDate, endDate } = req.query;
 
     const where = { userId };
@@ -210,15 +261,7 @@ async function getDailyUserStats(req, res) {
       data: stats
     });
   } catch (error) {
-    logger.error('Failed to get daily user stats:', error);
-    res.status(500).json({
-      success: false,
-      error:({
-        code: 'INT_001',
-        message: 'Failed to get user statistics',
-        statusCode: 500
-      })
-    });
+    handleError(res, error, 'Failed to get user statistics');
   }
 }
 
@@ -228,6 +271,10 @@ async function getDailyUserStats(req, res) {
 async function getOrCreateDailyUserStats(req, res) {
   try {
     const { userId, date } = req.params;
+
+    // P3-001: users can only access their own stats
+    assertUserStatsAccess(req, userId);
+
     const targetDate = new Date(date);
 
     let stats = await prisma.dailyUserStats.findUnique({
@@ -266,15 +313,7 @@ async function getOrCreateDailyUserStats(req, res) {
       data: stats
     });
   } catch (error) {
-    logger.error('Failed to get or create daily user stats:', error);
-    res.status(500).json({
-      success: false,
-      error:({
-        code: 'INT_001',
-        message: 'Failed to get user statistics',
-        statusCode: 500
-      })
-    });
+    handleError(res, error, 'Failed to get user statistics');
   }
 }
 
@@ -284,6 +323,10 @@ async function getOrCreateDailyUserStats(req, res) {
 async function updateDailyUserStats(req, res) {
   try {
     const { userId, date } = req.params;
+
+    // P3-001: users can only update their own stats; SUPER_ADMIN can update any
+    assertUserStatsAccess(req, userId);
+
     const { loginCount, postsCreated, commentsCreated, likesGiven, likesReceived, messagesSent, voiceMinutes, giftsSent, giftsReceived, coinsSpent, coinsEarned } = req.body;
 
     const stats = await prisma.dailyUserStats.upsert({
@@ -330,15 +373,7 @@ async function updateDailyUserStats(req, res) {
       data: stats
     });
   } catch (error) {
-    logger.error('Failed to update daily user stats:', error);
-    res.status(500).json({
-      success: false,
-      error:({
-        code: 'INT_001',
-        message: 'Failed to update user statistics',
-        statusCode: 500
-      })
-    });
+    handleError(res, error, 'Failed to update user statistics');
   }
 }
 
@@ -348,6 +383,10 @@ async function updateDailyUserStats(req, res) {
 async function incrementUserStat(req, res) {
   try {
     const { userId, date, stat } = req.params;
+
+    // P3-001: only the user themselves or SUPER_ADMIN can increment stats
+    assertUserStatsAccess(req, userId);
+
     const { amount = 1 } = req.body;
 
     const validStats = ['loginCount', 'postsCreated', 'commentsCreated', 'likesGiven', 'likesReceived', 'messagesSent', 'voiceMinutes', 'giftsSent', 'giftsReceived', 'coinsSpent', 'coinsEarned'];
@@ -396,15 +435,7 @@ async function incrementUserStat(req, res) {
       data: stats
     });
   } catch (error) {
-    logger.error('Failed to increment user stat:', error);
-    res.status(500).json({
-      success: false,
-      error:({
-        code: 'INT_001',
-        message: 'Failed to increment user stat',
-        statusCode: 500
-      })
-    });
+    handleError(res, error, 'Failed to increment user stat');
   }
 }
 
@@ -414,6 +445,10 @@ async function incrementUserStat(req, res) {
 async function getSchoolAnalytics(req, res) {
   try {
     const { schoolId } = req.params;
+
+    // P3-001: scope to caller's school
+    assertSchoolStatsAccess(req, schoolId);
+
     const { period = '30d' } = req.query;
 
     const endDate = new Date();
@@ -485,15 +520,7 @@ async function getSchoolAnalytics(req, res) {
       }
     });
   } catch (error) {
-    logger.error('Failed to get school analytics:', error);
-    res.status(500).json({
-      success: false,
-      error:({
-        code: 'INT_001',
-        message: 'Failed to get school analytics',
-        statusCode: 500
-      })
-    });
+    handleError(res, error, 'Failed to get school analytics');
   }
 }
 
@@ -503,6 +530,10 @@ async function getSchoolAnalytics(req, res) {
 async function getUserAnalytics(req, res) {
   try {
     const { userId } = req.params;
+
+    // P3-001: users can only read their own analytics
+    assertUserStatsAccess(req, userId);
+
     const { period = '30d' } = req.query;
 
     const endDate = new Date();
@@ -574,15 +605,7 @@ async function getUserAnalytics(req, res) {
       }
     });
   } catch (error) {
-    logger.error('Failed to get user analytics:', error);
-    res.status(500).json({
-      success: false,
-      error:({
-        code: 'INT_001',
-        message: 'Failed to get user analytics',
-        statusCode: 500
-      })
-    });
+    handleError(res, error, 'Failed to get user analytics');
   }
 }
 
