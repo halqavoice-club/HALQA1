@@ -22,6 +22,14 @@ jest.mock('../utils/redis', () => ({
 jest.mock('../utils/jwt',   () => ({ verifyAccessToken: jest.fn() }));
 jest.mock('../middleware/ipAllowlist', () => (req, res, next) => next());
 jest.mock('../sockets',     () => ({ getIo: jest.fn(() => null) }));
+jest.mock('../controllers/auth.controller', () => ({
+  deleteGetMeCache: jest.fn().mockResolvedValue(undefined),
+  getMe: jest.fn(),
+}));
+jest.mock('../utils/storage', () => ({
+  saveFile:   jest.fn().mockResolvedValue({ url: '/uploads/test.jpg' }),
+  deleteFile: jest.fn().mockResolvedValue(undefined),
+}));
 jest.mock('../utils/feedLive', () => ({
   broadcastLiveStart:  jest.fn(),
   broadcastLiveEnd:    jest.fn(),
@@ -58,6 +66,17 @@ beforeEach(() => {
   jest.clearAllMocks();
   require('../utils/redis').isRedisReady.mockReturnValue(false);
   require('../utils/redis').getCache.mockResolvedValue(null);
+  // Ensure schoolMembership stubs exist (needed by user.routes.js for DELETE /users/me)
+  if (!prisma.schoolMembership) prisma.schoolMembership = {};
+  ['findUnique', 'findFirst', 'update', 'create', 'count'].forEach(m => {
+    if (typeof prisma.schoolMembership[m] !== 'function') {
+      prisma.schoolMembership[m] = jest.fn();
+    }
+  });
+  prisma.schoolMembership.findUnique.mockResolvedValue(null);
+  prisma.schoolMembership.findFirst.mockResolvedValue(null);
+  // school.findFirst — needed for admin guard in DELETE /users/me
+  prisma.school.findFirst.mockResolvedValue(null);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -267,8 +286,139 @@ describe('P3-003: listLiveClasses conditions array uses safe parameterization', 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// P0/P1/P2 regression: all previously fixed findings still hold
+// P4-001: DELETE /users/me blocked when wallet has non-zero balance
 // ─────────────────────────────────────────────────────────────────────────────
+
+describe('P4-001: Wallet balance check on account deletion', () => {
+  let userApp;
+
+  beforeAll(() => {
+    userApp = express();
+    userApp.use(express.json());
+    userApp.use(cookieParser());
+    userApp.use('/api/v1/users', require('../routes/user.routes'));
+    userApp.use((err, req, res, _next) => {
+      res.status(err.status || err.statusCode || 500).json({ success: false, message: err.message });
+    });
+  });
+
+  const USER_ID = 'wallet-test-user';
+
+  async function setupUser(passwordHash, walletCoins, walletDiamonds) {
+    asUser(USER_ID, 'MEMBER', 'ACTIVE', null);
+    prisma.user.findUnique.mockResolvedValue({
+      id: USER_ID, role: 'MEMBER', status: 'ACTIVE', schoolId: null,
+      firstName: 'Test', lastName: 'User', avatarUrl: null, deletedAt: null,
+      email: 'test@example.com',
+      passwordHash: passwordHash || null,
+    });
+    prisma.schoolMembership.findFirst.mockResolvedValue(null);
+    prisma.wallet.findUnique.mockResolvedValue(
+      walletCoins !== undefined || walletDiamonds !== undefined
+        ? { coins: walletCoins ?? 0, diamonds: walletDiamonds ?? 0 }
+        : null
+    );
+  }
+
+  test('User with non-zero coins cannot delete account (400)', async () => {
+    const bcrypt = require('bcryptjs');
+    const hash = await bcrypt.hash('correct-password', 1);
+    await setupUser(hash, 50, 0);
+
+    const res = await request(userApp)
+      .delete('/api/v1/users/me')
+      .set('Authorization', tok(USER_ID))
+      .send({ password: 'correct-password' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/wallet|balance|coin/i);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  test('User with non-zero diamonds cannot delete account (400)', async () => {
+    const bcrypt = require('bcryptjs');
+    const hash = await bcrypt.hash('correct-password', 1);
+    await setupUser(hash, 0, 100);
+
+    const res = await request(userApp)
+      .delete('/api/v1/users/me')
+      .set('Authorization', tok(USER_ID))
+      .send({ password: 'correct-password' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/wallet|balance|diamond/i);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  test('User with both coins and diamonds cannot delete account (400)', async () => {
+    const bcrypt = require('bcryptjs');
+    const hash = await bcrypt.hash('correct-password', 1);
+    await setupUser(hash, 25, 75);
+
+    const res = await request(userApp)
+      .delete('/api/v1/users/me')
+      .set('Authorization', tok(USER_ID))
+      .send({ password: 'correct-password' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/wallet|balance/i);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  test('User with zero-balance wallet can proceed to deletion', async () => {
+    const bcrypt = require('bcryptjs');
+    const hash = await bcrypt.hash('correct-password', 1);
+    await setupUser(hash, 0, 0);
+    prisma.$transaction.mockResolvedValue([{ id: USER_ID }]);
+    prisma.follow.deleteMany.mockResolvedValue({ count: 0 });
+    prisma.communityMember.deleteMany.mockResolvedValue({ count: 0 });
+    if (!prisma.friendRequest) prisma.friendRequest = { deleteMany: jest.fn() };
+    prisma.friendRequest.deleteMany.mockResolvedValue({ count: 0 });
+    prisma.voiceParticipant.updateMany.mockResolvedValue({ count: 0 });
+    prisma.liveClassParticipant.updateMany.mockResolvedValue({ count: 0 });
+
+    const res = await request(userApp)
+      .delete('/api/v1/users/me')
+      .set('Authorization', tok(USER_ID))
+      .send({ password: 'correct-password' });
+
+    expect(res.status).toBe(200);
+  });
+
+  test('User with no wallet record can proceed to deletion', async () => {
+    const bcrypt = require('bcryptjs');
+    const hash = await bcrypt.hash('correct-password', 1);
+    await setupUser(hash, undefined, undefined); // wallet is null
+    prisma.$transaction.mockResolvedValue([{ id: USER_ID }]);
+    prisma.follow.deleteMany.mockResolvedValue({ count: 0 });
+    prisma.communityMember.deleteMany.mockResolvedValue({ count: 0 });
+    if (!prisma.friendRequest) prisma.friendRequest = { deleteMany: jest.fn() };
+    prisma.friendRequest.deleteMany.mockResolvedValue({ count: 0 });
+    prisma.voiceParticipant.updateMany.mockResolvedValue({ count: 0 });
+    prisma.liveClassParticipant.updateMany.mockResolvedValue({ count: 0 });
+
+    const res = await request(userApp)
+      .delete('/api/v1/users/me')
+      .set('Authorization', tok(USER_ID))
+      .send({ password: 'correct-password' });
+
+    expect(res.status).toBe(200);
+  });
+
+  // Source verification
+  test('user.routes.js has wallet balance check before deletion', () => {
+    const src = fs.readFileSync(
+      path.join(__dirname, '../routes/user.routes.js'), 'utf8'
+    );
+    expect(src).toMatch(/P4-001/);
+    expect(src).toMatch(/wallet\.coins > 0/);
+    expect(src).toMatch(/wallet\.diamonds > 0/);
+    expect(src).toMatch(/spend or withdraw/i);
+  });
+});
+
+
+
 
 describe('P0/P1/P2 regression checks', () => {
   test('backup.routes.js still has authorize("SUPER_ADMIN")', () => {

@@ -407,6 +407,26 @@ router.delete('/me', async (req, res, next) => {
       }
     }
 
+    // P4-001 FIX: Block deletion if the user has a non-zero wallet balance.
+    // Coins and diamonds represent real monetary value (coins are purchased via
+    // Stripe; diamonds are earned by receiving gifts). Silently discarding them
+    // on account deletion would be a financial loss for the user and a potential
+    // consumer-protection issue. We block deletion and direct the user to
+    // withdraw/spend their balance first.
+    const wallet = await prisma.wallet.findUnique({
+      where:  { userId: user.id },
+      select: { coins: true, diamonds: true },
+    });
+    if (wallet && (wallet.coins > 0 || wallet.diamonds > 0)) {
+      const parts = [];
+      if (wallet.coins    > 0) parts.push(`${wallet.coins} coin${wallet.coins    !== 1 ? 's' : ''}`);
+      if (wallet.diamonds > 0) parts.push(`${wallet.diamonds} diamond${wallet.diamonds !== 1 ? 's' : ''}`);
+      return errorResponse(res,
+        `Your wallet has a balance (${parts.join(' and ')}). Please spend or withdraw your balance before deleting your account.`,
+        400
+      );
+    }
+
     const deletedAt      = new Date();
     const anonymousEmail = `deleted_${user.id}@halqa.deleted`;
     const anonymousName  = 'Deleted User';
