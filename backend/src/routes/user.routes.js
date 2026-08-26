@@ -270,6 +270,24 @@ router.get('/:id', async (req, res, next) => {
       return successResponse(res, publicUser);
     }
 
+    // UIGAP-013 FIX: Audit log when SUPER_ADMIN reads full PII of another user.
+    // Own-profile reads are not logged (too noisy). Cross-user admin reads are.
+    if (isSuperAdmin && !isOwnProfile) {
+      const { v4: uuidv4 } = require('uuid');
+      prisma.auditLog.create({
+        data: {
+          id:        uuidv4(),
+          userId:    req.user.id,
+          action:    'VIEW',
+          entity:    'user_profile_access',
+          entityId:  targetId,
+          newValues: { targetEmail: user.email, requesterRole: 'SUPER_ADMIN' },
+          ipAddress: req.ip || null,
+          userAgent: req.headers['user-agent'] || null,
+        }
+      }).catch(err => require('../utils/logger').warn(`[user] PII audit log failed: ${err.message}`));
+    }
+
     return successResponse(res, user);
   } catch (error) { next(error); }
 });

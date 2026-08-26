@@ -18,6 +18,7 @@ const { v4: uuidv4 } = require('uuid');
 const prisma = require('../utils/prisma');
 const { successResponse, errorResponse } = require('../utils/response');
 const { getIo } = require('../sockets');
+const logger = require('../utils/logger');
 
 const USER_SELECT = {
   id: true, firstName: true, lastName: true, avatarUrl: true, role: true
@@ -205,11 +206,31 @@ async function reviewReport(req, res, next) {
       }
     }
 
+    // FS-GAP-003 FIX: Audit log every report review action (UIGAP-013).
+    // Previously report reviews had no audit trail. Now every decision is recorded.
+    const { v4: uuidv4Audit } = require('uuid');
+    prisma.auditLog.create({
+      data: {
+        id:        uuidv4Audit(),
+        userId:    req.user.id,
+        action:    'UPDATE',
+        entity:    'report_review',
+        entityId:  id,
+        newValues: {
+          reviewDecision:   status,
+          moderationAction: (status === 'ACTION_TAKEN' && action) ? action : null,
+          reporterId:       report.reporterId,
+          reportedId:       report.reportedId,
+          reason:           report.reason,
+        },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+      }
+    }).catch(err => logger.warn(`[report] Review audit log failed: ${err.message}`));
+
     return successResponse(res, updated, 'Report updated');
   } catch (error) { next(error); }
 }
-
-// ─── BLOCK USER ───────────────────────────────────────────────────────────────
 
 async function blockUser(req, res, next) {
   try {

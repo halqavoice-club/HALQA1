@@ -56,20 +56,26 @@ export default function AdminLiveVoicePage() {
   })
 
   // End a live class (emergency admin action)
+  // Sprint 2 fix — was using content-participation endpoint POST /live-classes/:id/end
+  // which requires HOST/staff role. Now uses dedicated admin termination endpoint
+  // that bypasses content auth and writes an audit log. (LS-GAP-001 / UIGAP-007)
   const endLiveMutation = useMutation({
-    mutationFn: (id: string) => api.patch(`/live-class/${id}/end`),
+    mutationFn: (id: string) => api.post(`/admin/actions/live-classes/${id}/terminate`, { reason: 'Admin terminated via dashboard' }),
     onSuccess: () => {
-      toast({ title: 'Live class ended' })
+      toast({ title: 'Live class terminated' })
       qc.invalidateQueries({ queryKey: ['admin-live-voice'] })
     },
     onError: (e: any) => toast({ title: 'Failed', description: e.response?.data?.message, variant: 'destructive' }),
   })
 
   // End a voice room (emergency admin action)
+  // Sprint 2 fix — was using content-participation endpoint PATCH /voice/:id/end
+  // which also requires the caller to be SUPER_ADMIN in voice.controller.js,
+  // but through a route that has no IP allowlist. Now uses dedicated admin endpoint.
   const endVoiceMutation = useMutation({
-    mutationFn: (id: string) => api.patch(`/voice/${id}/end`),
+    mutationFn: (id: string) => api.post(`/admin/actions/voice/${id}/terminate`, { reason: 'Admin terminated via dashboard' }),
     onSuccess: () => {
-      toast({ title: 'Voice room ended' })
+      toast({ title: 'Voice room archived' })
       qc.invalidateQueries({ queryKey: ['admin-live-voice'] })
     },
     onError: (e: any) => toast({ title: 'Failed', description: e.response?.data?.message, variant: 'destructive' }),
