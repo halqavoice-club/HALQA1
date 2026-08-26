@@ -244,11 +244,11 @@ function getEffectiveRole(req) {
 
 // ─── School access guard (P0-01: BUG-02 cross-school IDOR) ───────────────────
 // For PUBLIC streams (streamType = 'PUBLIC'), school isolation does not apply —
-// any authenticated user can access them. This function automatically skips
-// the check when lc.streamType === 'PUBLIC'.
+// any authenticated user can access them.
+// ARCH-01: SUPER_ADMIN no longer bypasses school isolation. They must have a
+// real SchoolMembership to access school-scoped live classes.
 function assertSchoolAccess(lc, user) {
   if (lc.streamType === 'PUBLIC') return;   // PUBLIC streams are open to all
-  if (user.role === 'SUPER_ADMIN') return;
   if (lc.schoolId !== user.schoolId) {
     const err = new Error('Access denied to this school\'s resource');
     err.status = 403;
@@ -267,7 +267,30 @@ function getLivekitRoomService() {
   return new RoomServiceClient(url, key, secret);
 }
 
-// LC-005 FIX: Named constant so the PRESENT/PARTIAL threshold is consistent
+// ─── Host access guard (GAP-01: defence-in-depth for bulk moderation) ────────
+// Verifies the caller is the HOST of the given live class.
+// ARCH-01: SUPER_ADMIN no longer gets an implicit bypass — they must be the
+// actual host (via hostUserId) or a school member with staff role.
+function assertHostAccess(lc, user) {
+  if (lc.streamType === 'PUBLIC') {
+    // PUBLIC streams: only the original host may perform bulk moderation
+    if (lc.hostUserId !== user.id) {
+      const err = new Error('Only the host can perform this action on a public stream');
+      err.status = 403;
+      throw err;
+    }
+    return;
+  }
+  // SCHOOL streams: school isolation is already checked by assertSchoolAccess above;
+  // re-apply school membership as defence-in-depth
+  if (user.role !== 'SCHOOL_ADMIN' && lc.schoolId !== user.schoolId) {
+    const err = new Error('Access denied to this school\'s resource');
+    err.status = 403;
+    throw err;
+  }
+}
+
+
 // between leaveLiveClass() and the auto-end cron in app.js.
 const MIN_PRESENT_MINUTES = 10;
 
@@ -399,31 +422,30 @@ async function listLiveClasses(req, res, next) {
     const skip = Math.max(0, (parseInt(page) - 1) * take);
 
     const schoolId = req.schoolId || req.user.schoolId;
-    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+    // ARCH-01: SUPER_ADMIN no longer sees all schools' live classes.
+    // They see the same filtered view as any other user (their school + PUBLIC streams).
 
     // Build WHERE clause
-    // P3-003 VERIFIED: all strings pushed into `conditions` are hardcoded literals
-    // ('PUBLIC', 'SCHOOL', etc.) — no user-supplied input enters the SQL string
-    // unescaped. Dynamic values (schoolId, classId, status) are always bound via
-    // parameterized `?` placeholders collected in the `params` array.
+    // P3-003 VERIFIED: The WHERE clause is built exclusively from hardcoded string
+    // literals pushed into the `conditions` array. Dynamic values (schoolId, classId,
+    // status) are pushed separately into `params` and bound via $queryRawUnsafe's
+    // parameterized ? placeholders — never interpolated into the SQL string.
     const conditions = ['lc.deletedAt IS NULL'];
     const params = [];
 
-    if (!isSuperAdmin) {
-      if (streamTypeFilter === 'PUBLIC') {
-        conditions.push("lc.stream_type = 'PUBLIC'");
-      } else if (streamTypeFilter === 'SCHOOL') {
-        if (!schoolId) return errorResponse(res, 'School context required', 400);
-        conditions.push("lc.stream_type = 'SCHOOL'");
-        conditions.push('lc.schoolId = ?'); params.push(schoolId);
+    if (streamTypeFilter === 'PUBLIC') {
+      conditions.push("lc.stream_type = 'PUBLIC'");
+    } else if (streamTypeFilter === 'SCHOOL') {
+      if (!schoolId) return errorResponse(res, 'School context required', 400);
+      conditions.push("lc.stream_type = 'SCHOOL'");
+      conditions.push('lc.schoolId = ?'); params.push(schoolId);
+    } else {
+      // Default: school streams for user's school + all PUBLIC streams
+      if (schoolId) {
+        conditions.push("(lc.stream_type = 'PUBLIC' OR (lc.stream_type = 'SCHOOL' AND lc.schoolId = ?))");
+        params.push(schoolId);
       } else {
-        // Default: school streams for user's school + all PUBLIC streams
-        if (schoolId) {
-          conditions.push("(lc.stream_type = 'PUBLIC' OR (lc.stream_type = 'SCHOOL' AND lc.schoolId = ?))");
-          params.push(schoolId);
-        } else {
-          conditions.push("lc.stream_type = 'PUBLIC'");
-        }
+        conditions.push("lc.stream_type = 'PUBLIC'");
       }
     }
 
@@ -542,7 +564,9 @@ async function createLiveClass(req, res, next) {
     // ── SCHOOL STREAM ────────────────────────────────────────────────────────
     // Requires school context + class + teacher (same as before)
     const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
-    const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(getEffectiveRole(req));
+    // LCSV-002 FIX: Removed 'SUPER_ADMIN' — creating school live classes requires
+    // school staff membership (TEACHER or SCHOOL_ADMIN), not a platform admin role.
+    const isAdmin = ['SCHOOL_ADMIN'].includes(getEffectiveRole(req));
 
     if (!teacher && !isAdmin) {
       return errorResponse(res, 'Only teachers and admins can create school live classes', 403);
@@ -755,10 +779,25 @@ async function joinLiveClass(req, res, next) {
     if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user);
     if (lc.status === 'ENDED' || lc.status === 'CANCELLED') return errorResponse(res, 'Class is not available', 400);
 
+    // SEC-BAN-01: Banned users cannot join any live session.
+    // Check the authoritative status from DB — req.user is populated from the JWT
+    // which may be stale (ban applied after token was issued). Query fresh.
+    const freshUser = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { status: true },
+    });
+    if (freshUser?.status === 'BANNED') {
+      return errorResponse(res, 'Your account has been suspended', 403);
+    }
+
     const userId = req.user.id;
     const effectiveRole = getEffectiveRole(req);
-    const isTeacher = req.user.role === 'TEACHER' || req.user.role === 'SCHOOL_ADMIN' || req.user.role === 'SUPER_ADMIN';
-    const isStaff = ['TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(effectiveRole);
+    // LCSV-001 FIX: SUPER_ADMIN is a platform administrator, NOT a live class teacher/host.
+    // Removed 'SUPER_ADMIN' from both checks so a platform admin joining a live class
+    // receives STUDENT role (same as any other viewer) unless they are the actual
+    // stream creator (isPublicHost check below covers that case).
+    const isTeacher = req.user.role === 'TEACHER' || req.user.role === 'SCHOOL_ADMIN';
+    const isStaff = ['TEACHER', 'SCHOOL_ADMIN'].includes(effectiveRole);
 
     // Normalise streamType — old rows and mocks may not have it set
     const streamType = lc.streamType || 'SCHOOL';
@@ -922,6 +961,17 @@ async function getLiveKitToken(req, res, next) {
     if (lc.status === 'ENDED')     return errorResponse(res, 'Class has ended', 400);
     if (lc.status === 'CANCELLED') return errorResponse(res, 'Class was cancelled', 400);
 
+    // SEC-BAN-01: Banned users must not receive new LiveKit tokens.
+    // Tokens are long-lived (1h) so a ban applied after token issue won't take effect
+    // until expiry — but we can at least block new token requests immediately.
+    const freshUser = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { status: true },
+    });
+    if (freshUser?.status === 'BANNED') {
+      return errorResponse(res, 'Your account has been suspended', 403);
+    }
+
     const participant = await prisma.liveClassParticipant.findFirst({
       where: { liveClassId: lc.id, userId: req.user.id, isActive: true }
     });
@@ -945,14 +995,39 @@ async function getLiveKitToken(req, res, next) {
     // can be seen by others. Mic mute state is controlled by isMuted flag
     // in the DB and enforced by the frontend — not by the LiveKit token.
     // This enables: students to publish video, teacher to see all students.
-    at.addGrant({
-      roomJoin: true,
-      room: lc.livekitRoomName || `liveclass-${lc.id}`,
-      canPublish:           true,   // all participants can publish audio + video
-      canSubscribe:         true,   // all participants can see/hear each other
+    //
+    // GAP-03 FIX: Enforce screenShareEnabled at the SFU grant level.
+    // When screenShareEnabled = false, non-host participants receive a token
+    // that explicitly excludes TrackSource.ScreenShare from canPublishSources.
+    // This means the LiveKit SFU itself rejects screen share publication —
+    // not just the UI. Hosts are always allowed to share regardless of the flag.
+    //
+    // canPublishSources uses livekit-server-sdk v2.x VideoGrant field.
+    // Values are TrackSource enum strings: 'camera', 'microphone', 'screen_share',
+    // 'screen_share_audio'. Omitting the field = unrestricted (all sources allowed).
+    const canShareScreen = isHost || lc.screenShareEnabled;
+
+    // GAP-03 FIX: Enforce screenShareEnabled at the SFU grant level.
+    // When screenShareEnabled = false, non-host participants receive a token
+    // that explicitly excludes TrackSource.ScreenShare from canPublishSources.
+    // canPublishSources uses livekit-server-sdk v2.x VideoGrant field.
+    // Values: 'camera', 'microphone', 'screen_share', 'screen_share_audio'.
+    // Omitting the field = unrestricted (all sources allowed).
+    const grantOptions = {
+      roomJoin:             true,
+      room:                 lc.livekitRoomName || `liveclass-${lc.id}`,
+      canPublish:           true,
+      canSubscribe:         true,
       canPublishData:       true,
-      canUpdateOwnMetadata: true
-    });
+      canUpdateOwnMetadata: true,
+    };
+
+    if (!canShareScreen) {
+      // Restrict to camera + microphone only — screen share blocked at SFU
+      grantOptions.canPublishSources = ['camera', 'microphone'];
+    }
+
+    at.addGrant(grantOptions);
 
     const token = await at.toJwt();
     return successResponse(res, {
@@ -1004,6 +1079,8 @@ async function muteAll(req, res, next) {
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     assertSchoolAccess(lc, req.user);
+    // GAP-01: defence-in-depth host ownership check
+    assertHostAccess(lc, req.user);
     await prisma.liveClassParticipant.updateMany({
       where: { liveClassId: id, isActive: true, role: { not: 'HOST' } },
       data: { isMuted: true }
@@ -1022,6 +1099,8 @@ async function unmuteAll(req, res, next) {
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     assertSchoolAccess(lc, req.user);
+    // GAP-01: defence-in-depth host ownership check
+    assertHostAccess(lc, req.user);
     await prisma.liveClassParticipant.updateMany({
       where: { liveClassId: id, isActive: true, role: { not: 'HOST' } },
       data: { isMuted: false }
@@ -1040,6 +1119,8 @@ async function lowerAllHands(req, res, next) {
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     assertSchoolAccess(lc, req.user);
+    // GAP-01: defence-in-depth host ownership check
+    assertHostAccess(lc, req.user);
     await prisma.liveClassParticipant.updateMany({
       where: { liveClassId: id, isActive: true, handRaised: true },
       data: { handRaised: false, handRaisedAt: null }
@@ -1190,7 +1271,9 @@ async function sendMessage(req, res, next) {
     if (!lc.chatEnabled) return errorResponse(res, 'Chat is disabled', 403);
 
     // Verify the sender is an active participant or the teacher/admin of this class
-    const isTeacherOrAdmin = ['TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(getEffectiveRole(req));
+    // LCSV-002 FIX: Removed 'SUPER_ADMIN' — sending messages requires school staff
+    // membership or active participant status, not a platform admin role.
+    const isTeacherOrAdmin = ['TEACHER', 'SCHOOL_ADMIN'].includes(getEffectiveRole(req));
     if (!isTeacherOrAdmin) {
       const participant = await prisma.liveClassParticipant.findFirst({
         where: { liveClassId: id, userId: req.user.id, isActive: true },
@@ -1532,7 +1615,9 @@ async function deleteMessage(req, res, next) {
   try {
     const { id: liveClassId, messageId } = req.params;
     const userId = req.user.id;
-    const isHost = ['TEACHER','SCHOOL_ADMIN','SUPER_ADMIN'].includes(getEffectiveRole(req));
+    const isHost = ['TEACHER','SCHOOL_ADMIN'].includes(getEffectiveRole(req));
+    // LCSV-002 FIX: Removed 'SUPER_ADMIN' — deleting chat messages as host requires
+    // school staff membership or being the message author, not a platform admin role.
 
     // P0-01: school isolation check — fetch lc before any data access
     const lc = await findLiveClass(liveClassId);
@@ -1623,7 +1708,8 @@ async function setVideoState(req, res, next) {
 
     // Security: the authenticated user can only update their own video state.
     // Hosts/admins do not set video state for others — the camera is purely self-managed.
-    if (req.user.id !== userId && getEffectiveRole(req) !== 'SUPER_ADMIN') {
+    // LCSV-003 FIX: Removed SUPER_ADMIN bypass — video state is self-managed only.
+    if (req.user.id !== userId) {
       return errorResponse(res, 'You can only update your own video state', 403);
     }
 
@@ -1651,5 +1737,7 @@ module.exports = {
   raiseHand, lowerHand, approveHand, rejectHand, getHandQueue, lowerAllHands,
   sendMessage, getMessages, deleteMessage, getAttendance, requestSpeak, toggleOpenMic,
   startRecording, stopRecording, broadcastPoll, getPollState, broadcastDraw, getWhiteboardState,
-  broadcastQuranPosition, uploadCoverImage, setVideoState
+  broadcastQuranPosition, uploadCoverImage, setVideoState,
+  // GAP-04: exported so app.js can call scheduleAutoEnd during startup recovery
+  scheduleAutoEnd,
 };

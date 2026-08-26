@@ -167,14 +167,18 @@ io.use(async (socket, next) => {
 function createSocketRateLimiter() {
   // Map<eventName, { max: number, windowMs: number }>
   const LIMITS = {
-    'voice:reaction':       { max: 10, windowMs: 2_000 },
-    'liveclass:reaction':   { max: 10, windowMs: 2_000 },
-    'voice:speaking':       { max: 30, windowMs: 5_000 },
-    'liveclass:speaking':   { max: 30, windowMs: 5_000 },
-    'dm:typing_start':      { max: 20, windowMs: 5_000 },
-    'dm:typing_stop':       { max: 20, windowMs: 5_000 },
-    'voice:leave_room':     { max: 10, windowMs: 5_000 },
-    'liveclass:video_changed': { max: 15, windowMs: 5_000 },
+    'voice:reaction':               { max: 10, windowMs: 2_000 },
+    'voice:join_room':              { max: 5,  windowMs: 10_000 }, // P0-2: prevent reconnect-loop attacks
+    'liveclass:reaction':           { max: 10, windowMs: 2_000 },
+    'voice:speaking':               { max: 30, windowMs: 5_000 },
+    'liveclass:speaking':           { max: 30, windowMs: 5_000 },
+    'dm:typing_start':              { max: 20, windowMs: 5_000 },
+    'dm:typing_stop':               { max: 20, windowMs: 5_000 },
+    'voice:leave_room':             { max: 10, windowMs: 5_000 },
+    'liveclass:video_changed':      { max: 15, windowMs: 5_000 },
+    // GAP-02: screen share state changes are infrequent — 5 per 10s is generous
+    'liveclass:screen_share_started': { max: 5, windowMs: 10_000 },
+    'liveclass:screen_share_stopped': { max: 5, windowMs: 10_000 },
   };
 
   // counters: Map<eventName, { count: number, windowStart: number }>
@@ -219,6 +223,14 @@ io.on('connection', (socket) => {
     logger.info(`User ${userId} joined personal room user:${userId}`);
   }
 
+  // ── Voice lobby room — all authenticated users join this room so they
+  // receive real-time voice:room_created / voice:room_deleted / voice:room_updated
+  // events regardless of whether they belong to a school or not.
+  // MEMBER users (schoolId = null) previously never received these events
+  // because the backend emitted to school:null which nobody was subscribed to.
+  socket.join('voice:lobby');
+  logger.debug(`User ${userId} joined voice:lobby`);
+
   // ── Role room — admin broadcast events (report alerts, system notices) ───
   // report-block.controller.js emits to role:SUPER_ADMIN only (SOC-P0-03 fixed).
   if (userRole) {
@@ -234,6 +246,7 @@ io.on('connection', (socket) => {
   // Now requires an active VoiceParticipant record, matching the liveclass:join_room
   // pattern that was already fixed.
   socket.on('voice:join_room', async (roomId) => {
+    if (!socketAllow('voice:join_room')) return; // P0-2: rate limit reconnect loops
     const id = typeof roomId === 'object' ? roomId?.roomId : roomId;
     if (!id || !userId) return;
     try {
@@ -260,6 +273,10 @@ io.on('connection', (socket) => {
   socket.on('voice:speaking', ({ roomId, speaking }) => {
     if (!roomId || !userId) return;
     if (!socketAllow('voice:speaking')) return; // rate limit
+    // P0-3: Only forward speaking events for users who are in the socket room
+    // (they were verified on voice:join_room via DB check). No additional DB
+    // query needed here — socket room membership is the proof of authorization.
+    if (!socket.rooms.has(`voice:${roomId}`)) return;
     socket.to(`voice:${roomId}`).emit('voice:speaking', { userId, speaking });
   });
 
@@ -276,15 +293,13 @@ io.on('connection', (socket) => {
   });
 
   // ── School room presence (lobby real-time updates) ───────────────────────
-  // Task 2 (P2-B): Validate school membership before joining the school socket room.
-  // Previously any authenticated user could join any school's room and receive
-  // live class start/schedule notifications for that school.
-  // Allow: same school as authenticated user, or SUPER_ADMIN.
-  // Never trust the client-supplied schoolId for authorization.
+  // SA-FIX-10: Removed SUPER_ADMIN bypass from school:join.
+  // SUPER_ADMIN has no automatic cross-school socket access — they receive events
+  // only for their own school, exactly like any other user.
+  // userSchoolId comes from JWT at connection time — never from client payload.
   socket.on('school:join', (schoolId) => {
     if (!schoolId) return;
-    // userSchoolId comes from JWT (set in auth middleware above) — never from client payload
-    if (userRole !== 'SUPER_ADMIN' && socket.userSchoolId !== schoolId) return; // silently reject
+    if (socket.userSchoolId !== schoolId) return; // silently reject — must match JWT school
     socket.join(`school:${schoolId}`);
   });
 
@@ -294,19 +309,16 @@ io.on('connection', (socket) => {
   });
 
   // ── Class room presence (live class notifications) ────────────────────────
-  // L-6 FIX: Validate school membership before joining class notification room.
-  // Previously any authenticated user could subscribe to any class's events
-  // (liveclass:started, schedule changes) for any class in any school.
+  // SA-FIX-11: Removed SUPER_ADMIN global bypass from class:join.
+  // All users including SUPER_ADMIN must have an active SchoolMembership for
+  // the school that owns the class to subscribe to its real-time events.
+  // This prevents SUPER_ADMIN from receiving liveclass:started events for
+  // every school on the platform.
   socket.on('class:join', async (classId) => {
     if (!classId || !userId) return;
     try {
-      // SUPER_ADMIN global bypass
-      if (userRole === 'SUPER_ADMIN') {
-        socket.join(`class:${classId}`);
-        return;
-      }
       // Check user has an active enrollment, teacher assignment, or school membership
-      // for the school that owns this class
+      // for the school that owns this class — applies to ALL roles including SUPER_ADMIN
       const cls = await prisma.class.findFirst({
         where: { id: classId, deletedAt: null },
         select: { schoolId: true }
@@ -426,6 +438,69 @@ io.on('connection', (socket) => {
     });
   });
 
+  // Screen share events (client→room)
+  // GAP-02 FIX: Previously these events had no server handler — any socket could
+  // broadcast screen-share notifications to any room without being a participant,
+  // without being the host, and without any rate limiting.
+  //
+  // Fix: server-side relay that:
+  //   1. Verifies the emitter is an active participant in the room (DB check)
+  //   2. For "started": verifies caller is HOST OR screenShareEnabled = true on the class
+  //   3. Uses socket.userId (JWT-verified) — never trusts client-supplied userId
+  //   4. Rate-limited via socketAllow (5 per 10s — screen share state changes are infrequent)
+  socket.on('liveclass:screen_share_started', async ({ liveClassId }) => {
+    if (!liveClassId || !userId) return;
+    if (!socketAllow('liveclass:screen_share_started')) return;
+    try {
+      // Verify active participation
+      const participant = await prisma.liveClassParticipant.findFirst({
+        where: { liveClassId, userId, isActive: true },
+        select: { id: true, role: true },
+      });
+      if (!participant) return; // not an active participant — silently drop
+
+      // Verify permission: HOST can always share; students need screenShareEnabled
+      if (participant.role !== 'HOST') {
+        const rows = await prisma.$queryRawUnsafe(
+          'SELECT screenShareEnabled FROM live_classes WHERE id = ? AND deletedAt IS NULL LIMIT 1',
+          liveClassId
+        );
+        const enabled = rows?.[0]?.screenShareEnabled;
+        if (!enabled) return; // screen share not allowed for participants
+      }
+
+      // Relay using server-verified userId
+      socket.to(`liveclass:${liveClassId}`).emit('liveclass:screen_share_started', {
+        liveClassId,
+        userId,  // server-verified
+      });
+      logger.debug(`[screen-share] User ${userId} started screen share in ${liveClassId}`);
+    } catch (err) {
+      logger.warn(`[socket] liveclass:screen_share_started check failed: ${err.message}`);
+    }
+  });
+
+  socket.on('liveclass:screen_share_stopped', async ({ liveClassId }) => {
+    if (!liveClassId || !userId) return;
+    if (!socketAllow('liveclass:screen_share_stopped')) return;
+    try {
+      // Only relay if caller is an active participant (prevents ghost stop events)
+      const participant = await prisma.liveClassParticipant.findFirst({
+        where: { liveClassId, userId, isActive: true },
+        select: { id: true },
+      });
+      if (!participant) return;
+
+      socket.to(`liveclass:${liveClassId}`).emit('liveclass:screen_share_stopped', {
+        liveClassId,
+        userId,  // server-verified
+      });
+      logger.debug(`[screen-share] User ${userId} stopped screen share in ${liveClassId}`);
+    } catch (err) {
+      logger.warn(`[socket] liveclass:screen_share_stopped check failed: ${err.message}`);
+    }
+  });
+
   // ── Group Chat room presence (Phase C-1) ────────────────────────────────────
   // C-2 FIX: Validate DB membership before joining a group conversation room.
   // Previously any authenticated socket could join any convId and receive
@@ -481,13 +556,12 @@ io.on('connection', (socket) => {
   // C-3 FIX: Validate school membership before joining school feed rooms.
   // Previously any authenticated user could subscribe to any school's real-time feed
   // by emitting feed:join:school with an arbitrary schoolId.
+  // SVSV-001 FIX: Removed SUPER_ADMIN legacy bypass. Platform admins have no
+  // automatic cross-school feed access — they must match the JWT schoolId like
+  // any other user. SA-FIX-10 (school:join) and SA-FIX-11 (class:join) applied
+  // the same fix to equivalent handlers; this completes the set.
   socket.on('feed:join:school', ({ schoolId } = {}) => {
     if (!schoolId) return;
-    // SUPER_ADMIN global bypass (legacy)
-    if (userRole === 'SUPER_ADMIN') {
-      socket.join(`feed:school:${schoolId}`);
-      return;
-    }
     // socket.userSchoolId is set from the JWT at connection time — never from client payload
     if (socket.userSchoolId !== schoolId) return; // silently reject
     socket.join(`feed:school:${schoolId}`);
@@ -508,12 +582,108 @@ io.on('connection', (socket) => {
     if (userId) socket.leave(`wallet:${userId}`);
   });
 
+  // ── Community socket rooms (Phase B-4) ─────────────────────────────────────
+  //
+  // DB-AUTHORITATIVE AUTHORIZATION — mirrors voice:join_room pattern.
+  //
+  // Rules:
+  //   1. userId must be set (authenticated socket only).
+  //   2. Community must exist and not be soft-deleted (DB lookup).
+  //   3. User must NOT be banned — DB is source of truth; Redis is cache only.
+  //      Redis failure → fall through to DB. Redis miss ≠ unbanned.
+  //   4. User must be an active MEMBER (community_members row required).
+  //   5. PRIVATE / INVITE_ONLY → membership mandatory. Non-members always rejected.
+  //   6. PUBLIC → membership still required for real-time room subscription.
+  //      (Non-members can poll the feed via HTTP; they don't need live events.)
+  //   7. IDOR: communityId is only used as a DB lookup key. All authorization
+  //      fields (privacy, deletedAt, membership) come exclusively from the DB.
+  //   8. Any error during authorization → fail-closed (no room access).
+  //
+  socket.on('community:join', async (communityId) => {
+    const id = typeof communityId === 'string' ? communityId : communityId?.communityId;
+    if (!id || !userId) return; // not authenticated — silently drop
+
+    try {
+      // Step 1: load community — never trust client-provided fields
+      const community = await prisma.community.findUnique({
+        where:  { id },
+        select: { id: true, privacy: true, deletedAt: true }
+      });
+
+      // Step 2: must exist and not be deleted
+      if (!community || community.deletedAt) {
+        logger.debug(`[socket:community:join] Community ${id} not found or deleted — rejected user ${userId}`);
+        socket.emit('community:join_rejected', { communityId: id, reason: 'not_found' });
+        return;
+      }
+
+      // Step 3: ban check — Redis as cache, DB as source of truth
+      let isBanned = false;
+      try {
+        const { isRedisReady, getRedis } = require('./utils/redis');
+        if (isRedisReady()) {
+          const cached = await getRedis().sismember(`community:ban:${id}`, userId);
+          if (cached === 1) isBanned = true;
+        }
+      } catch { /* Redis unavailable — continue to DB check */ }
+
+      // Always check DB if Redis said false OR Redis was unavailable
+      if (!isBanned) {
+        const ban = await prisma.communityBan.findUnique({
+          where:  { communityId_userId: { communityId: id, userId } },
+          select: { id: true }
+        });
+        if (ban) isBanned = true;
+      }
+
+      if (isBanned) {
+        logger.info(`[socket:community:join] Banned user ${userId} rejected from community:${id}`);
+        socket.emit('community:join_rejected', { communityId: id, reason: 'banned' });
+        return;
+      }
+
+      // Step 4: membership check — must exist in community_members table
+      const membership = await prisma.communityMember.findUnique({
+        where:  { communityId_userId: { communityId: id, userId } },
+        select: { role: true }
+      });
+
+      // Step 5: PRIVATE / INVITE_ONLY → membership is mandatory
+      if (community.privacy === 'PRIVATE' || community.privacy === 'INVITE_ONLY') {
+        if (!membership) {
+          logger.info(`[socket:community:join] Non-member ${userId} rejected from ${community.privacy} community:${id}`);
+          socket.emit('community:join_rejected', { communityId: id, reason: 'membership_required' });
+          return;
+        }
+      }
+
+      // Step 6: PUBLIC → require membership for real-time room
+      if (!membership) {
+        // Non-member of a PUBLIC community gets no real-time events (HTTP polling is the path).
+        return; // silent — not an error
+      }
+
+      // All checks passed — join the authenticated room
+      socket.join(`community:${id}`);
+      logger.info(`[socket:community:join] User ${userId} (${membership.role}) joined community:${id}`);
+
+    } catch (err) {
+      // Fail-closed: any unexpected error → no room access
+      logger.warn(`[socket:community:join] Auth check failed user ${userId} community ${id}: ${err.message}`);
+    }
+  });
+
+  socket.on('community:leave', (communityId) => {
+    const id = typeof communityId === 'string' ? communityId : communityId?.communityId;
+    if (!id) return;
+    socket.leave(`community:${id}`);
+    logger.debug(`[socket:community:leave] User ${userId} left community:${id}`);
+  });
+
   socket.on('disconnect', () => {
     logger.info(`Client disconnected: ${socket.id} (userId: ${userId})`);
   });
-
   // ── PK Battle System socket events ─────────────────────────────────────────
-  // Clients join a PK room to receive real-time battle events.
   // pk:{pkMatchId} — broadcast events (scores, timer, gifts, votes)
   const pkService = require('./services/pk.service');
 
@@ -1258,6 +1428,41 @@ async function startServer() {
         // Mark startup complete so /health/startup returns 200
         health.markStartupComplete();
 
+        // ── GAP-04 FIX: Recover in-process auto-end timers after server restart ──
+        // scheduleAutoEnd() stores timers in a Node.js Map — they are lost on restart.
+        // On startup we query all LIVE classes with an unexpired duration and
+        // re-schedule their auto-end timer. This runs in the background after the
+        // server is listening; failures are non-fatal (logged only).
+        //
+        // For multi-process / Kubernetes: move to a Redis-backed delayed queue
+        // (BullMQ delayed job) to make the auto-end durable across pod restarts.
+        setImmediate(async () => {
+          try {
+            const { scheduleAutoEnd } = require('./controllers/live-class.controller');
+            const now = new Date();
+            // Find LIVE classes with a duration that hasn't yet been exceeded
+            const activeDurationClasses = await prisma.$queryRaw`
+              SELECT id, startedAt, duration
+              FROM live_classes
+              WHERE status = 'LIVE'
+                AND deletedAt IS NULL
+                AND startedAt IS NOT NULL
+                AND duration IS NOT NULL
+                AND DATE_ADD(startedAt, INTERVAL duration MINUTE) > ${now}
+            `;
+            if (activeDurationClasses.length === 0) {
+              logger.info('[auto-end] No in-flight duration classes to recover');
+              return;
+            }
+            for (const lc of activeDurationClasses) {
+              scheduleAutoEnd(lc.id, lc.startedAt, lc.duration);
+            }
+            logger.info(`[auto-end] Recovered ${activeDurationClasses.length} in-process auto-end timer(s) after restart`);
+          } catch (err) {
+            logger.warn(`[auto-end] Startup recovery failed: ${err.message}`);
+          }
+        });
+
         // ── Periodic memory monitoring & GC hint ─────────────────────────
         // Log a warning when heap usage exceeds 85% so operators know to restart.
         // If global.gc is available (--expose-gc flag), nudge the GC to reclaim
@@ -1313,5 +1518,11 @@ async function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
+
+// ── Voice Club: online status cleanup job ─────────────────────────────────────
+// Marks voice room members as isOnline=false when their heartbeat is >3 min stale.
+// Runs every 2 minutes. Non-fatal — errors are swallowed inside cleanupStaleOnline.
+const { cleanupStaleOnline } = require('./controllers/room-member.controller');
+setInterval(() => { cleanupStaleOnline(); }, 2 * 60 * 1000);
 
 module.exports = app;
