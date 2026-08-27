@@ -184,6 +184,18 @@ async function acceptMicOffer(req, res, next) {
       return errorResponse(res, 'This offer was not sent to you', 403);
     }
 
+    // ── P2-1 FIX: Check micLocked before accepting — mic-pass creates a new speaker ──
+    const roomForLock = await prisma.voiceRoom.findUnique({
+      where: { id: roomId },
+      select: { micLocked: true, status: true }
+    });
+    if (!roomForLock || roomForLock.status !== 'LIVE') {
+      return errorResponse(res, 'Room is not live', 400);
+    }
+    if (roomForLock.micLocked) {
+      return errorResponse(res, 'The mic is locked — mic pass is not allowed while the stage is locked', 403);
+    }
+
     // ── Validate both participants still active ────────────────────────────
     const [passer, target] = await Promise.all([
       prisma.voiceParticipant.findUnique({

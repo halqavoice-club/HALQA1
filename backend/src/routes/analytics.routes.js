@@ -79,4 +79,11 @@ router.get('/schools/:schoolId/analytics', analyticsController.getSchoolAnalytic
  */
 router.get('/users/:userId/analytics', analyticsController.getUserAnalytics);
 
+/**
+ * @route   POST /api/v1/analytics/events
+ * @desc    Track a client-side analytics event (fire-and-forget, always 202)
+ * @access  Private (any authenticated user)
+ */
+router.post('/events', analyticsController.trackEvent);
+
 module.exports = router;

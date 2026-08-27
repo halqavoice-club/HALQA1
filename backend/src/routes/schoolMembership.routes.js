@@ -275,18 +275,18 @@ router.put('/:id/status',
       });
       if (!membership) return errorResponse(res, 'Membership not found', 404);
 
-      // Caller must be an admin of the same school
+      // ARCH-01: Only active school admins may update membership status.
+      // SUPER_ADMIN is a platform administrator — they must have an explicit
+      // SCHOOL_ADMIN or SUPER_ADMIN membership record in the target school.
+      // There is no global bypass: administration is school-scoped.
       const callerMembership = await prisma.schoolMembership.findUnique({
         where: { userId_schoolId: { userId: req.user.id, schoolId: membership.schoolId } }
       });
-      const isLegacySuperAdmin = req.user.role === 'SUPER_ADMIN';
-      // P1-002 FIX (SEC-MED-005): caller membership must be ACTIVE, not just admin role.
-      // A PENDING or SUSPENDED SCHOOL_ADMIN must not be able to approve/change memberships.
       const isAdmin = callerMembership &&
         ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(callerMembership.role) &&
         callerMembership.status === 'ACTIVE';
 
-      if (!isLegacySuperAdmin && !isAdmin) {
+      if (!isAdmin) {
         return errorResponse(res, 'Only active school admins can update membership status', 403);
       }
 
@@ -332,14 +332,13 @@ router.put('/:id/role',
       const callerMembership = await prisma.schoolMembership.findUnique({
         where: { userId_schoolId: { userId: req.user.id, schoolId: membership.schoolId } }
       });
-      const isLegacySuperAdmin = req.user.role === 'SUPER_ADMIN';
-      // P1-002 FIX (SEC-MED-005): caller membership must be ACTIVE, not just admin role.
-      // A PENDING or SUSPENDED SCHOOL_ADMIN must not be able to change member roles.
+      // ARCH-01: SUPER_ADMIN platform role is no longer a bypass.
+      // Caller must have an ACTIVE SCHOOL_ADMIN or SUPER_ADMIN membership in the school.
       const isAdmin = callerMembership &&
         ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(callerMembership.role) &&
         callerMembership.status === 'ACTIVE';
 
-      if (!isLegacySuperAdmin && !isAdmin) {
+      if (!isAdmin) {
         return errorResponse(res, 'Only active school admins can change membership roles', 403);
       }
 
@@ -401,8 +400,9 @@ router.delete('/:id',
       const callerMembership = await prisma.schoolMembership.findUnique({
         where: { userId_schoolId: { userId: req.user.id, schoolId: membership.schoolId } }
       });
-      const isAdmin = req.user.role === 'SUPER_ADMIN' ||
-        (callerMembership && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(callerMembership.role));
+      // ARCH-01: SUPER_ADMIN platform role no longer bypasses — must have a real membership.
+      const isAdmin = callerMembership &&
+        ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(callerMembership.role);
 
       if (!isOwn && !isAdmin) {
         return errorResponse(res, 'You can only remove yourself or your own school members', 403);
@@ -480,7 +480,7 @@ router.post('/create-school',
   validate,
   async (req, res, next) => {
     try {
-      const { name, slug, type = 'school', address, city, country, phone, email: schoolEmail, website, timezone } = req.body;
+      const { name, slug, type = 'school', description, address, city, state, country, phone, email: schoolEmail, website, timezone } = req.body;
 
       // Check slug uniqueness
       const existing = await prisma.school.findUnique({ where: { slug } });
@@ -493,12 +493,13 @@ router.post('/create-school',
             name,
             slug,
             type,
-            address: address || null,
-            city: city || null,
-            country: country || 'US',
-            phone: phone || null,
-            email: schoolEmail || null,
-            website: website || null,
+            address:  address  || null,
+            city:     city     || null,
+            state:    state    || null,
+            country:  country  || 'US',
+            phone:    phone    || null,
+            email:    schoolEmail || null,
+            website:  website  || null,
             timezone: timezone || 'America/New_York'
           }
         });
@@ -539,13 +540,25 @@ router.post('/create-school',
         return { school, membership };
       });
 
+      // Save description via raw SQL — Prisma client was compiled before this column
+      // was added so prisma.school.create/update doesn't know about it yet.
+      // The column exists in the DB (migration 20260822_add_school_description).
+      if (description) {
+        await prisma.$executeRawUnsafe(
+          'UPDATE schools SET description = ?, updatedAt = NOW() WHERE id = ?',
+          description,
+          result.school.id
+        );
+        result.school.description = description;
+      }
+
       await invalidateMembershipCache(req.user.id, result.school.id);
       // Invalidate getMe cache so the new school appears in the sidebar immediately
       await deleteGetMeCache(req.user.id);
 
       logger.info(`[schoolMembership] User ${req.user.id} created school ${result.school.id} (${name})`);
 
-      return successResponse(res, result, `School "${name}" created. You are now the School Super Admin.`, 201);
+      return successResponse(res, result, `School "${name}" created. You are now the School Admin.`, 201);
     } catch (error) { next(error); }
   }
 );

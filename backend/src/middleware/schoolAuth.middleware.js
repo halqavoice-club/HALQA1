@@ -130,19 +130,12 @@ function requireSchoolMember(schoolIdParam) {
       // Attach for downstream middleware/controllers
       req.schoolId = schoolId;
 
-      // Legacy SUPER_ADMIN global bypass — platform-level admins can access any school
-      // This is the LEGACY behavior. New users should have an explicit SchoolMembership.
-      if (req.user.role === 'SUPER_ADMIN') {
-        req.schoolMembership = {
-          id: null,
-          userId: req.user.id,
-          schoolId,
-          role: 'SUPER_ADMIN',
-          status: 'ACTIVE',
-          isLegacyGlobal: true
-        };
-        return next();
-      }
+      // ARCH-01 (Option A — Strict Separation):
+      // SUPER_ADMIN is a HALQA PLATFORM administrator, NOT an implicit school admin.
+      // They must have an explicit SchoolMembership to access school-scoped data.
+      // The legacy global bypass has been removed.
+      // To access a specific school's data, provision a SCHOOL_ADMIN membership
+      // via POST /school-memberships/create-school or the admin provisioning tool.
 
       const membership = await loadMembership(req.user.id, schoolId);
 
@@ -215,8 +208,8 @@ async function requireSchoolAccess(req, res, next) {
     const { user } = req;
     if (!user) return errorResponse(res, 'Authentication required', 401);
 
-    // Legacy SUPER_ADMIN bypass
-    if (user.role === 'SUPER_ADMIN') return next();
+    // ARCH-01: SUPER_ADMIN no longer bypasses school access checks.
+    // They must have a real SchoolMembership like any other user.
 
     // Check new SchoolMembership table (authoritative source)
     const membership = await loadMembership(user.id, schoolId);

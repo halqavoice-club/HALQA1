@@ -10,7 +10,8 @@ async function listTeachers(req, res, next) {
 
     const where = {
       deletedAt: null,
-      ...(schoolId && req.user.role !== 'SUPER_ADMIN' && { schoolId })
+      // ARCH-01: always filter by school — SUPER_ADMIN is no longer a bypass
+      ...(schoolId && { schoolId })
     };
 
     if (search) {
@@ -49,7 +50,7 @@ async function getTeacher(req, res, next) {
       where: {
         id: req.params.id,
         deletedAt: null,
-        ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId })
+        ...(schoolId && { schoolId })  // ARCH-01: always filter by school
       },
       include: {
         user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true, avatarUrl: true, status: true, lastLoginAt: true } },
@@ -125,7 +126,7 @@ async function updateTeacher(req, res, next) {
     // C-4 FIX: Verify school ownership before updating.
     const schoolId = req.schoolId || req.user.schoolId;
     const teacher = await prisma.teacher.findFirst({
-      where: { id: req.params.id, deletedAt: null, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) }
+      where: { id: req.params.id, deletedAt: null, ...(schoolId && { schoolId }) }  // ARCH-01
     });
     if (!teacher) return errorResponse(res, 'Teacher not found', 404);
 
@@ -168,7 +169,7 @@ async function deleteTeacher(req, res, next) {
     // C-4 FIX: Verify school ownership before soft-delete.
     const schoolId = req.schoolId || req.user.schoolId;
     const teacher = await prisma.teacher.findFirst({
-      where: { id: req.params.id, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) },
+      where: { id: req.params.id, ...(schoolId && { schoolId }) },  // ARCH-01
       select: { id: true }
     });
     if (!teacher) return errorResponse(res, 'Teacher not found', 404);

@@ -134,52 +134,122 @@ router.post('/',
 );
 
 router.put('/:id',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
-  // F-4 FIX: Add school ownership check for SCHOOL_ADMIN.
-  // NF-2 FIX: Also check req.schoolMembership?.schoolId for new-architecture MEMBER users
-  // with SCHOOL_ADMIN membership (their user.schoolId may be null or different).
-  (req, res, next) => {
-    if (req.user.role === 'SCHOOL_ADMIN') {
-      const ownSchoolId = req.schoolMembership?.schoolId || req.user.schoolId;
-      if (ownSchoolId !== req.params.id) {
-        const { errorResponse } = require('../utils/response');
-        return errorResponse(res, 'You can only update your own school', 403);
+  // ARCH-01: SUPER_ADMIN can only update a school if they have an active membership.
+  // Previously `authorize('SUPER_ADMIN', 'SCHOOL_ADMIN')` let any platform admin
+  // edit any school's settings without being a member. Now all updates require
+  // a real SCHOOL_ADMIN membership for that school.
+  async (req, res, next) => {
+    const { id } = req.params;
+    const userRole = req.user?.role;
+
+    // SUPER_ADMIN: must have an explicit SCHOOL_ADMIN membership in this school
+    if (userRole === 'SUPER_ADMIN') {
+      const membership = await prisma.schoolMembership.findUnique({
+        where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+        select: { role: true, status: true },
+      }).catch(() => null);
+      if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+        return next();
       }
+      return errorResponse(res, 'Platform admins must have an active school membership to edit school settings', 403);
     }
-    next();
+
+    // Legacy SCHOOL_ADMIN (User.role) — own school only
+    if (userRole === 'SCHOOL_ADMIN') {
+      const ownSchoolId = req.schoolMembership?.schoolId || req.user.schoolId;
+      if (ownSchoolId !== id) return errorResponse(res, 'You can only update your own school', 403);
+      return next();
+    }
+
+    return errorResponse(res, 'Insufficient permissions', 403);
+  },
+  ctrl.updateSchool
+);
+
+// PATCH /schools/:id — same as PUT but partial update; also allows MEMBER school admins
+router.patch('/:id',
+  async (req, res, next) => {
+    const { id } = req.params;
+    const userRole = req.user?.role;
+
+    if (userRole === 'SUPER_ADMIN') return next();
+
+    if (userRole === 'SCHOOL_ADMIN') {
+      const ownSchoolId = req.schoolMembership?.schoolId || req.user.schoolId;
+      if (ownSchoolId !== id) return errorResponse(res, 'You can only update your own school', 403);
+      return next();
+    }
+
+    // New-architecture: MEMBER user with active SCHOOL_ADMIN membership
+    const membership = await prisma.schoolMembership.findUnique({
+      where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+      select: { role: true, status: true },
+    }).catch(() => null);
+    if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+      return next();
+    }
+
+    return errorResponse(res, 'Only school admins can update this school', 403);
   },
   ctrl.updateSchool
 );
 router.put('/:id/settings',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
-  // F-4 FIX + NF-2 FIX: Same ownership check using membership-aware schoolId.
-  (req, res, next) => {
-    if (req.user.role === 'SCHOOL_ADMIN') {
-      const ownSchoolId = req.schoolMembership?.schoolId || req.user.schoolId;
-      if (ownSchoolId !== req.params.id) {
-        const { errorResponse } = require('../utils/response');
-        return errorResponse(res, 'You can only update settings for your own school', 403);
+  // ARCH-01: All roles must have an explicit membership to edit school settings.
+  async (req, res, next) => {
+    const { id } = req.params;
+    const userRole = req.user?.role;
+
+    if (userRole === 'SUPER_ADMIN') {
+      const membership = await prisma.schoolMembership.findUnique({
+        where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+        select: { role: true, status: true },
+      }).catch(() => null);
+      if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+        return next();
       }
+      return errorResponse(res, 'Platform admins must have an active school membership to edit school settings', 403);
     }
-    next();
+
+    if (userRole === 'SCHOOL_ADMIN') {
+      const ownSchoolId = req.schoolMembership?.schoolId || req.user.schoolId;
+      if (ownSchoolId !== id) return errorResponse(res, 'You can only update settings for your own school', 403);
+      return next();
+    }
+
+    return errorResponse(res, 'Insufficient permissions', 403);
   },
   ctrl.updateSchoolSettings
 );
 router.delete('/:id', authorize('SUPER_ADMIN'), ctrl.deleteSchool);
 
 // Logo upload
+// Auth: SUPER_ADMIN, legacy SCHOOL_ADMIN (User.role), OR any MEMBER user who
+// holds an active SCHOOL_ADMIN membership for the target school (new architecture).
 router.post('/:id/logo',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
-  // F-4 FIX + NF-2 FIX: SCHOOL_ADMIN can only upload logo for their own school.
-  (req, res, next) => {
-    if (req.user.role === 'SCHOOL_ADMIN') {
+  async (req, res, next) => {
+    const { id } = req.params;
+    const userRole = req.user?.role;
+
+    // SUPER_ADMIN: always allowed
+    if (userRole === 'SUPER_ADMIN') return next();
+
+    // Legacy SCHOOL_ADMIN (User.role): own school only
+    if (userRole === 'SCHOOL_ADMIN') {
       const ownSchoolId = req.schoolMembership?.schoolId || req.user.schoolId;
-      if (ownSchoolId !== req.params.id) {
-        const { errorResponse } = require('../utils/response');
-        return errorResponse(res, 'You can only upload a logo for your own school', 403);
-      }
+      if (ownSchoolId !== id) return errorResponse(res, 'You can only upload a logo for your own school', 403);
+      return next();
     }
-    next();
+
+    // New-architecture: MEMBER user with SCHOOL_ADMIN membership for this school
+    const membership = await prisma.schoolMembership.findUnique({
+      where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+      select: { role: true, status: true },
+    }).catch(() => null);
+    if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+      return next();
+    }
+
+    return errorResponse(res, 'Only school admins can upload a logo', 403);
   },
   logoUpload.single('logo'),
   async (req, res, next) => {

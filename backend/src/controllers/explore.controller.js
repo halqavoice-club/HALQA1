@@ -123,6 +123,7 @@ async function getExploreFeed(req, res, next) {
       })(),
 
       // Suggested people — users the viewer doesn't follow yet, globally
+      // Ordered by follower count descending so well-known users appear first
       (async () => {
         const alreadyFollowing = await prisma.follow.findMany({
           where: { followerId: viewerId },
@@ -140,7 +141,10 @@ async function getExploreFeed(req, res, next) {
             ...USER_SELECT,
             _count: { select: { followers: true } },
           },
-          orderBy: { createdAt: 'desc' },
+          orderBy: [
+            { followers: { _count: 'desc' } },  // most-followed first
+            { createdAt: 'desc' },               // newest as tiebreaker
+          ],
           take: 12,
         });
         return people;

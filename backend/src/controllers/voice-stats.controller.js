@@ -202,12 +202,10 @@ async function getLeaderboard(req, res, next) {
   try {
     const schoolId = req.user.schoolId;
 
-    // Aggregate per user
+    // Voice Club is a global feature — leaderboard is always global (no school filter)
     const rows = await prisma.voiceHostStats.groupBy({
       by: ['userId'],
-      where: schoolId
-        ? { user: { schoolId } }
-        : {},
+      where: {},
       _sum: {
         roomsHosted:    true,
         totalMinutes:   true,

@@ -70,17 +70,15 @@ async function listStudents(req, res, next) {
     const { skip, ...pagination } = getPagination(page, limit);
     const schoolId = req.schoolId || req.user.schoolId;
 
-    // Safety: non-SUPER_ADMIN users must always be scoped to a school.
-    // req.schoolId is set by requireSchoolMember() from the SchoolMembership table.
-    // req.user.schoolId is the legacy single-school fallback.
-    // If neither is present, refuse the request — returning all-school data is not safe.
-    if (!schoolId && req.user.role !== 'SUPER_ADMIN') {
+    // ARCH-01: ALL users (including SUPER_ADMIN) must be scoped to a school.
+    // SUPER_ADMIN must have an explicit SchoolMembership to view school student data.
+    if (!schoolId) {
       return errorResponse(res, 'School context required', 400);
     }
 
     const where = {
       deletedAt: null,
-      ...(schoolId && req.user.role !== 'SUPER_ADMIN' && { schoolId })
+      schoolId,   // always filter by school — no bypass for any role
     };
 
     // Search filter
@@ -147,7 +145,7 @@ async function getStudent(req, res, next) {
       where: {
         id: req.params.id,
         deletedAt: null,
-        ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId })
+        ...(schoolId && { schoolId })  // ARCH-01: always filter by school
       },
       include: {
         user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true, avatarUrl: true, dateOfBirth: true, gender: true, status: true, emailVerified: true, lastLoginAt: true } },
@@ -239,13 +237,13 @@ async function createStudent(req, res, next) {
 async function updateStudent(req, res, next) {
   try {
     const { firstName, lastName, phone, dateOfBirth, gender, gradeLevel, medicalNotes, emergencyContact } = req.body;
-    // C-4 FIX: Verify the student belongs to the requester's school before updating.
+    // ARCH-01: Verify student belongs to requester's school — no bypass.
     const schoolId = req.schoolId || req.user.schoolId;
     const student = await prisma.student.findFirst({
       where: {
         id: req.params.id,
         deletedAt: null,
-        ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId })
+        ...(schoolId && { schoolId })
       }
     });
     if (!student) return errorResponse(res, 'Student not found', 404);
@@ -269,8 +267,8 @@ async function enrollStudent(req, res, next) {
     // H-9 FIX: Verify both student and class belong to the caller's school.
     const schoolId = req.schoolId || req.user.schoolId;
     const [student, cls] = await Promise.all([
-      prisma.student.findFirst({ where: { id: req.params.id, deletedAt: null, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) }, select: { id: true } }),
-      prisma.class.findFirst({ where: { id: req.body.classId, deletedAt: null, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) }, select: { id: true } })
+      prisma.student.findFirst({ where: { id: req.params.id, deletedAt: null, ...(schoolId && { schoolId }) }, select: { id: true } }),
+      prisma.class.findFirst({ where: { id: req.body.classId, deletedAt: null, ...(schoolId && { schoolId }) }, select: { id: true } })
     ]);
     if (!student) return errorResponse(res, 'Student not found or not in your school', 404);
     if (!cls) return errorResponse(res, 'Class not found or not in your school', 404);
@@ -290,11 +288,11 @@ async function unenrollStudent(req, res, next) {
     const schoolId = req.schoolId || req.user.schoolId;
     const [student, cls] = await Promise.all([
       prisma.student.findFirst({
-        where: { id: req.params.id, deletedAt: null, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) },
+        where: { id: req.params.id, deletedAt: null, ...(schoolId && { schoolId }) },
         select: { id: true }
       }),
       prisma.class.findFirst({
-        where: { id: req.params.classId, deletedAt: null, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) },
+        where: { id: req.params.classId, deletedAt: null, ...(schoolId && { schoolId }) },
         select: { id: true }
       })
     ]);
@@ -314,7 +312,7 @@ async function deleteStudent(req, res, next) {
     // C-4 FIX: Verify school ownership before soft-delete.
     const schoolId = req.schoolId || req.user.schoolId;
     const student = await prisma.student.findFirst({
-      where: { id: req.params.id, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) },
+      where: { id: req.params.id, ...(schoolId && { schoolId }) },
       select: { id: true }
     });
     if (!student) return errorResponse(res, 'Student not found', 404);

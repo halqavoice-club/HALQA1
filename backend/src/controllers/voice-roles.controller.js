@@ -19,11 +19,25 @@
  */
 
 const prisma = require('../utils/prisma');
+const { v4: uuidv4 } = require('uuid');
 const { deleteCache } = require('../utils/redis');
 const { successResponse, errorResponse } = require('../utils/response');
 const { getIo } = require('../sockets');
 const { VOICE_ROLES } = require('../middleware/voiceRole.middleware');
 const logger = require('../utils/logger');
+
+// ── Audit helper (fire-and-forget, never throws) ──────────────────────────────
+async function _rolesAudit(actorId, action, roomId, meta = {}) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        id: uuidv4(), userId: actorId, action: 'UPDATE',
+        entity: 'VoiceRoom', entityId: roomId,
+        newValues: { action, ...meta }
+      }
+    });
+  } catch { /* non-fatal */ }
+}
 
 function roomCacheKey(roomId) { return `voice:room:${roomId}`; }
 
@@ -93,6 +107,7 @@ async function assignModerator(req, res, next) {
       });
     }
 
+    _rolesAudit(req.user.id, 'ASSIGN_MODERATOR', roomId, { targetUserId });
     return successResponse(res, {
       userId: targetUserId,
       role:   VOICE_ROLES.MODERATOR,
@@ -100,8 +115,6 @@ async function assignModerator(req, res, next) {
     }, `${target.user.firstName} is now a moderator`);
   } catch (error) { next(error); }
 }
-
-// ─── REMOVE MODERATOR ─────────────────────────────────────────────────────────
 /**
  * DELETE /voice/:id/moderator/:userId
  * HOST removes MODERATOR role → demotes to AUDIENCE.
@@ -150,6 +163,7 @@ async function removeModerator(req, res, next) {
       });
     }
 
+    _rolesAudit(req.user.id, 'REMOVE_MODERATOR', roomId, { targetUserId });
     return successResponse(res, { userId: targetUserId, role: VOICE_ROLES.AUDIENCE },
       `${target.user.firstName} removed from moderators`);
   } catch (error) { next(error); }
@@ -160,6 +174,10 @@ async function removeModerator(req, res, next) {
  * POST /voice/:id/transfer/:userId
  * HOST transfers ownership to another participant.
  * Old HOST becomes MODERATOR. New HOST gets full control.
+ *
+ * RACE CONDITION FIX: The transaction now re-reads the current hostId inside
+ * the transaction and verifies the caller is still the host before committing.
+ * Two concurrent transfers can no longer both succeed and leave inconsistent state.
  */
 async function transferAdmin(req, res, next) {
   try {
@@ -182,49 +200,57 @@ async function transferAdmin(req, res, next) {
       return errorResponse(res, 'Target is already the host', 400);
     }
 
-    // Atomic: demote old host → MODERATOR, promote target → HOST
-    await prisma.$transaction([
-      prisma.voiceParticipant.update({
-        where: { roomId_userId: { roomId, userId: prevHostId } },
-        data: { role: VOICE_ROLES.MODERATOR, updatedAt: new Date() }
-      }),
-      prisma.voiceParticipant.update({
-        where: { id: target.id },
-        data: { role: VOICE_ROLES.HOST, isMuted: false, updatedAt: new Date() }
-      }),
-      prisma.voiceRoom.update({
-        where: { id: roomId },
-        data: { hostId: targetUserId, updatedAt: new Date() }
-      })
-    ]);
+    // Race-condition protection: re-read current hostId inside transaction.
+    // The VoiceRoom update uses a WHERE condition matching the expected hostId
+    // so it affects 0 rows if another transaction already changed the host.
+    try {
+      let transferred = false;
+      await prisma.$transaction(async (tx) => {
+        // Demote old host → MODERATOR
+        await tx.voiceParticipant.update({
+          where: { roomId_userId: { roomId, userId: prevHostId } },
+          data: { role: VOICE_ROLES.MODERATOR, updatedAt: new Date() }
+        });
+        // Promote target → HOST
+        await tx.voiceParticipant.update({
+          where: { id: target.id },
+          data: { role: VOICE_ROLES.HOST, isMuted: false, updatedAt: new Date() }
+        });
+        // Update room hostId — only if current hostId still matches prevHostId
+        const updateResult = await tx.voiceRoom.updateMany({
+          where: { id: roomId, hostId: prevHostId },   // serialization point
+          data: { hostId: targetUserId, updatedAt: new Date() }
+        });
+        if (updateResult.count === 0) {
+          // Another transfer already succeeded — rollback by throwing
+          const err = new Error('You are no longer the host of this room');
+          err.statusCode = 403;
+          throw err;
+        }
+        transferred = true;
+      });
+    } catch (txErr) {
+      if (txErr.statusCode) return errorResponse(res, txErr.message, txErr.statusCode);
+      throw txErr;
+    }
 
     await safeDeleteCache(roomCacheKey(roomId));
 
     const io = getIo();
     if (io) {
       io.to(`voice:${roomId}`).emit('voice:admin_transferred', {
-        roomId,
-        newHostId:  targetUserId,
-        prevHostId,
+        roomId, newHostId: targetUserId, prevHostId,
         newHostName: `${target.user.firstName} ${target.user.lastName}`
       });
-      io.to(`voice:${roomId}`).emit('voice:role_changed', {
-        roomId, userId: targetUserId, role: VOICE_ROLES.HOST
-      });
-      io.to(`voice:${roomId}`).emit('voice:role_changed', {
-        roomId, userId: prevHostId, role: VOICE_ROLES.MODERATOR
-      });
-      io.to(`user:${targetUserId}`).emit('voice:you_are_host', {
-        roomId,
-        message: "You are now the host of this room!"
-      });
+      io.to(`voice:${roomId}`).emit('voice:role_changed', { roomId, userId: targetUserId, role: VOICE_ROLES.HOST });
+      io.to(`voice:${roomId}`).emit('voice:role_changed', { roomId, userId: prevHostId, role: VOICE_ROLES.MODERATOR });
+      io.to(`user:${targetUserId}`).emit('voice:you_are_host', { roomId, message: 'You are now the host of this room!' });
     }
 
+    _rolesAudit(prevHostId, 'TRANSFER_OWNERSHIP', roomId, { newHostId: targetUserId });
     return successResponse(res, {
-      newHostId:  targetUserId,
-      prevHostId,
-      newHostRole: VOICE_ROLES.HOST,
-      prevHostRole: VOICE_ROLES.MODERATOR
+      newHostId: targetUserId, prevHostId,
+      newHostRole: VOICE_ROLES.HOST, prevHostRole: VOICE_ROLES.MODERATOR
     }, `Ownership transferred to ${target.user.firstName}`);
   } catch (error) { next(error); }
 }
@@ -257,7 +283,7 @@ async function muteAll(req, res, next) {
 
     await prisma.voiceParticipant.updateMany({
       where: { id: { in: targets.map(t => t.id) } },
-      data: { isMuted: true, updatedAt: new Date() }
+      data: { isMuted: true, mutedByModerator: true, updatedAt: new Date() }
     });
 
     await safeDeleteCache(roomCacheKey(roomId));
@@ -271,8 +297,61 @@ async function muteAll(req, res, next) {
       });
     }
 
+    _rolesAudit(callerId, 'MUTE_ALL', roomId, { mutedCount: targets.length });
     return successResponse(res, { mutedCount: targets.length },
       `Muted ${targets.length} speaker${targets.length > 1 ? 's' : ''}`);
+  } catch (error) { next(error); }
+}
+
+// ─── UNMUTE ALL ───────────────────────────────────────────────────────────────
+/**
+ * PATCH /voice/:id/unmute-all
+ * P1-1 FIX: Unmutes all SPEAKER and MODERATOR participants.
+ * HOST/MOD only. Inverse of muteAll.
+ * The calling user (HOST/MOD) is excluded from the update — they control their
+ * own mic independently. AUDIENCE participants are left alone (they are always
+ * muted and are not stage speakers).
+ */
+async function unmuteAll(req, res, next) {
+  try {
+    const { id: roomId } = req.params;
+    const callerId = req.user.id;
+
+    // Find all currently muted SPEAKER and MODERATOR (not self, not HOST who controls own mic)
+    const targets = await prisma.voiceParticipant.findMany({
+      where: {
+        roomId,
+        isActive: true,
+        isMuted:  true,
+        userId:   { not: callerId },
+        role:     { in: [VOICE_ROLES.SPEAKER, VOICE_ROLES.MODERATOR] }
+      },
+      select: { id: true, userId: true }
+    });
+
+    if (targets.length === 0) {
+      return successResponse(res, { unmutedCount: 0 }, 'No muted speakers to unmute');
+    }
+
+    await prisma.voiceParticipant.updateMany({
+      where: { id: { in: targets.map(t => t.id) } },
+      data: { isMuted: false, mutedByModerator: false, updatedAt: new Date() }
+    });
+
+    await safeDeleteCache(roomCacheKey(roomId));
+
+    const io = getIo();
+    if (io) {
+      targets.forEach(t => {
+        io.to(`voice:${roomId}`).emit('voice:mute_changed', {
+          roomId, userId: t.userId, isMuted: false
+        });
+      });
+    }
+
+    _rolesAudit(callerId, 'UNMUTE_ALL', roomId, { unmutedCount: targets.length });
+    return successResponse(res, { unmutedCount: targets.length },
+      `Unmuted ${targets.length} speaker${targets.length > 1 ? 's' : ''}`);
   } catch (error) { next(error); }
 }
 
@@ -280,19 +359,27 @@ async function muteAll(req, res, next) {
 /**
  * GET /voice/:id/participants
  * Returns all active participants grouped by role.
- * Available to everyone in the room.
+ * P2-2 FIX: Added pagination — ?page=1&limit=100. Default limit 100, max 200.
  */
 async function getParticipants(req, res, next) {
   try {
     const { id: roomId } = req.params;
+    const { page = 1, limit = 100 } = req.query;
+    const take = Math.min(200, parseInt(limit));
+    const skip = (Math.max(1, parseInt(page)) - 1) * take;
 
-    const participants = await prisma.voiceParticipant.findMany({
-      where: { roomId, isActive: true },
-      include: {
-        user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } }
-      },
-      orderBy: [{ role: 'asc' }, { joinedAt: 'asc' }]
-    });
+    const [total, participants] = await Promise.all([
+      prisma.voiceParticipant.count({ where: { roomId, isActive: true } }),
+      prisma.voiceParticipant.findMany({
+        where: { roomId, isActive: true },
+        include: {
+          user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } }
+        },
+        orderBy: [{ role: 'asc' }, { joinedAt: 'asc' }],
+        skip,
+        take,
+      })
+    ]);
 
     // Group by role
     const grouped = {
@@ -300,7 +387,9 @@ async function getParticipants(req, res, next) {
       moderators: participants.filter(p => p.role === VOICE_ROLES.MODERATOR),
       speakers:   participants.filter(p => p.role === VOICE_ROLES.SPEAKER),
       audience:   participants.filter(p => p.role === VOICE_ROLES.AUDIENCE),
-      total:      participants.length
+      total,
+      page:       parseInt(page),
+      hasMore:    skip + take < total,
     };
 
     return successResponse(res, grouped);
@@ -370,4 +459,4 @@ async function pinSpeaker(req, res, next) {
   } catch (error) { next(error); }
 }
 
-module.exports = { assignModerator, removeModerator, transferAdmin, muteAll, getParticipants, pinSpeaker };
+module.exports = { assignModerator, removeModerator, transferAdmin, muteAll, unmuteAll, getParticipants, pinSpeaker };

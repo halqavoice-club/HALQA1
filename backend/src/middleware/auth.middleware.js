@@ -165,7 +165,8 @@ function requireSchoolAccess(req, res, next) {
   if (!schoolId) return next();
 
   const { user } = req;
-  if (user.role === 'SUPER_ADMIN') return next();
+  // ARCH-01: SUPER_ADMIN no longer bypasses school access.
+  // They must have a real schoolId or membership like any other user.
   if (user.schoolId !== schoolId) {
     return errorResponse(res, 'Access denied to this school', 403);
   }

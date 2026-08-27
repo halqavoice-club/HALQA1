@@ -25,6 +25,7 @@ const { successResponse, errorResponse } = require('../utils/response');
 const { getIo } = require('../sockets');
 const { VOICE_ROLES, MODERATOR_ROLES } = require('../middleware/voiceRole.middleware');
 const logger = require('../utils/logger');
+const { notify } = require('../services/notification.service');
 
 const MAX_SPEAKERS = 10;
 
@@ -87,7 +88,15 @@ async function raiseHand(req, res, next) {
     // ── Validate room ──────────────────────────────────────────────────────
     const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
-    if (room.status === 'ENDED')  return errorResponse(res, 'Room has ended', 400);
+    // PERMANENT ROOMS: Only archived rooms block the queue.
+    if (room.status === 'ENDED')  return errorResponse(res, 'This room has been archived', 400);
+
+    // P0-1 FIX: micLocked blocks new speaker entries via the queue as well.
+    // HOST/MODERATOR are already speakers so they cannot raiseHand; this only
+    // affects AUDIENCE members trying to enter the speaker queue.
+    if (room.micLocked) {
+      return errorResponse(res, 'The mic is locked — no new speakers can join the stage', 403);
+    }
 
     // ── Validate participant ───────────────────────────────────────────────
     const participant = await prisma.voiceParticipant.findUnique({
@@ -225,6 +234,13 @@ async function approveNext(req, res, next) {
     const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
     if (!room) return errorResponse(res, 'Room not found', 404);
 
+    // P2-1 FIX: micLocked blocks HOST/MOD from approving new speakers too.
+    // The queue may still contain waiting users but no new speakers should
+    // be created while the stage is locked.
+    if (room.micLocked) {
+      return errorResponse(res, 'The mic is locked — unlock to approve speakers', 403);
+    }
+
     const speakerCount = await countSpeakers(roomId);
     const limit = room.maxSpeakers || MAX_SPEAKERS;
     if (speakerCount >= limit) {
@@ -298,6 +314,11 @@ async function approveUser(req, res, next) {
     const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
     if (!room) return errorResponse(res, 'Room not found', 404);
 
+    // P2-1 FIX: micLocked blocks approveUser as well
+    if (room.micLocked) {
+      return errorResponse(res, 'The mic is locked — unlock to approve speakers', 403);
+    }
+
     const speakerCount = await countSpeakers(roomId);
     const limit = room.maxSpeakers || MAX_SPEAKERS;
     if (speakerCount >= limit) {
@@ -330,40 +351,72 @@ async function approveUser(req, res, next) {
 }
 
 // ─── Shared promotion logic ───────────────────────────────────────────────────
+// P1-2 FIX: Wrap the DB update in a transaction that first re-checks the
+// participant's current role. Two concurrent moderator approvals used to both
+// succeed; now the second will find role != 'AUDIENCE' and return a clear error.
 async function _promoteUser(req, res, userMeta, roomId, room) {
   const { userId } = userMeta;
 
-  // ── Update DB ─────────────────────────────────────────────────────────
-  await prisma.voiceParticipant.update({
-    where: { roomId_userId: { roomId, userId } },
-    data: {
-      role:        'SPEAKER',
-      isMuted:     false,
-      handRaised:  false,
-      handRaisedAt: null,
-      updatedAt:   new Date()
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Re-read inside transaction — prevents race condition between two simultaneous approvals
+      const current = await tx.voiceParticipant.findUnique({
+        where: { roomId_userId: { roomId, userId } },
+        select: { role: true, isActive: true }
+      });
+
+      if (!current?.isActive) {
+        const err = new Error('Participant is no longer in the room');
+        err.statusCode = 400;
+        throw err;
+      }
+      if (current.role !== 'AUDIENCE') {
+        const err = new Error(`User is already ${current.role.toLowerCase()} — cannot promote again`);
+        err.statusCode = 409;
+        throw err;
+      }
+
+      await tx.voiceParticipant.update({
+        where: { roomId_userId: { roomId, userId } },
+        data: {
+          role:        'SPEAKER',
+          isMuted:     false,
+          handRaised:  false,
+          handRaisedAt: null,
+          updatedAt:   new Date()
+        }
+      });
+    });
+  } catch (txErr) {
+    if (txErr.statusCode) {
+      return errorResponse(res, txErr.message, txErr.statusCode);
     }
-  });
+    throw txErr; // re-throw unexpected errors to the outer next()
+  }
+
   await safeDeleteCache(roomCacheKey(roomId));
 
   // ── Broadcast ─────────────────────────────────────────────────────────
   const io = getIo();
   if (io) {
-    // Tell everyone the role changed
     io.to(`voice:${roomId}`).emit('voice:role_changed', {
-      roomId,
-      userId,
-      role: 'SPEAKER'
+      roomId, userId, role: 'SPEAKER'
     });
-    // Tell the promoted user specifically
     io.to(`user:${userId}`).emit('voice:promoted_to_speaker', {
       roomId,
       message: "You've been approved as a speaker!"
     });
   }
 
-  // Broadcast updated queue
   await broadcastQueue(roomId);
+
+  // P2-3: Push notification to the promoted user
+  notify(userId, {
+    type:  'MENTION',  // reuse as speaker approval notification
+    title: 'You are now a speaker!',
+    body:  "You've been approved as a speaker in a voice room.",
+    data:  { roomId, type: 'speaker_approved' }
+  }).catch(() => {});
 
   return successResponse(res, {
     userId,
@@ -414,14 +467,20 @@ async function rejectUser(req, res, next) {
     // ── Broadcast ─────────────────────────────────────────────────────────
     const io = getIo();
     if (io) {
-      // Notify the rejected user privately
       io.to(`user:${targetUserId}`).emit('voice:queue_rejected', {
         roomId,
         message: 'Your request to speak was declined.'
       });
-      // Update queue for everyone
     }
     await broadcastQueue(roomId);
+
+    // P2-3: Push notification to the rejected user
+    notify(targetUserId, {
+      type:  'SYSTEM',
+      title: 'Speaker request declined',
+      body:  'Your request to speak was not approved.',
+      data:  { roomId, type: 'speaker_rejected' }
+    }).catch(() => {});
 
     return successResponse(res, null, 'Request rejected');
   } catch (error) { next(error); }
@@ -432,7 +491,8 @@ async function rejectUser(req, res, next) {
  * GET /voice/:id/queue
  *
  * Returns the full FIFO queue in order.
- * Available to host and admins; audience members see only their position.
+ * Only active HOST or MODERATOR participants see the full queue.
+ * All other users (including SUPER_ADMIN without a room role) see only their position.
  */
 async function getQueueHandler(req, res, next) {
   try {
@@ -443,19 +503,20 @@ async function getQueueHandler(req, res, next) {
       where: { roomId_userId: { roomId, userId } }
     });
 
-    const isHost  = participant?.role === 'HOST' || participant?.role === 'MODERATOR';
-    // NF-6 FIX: Voice queue admin is Social-scoped — host or SUPER_ADMIN only.
-    const isAdmin = req.user.role === 'SUPER_ADMIN';
+    // SA-FIX-09: SUPER_ADMIN has no room-level queue admin privilege.
+    // Full queue is available only to active HOST or MODERATOR participants.
+    const isHost = participant?.isActive &&
+      (participant?.role === 'HOST' || participant?.role === 'MODERATOR');
 
-    if (isHost || isAdmin) {
-      // Full queue for host
+    if (isHost) {
+      // Full queue for host/moderator
       let q = [];
       if (isRedisReady()) {
         try { q = await queue.getQueue(roomId); } catch (err) { /* Redis unavailable */ }
       }
       return successResponse(res, { queue: q, queueLength: q.length });
     } else {
-      // Audience: just their position
+      // Audience (or non-participant): just their position
       let position = 0;
       let length   = 0;
       if (isRedisReady()) {

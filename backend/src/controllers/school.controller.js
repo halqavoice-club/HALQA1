@@ -22,12 +22,28 @@ async function listSchools(req, res, next) {
 
 async function getSchool(req, res, next) {
   try {
-    const school = await prisma.school.findUnique({
-      where: { id: req.params.id },
-      include: { settings: true }
-    });
-    if (!school) return errorResponse(res, 'School not found', 404);
-    return successResponse(res, school);
+    // Use raw SQL to include `description` — Prisma client was compiled before
+    // the 20260822_add_school_description migration, so prisma.school.findUnique
+    // doesn't return the field yet. Raw SQL works on all column versions.
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT s.id, s.name, s.slug, s.type, s.description,
+              s.address, s.city, s.state, s.country, s.phone, s.email,
+              s.website, s.logoUrl, s.timezone, s.isActive,
+              s.deletedAt, s.createdAt, s.updatedAt
+       FROM schools s
+       WHERE s.id = ? AND s.deletedAt IS NULL
+       LIMIT 1`,
+      req.params.id
+    );
+    if (!rows || rows.length === 0) return errorResponse(res, 'School not found', 404);
+    const school = rows[0];
+
+    // Load settings via ORM (settings table has no new columns)
+    const settings = await prisma.schoolSettings.findUnique({
+      where: { schoolId: req.params.id }
+    }).catch(() => null);
+
+    return successResponse(res, { ...school, settings: settings || null });
   } catch (error) { next(error); }
 }
 
@@ -35,7 +51,7 @@ async function createSchool(req, res, next) {
   try {
     // Explicit field extraction prevents mass assignment
     const {
-      name, slug, type, address, city, state, country,
+      name, slug, type, description, address, city, state, country,
       phone, email, website, logoUrl, timezone
     } = req.body;
 
@@ -43,16 +59,17 @@ async function createSchool(req, res, next) {
       data: {
         name,
         slug,
-        type:     type     || 'school',
-        address:  address  || null,
-        city:     city     || null,
-        state:    state    || null,
-        country:  country  || 'US',
-        phone:    phone    || null,
-        email:    email    || null,
-        website:  website  || null,
-        logoUrl:  logoUrl  || null,
-        timezone: timezone || 'America/New_York',
+        type:        type        || 'school',
+        description: description || null,
+        address:     address     || null,
+        city:        city        || null,
+        state:       state       || null,
+        country:     country     || 'US',
+        phone:       phone       || null,
+        email:       email       || null,
+        website:     website     || null,
+        logoUrl:     logoUrl     || null,
+        timezone:    timezone    || 'America/New_York',
         settings: { create: {} }
       },
       include: { settings: true }
@@ -66,10 +83,11 @@ async function updateSchool(req, res, next) {
     // Explicit field extraction prevents mass assignment
     // Sensitive fields (deletedAt, isActive) are NOT accepted from req.body
     const {
-      name, slug, type, address, city, state, country,
+      name, slug, type, description, address, city, state, country,
       phone, email, website, logoUrl, timezone
     } = req.body;
 
+    // Build safe ORM update data (known-safe fields, no description yet — see below)
     const data = {};
     if (name     !== undefined) data.name     = name;
     if (slug     !== undefined) data.slug     = slug;
@@ -84,11 +102,27 @@ async function updateSchool(req, res, next) {
     if (logoUrl  !== undefined) data.logoUrl  = logoUrl  || null;
     if (timezone !== undefined) data.timezone = timezone;
 
-    const school = await prisma.school.update({
-      where: { id: req.params.id },
-      data
-    });
-    return successResponse(res, school, 'School updated');
+    // Update ORM-known fields
+    if (Object.keys(data).length > 0) {
+      await prisma.school.update({ where: { id: req.params.id }, data });
+    }
+
+    // description: Prisma client was compiled before this column was added.
+    // Use raw SQL to avoid P2022 "Unknown argument" error until prisma generate is run.
+    if (description !== undefined) {
+      await prisma.$executeRawUnsafe(
+        'UPDATE schools SET description = ?, updatedAt = NOW() WHERE id = ?',
+        description || null,
+        req.params.id
+      );
+    }
+
+    // Re-fetch full row including description
+    const rows = await prisma.$queryRawUnsafe(
+      'SELECT id, name, slug, type, description, address, city, state, country, phone, email, website, logoUrl, timezone, isActive, createdAt, updatedAt FROM schools WHERE id = ? LIMIT 1',
+      req.params.id
+    );
+    return successResponse(res, rows[0] || null, 'School updated');
   } catch (error) { next(error); }
 }
 

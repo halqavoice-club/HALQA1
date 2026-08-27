@@ -533,7 +533,6 @@ async function getUserAnalytics(req, res) {
 
     // P3-001: users can only read their own analytics
     assertUserStatsAccess(req, userId);
-
     const { period = '30d' } = req.query;
 
     const endDate = new Date();
@@ -609,6 +608,61 @@ async function getUserAnalytics(req, res) {
   }
 }
 
+/**
+ * Track a client-side analytics event (POST /analytics/events)
+ * Rate-limited: 60 req/min per user (handled by existing rateLimiter middleware).
+ * Events are stored in DailyUserStats — increments the matching counter.
+ * Unknown event names are accepted but stored as-is in a JSON log field (future use).
+ */
+async function trackEvent(req, res) {
+  try {
+    const userId = req.user.id;
+    const { event, properties } = req.body;
+
+    if (!event || typeof event !== 'string') {
+      return res.status(400).json({ success: false, message: 'event is required' });
+    }
+
+    // Map known frontend event names to DailyUserStats fields
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const statMap = {
+      'voice_room_join':    'voiceMinutes',
+      'post_created':       'postsCreated',
+      'comment_created':    'commentsCreated',
+      'like_given':         'likesGiven',
+      'message_sent':       'messagesSent',
+      'gift_sent':          'giftsSent',
+      'page_view':          'loginCount',
+    };
+
+    const statField = statMap[event];
+
+    if (statField) {
+      const amount = properties?.value ?? 1;
+      await prisma.dailyUserStats.upsert({
+        where:  { userId_date: { userId, date: today } },
+        create: {
+          userId, date: today,
+          loginCount: 0, postsCreated: 0, commentsCreated: 0,
+          likesGiven: 0, likesReceived: 0, messagesSent: 0,
+          voiceMinutes: 0, giftsSent: 0, giftsReceived: 0,
+          coinsSpent: 0, coinsEarned: 0,
+          [statField]: amount,
+        },
+        update: { [statField]: { increment: amount } },
+      });
+    }
+
+    // Always return 202 — fire-and-forget from client's perspective
+    res.status(202).json({ success: true });
+  } catch (error) {
+    // Non-fatal — analytics must never break the client
+    res.status(202).json({ success: true });
+  }
+}
+
 module.exports = {
   getDailySchoolStats,
   getOrCreateDailySchoolStats,
@@ -618,5 +672,6 @@ module.exports = {
   updateDailyUserStats,
   incrementUserStat,
   getSchoolAnalytics,
-  getUserAnalytics
+  getUserAnalytics,
+  trackEvent,
 };

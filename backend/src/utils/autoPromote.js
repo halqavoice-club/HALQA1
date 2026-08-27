@@ -20,9 +20,13 @@ async function autoPromoteNext(roomId, io) {
   // Check if there's room for another speaker
   const room = await prisma.voiceRoom.findUnique({
     where: { id: roomId },
-    select: { maxSpeakers: true, status: true }
+    select: { maxSpeakers: true, status: true, micLocked: true }
   });
   if (!room || room.status === 'ENDED') return null;
+
+  // P2-1 FIX: Do not auto-promote when mic is locked.
+  // The host locked the stage intentionally; respect that even on slot-free events.
+  if (room.micLocked) return null;
 
   const speakerCount = await prisma.voiceParticipant.count({
     where: { roomId, isActive: true, role: { in: ['HOST', 'MODERATOR', 'SPEAKER'] } }

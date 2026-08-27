@@ -17,10 +17,11 @@ const { moderateDeviceLimiter } = require('../middleware/rateLimiter.device');
 const { middleware: idempotency } = require('../middleware/idempotency');
 const {
   listRooms, getRoom, searchRooms, createRoom, joinRoom, leaveRoom, endRoom,
-  toggleMute, raiseHand, promoteParticipant, kickParticipant,
+  toggleMute, raiseHand, promoteParticipant, kickParticipant, banParticipant, unbanParticipant,
   getMessages, sendMessage, getHandQueue,
   toggleOpenMic, toggleMicLock, grabMic, dropMic,
-  updateRoom, deleteRoom, getMyRooms, uploadRoomCover
+  updateRoom, deleteRoom, getMyRooms, getScheduledRooms, uploadRoomCover, toggleSeatLock,
+  deleteMessage
 } = require('../controllers/voice.controller');
 
 // ─── Multer — room cover image (2 MB, images only, memory storage) ───────────
@@ -62,7 +63,7 @@ const {
   getQueueHandler
 } = require('../controllers/voice-queue.controller');
 const {
-  assignModerator, removeModerator, transferAdmin, muteAll, getParticipants, pinSpeaker
+  assignModerator, removeModerator, transferAdmin, muteAll, unmuteAll, getParticipants, pinSpeaker
 } = require('../controllers/voice-roles.controller');
 const {
   checkVoiceRole, VOICE_ROLES
@@ -98,6 +99,7 @@ router.get('/stats/leaderboard', getLeaderboard);
 router.get('/', moderateLimiter, listRooms);
 router.get('/search', moderateLimiter, searchRooms);  // must be before /:id
 router.get('/my', moderateLimiter, getMyRooms);       // user's own rooms — must be before /:id
+router.get('/scheduled', moderateLimiter, getScheduledRooms); // P2-4: upcoming scheduled rooms
 router.get('/:id', moderateLimiter, getRoom);
 
 router.post('/',
@@ -173,6 +175,15 @@ router.patch('/:id/promote',
 
 router.delete('/:id/kick/:userId', kickParticipant);
 
+// Ban a participant (kick + persistent DB ban — cannot rejoin)
+router.post('/:id/ban/:userId',
+  [body('reason').optional().isString().isLength({ max: 500 })],
+  validate,
+  banParticipant
+);
+// Unban a participant (removes persistent ban)
+router.delete('/:id/ban/:userId', unbanParticipant);
+
 // ─── FIFO SPEAKER QUEUE ───────────────────────────────────────────────────────
 router.post('/:id/queue/raise',              queueRaiseHand);
 router.delete('/:id/queue/cancel',           cancelHand);
@@ -201,6 +212,11 @@ router.patch('/:id/mute-all',
   checkVoiceRole([VOICE_ROLES.HOST, VOICE_ROLES.MODERATOR]),
   muteAll
 );
+// HOST or MODERATOR unmutes all speakers (P1-1 FIX)
+router.patch('/:id/unmute-all',
+  checkVoiceRole([VOICE_ROLES.HOST, VOICE_ROLES.MODERATOR]),
+  unmuteAll
+);
 // HOST or MODERATOR pins/unpins a speaker to top of stage
 router.patch('/:id/pin/:userId',
   checkVoiceRole([VOICE_ROLES.HOST, VOICE_ROLES.MODERATOR]),
@@ -211,17 +227,26 @@ router.patch('/:id/pin/:userId',
 router.get('/:id/participants', getParticipants);
 
 // ─── OPEN MIC ─────────────────────────────────────────────────────────────────
-// HOST/MOD toggles open mic mode
+// HOST/MOD toggles open mic mode — route-level guard added for defence-in-depth
 router.patch('/:id/open-mic',
+  checkVoiceRole([VOICE_ROLES.HOST, VOICE_ROLES.MODERATOR]),
   [body('enabled').optional().isBoolean()],
   validate,
   toggleOpenMic
 );
-// HOST/MOD locks/unlocks the mic (prevents anyone from grabbing the mic)
+// HOST or MODERATOR locks/unlocks the mic — route-level guard added for defence-in-depth
 router.patch('/:id/mic-lock',
+  checkVoiceRole([VOICE_ROLES.HOST, VOICE_ROLES.MODERATOR]),
   [body('locked').optional().isBoolean()],
   validate,
   toggleMicLock
+);
+
+// HOST or MODERATOR locks/unlocks an individual speaker seat by index
+router.patch('/:id/seat-lock',
+  [body('seatIndex').isInt({ min: 0, max: 99 }).withMessage('seatIndex must be 0-99')],
+  validate,
+  toggleSeatLock
 );
 // AUDIENCE grabs mic directly
 router.post('/:id/grab-mic', grabMic);
@@ -247,6 +272,9 @@ router.post('/:id/messages',
   validate,
   sendMessage
 );
+
+// Delete a single message (host/mod/author only)
+router.delete('/:id/messages/:msgId', deleteMessage);
 
 // ─── HAND QUEUE (legacy) ──────────────────────────────────────────────────────
 router.get('/:id/hand-queue', getHandQueue);
