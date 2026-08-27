@@ -349,7 +349,7 @@ Integrated into same `POST /transactions/:id/refund` endpoint:
 | FS-GAP-004 | LOW | Feed | SUPER_ADMIN can create stories |
 | FS-GAP-006 | LOW | Feed | No post/user muting feature |
 | CHAT-GAP-002 | LOW | Chat/DM | No DM message editing |
-| CHAT-GAP-003 | MEDIUM | Chat/DM | ALLOW_DM_NON_FRIENDS not verified at API level |
+| CHAT-GAP-003 | MEDIUM | Chat/DM | ✅ VERIFIED Sprint 11 — areFriends() enforced server-side in both sendMessage and getOrStartConversation |
 | UIGAP-001 | MEDIUM | Admin UI | Route guard is client-side only |
 | UIGAP-002 | HIGH | Admin UI | ✅ FIXED Sprint 5 — Session management (view + revoke) |
 | UIGAP-003 | MEDIUM | Admin UI | ✅ FIXED Sprint 9 — User profile drill-down page |
@@ -370,9 +370,11 @@ Integrated into same `POST /transactions/:id/refund` endpoint:
 | 🟡 MEDIUM | 6 | 5 (SVSV-001, UIGAP-008✅, FS-GAP-002✅, UIGAP-014✅, GAP-001✅mitigated, GAP-002✅resolved) |
 | 🟢 LOW | 13 | 2 (LCSV-003, VC-SA-002 inert) |
 
-**Sprints 1–10 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001, UIGAP-004, UIGAP-005, UIGAP-002, FS-GAP-002, UIGAP-014, GAP-001 (mitigated), GAP-002 (already resolved), PAY-GAP-001, PAY-GAP-002, UIGAP-003, UIGAP-012
+**Sprints 1–11 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001, UIGAP-004, UIGAP-005, UIGAP-002, FS-GAP-002, UIGAP-014, GAP-001 (mitigated), GAP-002 (already resolved), PAY-GAP-001, PAY-GAP-002, UIGAP-003, UIGAP-012, CHAT-GAP-003 (verified)
 
 **Still open (MEDIUM):**
-- CHAT-GAP-003 — ALLOW_DM_NON_FRIENDS not verified at API level
 - VC-GAP-003 — No admin voice room inspection without participation
-- LTSV-001 — Generic LiveKit token school bypass (LOW/mitigated)
+
+**Still open (LOW):**
+- LTSV-001 — Generic LiveKit token school bypass (mitigated by participant check)
+- VC-SA-002 — SA bypasses voice room GET check (inert, 2 failing tests document this)
