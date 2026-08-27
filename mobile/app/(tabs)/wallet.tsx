@@ -129,7 +129,14 @@ export default function WalletScreen() {
       }
       // 503 = Stripe not configured — fall through to dev mode
     }
-    // Dev fallback
+    // Dev fallback — only works in development (blocked by backend in production)
+    // In production, the /stripe/checkout flow above handles coin purchases.
+    // If we reach this point in production, show an appropriate message.
+    if (process.env.EXPO_PUBLIC_ENV === 'production') {
+      showMessage({ message: 'Stripe checkout is required for purchases', type: 'danger' });
+      setBuyingId(null);
+      return;
+    }
     try {
       const res = await api.post('/wallet/purchase', { packageId: pkg.id });
       const total = res.data.data?.purchased?.total ?? 0;

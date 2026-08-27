@@ -25,6 +25,8 @@ interface Message {
   body: string;
   senderId: string;
   createdAt: string;
+  isEdited?: boolean;      // Sprint 16 (CHAT-GAP-002): true when message was edited
+  editedAt?:  string;      // Sprint 16: timestamp of last edit
   sender: { id: string; firstName: string; lastName: string };
 }
 
@@ -115,15 +117,35 @@ export default function DMConversationScreen() {
     const onRead = (data: { convId: string }) => {
       if (data.convId === convId) qc.invalidateQueries({ queryKey: ['dm-messages', convId] });
     };
+    // Sprint 16 (CHAT-GAP-002): handle real-time message edit from sender
+    // Backend emits { convId, messageId, newBody, editedAt } to receiver's personal room
+    const onEdited = (data: { convId: string; messageId: string; newBody: string; editedAt: string }) => {
+      if (data.convId !== convId) return;
+      qc.setQueryData(['dm-messages', convId], (old: any) => {
+        if (!old) return old;
+        return {
+          ...old,
+          pages: old.pages.map((page: Message[]) =>
+            page.map(msg =>
+              msg.id === data.messageId
+                ? { ...msg, body: data.newBody, isEdited: true, editedAt: data.editedAt }
+                : msg
+            )
+          ),
+        };
+      });
+    };
 
-    socket.on('dm:message',   onMsg);
-    socket.on('dm:delivered', onDelivered);
-    socket.on('dm:read',      onRead);
+    socket.on('dm:message',       onMsg);
+    socket.on('dm:delivered',     onDelivered);
+    socket.on('dm:read',          onRead);
+    socket.on('dm:message_edited', onEdited);
 
     return () => {
-      socket.off('dm:message',   onMsg);
-      socket.off('dm:delivered', onDelivered);
-      socket.off('dm:read',      onRead);
+      socket.off('dm:message',       onMsg);
+      socket.off('dm:delivered',     onDelivered);
+      socket.off('dm:read',          onRead);
+      socket.off('dm:message_edited', onEdited);
     };
   }, [otherUserId, convId, qc]);
 
@@ -148,6 +170,7 @@ export default function DMConversationScreen() {
           </Text>
           <Text style={[styles.bubbleTime, isMe && { color: '#c7d2fe' }]}>
             {formatDistanceToNow(new Date(item.createdAt), { addSuffix: true })}
+            {item.isEdited && ' · edited'}
           </Text>
         </View>
       </View>
