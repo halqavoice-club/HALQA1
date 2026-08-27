@@ -175,3 +175,104 @@ router.post('/voice/:id/terminate', async (req, res, next) => {
 });
 
 module.exports = router;
+
+// ─── POST /api/v1/admin/actions/users/:id/grant-coins ────────────────────────
+/**
+ * Grant coins to a user as a platform administrative action.
+ *
+ * UIGAP-005 FIX: Implements the ADMIN_GRANT WalletTransaction type that was
+ * present in the schema but had no API endpoint.
+ *
+ * Requirements (INVARIANT-006):
+ * - Atomic transaction (wallet update + ledger entry)
+ * - Idempotency key to prevent double-grant on retry
+ * - Must not result in negative balance (grants are always positive)
+ * - Full audit log entry written
+ * - User receives a socket notification
+ *
+ * Body: { coins: number (1–100000), reason: string (required, min 10 chars), idempotencyKey?: string }
+ */
+router.post('/users/:id/grant-coins', async (req, res, next) => {
+  try {
+    const { id: targetUserId } = req.params;
+    const adminId = req.user.id;
+    const { coins, reason, idempotencyKey } = req.body;
+
+    // Validation
+    const coinsInt = parseInt(coins, 10);
+    if (!coinsInt || coinsInt < 1 || coinsInt > 100_000) {
+      return errorResponse(res, 'coins must be an integer between 1 and 100,000', 400);
+    }
+    if (!reason || typeof reason !== 'string' || reason.trim().length < 10) {
+      return errorResponse(res, 'reason is required (minimum 10 characters)', 400);
+    }
+
+    // Find target user
+    const target = await prisma.user.findUnique({
+      where: { id: targetUserId, deletedAt: null },
+      select: { id: true, email: true, firstName: true, lastName: true }
+    });
+    if (!target) return errorResponse(res, 'User not found', 404);
+
+    // Idempotency check — prevents double-grant on client retry
+    const iKey = idempotencyKey || uuidv4();
+    const existing = await prisma.walletTransaction.findFirst({
+      where: { userId: targetUserId, type: 'ADMIN_GRANT', description: { contains: iKey } }
+    });
+    if (existing) {
+      return res.status(200).json({
+        success: true,
+        data: existing,
+        message: 'Grant already processed (idempotent)',
+        duplicate: true
+      });
+    }
+
+    // Atomic: credit coins + write ledger entry
+    let transaction;
+    await prisma.$transaction(async (tx) => {
+      // Ensure wallet exists
+      await tx.wallet.upsert({
+        where:  { userId: targetUserId },
+        create: { userId: targetUserId, coins: coinsInt, diamonds: 0, totalSpent: 0, totalEarned: 0 },
+        update: { coins: { increment: coinsInt } }
+      });
+
+      transaction = await tx.walletTransaction.create({
+        data: {
+          id:          uuidv4(),
+          userId:      targetUserId,
+          type:        'ADMIN_GRANT',
+          coins:       coinsInt,   // positive = credit
+          description: `Admin grant by ${adminId} — ${reason.trim()} [ikey:${iKey}]`,
+        }
+      });
+    });
+
+    // Notify user via socket
+    const io = getIo();
+    if (io) {
+      io.to(`user:${targetUserId}`).emit('wallet:coins_credited', {
+        coins:       coinsInt,
+        packageId:   null,
+        type:        'ADMIN_GRANT',
+        description: `${coinsInt} coins granted by platform admin`,
+      });
+      io.to(`wallet:${targetUserId}`).emit('wallet:coins_credited', {
+        coins:       coinsInt,
+        type:        'ADMIN_GRANT',
+      });
+    }
+
+    // Audit log
+    await adminAudit(adminId, 'ADMIN_COIN_GRANT', 'wallet', targetUserId,
+      { coins: coinsInt, reason: reason.trim(), targetEmail: target.email },
+      req.ip
+    );
+
+    logger.info(`[admin-actions] ${coinsInt} coins granted to ${targetUserId} by admin ${adminId}`);
+
+    return successResponse(res, { transaction, coinsGranted: coinsInt, targetUser: target },
+      `${coinsInt} coins granted to ${target.firstName} ${target.lastName}`);
+  } catch (err) { next(err); }
+});

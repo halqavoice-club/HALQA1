@@ -66,6 +66,15 @@ export default function AdminPaymentsPage() {
   const [adminNote, setAdminNote]             = useState('')
   const [transactionRef, setTransactionRef]   = useState('')
 
+  // Coin grant section state (UIGAP-005)
+  const [grantOpen, setGrantOpen]           = useState(false)
+  const [grantUserId, setGrantUserId]       = useState('')
+  const [grantUserEmail, setGrantUserEmail] = useState('')
+  const [grantCoins, setGrantCoins]         = useState('')
+  const [grantReason, setGrantReason]       = useState('')
+  const [lookupResult, setLookupResult]     = useState<any>(null)
+  const [lookupLoading, setLookupLoading]   = useState(false)
+
   // ── Wallet transactions query ─────────────────────────────────────────────
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['admin-payments'],
@@ -105,6 +114,45 @@ export default function AdminPaymentsPage() {
   })
 
   if (!isAdmin) return <div className="flex items-center justify-center h-64"><p className="text-gray-500">Access restricted.</p></div>
+
+  // ── Coin grant lookup helper ─────────────────────────────────────────────
+  async function lookupUserForGrant() {
+    if (!grantUserEmail.trim()) return
+    setLookupLoading(true)
+    setLookupResult(null)
+    try {
+      const res = await api.get('/admin/stats/users', { params: { search: grantUserEmail, limit: 5 } })
+      const users = res.data.data?.users ?? []
+      const match = users.find((u: any) => u.email.toLowerCase() === grantUserEmail.toLowerCase())
+      setLookupResult(match || null)
+      if (!match) toast({ title: 'User not found', description: `No user with email: ${grantUserEmail}`, variant: 'destructive' })
+      else setGrantUserId(match.id)
+    } catch {
+      toast({ title: 'Lookup failed', variant: 'destructive' })
+    } finally {
+      setLookupLoading(false)
+    }
+  }
+
+  // ── Grant coins mutation ────────────────────────────────────────────────
+  const grantMutation = { mutate: async (payload: any) => {
+    try {
+      await api.post(`/admin/actions/users/${payload.userId}/grant-coins`, {
+        coins:  payload.coins,
+        reason: payload.reason,
+      })
+      toast({ title: `✅ ${payload.coins} coins granted`, description: `To ${lookupResult?.firstName} ${lookupResult?.lastName}` })
+      qc.invalidateQueries({ queryKey: ['admin-payments'] })
+      setGrantOpen(false)
+      setGrantUserEmail('')
+      setGrantUserId('')
+      setGrantCoins('')
+      setGrantReason('')
+      setLookupResult(null)
+    } catch (e: any) {
+      toast({ title: 'Grant failed', description: e.response?.data?.message, variant: 'destructive' })
+    }
+  }, isPending: false }
 
   const txs = (data?.recentTransactions ?? []).filter((t: any) => {
     if (!search) return true
@@ -247,7 +295,16 @@ export default function AdminPaymentsPage() {
 
       {/* ── Recent Transactions ─────────────────────────────────────────── */}
       <section>
-        <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4">Recent Wallet Transactions</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-bold text-gray-900 dark:text-white">Recent Wallet Transactions</h2>
+          <Button
+            size="sm" variant="outline"
+            className="text-yellow-700 border-yellow-300 hover:bg-yellow-50 dark:text-yellow-300 dark:border-yellow-700"
+            onClick={() => setGrantOpen(true)}
+          >
+            + Grant Coins
+          </Button>
+        </div>
 
         <div className="relative max-w-sm mb-4">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -314,7 +371,58 @@ export default function AdminPaymentsPage() {
       </section>
 
       {/* ── Payout action dialog ─────────────────────────────────────────── */}
-      <Dialog open={!!selectedPayout} onOpenChange={open => !open && setSelectedPayout(null)}>
+      {/* ── Grant Coins dialog (UIGAP-005) ──────────────────────────────── */}
+      <Dialog open={grantOpen} onOpenChange={open => { if (!open) { setGrantOpen(false); setLookupResult(null); setGrantUserEmail(''); setGrantUserId(''); setGrantCoins(''); setGrantReason('') } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Grant Coins to User</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg text-xs text-yellow-800 dark:text-yellow-200">
+              ⚠️ This action credits coins directly to a user's wallet. It is permanently audited. Use for compensation or corrections only.
+            </div>
+            <div>
+              <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">User Email</label>
+              <div className="flex gap-2">
+                <Input value={grantUserEmail} onChange={e => { setGrantUserEmail(e.target.value); setLookupResult(null) }} placeholder="user@example.com" type="email" />
+                <Button variant="outline" onClick={lookupUserForGrant} disabled={lookupLoading || !grantUserEmail}>
+                  {lookupLoading ? '…' : 'Find'}
+                </Button>
+              </div>
+            </div>
+            {lookupResult && (
+              <div className="flex items-center gap-3 p-3 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                <div className="w-8 h-8 bg-green-100 dark:bg-green-900/40 rounded-full flex items-center justify-center text-sm font-bold text-green-700">
+                  {lookupResult.firstName?.[0]}{lookupResult.lastName?.[0]}
+                </div>
+                <div>
+                  <p className="font-semibold text-sm">{lookupResult.firstName} {lookupResult.lastName}</p>
+                  <p className="text-xs text-gray-500">{lookupResult.email} · {lookupResult.role}</p>
+                </div>
+              </div>
+            )}
+            <div>
+              <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Coins to Grant (1–100,000)</label>
+              <Input type="number" min={1} max={100000} value={grantCoins} onChange={e => setGrantCoins(e.target.value)} placeholder="e.g. 1000" />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Reason (required, min 10 chars)</label>
+              <Textarea value={grantReason} onChange={e => setGrantReason(e.target.value)} placeholder="Why are these coins being granted?" rows={2} maxLength={500} />
+              <p className="text-xs text-gray-400 mt-1">{grantReason.length}/500</p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setGrantOpen(false)}>Cancel</Button>
+            <Button
+              className="bg-yellow-600 hover:bg-yellow-700 text-white"
+              onClick={() => grantMutation.mutate({ userId: grantUserId, coins: parseInt(grantCoins, 10), reason: grantReason })}
+              disabled={!lookupResult || !grantCoins || parseInt(grantCoins,10) < 1 || grantReason.length < 10 || grantMutation.isPending}
+            >
+              {grantMutation.isPending ? 'Granting…' : `Grant ${grantCoins || '?'} Coins`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>      <Dialog open={!!selectedPayout} onOpenChange={open => !open && setSelectedPayout(null)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Manage Payout Request</DialogTitle>

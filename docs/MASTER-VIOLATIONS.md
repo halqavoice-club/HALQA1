@@ -119,7 +119,8 @@ Severity scale: 🚨 CRITICAL · 🔴 HIGH · 🟡 MEDIUM · 🟢 LOW
 **ID:** UIGAP-004  
 **Severity:** 🚨 CRITICAL  
 **Domain:** Payments / Admin UI  
-**Status:** API EXISTS — UI MISSING
+**Status:** ✅ FIXED — Sprint 3 (commit 219df3f)
+Payout management section added to `/admin/payments` page. Wired to existing backend API: `GET /wallet/payout/admin/list` + `PATCH /wallet/payout/admin/:id`.
 
 | Field | Value |
 |-------|-------|
