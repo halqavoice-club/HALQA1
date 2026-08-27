@@ -89,6 +89,6 @@ The FIFO speaker queue lives in Redis. If Redis flushes (restart, OOM), the queu
 | VC-SA-002 | LOW | getScheduledRooms SUPER_ADMIN school bypass (inert) | ❌ Not fixed (inert) |
 | VC-GAP-001 | LOW | voiceMinutes not credited on normal leave | ✅ Already fixed (L-8 FIX in leaveRoom) |
 | VC-GAP-003 | MEDIUM | No admin room inspection without participation | ✅ Fixed Sprint 12 |
-| VC-GAP-004 | LOW | Kick socket eviction may miss multi-tab users | ❌ |
+| VC-GAP-004 | LOW | Kick socket eviction may miss multi-tab users | ✅ Fixed Sprint 18 — socketsLeave() used in voice, room-member, community controllers |
 | VC-GAP-005 | MEDIUM | Kick/ban not audit-logged | ✅ Already implemented (voiceAudit called) |
 | VC-GAP-006 | LOW | Speaker queue lost on Redis flush | ❌ (DB fallback exists) |

@@ -15,6 +15,62 @@ const { successResponse, errorResponse, paginatedResponse, getPagination, buildP
 const { getIo } = require('../sockets');
 const { VOICE_ROLES, MODERATOR_ROLES } = require('../middleware/voiceRole.middleware');
 const crypto = require('crypto');
+const { v4: uuidv4 } = require('uuid');
+
+// ── Authorization helpers ─────────────────────────────────────────────────────
+
+/**
+ * authorizeLiveModerator
+ * P1 FIX: For LIVE SESSION moderation — checks VoiceParticipant.role.
+ * Returns the participant if the caller is an active HOST or MODERATOR.
+ * Returns null otherwise.
+ *
+ * Used by: blockMember, removeMember (when they affect live session state)
+ * NOT used by: permanent membership admin operations (approveRequest, setMemberRole)
+ */
+async function authorizeLiveModerator(roomId, userId) {
+  const participant = await prisma.voiceParticipant.findUnique({
+    where: { roomId_userId: { roomId, userId } }
+  });
+  if (!participant || !participant.isActive) return null;
+  if (!MODERATOR_ROLES.includes(participant.role)) return null;
+  return participant;
+}
+
+/**
+ * authorizeRoomMemberAdmin
+ * For PERMANENT MEMBERSHIP administration — checks VoiceRoomMember.role.
+ * Returns the member record if the caller has the required permanent role.
+ * Also accepts the room host (room.hostId) as always having permission.
+ *
+ * Used by: approveRequest, rejectRequest, setMemberRole, upgradeMember
+ */
+async function authorizeRoomMemberAdmin(roomId, userId, allowedRoles) {
+  const room = await prisma.voiceRoom.findUnique({
+    where: { id: roomId },
+    select: { hostId: true, title: true, roomLevel: true }
+  });
+  if (!room) return { caller: null, room: null };
+  // Room host always has permission for membership admin
+  if (room.hostId === userId) return { caller: { role: 'OWNER' }, room };
+  const member = await prisma.voiceRoomMember.findUnique({ where: { roomId_userId: { roomId, userId } } });
+  if (!member || member.status !== 'ACTIVE') return { caller: null, room };
+  if (!allowedRoles.includes(member.role)) return { caller: null, room };
+  return { caller: member, room };
+}
+
+// ── Audit helper (fire-and-forget, never throws) ──────────────────────────────
+async function _memberAudit(actorId, action, roomId, meta = {}) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        id: uuidv4(), userId: actorId, action: 'UPDATE',
+        entity: 'VoiceRoom', entityId: roomId,
+        newValues: { action, ...meta }
+      }
+    });
+  } catch { /* non-fatal */ }
+}
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -88,7 +144,8 @@ async function requestJoin(req, res, next) {
       select: { id: true, hostId: true, status: true, deletedAt: true, roomLevel: true, title: true }
     });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
-    if (room.status === 'ENDED') return errorResponse(res, 'Room has ended', 400);
+    // PERMANENT ROOMS: Membership requests work on IDLE rooms too.
+    if (room.status === 'ENDED') return errorResponse(res, 'This room has been archived', 400);
 
     const existing = await prisma.voiceRoomMember.findUnique({
       where: { roomId_userId: { roomId, userId } }
@@ -151,7 +208,8 @@ async function approveRequest(req, res, next) {
   try {
     const { id: roomId, userId: targetId } = req.params;
     const callerId = req.user.id;
-    const { caller, room } = await validateCaller(roomId, callerId, ['OWNER','CO_OWNER','ADMIN','MODERATOR']);
+    // PERMANENT MEMBERSHIP ADMIN operation — uses member role chain
+    const { caller, room } = await authorizeRoomMemberAdmin(roomId, callerId, ['OWNER','CO_OWNER','ADMIN','MODERATOR']);
     if (!caller) return errorResponse(res, 'Permission denied', 403);
 
     const member = await prisma.voiceRoomMember.findUnique({ where: { roomId_userId: { roomId, userId: targetId } } });
@@ -172,6 +230,7 @@ async function approveRequest(req, res, next) {
         role: updated.role, memberLevel: updated.memberLevel,
       });
     }
+    _memberAudit(callerId, 'JOIN_REQUEST_APPROVED', roomId, { targetUserId: targetId });
     return successResponse(res, enrichMember(updated), 'Join request approved');
   } catch (error) { next(error); }
 }
@@ -181,25 +240,27 @@ async function rejectRequest(req, res, next) {
   try {
     const { id: roomId, userId: targetId } = req.params;
     const callerId = req.user.id;
-    const { caller } = await validateCaller(roomId, callerId, ['OWNER','CO_OWNER','ADMIN','MODERATOR']);
+    // PERMANENT MEMBERSHIP ADMIN operation — uses member role chain
+    const { caller } = await authorizeRoomMemberAdmin(roomId, callerId, ['OWNER','CO_OWNER','ADMIN','MODERATOR']);
     if (!caller) return errorResponse(res, 'Permission denied', 403);
 
     await prisma.voiceRoomMember.delete({ where: { roomId_userId: { roomId, userId: targetId } } });
 
     const io = getIo();
     if (io) io.to(`user:${targetId}`).emit('voice:join_rejected', { roomId });
+    _memberAudit(callerId, 'JOIN_REQUEST_REJECTED', roomId, { targetUserId: targetId });
     return successResponse(res, null, 'Request rejected');
   } catch (error) { next(error); }
 }
 
-// ── Helper: validate caller has required role ──────────────────────────────────
+// ── Helper: validate caller has required role (kept for non-live operations) ──
+// NOTE: For live-session operations, use authorizeLiveModerator() instead.
+// This function is now only used by permanent-membership-only operations
+// that do not affect VoiceParticipant/live session state.
 async function validateCaller(roomId, userId, allowedRoles) {
   const room = await prisma.voiceRoom.findUnique({ where: { id: roomId }, select: { hostId: true, title: true, roomLevel: true } });
   if (!room) return { caller: null, room: null };
-
-  // Room host always has permission
   if (room.hostId === userId) return { caller: { role: 'OWNER' }, room };
-
   const member = await prisma.voiceRoomMember.findUnique({ where: { roomId_userId: { roomId, userId } } });
   if (!member || member.status !== 'ACTIVE') return { caller: null, room };
   if (!allowedRoles.includes(member.role)) return { caller: null, room };
@@ -323,8 +384,15 @@ async function setMemberRole(req, res, next) {
 
     if (!MEMBER_ROLES.includes(role)) return errorResponse(res, 'Invalid role', 400);
     if (role === 'OWNER') return errorResponse(res, 'Use transfer-owner endpoint to change owner', 400);
+    // MED-1 FIX: Disallow setting BLOCKED via generic role assignment.
+    // blockMember is the single enforcement path for blocking (it also sets
+    // isBanned=true and evicts the live participant). Using setMemberRole with
+    // BLOCKED would set the membership role but leave isBanned=false and the
+    // user could still join. Route callers to the dedicated endpoint.
+    if (role === 'BLOCKED') return errorResponse(res, 'Use the block endpoint to block a member', 400);
 
-    const { caller } = await validateCaller(roomId, callerId, ['OWNER','CO_OWNER','ADMIN']);
+    // PERMANENT MEMBERSHIP ADMIN — uses member role chain
+    const { caller } = await authorizeRoomMemberAdmin(roomId, callerId, ['OWNER','CO_OWNER','ADMIN']);
     if (!caller) return errorResponse(res, 'Permission denied', 403);
 
     const target = await prisma.voiceRoomMember.findUnique({ where: { roomId_userId: { roomId, userId: targetId } } });
@@ -342,34 +410,75 @@ async function setMemberRole(req, res, next) {
       io.to(`voice:${roomId}`).emit('voice:member_role_changed', { roomId, userId: targetId, role, changedBy: callerId });
       io.to(`user:${targetId}`).emit('voice:your_member_role', { roomId, role });
     }
+    _memberAudit(callerId, 'MEMBER_ROLE_SET', roomId, { targetUserId: targetId, role });
     return successResponse(res, enrichMember(updated), `Role updated to ${role}`);
   } catch (error) { next(error); }
 }
 
 // ── REMOVE member ──────────────────────────────────────────────────────────────
+// MED-2 FIX: removeMember is a LIVE SESSION control — requires live HOST/MODERATOR
+// auth and terminates the user's current VoiceParticipant session.
 async function removeMember(req, res, next) {
   try {
     const { id: roomId, userId: targetId } = req.params;
     const callerId = req.user.id;
-    const { caller } = await validateCaller(roomId, callerId, ['OWNER','CO_OWNER','ADMIN','MODERATOR']);
-    if (!caller) return errorResponse(res, 'Permission denied', 403);
+
+    // Live session authorization — must be active live HOST or MODERATOR
+    const liveAuth = await authorizeLiveModerator(roomId, callerId);
+    const room = await prisma.voiceRoom.findUnique({ where: { id: roomId }, select: { hostId: true } });
+    if (!room) return errorResponse(res, 'Room not found', 404);
+    const isRoomHost = room.hostId === callerId;
+    if (!liveAuth && !isRoomHost) {
+      return errorResponse(res, 'Only live hosts and moderators can remove members', 403);
+    }
 
     const target = await prisma.voiceRoomMember.findUnique({ where: { roomId_userId: { roomId, userId: targetId } } });
     if (!target) return errorResponse(res, 'Member not found', 404);
     if (target.role === 'OWNER') return errorResponse(res, 'Cannot remove the owner', 403);
-    if (!canManage(caller.role, target.role)) return errorResponse(res, 'Cannot remove a higher-ranked member', 403);
 
-    await prisma.voiceRoomMember.update({
-      where: { roomId_userId: { roomId, userId: targetId } },
-      data: { status: 'REMOVED' }
+    const callerMemberRole = isRoomHost ? 'OWNER' : (liveAuth?.role === 'HOST' ? 'OWNER' : 'MODERATOR');
+    if (!canManage(callerMemberRole, target.role)) {
+      return errorResponse(res, 'Cannot remove a higher-ranked member', 403);
+    }
+
+    // Atomically: mark member REMOVED + deactivate live participant
+    await prisma.$transaction(async (tx) => {
+      await tx.voiceRoomMember.update({
+        where: { roomId_userId: { roomId, userId: targetId } },
+        data: { status: 'REMOVED' }
+      });
+      const liveParticipant = await tx.voiceParticipant.findUnique({
+        where: { roomId_userId: { roomId, userId: targetId } }
+      });
+      if (liveParticipant?.isActive) {
+        await tx.voiceParticipant.update({
+          where: { roomId_userId: { roomId, userId: targetId } },
+          data: { isActive: false, leftAt: new Date() }
+        });
+      }
     });
+
+    // Dequeue from speaker queue
+    try {
+      const { dequeue } = require('../utils/voiceQueue');
+      await dequeue(roomId, targetId);
+    } catch { /* non-fatal */ }
+
+    // Cache invalidation
+    try {
+      const { deleteCache } = require('../utils/redis');
+      await deleteCache(`voice:room:${roomId}`);
+    } catch { /* non-fatal */ }
 
     const newCount = await prisma.voiceRoomMember.count({ where: { roomId, status: 'ACTIVE' } });
     const io = getIo();
     if (io) {
       io.to(`voice:${roomId}`).emit('voice:member_left', { roomId, userId: targetId, memberCount: newCount });
       io.to(`user:${targetId}`).emit('voice:removed_from_room', { roomId });
+      // VC-GAP-004 FIX: socketsLeave() covers multi-tab and multi-server
+      io.in(`user:${targetId}`).socketsLeave(`voice:${roomId}`);
     }
+    _memberAudit(callerId, 'MEMBER_REMOVED', roomId, { targetUserId: targetId });
     return successResponse(res, null, 'Member removed');
   } catch (error) { next(error); }
 }
@@ -379,20 +488,75 @@ async function blockMember(req, res, next) {
   try {
     const { id: roomId, userId: targetId } = req.params;
     const callerId = req.user.id;
-    const { caller } = await validateCaller(roomId, callerId, ['OWNER','CO_OWNER','ADMIN']);
-    if (!caller) return errorResponse(res, 'Permission denied', 403);
+
+    // P1 FIX: blockMember affects LIVE SESSION state (evicts participant).
+    // Authorization requires the caller to be an active live HOST or MODERATOR.
+    // We also accept permanent OWNER/CO_OWNER/ADMIN who ARE the room host (room.hostId),
+    // since the host can always manage their own room.
+    // A permanent ADMIN who is only in AUDIENCE live role cannot perform this operation.
+    const liveAuth = await authorizeLiveModerator(roomId, callerId);
+    const room = await prisma.voiceRoom.findUnique({ where: { id: roomId }, select: { hostId: true } });
+    if (!room) return errorResponse(res, 'Room not found', 404);
+    const isRoomHost = room.hostId === callerId;
+    if (!liveAuth && !isRoomHost) {
+      return errorResponse(res, 'Only live hosts and moderators can block members', 403);
+    }
 
     const target = await prisma.voiceRoomMember.findUnique({ where: { roomId_userId: { roomId, userId: targetId } } });
     if (target?.role === 'OWNER') return errorResponse(res, 'Cannot block the owner', 403);
 
-    if (target) {
-      await prisma.voiceRoomMember.update({ where: { roomId_userId: { roomId, userId: targetId } }, data: { role: 'BLOCKED', status: 'REMOVED', isBanned: true } });
-    } else {
-      await prisma.voiceRoomMember.create({ data: { id: crypto.randomUUID(), roomId, userId: targetId, role: 'BLOCKED', status: 'REMOVED', isBanned: true, memberLevel: 1 } });
+    // P0-2 FIX: Atomically update persistent membership AND deactivate live participant.
+    // Previously only the permanent member record was updated, leaving the user
+    // as an active VoiceParticipant who could still participate until reconnect.
+    await prisma.$transaction(async (tx) => {
+      // 1. Update permanent membership record
+      if (target) {
+        await tx.voiceRoomMember.update({
+          where: { roomId_userId: { roomId, userId: targetId } },
+          data: { role: 'BLOCKED', status: 'REMOVED', isBanned: true }
+        });
+      } else {
+        await tx.voiceRoomMember.create({
+          data: { id: crypto.randomUUID(), roomId, userId: targetId, role: 'BLOCKED', status: 'REMOVED', isBanned: true, memberLevel: 1 }
+        });
+      }
+
+      // 2. Deactivate live VoiceParticipant if they are currently in the session
+      const liveParticipant = await tx.voiceParticipant.findUnique({
+        where: { roomId_userId: { roomId, userId: targetId } }
+      });
+      if (liveParticipant?.isActive) {
+        await tx.voiceParticipant.update({
+          where: { roomId_userId: { roomId, userId: targetId } },
+          data: { isActive: false, leftAt: new Date() }
+        });
+      }
+    });
+
+    // 3. Remove from speaker queue (Redis — outside transaction, non-fatal)
+    try {
+      const { dequeue } = require('../utils/voiceQueue');
+      await dequeue(roomId, targetId);
+    } catch { /* non-fatal */ }
+
+    // 4. Invalidate room cache
+    try {
+      const { deleteCache } = require('../utils/redis');
+      await deleteCache(`voice:room:${roomId}`);
+    } catch { /* non-fatal */ }
+
+    // 5. Socket eviction — remove from voice:{roomId} room and notify
+    const io = getIo();
+    if (io) {
+      // Notify the room
+      io.to(`voice:${roomId}`).emit('voice:banned', { roomId, userId: targetId });
+      // Notify the blocked user directly
+      io.to(`user:${targetId}`).emit('voice:blocked_from_room', { roomId });
+      // VC-GAP-004 FIX: socketsLeave() covers multi-tab and multi-server
+      io.in(`user:${targetId}`).socketsLeave(`voice:${roomId}`);
     }
 
-    const io = getIo();
-    if (io) io.to(`user:${targetId}`).emit('voice:blocked_from_room', { roomId });
+    _memberAudit(callerId, 'MEMBER_BLOCKED', roomId, { targetUserId: targetId });
     return successResponse(res, null, 'Member blocked');
   } catch (error) { next(error); }
 }
@@ -401,13 +565,24 @@ async function unblockMember(req, res, next) {
   try {
     const { id: roomId, userId: targetId } = req.params;
     const callerId = req.user.id;
+    // Authorization: permanent room admin chain (OWNER/CO_OWNER/ADMIN)
     const { caller } = await validateCaller(roomId, callerId, ['OWNER','CO_OWNER','ADMIN']);
     if (!caller) return errorResponse(res, 'Permission denied', 403);
 
+    const member = await prisma.voiceRoomMember.findUnique({
+      where: { roomId_userId: { roomId, userId: targetId } }
+    });
+    if (!member) return errorResponse(res, 'Member not found', 404);
+
+    // P0-1 FIX: Atomically restore all three fields that blockMember sets.
+    // Previously only role+status were restored, leaving isBanned=true which
+    // kept the user permanently locked out of joinRoom.
     await prisma.voiceRoomMember.update({
       where: { roomId_userId: { roomId, userId: targetId } },
-      data: { role: 'MEMBER', status: 'ACTIVE' }
+      data: { role: 'MEMBER', status: 'ACTIVE', isBanned: false }
     });
+
+    _memberAudit(callerId, 'MEMBER_UNBLOCKED', roomId, { targetUserId: targetId });
     return successResponse(res, null, 'Member unblocked');
   } catch (error) { next(error); }
 }
@@ -420,7 +595,7 @@ async function upgradeMember(req, res, next) {
     const callerId = req.user.id;
     if (!memberLevel || memberLevel < 1 || memberLevel > 5) return errorResponse(res, 'Member level must be 1-5', 400);
 
-    const { caller } = await validateCaller(roomId, callerId, ['OWNER','CO_OWNER','ADMIN','MODERATOR']);
+    const { caller } = await authorizeRoomMemberAdmin(roomId, callerId, ['OWNER','CO_OWNER','ADMIN','MODERATOR']);
     if (!caller) return errorResponse(res, 'Permission denied', 403);
 
     const updated = await prisma.voiceRoomMember.update({
@@ -475,6 +650,29 @@ async function heartbeat(req, res, next) {
   } catch (error) { next(error); }
 }
 
+/**
+ * cleanupStaleOnline — marks isOnline=false for members whose lastActiveAt
+ * is older than 3 minutes (2× the expected 90-second heartbeat interval).
+ * Called every 2 minutes by a setInterval in app.js.
+ * Safe to call concurrently — uses a single updateMany, no race condition.
+ */
+async function cleanupStaleOnline() {
+  try {
+    const staleThreshold = new Date(Date.now() - 3 * 60 * 1000); // 3 minutes ago
+    const result = await prisma.voiceRoomMember.updateMany({
+      where: {
+        isOnline:     true,
+        lastActiveAt: { lt: staleThreshold }
+      },
+      data: { isOnline: false }
+    });
+    if (result.count > 0) {
+      const logger = require('../utils/logger');
+      logger.debug(`[heartbeat-cleanup] Marked ${result.count} member(s) offline (stale heartbeat)`);
+    }
+  } catch { /* non-fatal — will retry next cycle */ }
+}
+
 // ── GET room level stats ──────────────────────────────────────────────────────
 async function getRoomLevelStats(req, res, next) {
   try {
@@ -505,5 +703,6 @@ module.exports = {
   getMembershipStatus, getPendingRequests, listMembers,
   setMemberRole, removeMember, blockMember, unblockMember,
   upgradeMember, upgradeRoomLevel, heartbeat, getRoomLevelStats,
+  cleanupStaleOnline,
   LEVEL_CAPACITY, MEMBER_LEVEL_LABELS, MEMBER_ROLES,
 };

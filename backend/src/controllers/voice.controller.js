@@ -3,6 +3,22 @@ const path    = require('path');
 const prisma  = require('../utils/prisma');
 const { setCache, getCache, deleteCache, isRedisReady } = require('../utils/redis');
 const { saveFile, deleteFile } = require('../utils/storage');
+
+// ── Audit helper — fire-and-forget, never throws ──────────────────────────────
+async function voiceAudit(actorId, action, entityId, meta = {}) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        id:       uuidv4(),
+        userId:   actorId,
+        action:   'UPDATE',
+        entity:   'VoiceRoom',
+        entityId,
+        newValues: { action, ...meta },
+      }
+    });
+  } catch { /* non-fatal */ }
+}
 const { successResponse, errorResponse, paginatedResponse, getPagination, buildPaginationMeta } = require('../utils/response');
 const { getIo } = require('../sockets');
 const { upsertDailyStats } = require('./voice-stats.controller');
@@ -181,21 +197,9 @@ function roomListCacheKey(schoolId, status, privacy, page, limit) {
 async function listRooms(req, res, next) {
   try {
     const { status, privacy, limit = 50, page = 1 } = req.query;
-    // ARCHITECTURE FIX (HALQA-ARCH-03): Use SchoolMembership as authoritative source.
-    // user.schoolId is null for new MEMBER users who joined via SchoolMembership;
-    // they would only see global rooms. Resolve their school from SchoolMembership.
-    let resolvedSchoolId = req.user.schoolId || null;
-    if (!resolvedSchoolId) {
-      try {
-        const firstMembership = await prisma.schoolMembership.findFirst({
-          where: { userId: req.user.id, status: 'ACTIVE' },
-          select: { schoolId: true },
-          orderBy: { createdAt: 'asc' },
-        });
-        if (firstMembership) resolvedSchoolId = firstMembership.schoolId;
-      } catch { /* non-fatal — fall through to global-only */ }
-    }
-    const schoolId = resolvedSchoolId;
+    // Voice Club is a global Social feature — all rooms have schoolId = null
+    // and are visible to every authenticated user. No school-based filtering.
+    const schoolId = null;
     const { skip, ...pagination } = getPagination(page, limit);
 
     // BE-008: Try list cache first
@@ -207,45 +211,15 @@ async function listRooms(req, res, next) {
       }
     } catch { /* cache miss — fall through to DB */ }
 
-    // SOC-P0-01 FIX: Voice Club is a Social platform feature — room listing must
-    // work correctly for ALL authenticated users regardless of school membership.
-    //
-    // Previous behaviour was broken in two ways:
-    //   1. User WITH schoolId: only saw rooms from their school + schoolless rooms.
-    //      School-specific PUBLIC rooms from other schools were hidden.
-    //   2. User WITHOUT schoolId: the schoolId filter was skipped entirely, exposing
-    //      ALL rooms including school-scoped rooms not intended for global users.
-    //
-    // Correct Social behaviour:
-    //   - PUBLIC rooms with NO schoolId (global): visible to everyone
-    //   - PUBLIC rooms WITH a schoolId (school-scoped): visible only to users who
-    //     belong to that school, OR to SUPER_ADMIN
-    //   - PRIVATE rooms: visible to everyone in the list (join is gated separately)
-    //
-    // Implementation: show global rooms always + own-school rooms if user has a school.
-    // This preserves school privacy while keeping Voice Club open to all social users.
-    let schoolWhere;
-    if (req.user.role === 'SUPER_ADMIN') {
-      // Platform admin sees everything
-      schoolWhere = {};
-    } else if (schoolId) {
-      // User belongs to a school: show global rooms + their own school's rooms
-      schoolWhere = {
-        OR: [
-          { schoolId: null },        // global rooms (no school affiliation)
-          { schoolId: schoolId },    // user's own school rooms
-        ]
-      };
-    } else {
-      // User has no school: show only global rooms (schoolId is null)
-      schoolWhere = { schoolId: null };
-    }
-
+    // All rooms are global (schoolId = null). Every authenticated user sees them all.
+    // PRIVATE/INVITE_ONLY rooms are shown in the list; join is gated separately.
+    // PERMANENT ROOMS: include IDLE (offline/sleeping) rooms — they can be rejoined.
+    // Only ENDED (archived/soft-deleted) rooms are excluded from the lobby.
     const where = {
       deletedAt: null,
+      schoolId:  null,   // Voice Club rooms are always global
       status:    status  ? status  : { not: STATUS.ENDED },
       ...(privacy  && { privacy }),
-      ...schoolWhere,
     };
 
     const [rooms, total] = await Promise.all([
@@ -284,9 +258,9 @@ async function listRooms(req, res, next) {
 }
 
 // --- GET SINGLE ROOM ----------------------------------------------------------
-// SEC-HIGH-002 FIX: PRIVATE and INVITE_ONLY rooms must not expose room data
-// (including participant list) to users who are not active participants.
-// HOST and SUPER_ADMIN always bypass this check.
+// SA-FIX-07: PRIVATE and INVITE_ONLY rooms require active participation.
+// Removed SUPER_ADMIN bypass — platform admins have no implicit right to read
+// private room participant lists. They must join the room like any other user.
 // PUBLIC rooms remain readable by any authenticated user.
 async function getRoom(req, res, next) {
   try {
@@ -296,9 +270,8 @@ async function getRoom(req, res, next) {
 
     // Privacy check for non-public rooms
     if (room.privacy === 'PRIVATE' || room.privacy === 'INVITE_ONLY') {
-      const isHost       = room.hostId === req.user.id;
-      const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
-      if (!isHost && !isSuperAdmin) {
+      const isHost = room.hostId === req.user.id;
+      if (!isHost) {
         const participant = await prisma.voiceParticipant.findUnique({
           where: { roomId_userId: { roomId: id, userId: req.user.id } }
         });
@@ -335,19 +308,11 @@ async function createRoom(req, res, next) {
       coverEmoji = '???', maxSpeakers = 10, scheduledAt
     } = req.body;
     const hostId  = req.user.id;
-    // ARCHITECTURE FIX (HALQA-ARCH-03): Resolve school from SchoolMembership for new-arch users.
-    let resolvedSchoolId = req.user.schoolId || null;
-    if (!resolvedSchoolId) {
-      try {
-        const firstMembership = await prisma.schoolMembership.findFirst({
-          where: { userId: req.user.id, status: 'ACTIVE' },
-          select: { schoolId: true },
-          orderBy: { createdAt: 'asc' },
-        });
-        if (firstMembership) resolvedSchoolId = firstMembership.schoolId;
-      } catch { /* non-fatal */ }
-    }
-    const schoolId = resolvedSchoolId;
+    // Voice Club is a global Social feature — rooms are NOT school-scoped.
+    // schoolId is always null so rooms are visible to ALL users regardless of
+    // school membership. Removing the school resolution that was incorrectly
+    // tagging rooms to the creator's school and hiding them from other schools.
+    const schoolId = null;
 
     // BUG FIX: wrap room + host participant creation in a transaction
     // so we never end up with a room that has no host participant
@@ -382,8 +347,12 @@ async function createRoom(req, res, next) {
       })
     ]);
 
-    // Transition to LIVE
-    await syncRoomStatus(roomId, schoolId);
+    // Only transition to LIVE immediately if this is not a future scheduled room.
+    // A room with scheduledAt in the future should stay SCHEDULED until that time arrives.
+    const isFutureScheduled = scheduledAt && new Date(scheduledAt) > new Date();
+    if (!isFutureScheduled) {
+      await syncRoomStatus(roomId, schoolId);
+    }
     const updatedRoom = await getRoomWithParticipants(roomId);
 
     // Schedule push notification reminder if room is scheduled for the future
@@ -399,7 +368,12 @@ async function createRoom(req, res, next) {
 
     const io = getIo();
     if (io) {
-      io.to(`school:${schoolId}`).emit('voice:room_created', updatedRoom);
+      // Broadcast to all lobby watchers (voice:lobby covers ALL users including
+      // MEMBER users with no school). Also send to school room for school-scoped users.
+      io.to('voice:lobby').emit('voice:room_created', updatedRoom);
+      if (schoolId) {
+        io.to(`school:${schoolId}`).emit('voice:room_created', updatedRoom);
+      }
     }
 
     return successResponse(res, updatedRoom, 'Room created', 201);
@@ -415,7 +389,9 @@ async function joinRoom(req, res, next) {
 
     const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
     if (!room) return errorResponse(res, 'Room not found', 404);
-    if (room.status === STATUS.ENDED) return errorResponse(res, 'This room has ended', 400);
+    // PERMANENT ROOMS: Only ENDED (archived by platform admin) rooms cannot be joined.
+    // IDLE rooms are fully joinable — that's the whole point of permanent rooms.
+    if (room.status === STATUS.ENDED) return errorResponse(res, 'This room has been archived and is no longer available', 400);
     if (room.deletedAt) return errorResponse(res, 'Room not found', 404);
 
     // --- Audience capacity enforcement (Requirement 17.1, 17.2) ---------------
@@ -431,8 +407,32 @@ async function joinRoom(req, res, next) {
     }
 
     // Check privacy
-    if (room.privacy === 'PRIVATE' && room.hostId !== userId) {
-      return errorResponse(res, 'This is a private room', 403);
+    if ((room.privacy === 'PRIVATE' || room.privacy === 'INVITE_ONLY') && room.hostId !== userId) {
+      // Check if they are already an ACTIVE member (invited/approved)
+      const memberRecord = await prisma.voiceRoomMember.findUnique({
+        where: { roomId_userId: { roomId, userId } },
+        select: { status: true, isBanned: true }
+      });
+      if (!memberRecord || memberRecord.status !== 'ACTIVE') {
+        const msg = room.privacy === 'PRIVATE'
+          ? 'This is a private room'
+          : 'This is an invite-only room — you need an invite to join';
+        return errorResponse(res, msg, 403);
+      }
+    }
+
+    // ── P0-1 FIX: Check room-level ban (DB-authoritative) ─────────────────
+    // VoiceRoomMember.isBanned is the persistent ban record.
+    // A banned user must not be able to rejoin even after being kicked.
+    // Host is always exempt from ban checks (they own the room).
+    if (room.hostId !== userId) {
+      const banRecord = await prisma.voiceRoomMember.findUnique({
+        where: { roomId_userId: { roomId, userId } },
+        select: { isBanned: true }
+      });
+      if (banRecord?.isBanned) {
+        return errorResponse(res, 'You are banned from this room', 403);
+      }
     }
 
     // Upsert participant � re-join if previously left
@@ -566,9 +566,9 @@ async function joinRoom(req, res, next) {
         avatarUrl: participant.user.avatarUrl,
         role:      participant.role,
       });
-      // Join the socket room
-      const sockets = await io.in(`user:${userId}`).fetchSockets();
-      sockets.forEach(s => s.join(`voice:${roomId}`));
+      // VC-GAP-004 FIX: Use socketsJoin() for multi-tab/multi-server join.
+      // Works across all nodes via Redis adapter.
+      io.in(`user:${userId}`).socketsJoin(`voice:${roomId}`);
     }
 
     return successResponse(res, updatedRoom, 'Joined room');
@@ -617,19 +617,92 @@ async function leaveRoom(req, res, next) {
     const io = getIo();
     if (io) {
       io.to(`voice:${roomId}`).emit('voice:user_left', { roomId, userId });
-      const sockets = await io.in(`user:${userId}`).fetchSockets();
-      sockets.forEach(s => s.leave(`voice:${roomId}`));
+      // VC-GAP-004 FIX: Use socketsLeave() for multi-tab/multi-server eviction.
+      io.in(`user:${userId}`).socketsLeave(`voice:${roomId}`);
     }
 
     // Update feed live card participant count
     const remaining = await countActive(roomId);
     broadcastLiveUpdate('voice_room', roomId, remaining);
 
+    // PERMANENT ROOM LIFECYCLE (Option A):
+    // All HALQA voice rooms are permanent. When the HOST leaves and no
+    // participants remain, the room transitions to IDLE (not ENDED).
+    // IDLE rooms are fully joinable — syncRoomStatus() will transition
+    // IDLE → LIVE when the next participant joins.
+    //
+    // The 5-minute grace period is preserved to handle temporary network
+    // disconnects before sleeping the room. If someone rejoins during the
+    // grace period, the room stays LIVE normally.
+    //
+    // Explicit endRoom() is the ONLY path to status=ENDED (terminal).
+    if (participant.role === VOICE_ROLES.HOST && remaining === 0) {
+      const AUTO_SLEEP_GRACE_MS = 5 * 60 * 1000; // 5 minutes
+      setTimeout(async () => {
+        try {
+          const liveRoom = await prisma.voiceRoom.findUnique({
+            where: { id: roomId },
+            select: { status: true }
+          });
+          // Only sleep if still LIVE (i.e. not already explicitly ended by endRoom)
+          if (!liveRoom || liveRoom.status !== STATUS.LIVE) return;
+          const stillActive = await countActive(roomId);
+          if (stillActive > 0) return; // someone rejoined during grace period
+
+          // Transition LIVE → IDLE (permanent room sleep — NOT terminal)
+          // Do NOT set endedAt. Do NOT mark status=ENDED.
+          await prisma.voiceRoom.update({
+            where: { id: roomId },
+            data:  { status: STATUS.IDLE, lastActivityAt: new Date(), updatedAt: new Date() }
+          });
+          try { await require('../utils/voiceQueue').clearQueue(roomId); } catch {}
+          await invalidateRoomCache(roomId, null);
+
+          const io2 = getIo();
+          if (io2) io2.to(`voice:${roomId}`).emit('voice:status_changed', { roomId, status: STATUS.IDLE, reason: 'empty_room_sleep' });
+          broadcastLiveEnd('voice_room', roomId);
+          logger.info(`[voice] Room ${roomId} transitioned LIVE → IDLE (permanent room, 0 participants)`);
+        } catch (sleepErr) {
+          logger.warn(`[voice] Room sleep transition failed for ${roomId}: ${sleepErr.message}`);
+        }
+      }, AUTO_SLEEP_GRACE_MS);
+    }
+
+    // ── L-8 FIX: Track voice listening time in DailyUserStats ──────────────
+    // Every user who spends time in a voice room earns voiceMinutes — not just
+    // the host. The participant's joinedAt records when they entered; leftAt is
+    // now (set above). Fire-and-forget so leave response is never delayed.
+    const listenMinutes = Math.round(
+      (Date.now() - new Date(participant.joinedAt).getTime()) / 60_000
+    );
+    if (listenMinutes > 0) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      prisma.dailyUserStats.upsert({
+        where:  { userId_date: { userId, date: today } },
+        create: {
+          userId, date: today,
+          loginCount: 0, postsCreated: 0, commentsCreated: 0,
+          likesGiven: 0, likesReceived: 0, messagesSent: 0,
+          voiceMinutes: listenMinutes,
+          giftsSent: 0, giftsReceived: 0, coinsSpent: 0, coinsEarned: 0,
+        },
+        update: { voiceMinutes: { increment: listenMinutes } },
+      }).catch(err =>
+        logger.warn(`[voice] voiceMinutes upsert failed for ${userId}: ${err.message}`)
+      );
+    }
+
     return successResponse(res, null, 'Left room');
   } catch (error) { next(error); }
 }
 
 // --- END ROOM -----------------------------------------------------------------
+// PERMANENT ROOMS: This endpoint terminates a room (status=ENDED, terminal state).
+// Per the permanent-room contract, regular users including the room HOST must
+// NOT be able to terminate their own room — they can only LEAVE (room → IDLE).
+// Only SUPER_ADMIN (platform admin) can archive a room for policy/moderation reasons.
+// The host uses DELETE /voice/:id to soft-delete their room instead.
 async function endRoom(req, res, next) {
   try {
     const { id: roomId } = req.params;
@@ -642,13 +715,17 @@ async function endRoom(req, res, next) {
     });
 
     if (!room) return errorResponse(res, 'Room not found', 404);
-    if (room.status === STATUS.ENDED) return errorResponse(res, 'Room already ended', 400);
+    if (room.status === STATUS.ENDED) return errorResponse(res, 'Room already archived', 400);
 
-    // NF-6 FIX: Voice rooms are a Social feature — SCHOOL_ADMIN must not end rooms
-    // belonging to users from other schools. Only the host or SUPER_ADMIN (platform admin).
-    const isAdmin = req.user.role === 'SUPER_ADMIN';
-    if (room.hostId !== userId && !isAdmin) {
-      return errorResponse(res, 'Only the host can end this room', 403);
+    // PERMANENT ROOM CONTRACT: Only SUPER_ADMIN can set status=ENDED.
+    // Regular hosts/owners cannot terminate rooms — they leave and the room stays IDLE.
+    // This prevents accidental or intentional permanent destruction of community spaces.
+    if (req.user.role !== 'SUPER_ADMIN') {
+      return errorResponse(
+        res,
+        'Rooms are permanent. Use the Leave button to step out — the room stays available for members to rejoin. Only platform admins can archive rooms.',
+        403
+      );
     }
 
     const endedAt = new Date();
@@ -690,6 +767,36 @@ async function endRoom(req, res, next) {
       });
     } catch {}
 
+    // ── L-8 FIX: Track voiceMinutes for ALL active participants on room end ──
+    // When the host ends the room, all participants who are still in (isActive was
+    // true before updateMany above) get voiceMinutes credited. Each participant's
+    // join time is stored in joinedAt. Fire-and-forget — never blocks the response.
+    try {
+      const activeParticipants = await prisma.voiceParticipant.findMany({
+        where: { roomId, leftAt: endedAt }, // these were just set inactive above
+        select: { userId: true, joinedAt: true }
+      });
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      for (const p of activeParticipants) {
+        const mins = Math.round(
+          (endedAt.getTime() - new Date(p.joinedAt).getTime()) / 60_000
+        );
+        if (mins <= 0) continue;
+        prisma.dailyUserStats.upsert({
+          where:  { userId_date: { userId: p.userId, date: today } },
+          create: {
+            userId: p.userId, date: today,
+            loginCount: 0, postsCreated: 0, commentsCreated: 0,
+            likesGiven: 0, likesReceived: 0, messagesSent: 0,
+            voiceMinutes: mins,
+            giftsSent: 0, giftsReceived: 0, coinsSpent: 0, coinsEarned: 0,
+          },
+          update: { voiceMinutes: { increment: mins } },
+        }).catch(() => {}); // fire-and-forget
+      }
+    } catch { /* non-fatal */ }
+
     try { await clearQueue(roomId); } catch (err) { logger.warn(`[voice] clearQueue failed: ${err.message}`); }
     await invalidateRoomCache(roomId, schoolId);
 
@@ -701,6 +808,7 @@ async function endRoom(req, res, next) {
     // Remove live card from feed
     broadcastLiveEnd('voice_room', roomId);
 
+    voiceAudit(userId, 'ROOM_ENDED', roomId, { durationMinutes });
     return successResponse(res, null, 'Room ended');
   } catch (error) { next(error); }
 }
@@ -715,7 +823,7 @@ async function toggleMute(req, res, next) {
     // Determine who is being muted: self or another user (moderator action)
     const subjectId = targetUserId || callerId;
 
-    // If muting someone else, caller must be HOST or MODERATOR
+    // If muting/unmuting someone else, caller must be HOST or MODERATOR
     if (subjectId !== callerId) {
       const caller = await prisma.voiceParticipant.findUnique({
         where: { roomId_userId: { roomId, userId: callerId } }
@@ -735,9 +843,44 @@ async function toggleMute(req, res, next) {
 
     const newMuted = isMuted !== undefined ? isMuted : !participant.isMuted;
 
+    // P1-3 FIX: HOST cannot be muted by MODERATOR.
+    // Only the HOST themselves may toggle their own mute state.
+    if (subjectId !== callerId && participant.role === VOICE_ROLES.HOST) {
+      return errorResponse(res, 'The host cannot be muted by a moderator', 403);
+    }
+
+    // P1-2 FIX: Prevent self-unmute bypass after moderator mute.
+    // If the participant was muted by a moderator (mutedByModerator=true),
+    // only a HOST or MODERATOR can clear it. The participant themselves
+    // cannot call PATCH /mute { isMuted: false } to bypass the lock.
+    if (
+      subjectId === callerId &&          // self-action
+      newMuted === false &&              // trying to unmute
+      participant.mutedByModerator       // was mod-locked
+    ) {
+      // Check if the caller is actually a HOST or MODERATOR in this room
+      // (they could be calling on themselves — HOST always allowed to unmute self)
+      if (!MODERATOR_ROLES.includes(participant.role)) {
+        return errorResponse(res, 'You were muted by a moderator and cannot unmute yourself', 403);
+      }
+    }
+
+    // Determine mutedByModerator state for the DB write
+    let mutedByModeratorValue;
+    if (subjectId !== callerId) {
+      // Moderator action: set flag when muting, clear when unmuting
+      mutedByModeratorValue = newMuted ? true : false;
+    } else {
+      // Self-action by HOST/MODERATOR clearing their own mod-mute: clear the flag
+      mutedByModeratorValue = newMuted ? participant.mutedByModerator : false;
+    }
+
     await prisma.voiceParticipant.update({
       where: { roomId_userId: { roomId, userId: subjectId } },
-      data: { isMuted: newMuted }
+      data: {
+        isMuted:          newMuted,
+        mutedByModerator: mutedByModeratorValue,
+      }
     });
 
     await safeDeleteCache(roomCacheKey(roomId));
@@ -754,6 +897,10 @@ async function toggleMute(req, res, next) {
 }
 
 // --- RAISE HAND ---------------------------------------------------------------
+// --- RAISE HAND (legacy endpoint — now delegates to FIFO queue) ---------------
+// P1-1 FIX: Previously this only updated DB handRaised flag without enqueuing
+// in Redis FIFO queue, creating state split between DB and queue. Now it fully
+// delegates to the queue system for consistency.
 async function raiseHand(req, res, next) {
   try {
     const { id: roomId } = req.params;
@@ -768,30 +915,17 @@ async function raiseHand(req, res, next) {
       return errorResponse(res, 'You are not in this room', 403);
     }
 
-    const newRaised = raised !== undefined ? raised : !participant.handRaised;
+    // Delegate to the queue controller
+    const { raiseHand: queueRaiseHand, cancelHand } = require('./voice-queue.controller');
 
-    await prisma.voiceParticipant.update({
-      where: { roomId_userId: { roomId, userId } },
-      data: {
-        handRaised:   newRaised,
-        handRaisedAt: newRaised ? new Date() : null
-      }
-    });
+    // raised === false or undefined toggle: if currently raised → lower, else → raise
+    const shouldRaise = raised !== undefined ? raised : !participant.handRaised;
 
-    await safeDeleteCache(roomCacheKey(roomId));
-
-    const io = getIo();
-    if (io) {
-      io.to(`voice:${roomId}`).emit('voice:hand_raised', {
-        roomId,
-        userId,
-        raised:    newRaised,
-        firstName: req.user.firstName,
-        lastName:  req.user.lastName,
-      });
+    if (shouldRaise) {
+      return queueRaiseHand(req, res, next);
+    } else {
+      return cancelHand(req, res, next);
     }
-
-    return successResponse(res, { raised: newRaised });
   } catch (error) { next(error); }
 }
 
@@ -824,9 +958,18 @@ async function promoteParticipant(req, res, next) {
       return errorResponse(res, 'Target user is not in this room', 404);
     }
 
-    // Check speaker limit when promoting to SPEAKER
+    // P2-1 FIX: micLocked prevents promoting new speakers via direct promote.
+    // Only applies when promoting TO SPEAKER — demoting to AUDIENCE always allowed.
+    // P2-3 FIX: Wrap in transaction with role re-check to prevent concurrent
+    // double-promote race condition (same fix applied to _promoteUser in queue).
     if (role === VOICE_ROLES.SPEAKER) {
-      const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
+      const room = await prisma.voiceRoom.findUnique({
+        where: { id: roomId },
+        select: { micLocked: true, maxSpeakers: true }
+      });
+      if (room?.micLocked) {
+        return errorResponse(res, 'The mic is locked — unlock to promote speakers', 403);
+      }
       const speakerCount = await prisma.voiceParticipant.count({
         where: { roomId, isActive: true, role: { in: ['HOST', 'MODERATOR', 'SPEAKER'] } }
       });
@@ -835,15 +978,40 @@ async function promoteParticipant(req, res, next) {
       }
     }
 
-    await prisma.voiceParticipant.update({
-      where: { roomId_userId: { roomId, userId: targetUserId } },
-      data: {
-        role,
-        isMuted:     role === VOICE_ROLES.AUDIENCE,
-        handRaised:  false,
-        handRaisedAt: null,
-      }
-    });
+    // P2-3: Use transaction to re-check current role before updating,
+    // preventing two concurrent promotes from both succeeding.
+    try {
+      await prisma.$transaction(async (tx) => {
+        const current = await tx.voiceParticipant.findUnique({
+          where: { roomId_userId: { roomId, userId: targetUserId } },
+          select: { role: true, isActive: true }
+        });
+        if (!current?.isActive) {
+          const err = new Error('Participant is no longer in the room');
+          err.statusCode = 400;
+          throw err;
+        }
+        // Prevent double-promote: if already SPEAKER and trying to set SPEAKER again
+        if (role === VOICE_ROLES.SPEAKER && current.role === VOICE_ROLES.SPEAKER) {
+          const err = new Error('Participant is already a speaker');
+          err.statusCode = 409;
+          throw err;
+        }
+        await tx.voiceParticipant.update({
+          where: { roomId_userId: { roomId, userId: targetUserId } },
+          data: {
+            role,
+            isMuted:          role === VOICE_ROLES.AUDIENCE,
+            mutedByModerator: false, // clear any mod-mute lock on promote/demote
+            handRaised:       false,
+            handRaisedAt:     null,
+          }
+        });
+      });
+    } catch (txErr) {
+      if (txErr.statusCode) return errorResponse(res, txErr.message, txErr.statusCode);
+      throw txErr;
+    }
 
     await safeDeleteCache(roomCacheKey(roomId));
 
@@ -853,6 +1021,7 @@ async function promoteParticipant(req, res, next) {
       io.to(`user:${targetUserId}`).emit('voice:your_role_changed', { roomId, role });
     }
 
+    voiceAudit(requesterId, 'PARTICIPANT_PROMOTED', roomId, { targetUserId, role });
     return successResponse(res, { userId: targetUserId, role });
   } catch (error) { next(error); }
 }
@@ -894,23 +1063,153 @@ async function kickParticipant(req, res, next) {
       data: { isActive: false, leftAt: new Date() }
     });
 
+    // Remove from speaker queue
+    try { await require('../utils/voiceQueue').dequeue(roomId, targetUserId); } catch {}
+
     await safeDeleteCache(roomCacheKey(roomId));
 
     const io = getIo();
     if (io) {
       io.to(`voice:${roomId}`).emit('voice:kicked', { roomId, userId: targetUserId });
       io.to(`user:${targetUserId}`).emit('voice:kicked', { roomId });
-      const sockets = await io.in(`user:${targetUserId}`).fetchSockets();
-      sockets.forEach(s => s.leave(`voice:${roomId}`));
+      // VC-GAP-004 FIX: Use socketsLeave() instead of fetchSockets().forEach(s.leave())
+      // socketsLeave() works across ALL connected nodes via the Redis adapter, ensuring
+      // multi-tab and multi-server eviction. fetchSockets() only returns sockets in the
+      // current process — missing other tabs on different server instances.
+      io.in(`user:${targetUserId}`).socketsLeave(`voice:${roomId}`);
     }
+
+    // Audit log
+    voiceAudit(requesterId, 'PARTICIPANT_KICKED', roomId, { targetUserId });
 
     return successResponse(res, null, 'Participant removed');
   } catch (error) { next(error); }
 }
 
+// --- BAN PARTICIPANT ----------------------------------------------------------
+// Kicks the user, writes VoiceRoomMember.isBanned = true (DB-persistent),
+// and evicts their socket. Banned users cannot rejoin — enforced in joinRoom.
+async function banParticipant(req, res, next) {
+  try {
+    const { id: roomId, userId: targetUserId } = req.params;
+    const { reason = '' } = req.body;
+    const requesterId = req.user.id;
+
+    const requester = await prisma.voiceParticipant.findUnique({
+      where: { roomId_userId: { roomId, userId: requesterId } }
+    });
+
+    if (!requester || !requester.isActive || !MODERATOR_ROLES.includes(requester.role)) {
+      return errorResponse(res, 'Only hosts and moderators can ban participants', 403);
+    }
+
+    // Cannot ban the host
+    const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
+    if (!room) return errorResponse(res, 'Room not found', 404);
+    if (targetUserId === room.hostId) {
+      return errorResponse(res, 'Cannot ban the host', 403);
+    }
+
+    // Moderators cannot ban other moderators
+    const targetParticipant = await prisma.voiceParticipant.findUnique({
+      where: { roomId_userId: { roomId, userId: targetUserId } }
+    });
+    if (targetParticipant?.role === VOICE_ROLES.MODERATOR && requester.role !== VOICE_ROLES.HOST) {
+      return errorResponse(res, 'Only the host can ban moderators', 403);
+    }
+
+    // Atomic: mark participant inactive + write persistent ban
+    await prisma.$transaction(async (tx) => {
+      // Deactivate participant if they're in the room
+      if (targetParticipant?.isActive) {
+        await tx.voiceParticipant.update({
+          where: { roomId_userId: { roomId, userId: targetUserId } },
+          data: { isActive: false, leftAt: new Date() }
+        });
+      }
+
+      // Write or update persistent ban record
+      await tx.voiceRoomMember.upsert({
+        where: { roomId_userId: { roomId, userId: targetUserId } },
+        create: {
+          id:          require('crypto').randomUUID(),
+          roomId,
+          userId:      targetUserId,
+          role:        'MEMBER',
+          status:      'ACTIVE',
+          isBanned:    true,
+          joinedAt:    new Date(),
+          note:        reason || null,
+        },
+        update: {
+          isBanned: true,
+          note:     reason || null,
+        }
+      });
+    });
+
+    // Remove from speaker queue
+    try { await require('../utils/voiceQueue').dequeue(roomId, targetUserId); } catch {}
+
+    await safeDeleteCache(roomCacheKey(roomId));
+
+    logger.info(`[voice] User ${targetUserId} banned from room ${roomId} by ${requesterId}. Reason: ${reason}`);
+
+    const io = getIo();
+    if (io) {
+      io.to(`voice:${roomId}`).emit('voice:banned', { roomId, userId: targetUserId });
+      io.to(`user:${targetUserId}`).emit('voice:banned', { roomId, reason });
+      // VC-GAP-004 FIX: Use socketsLeave() for multi-tab/multi-server eviction
+      io.in(`user:${targetUserId}`).socketsLeave(`voice:${roomId}`);
+    }
+
+    // Audit log
+    voiceAudit(requesterId, 'PARTICIPANT_BANNED', roomId, { targetUserId, reason });
+
+    return successResponse(res, null, 'Participant banned from room');
+  } catch (error) { next(error); }
+}
+
+// --- UNBAN PARTICIPANT --------------------------------------------------------
+// Removes the persistent ban so the user can rejoin.
+async function unbanParticipant(req, res, next) {
+  try {
+    const { id: roomId, userId: targetUserId } = req.params;
+    const requesterId = req.user.id;
+
+    const requester = await prisma.voiceParticipant.findUnique({
+      where: { roomId_userId: { roomId, userId: requesterId } }
+    });
+    // SA-FIX-04: Must be active host or moderator in the room.
+    // SUPER_ADMIN has no room-level unban privilege — they are platform admin only.
+    // Removing a host's ban decision requires being an active HOST or MODERATOR.
+    if (!requester?.isActive || !MODERATOR_ROLES.includes(requester.role)) {
+      return errorResponse(res, 'Only hosts and moderators can unban participants', 403);
+    }
+
+    const banRecord = await prisma.voiceRoomMember.findUnique({
+      where: { roomId_userId: { roomId, userId: targetUserId } },
+      select: { isBanned: true }
+    });
+    if (!banRecord?.isBanned) {
+      return errorResponse(res, 'User is not banned from this room', 404);
+    }
+
+    await prisma.voiceRoomMember.update({
+      where: { roomId_userId: { roomId, userId: targetUserId } },
+      data: { isBanned: false, note: null }
+    });
+
+    logger.info(`[voice] User ${targetUserId} unbanned from room ${roomId} by ${requesterId}`);
+    voiceAudit(requesterId, 'PARTICIPANT_UNBANNED', roomId, { targetUserId });
+    return successResponse(res, null, 'Participant unbanned');
+  } catch (error) { next(error); }
+}
+
 // --- GET MESSAGES -------------------------------------------------------------
-// SEC-HIGH-002 FIX: Apply the same privacy guard as getRoom — PRIVATE and
+// SEC-HIGH-002 / SA-FIX-08: Apply the same privacy guard as getRoom — PRIVATE and
 // INVITE_ONLY rooms must not expose message history to non-participants.
+// Removed SUPER_ADMIN bypass — platform admins must join a room to read its messages.
 async function getMessages(req, res, next) {
   try {
     const { id: roomId } = req.params;
@@ -923,9 +1222,8 @@ async function getMessages(req, res, next) {
     if (!room) return errorResponse(res, 'Room not found', 404);
 
     if (room.privacy === 'PRIVATE' || room.privacy === 'INVITE_ONLY') {
-      const isHost       = room.hostId === req.user.id;
-      const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
-      if (!isHost && !isSuperAdmin) {
+      const isHost = room.hostId === req.user.id;
+      if (!isHost) {
         const participant = await prisma.voiceParticipant.findUnique({
           where: { roomId_userId: { roomId, userId: req.user.id } }
         });
@@ -937,7 +1235,7 @@ async function getMessages(req, res, next) {
 
     const { limit = 50, before } = req.query;
 
-    const where = { roomId };
+    const where = { roomId, deletedAt: null };
     if (before) where.createdAt = { lt: new Date(before) };
 
     const messages = await prisma.voiceMessage.findMany({
@@ -1150,6 +1448,35 @@ async function grabMic(req, res, next) {
       return errorResponse(res, 'You are already a speaker', 400);
     }
 
+    // P0-1 FIX: Enforce micLocked at the backend.
+    // The frontend also blocks this client-side, but any direct API call bypassed it.
+    // micLocked means the host has frozen the stage — no new speakers allowed
+    // via any path (grab mic, queue raise, approve, promote, mic-pass).
+    // HOST/MODERATOR are exempt — they can always speak regardless of the lock.
+    if (room.micLocked) {
+      return errorResponse(res, 'The mic is locked — no new speakers can join the stage', 403);
+    }
+
+    // P2-2 FIX: Enforce isOpenMic at the backend.
+    // When isOpenMic=false, audience cannot instantly grab the mic — they must
+    // raise their hand and be approved by the host/moderator through the queue.
+    // When isOpenMic=true, instant grab is allowed (host has opened the stage).
+    if (!room.isOpenMic) {
+      // Redirect: enqueue them via the raiseHand queue path instead
+      const { raiseHand: queueRaiseHand } = require('./voice-queue.controller');
+      return queueRaiseHand(req, res, next);
+    }
+
+    // SEAT LOCK: Check if the next available speaker slot is individually locked.
+    // Seat index = number of current active speakers (the new speaker fills that slot).
+    const activeSpeakerCount = await prisma.voiceParticipant.count({
+      where: { roomId, isActive: true, role: { in: ['HOST', 'MODERATOR', 'SPEAKER'] } }
+    });
+    const lockedSeatsArr = Array.isArray(room.lockedSeats) ? room.lockedSeats : [];
+    if (lockedSeatsArr.includes(activeSpeakerCount)) {
+      return errorResponse(res, `Seat ${activeSpeakerCount + 1} is locked by the host`, 403);
+    }
+
     // Check if already in queue (Redis-safe: skip if Redis unavailable)
     if (isRedisReady()) {
       try {
@@ -1300,9 +1627,9 @@ async function uploadRoomCover(req, res, next) {
     const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
 
-    // NF-6 FIX: Only host or SUPER_ADMIN can update room cover image.
-    const isAdmin = req.user.role === 'SUPER_ADMIN';
-    if (room.hostId !== userId && !isAdmin) {
+    // SA-FIX-06: Only the room host can update the cover image.
+    // SUPER_ADMIN has no privilege to change another room's visual identity.
+    if (room.hostId !== userId) {
       return errorResponse(res, 'Only the host can update the room image', 403);
     }
 
@@ -1341,6 +1668,8 @@ async function uploadRoomCover(req, res, next) {
         coverImageUrl: updated.coverImageUrl,
       };
       io.to(`voice:${roomId}`).emit('voice:room_updated', payload);
+      // Broadcast to all lobby watchers — covers schoolId=null MEMBER users
+      io.to('voice:lobby').emit('voice:room_updated', payload);
       if (updated.schoolId) {
         io.to(`school:${updated.schoolId}`).emit('voice:room_updated', payload);
       }
@@ -1381,6 +1710,112 @@ async function getMyRooms(req, res, next) {
   } catch (error) { next(error); }
 }
 
+// --- GET SCHEDULED ROOMS (P2-4) -----------------------------------------------
+// Returns upcoming scheduled rooms, globally and for the user's school.
+async function getScheduledRooms(req, res, next) {
+  try {
+    const { limit = 20 } = req.query;
+    const take = Math.min(50, parseInt(limit));
+
+    let schoolWhere;
+    if (req.user.role === 'SUPER_ADMIN') {
+      schoolWhere = {};
+    } else if (req.user.schoolId) {
+      schoolWhere = { OR: [{ schoolId: null }, { schoolId: req.user.schoolId }] };
+    } else {
+      schoolWhere = { schoolId: null };
+    }
+
+    const rooms = await prisma.voiceRoom.findMany({
+      where: {
+        status:     STATUS.SCHEDULED,
+        deletedAt:  null,
+        scheduledAt: { gt: new Date() },
+        ...schoolWhere,
+      },
+      include: {
+        host: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } },
+        _count: { select: { participants: true } }
+      },
+      orderBy: { scheduledAt: 'asc' },
+      take,
+    });
+
+    return successResponse(res, rooms);
+  } catch (error) { next(error); }
+}
+
+// --- TOGGLE INDIVIDUAL SEAT LOCK -----------------------------------------------
+// HOST/MOD can lock/unlock a specific speaker seat by its 0-based index.
+// Locked seats show a 🔒 icon and cannot be occupied by audience members.
+// If a speaker is already occupying the seat when it is locked, they keep it
+// until they leave — but the slot cannot be re-filled once freed.
+async function toggleSeatLock(req, res, next) {
+  try {
+    const { id: roomId } = req.params;
+    const { seatIndex } = req.body;
+    const callerId = req.user.id;
+
+    if (seatIndex === undefined || typeof seatIndex !== 'number' || seatIndex < 0) {
+      return errorResponse(res, 'seatIndex must be a non-negative integer', 400);
+    }
+
+    // Must be HOST or MODERATOR
+    const caller = await prisma.voiceParticipant.findUnique({
+      where: { roomId_userId: { roomId, userId: callerId } }
+    });
+    if (!caller || !caller.isActive || !MODERATOR_ROLES.includes(caller.role)) {
+      return errorResponse(res, 'Only hosts and moderators can lock seats', 403);
+    }
+
+    const room = await prisma.voiceRoom.findUnique({
+      where: { id: roomId },
+      select: { id: true, lockedSeats: true, maxSpeakers: true }
+    });
+    if (!room) return errorResponse(res, 'Room not found', 404);
+    if (seatIndex >= (room.maxSpeakers || 10)) {
+      return errorResponse(res, `Seat index out of range (max ${room.maxSpeakers || 10} seats)`, 400);
+    }
+
+    // Parse current locked seats array (stored as JSON)
+    let locked = Array.isArray(room.lockedSeats) ? [...room.lockedSeats] : [];
+    const isCurrentlyLocked = locked.includes(seatIndex);
+    let action;
+
+    if (isCurrentlyLocked) {
+      // Unlock: remove the seat index
+      locked = locked.filter(s => s !== seatIndex);
+      action = 'unlocked';
+    } else {
+      // Lock: add the seat index
+      locked.push(seatIndex);
+      action = 'locked';
+    }
+
+    await prisma.voiceRoom.update({
+      where: { id: roomId },
+      data: { lockedSeats: locked, updatedAt: new Date() }
+    });
+
+    await safeDeleteCache(roomCacheKey(roomId));
+
+    const io = getIo();
+    if (io) {
+      io.to(`voice:${roomId}`).emit('voice:seat_lock_changed', {
+        roomId,
+        seatIndex,
+        locked: !isCurrentlyLocked,
+        lockedSeats: locked,
+        changedBy: callerId,
+      });
+    }
+
+    voiceAudit(callerId, isCurrentlyLocked ? 'SEAT_UNLOCKED' : 'SEAT_LOCKED', roomId, { seatIndex });
+    return successResponse(res, { seatIndex, locked: !isCurrentlyLocked, lockedSeats: locked },
+      `Seat ${seatIndex + 1} ${action}`);
+  } catch (error) { next(error); }
+}
+
 // --- UPDATE ROOM --------------------------------------------------------------
 async function updateRoom(req, res, next) {
   try {
@@ -1391,21 +1826,22 @@ async function updateRoom(req, res, next) {
 
     const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
-    if (room.status === STATUS.ENDED) return errorResponse(res, 'Cannot edit an ended room', 400);
+    // PERMANENT ROOMS: IDLE rooms are fully editable — only hard-archived rooms (ENDED) cannot be edited.
+    if (room.status === STATUS.ENDED) return errorResponse(res, 'This room has been archived and cannot be edited', 400);
 
-    // NF-6 FIX: Only host, moderator, or SUPER_ADMIN can edit room settings.
-    const isAdmin = req.user.role === 'SUPER_ADMIN';
+    // SA-FIX-02: Only host or active room moderator can edit room settings.
+    // SUPER_ADMIN is platform-admin only — no room-edit privileges without being a participant.
     const participant = await prisma.voiceParticipant.findUnique({
       where: { roomId_userId: { roomId, userId } }
     });
     const isModerator = participant?.isActive && MODERATOR_ROLES.includes(participant?.role);
 
-    if (room.hostId !== userId && !isAdmin && !isModerator) {
+    if (room.hostId !== userId && !isModerator) {
       return errorResponse(res, 'Only the host or moderator can edit this room', 403);
     }
 
     // Moderators can only change chat/reaction/comment settings — not title, privacy, etc.
-    if (isModerator && room.hostId !== userId && !isAdmin) {
+    if (isModerator && room.hostId !== userId) {
       const allowed = ['commentsEnabled', 'slowMode', 'messageType', 'reactionsEnabled'];
       const requestedKeys = Object.keys(req.body);
       const forbidden = requestedKeys.filter(k => !allowed.includes(k));
@@ -1465,6 +1901,8 @@ async function updateRoom(req, res, next) {
         reactionsEnabled: updated.reactionsEnabled,
       };
       io.to(`voice:${roomId}`).emit('voice:room_updated', payload);
+      // Broadcast to all lobby watchers — covers schoolId=null MEMBER users
+      io.to('voice:lobby').emit('voice:room_updated', payload);
       if (updated.schoolId) {
         io.to(`school:${updated.schoolId}`).emit('voice:room_updated', payload);
       }
@@ -1483,9 +1921,10 @@ async function deleteRoom(req, res, next) {
     const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
 
-    // NF-6 FIX: Only host or SUPER_ADMIN can delete a voice room.
-    const isAdmin = req.user.role === 'SUPER_ADMIN';
-    if (room.hostId !== userId && !isAdmin) {
+    // SA-FIX-03: Only the room host can delete their own room.
+    // SUPER_ADMIN uses PATCH /:id/end (endRoom) for platform-level archival — that
+    // endpoint is explicitly scoped, audited, and emits the correct terminal state.
+    if (room.hostId !== userId) {
       return errorResponse(res, 'Only the host can delete this room', 403);
     }
 
@@ -1499,7 +1938,8 @@ async function deleteRoom(req, res, next) {
       if (io) {
         // Tell people inside the room they're being kicked
         io.to(`voice:${roomId}`).emit('voice:room_ended', { roomId });
-        // Tell the lobby to remove the card
+        // Tell ALL lobby watchers to remove the card (voice:lobby covers schoolId=null users)
+        io.to('voice:lobby').emit('voice:room_deleted', { roomId });
         if (room.schoolId) {
           io.to(`school:${room.schoolId}`).emit('voice:room_deleted', { roomId });
         }
@@ -1579,6 +2019,51 @@ async function _notifyFollowersVoiceLive(liveRoom, roomId) {
   }
 }
 
+// --- DELETE MESSAGE (host/mod only) ------------------------------------------
+async function deleteMessage(req, res, next) {
+  try {
+    const { id: roomId, msgId } = req.params;
+    const userId = req.user.id;
+
+    // Check caller is host or moderator in the room
+    const participant = await prisma.voiceParticipant.findUnique({
+      where: { roomId_userId: { roomId, userId } }
+    });
+    // SA-FIX-05: SUPER_ADMIN has no room-level message deletion privilege.
+    // Allow: active HOST or MODERATOR in the room, OR the message author.
+    if (!participant?.isActive || !MODERATOR_ROLES.includes(participant.role)) {
+      // Also allow the message author to delete their own message
+      const msg = await prisma.voiceMessage.findUnique({ where: { id: msgId }, select: { userId: true } });
+      if (!msg || msg.userId !== userId) {
+        return errorResponse(res, 'Only hosts, moderators, or the author can delete messages', 403);
+      }
+    }
+
+    const message = await prisma.voiceMessage.findUnique({
+      where: { id: msgId },
+      select: { id: true, roomId: true, deletedAt: true }
+    });
+    if (!message || message.roomId !== roomId) {
+      return errorResponse(res, 'Message not found', 404);
+    }
+    if (message.deletedAt) {
+      return errorResponse(res, 'Message already deleted', 400);
+    }
+
+    await prisma.voiceMessage.update({
+      where: { id: msgId },
+      data: { deletedAt: new Date() }
+    });
+
+    const io = getIo();
+    if (io) {
+      io.to(`voice:${roomId}`).emit('voice:message_deleted', { roomId, msgId, deletedBy: userId });
+    }
+
+    return successResponse(res, null, 'Message deleted');
+  } catch (error) { next(error); }
+}
+
 // --- EXPORTS ------------------------------------------------------------------
 module.exports = {
   listRooms,
@@ -1592,6 +2077,8 @@ module.exports = {
   raiseHand,
   promoteParticipant,
   kickParticipant,
+  banParticipant,
+  unbanParticipant,
   getMessages,
   sendMessage,
   getHandQueue,
@@ -1601,6 +2088,9 @@ module.exports = {
   updateRoom,
   deleteRoom,
   getMyRooms,
+  getScheduledRooms,
   dropMic,
   uploadRoomCover,
+  toggleSeatLock,
+  deleteMessage,
 };
