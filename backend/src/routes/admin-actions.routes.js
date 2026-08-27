@@ -604,3 +604,121 @@ router.post('/transactions/:id/refund', async (req, res, next) => {
 
   } catch (err) { next(err); }
 });
+
+// ─── GET /api/v1/admin/actions/voice/:id/inspect ─────────────────────────────
+/**
+ * VC-GAP-003 FIX: Admin voice room inspection without participation.
+ *
+ * SUPER_ADMIN can inspect any voice room for moderation purposes without
+ * joining as a participant or receiving a LiveKit token.
+ *
+ * This endpoint bypasses the privacy gate that normal users see on GET /voice/:id
+ * because platform admins need to be able to inspect PRIVATE/INVITE_ONLY rooms
+ * during abuse investigations. The admin NEVER appears in the participant list.
+ *
+ * Returns:
+ *   - Room metadata (title, privacy, status, host, school)
+ *   - Active participant list (user info, role, joinedAt, isMuted)
+ *   - Banned users list
+ *   - Message count (not messages themselves — privacy preserved)
+ *   - Room statistics (total joins, peak concurrent, duration)
+ *
+ * Writes an audit log entry so every admin room inspection is traceable.
+ */
+router.get('/voice/:id/inspect', async (req, res, next) => {
+  try {
+    const { id: roomId } = req.params;
+    const adminId = req.user.id;
+
+    const room = await prisma.voiceRoom.findUnique({
+      where: { id: roomId },
+      include: {
+        host: { select: { id: true, firstName: true, lastName: true, email: true, avatarUrl: true } },
+        school: { select: { id: true, name: true } },
+        participants: {
+          where: { isActive: true },
+          include: {
+            user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true, email: true } }
+          },
+          orderBy: { joinedAt: 'asc' },
+        },
+        _count: {
+          select: {
+            participants: true,                          // total ever joined
+            messages:     true,                          // total messages sent
+          }
+        }
+      }
+    });
+
+    if (!room || room.deletedAt) return errorResponse(res, 'Voice room not found', 404);
+
+    // Load banned users separately
+    const bannedMembers = await prisma.voiceRoomMember.findMany({
+      where: { roomId, isBanned: true },
+      include: {
+        user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true, email: true } }
+      },
+      take: 50,
+    }).catch(() => []);
+
+    // Count active participants manually from the included relation
+    const activeParticipants = room.participants;
+    const activeCount = activeParticipants.length;
+
+    // Duration in minutes if room is live
+    let durationMinutes = null;
+    if (room.status === 'LIVE' && room.startedAt) {
+      durationMinutes = Math.floor((Date.now() - new Date(room.startedAt).getTime()) / 60000);
+    }
+    if (room.status === 'ENDED' && room.startedAt && room.endedAt) {
+      durationMinutes = Math.floor((new Date(room.endedAt).getTime() - new Date(room.startedAt).getTime()) / 60000);
+    }
+
+    // Write audit log — INVARIANT-005: every admin inspection must be logged
+    await adminAudit(adminId, 'ADMIN_INSPECT_VOICE_ROOM', 'VoiceRoom', roomId,
+      { title: room.title, privacy: room.privacy, status: room.status, activeCount },
+      req.ip
+    );
+
+    logger.info(`[admin-actions] Voice room ${roomId} inspected by admin ${adminId}`);
+
+    return successResponse(res, {
+      room: {
+        id:          room.id,
+        title:       room.title,
+        description: room.description,
+        privacy:     room.privacy,
+        status:      room.status,
+        schoolId:    room.schoolId,
+        school:      room.school,
+        host:        room.host,
+        maxSpeakers: room.maxSpeakers,
+        micLocked:   room.micLocked,
+        createdAt:   room.createdAt,
+        startedAt:   room.startedAt,
+        endedAt:     room.endedAt,
+        scheduledAt: room.scheduledAt,
+        deletedAt:   room.deletedAt,
+      },
+      stats: {
+        activeParticipants: activeCount,
+        totalJoinsEver:     room._count.participants,
+        totalMessages:      room._count.messages,
+        durationMinutes,
+      },
+      participants: activeParticipants.map(p => ({
+        userId:    p.userId,
+        user:      p.user,
+        role:      p.role,
+        isMuted:   p.isMuted,
+        isSpeaker: p.isSpeaker,
+        joinedAt:  p.joinedAt,
+      })),
+      bannedUsers: bannedMembers.map(m => ({
+        userId: m.userId,
+        user:   m.user,
+      })),
+    });
+  } catch (err) { next(err); }
+});

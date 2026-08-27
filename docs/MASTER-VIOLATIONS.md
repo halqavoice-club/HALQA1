@@ -370,11 +370,8 @@ Integrated into same `POST /transactions/:id/refund` endpoint:
 | 🟡 MEDIUM | 6 | 5 (SVSV-001, UIGAP-008✅, FS-GAP-002✅, UIGAP-014✅, GAP-001✅mitigated, GAP-002✅resolved) |
 | 🟢 LOW | 13 | 2 (LCSV-003, VC-SA-002 inert) |
 
-**Sprints 1–11 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001, UIGAP-004, UIGAP-005, UIGAP-002, FS-GAP-002, UIGAP-014, GAP-001 (mitigated), GAP-002 (already resolved), PAY-GAP-001, PAY-GAP-002, UIGAP-003, UIGAP-012, CHAT-GAP-003 (verified)
-
-**Still open (MEDIUM):**
-- VC-GAP-003 — No admin voice room inspection without participation
+**Sprints 1–12 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001, UIGAP-004, UIGAP-005, UIGAP-002, FS-GAP-002, UIGAP-014, GAP-001 (mitigated), GAP-002 (already resolved), PAY-GAP-001, PAY-GAP-002, UIGAP-003, UIGAP-012, CHAT-GAP-003 (verified), VC-GAP-003
 
 **Still open (LOW):**
 - LTSV-001 — Generic LiveKit token school bypass (mitigated by participant check)
-- VC-SA-002 — SA bypasses voice room GET check (inert, 2 failing tests document this)
+- VC-SA-002 — SA bypasses voice room GET participant check (inert, 2 failing tests document this)
