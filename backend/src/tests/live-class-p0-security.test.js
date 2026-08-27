@@ -117,13 +117,15 @@ describe('P0-01 BUG-02: Cross-school IDOR', () => {
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
   });
 
-  test('getLiveClass: SUPER_ADMIN can access any school', async () => {
+  test('getLiveClass: SUPER_ADMIN without school membership is denied (no bypass)', async () => {
+    // SUPER_ADMIN is platform administration only — no implicit school data access.
+    // They must be a member of the school to access school-scoped live class data.
     prisma.liveClass.findFirst.mockResolvedValue(LC_OTHER_SCHOOL);
     const req = makeReq({ user: { id: 'admin-1', role: 'SUPER_ADMIN', schoolId: 'school-x', firstName: 'A', lastName: 'A' } });
     const res = makeRes();
     await ctrl.getLiveClass(req, res, next);
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
-    expect(next).not.toHaveBeenCalled();
+    // assertSchoolAccess throws a 403 for cross-school access — no bypass for SUPER_ADMIN
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
   });
 
   // ── getLiveKitToken ───────────────────────────────────────────────────────
@@ -237,15 +239,16 @@ describe('P0-01 BUG-02: Cross-school IDOR', () => {
 
   // ── SUPER_ADMIN cross-school access ───────────────────────────────────────
 
-  test('kickParticipant: SUPER_ADMIN can kick across schools', async () => {
+  test('kickParticipant: SUPER_ADMIN without school membership is denied (no bypass)', async () => {
+    // SUPER_ADMIN is platform administration only — no implicit school data access.
     prisma.liveClass.findFirst.mockResolvedValue(LC_OTHER_SCHOOL);
     prisma.liveClassParticipant.findFirst.mockResolvedValue({ id: 'p-1', isActive: true });
     prisma.liveClassParticipant.update.mockResolvedValue({});
     const req = makeReq({ user: { id: 'admin-1', role: 'SUPER_ADMIN', schoolId: 'school-x', firstName: 'A', lastName: 'A' } });
     const res = makeRes();
     await ctrl.kickParticipant(req, res, next);
-    expect(next).not.toHaveBeenCalled();
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+    // Cross-school access denied — SUPER_ADMIN has no bypass
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
   });
 });
 
@@ -533,12 +536,13 @@ describe('assertSchoolAccess helper unit tests', () => {
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
   });
 
-  test('SUPER_ADMIN cross-school: no error thrown', async () => {
+  test('SUPER_ADMIN cross-school: 403 thrown (no bypass — admin is platform-level only)', async () => {
+    // SUPER_ADMIN has no implicit school data bypass. They must be a school member.
     prisma.liveClass.findFirst.mockResolvedValue(LC_OTHER_SCHOOL);
     const req = makeReq({ user: { id: 'su1', role: 'SUPER_ADMIN', schoolId: null, firstName: 'S', lastName: 'A' } });
     const res = makeRes();
     await ctrl.getLiveClass(req, res, next);
-    expect(next).not.toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
   });
 
   test('STUDENT cross-school: 403 thrown', async () => {

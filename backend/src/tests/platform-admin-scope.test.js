@@ -414,6 +414,8 @@ describe('Platform Admin Scope Audit — Security Regression Tests', () => {
     test('SUPER_ADMIN can update any school', async () => {
       mockUser(SUPER_ADMIN_A);
       prisma.school.update.mockResolvedValue({ id: 'school-b', name: 'Updated' });
+      prisma.$queryRawUnsafe = jest.fn().mockResolvedValue([{ id: 'school-b', name: 'Updated' }]);
+      prisma.$executeRawUnsafe = jest.fn().mockResolvedValue(1);
 
       const res = await request(app)
         .put('/schools/school-b')  // different school from SUPER_ADMIN_A.schoolId
@@ -439,6 +441,8 @@ describe('Platform Admin Scope Audit — Security Regression Tests', () => {
     test('SCHOOL_ADMIN can update their own school (should remain 200 after fix)', async () => {
       mockUser(SCHOOL_ADMIN_A);
       prisma.school.update.mockResolvedValue({ id: 'school-a', name: 'Updated' });
+      prisma.$queryRawUnsafe = jest.fn().mockResolvedValue([{ id: 'school-a', name: 'Updated' }]);
+      prisma.$executeRawUnsafe = jest.fn().mockResolvedValue(1);
 
       const res = await request(app)
         .put('/schools/school-a')  // Own school

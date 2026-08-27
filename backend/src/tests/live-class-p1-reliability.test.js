@@ -213,7 +213,9 @@ describe('P1-01 BUG-06: Enrollment gate on joinLiveClass', () => {
     expect(prisma.enrollment.findFirst).not.toHaveBeenCalled();
   });
 
-  test('SUPER_ADMIN bypasses enrollment gate', async () => {
+  test('SUPER_ADMIN without school membership is denied (no bypass)', async () => {
+    // SUPER_ADMIN is platform administration only — cross-school join is not allowed.
+    // They must have a school membership to access school-scoped live classes.
     prisma.liveClass.findFirst
       .mockResolvedValueOnce({ ...LC_LIVE, schoolId: 'school-other' })
       .mockResolvedValueOnce({ ...LC_LIVE, schoolId: 'school-other', participants: [] });
@@ -228,8 +230,8 @@ describe('P1-01 BUG-06: Enrollment gate on joinLiveClass', () => {
     const res = makeRes();
     await ctrl.joinLiveClass(req, res, next);
 
-    expect(next).not.toHaveBeenCalled();
-    expect(prisma.enrollment.findFirst).not.toHaveBeenCalled();
+    // SUPER_ADMIN schoolId is null, live class is 'school-other' — assertSchoolAccess blocks it
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 403 }));
   });
 
   test('client cannot spoof enrollment by injecting body.studentId or body.enrolled', async () => {
@@ -246,8 +248,13 @@ describe('P1-01 BUG-06: Enrollment gate on joinLiveClass', () => {
     const res = makeRes();
     await ctrl.joinLiveClass(req, res, next);
 
-    // Despite fake body fields, DB check correctly denies access
-    expect(res.status).toHaveBeenCalledWith(403);
+    // Despite fake body fields, DB check correctly denies access.
+    // Controller calls next(err) with status 403, or res.status(403) — check both paths.
+    const wasBlockedViaNext = next.mock.calls.some(
+      call => call[0] && (call[0].status === 403 || call[0].statusCode === 403)
+    );
+    const wasBlockedViaRes = res.status.mock.calls.some(call => call[0] === 403);
+    expect(wasBlockedViaNext || wasBlockedViaRes).toBe(true);
   });
 });
 

@@ -334,9 +334,10 @@ describe('P1-002 SEC-MED-005: PENDING school admin blocked', () => {
     expect(prisma.schoolMembership.update).not.toHaveBeenCalled();
   });
 
-  test('Legacy SUPER_ADMIN (User.role) bypasses membership status check', async () => {
+  test('SUPER_ADMIN without school membership is denied (no implicit bypass)', async () => {
     asUser(CALLER_ID, 'SUPER_ADMIN', 'ACTIVE', null);
-    // callerMembership is null — only legacy bypass via req.user.role
+    // SUPER_ADMIN has no membership record in the target school.
+    // Under the no-bypass rule, they must be denied — admin is platform-level only.
     prisma.schoolMembership.findUnique.mockImplementation(({ where }) => {
       if (where.id === TARGET_MEMBERSHIP_ID) {
         return Promise.resolve({
@@ -355,7 +356,8 @@ describe('P1-002 SEC-MED-005: PENDING school admin blocked', () => {
       .put(`/api/v1/school-memberships/${TARGET_MEMBERSHIP_ID}/status`)
       .set('Authorization', tok(CALLER_ID))
       .send({ status: 'ACTIVE' });
-    expect(res.status).toBe(200);
+    // No bypass: 403 — SUPER_ADMIN must have an active school membership to act
+    expect(res.status).toBe(403);
   });
 
   test('PENDING admin cannot approve their own membership (self-approval blocked)', async () => {

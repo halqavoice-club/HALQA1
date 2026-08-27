@@ -243,6 +243,8 @@ test('SUPER_ADMIN cannot be granted through Google login', async () => {
 // ─────────────────────────────────────────────────────────────────────────────
 test('Suspended HALQA account returns 403', async () => {
   const hash = require('bcryptjs').hashSync('Password@123', 10);
+  // Clean up any leftover from a prior failed run before creating
+  await prisma.user.deleteMany({ where: { email: 'suspended_g@example.com' } }).catch(() => {});
   const suspended = await prisma.user.create({
     data: { email: 'suspended_g@example.com', passwordHash: hash, firstName: 'Sus', lastName: 'User', role: 'MEMBER', status: 'SUSPENDED', emailVerified: true }
   });
@@ -264,6 +266,8 @@ test('Suspended HALQA account returns 403', async () => {
 // ─────────────────────────────────────────────────────────────────────────────
 test('Deleted HALQA account returns 403', async () => {
   const hash = require('bcryptjs').hashSync('Password@123', 10);
+  // Clean up any leftover from a prior failed run before creating
+  await prisma.user.deleteMany({ where: { email: 'deleted_g@example.com' } }).catch(() => {});
   const deleted = await prisma.user.create({
     data: { email: 'deleted_g@example.com', passwordHash: hash, firstName: 'Del', lastName: 'User', role: 'MEMBER', status: 'ACTIVE', emailVerified: true, deletedAt: new Date() }
   });

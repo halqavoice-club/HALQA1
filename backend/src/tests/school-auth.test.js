@@ -318,16 +318,18 @@ describe('Social/Education Authorization Separation', () => {
       expect(res.status).toBe(200);
     });
 
-    test('SUPER_ADMIN can access any school (global bypass)', async () => {
+    test('SUPER_ADMIN requires explicit school membership to access education data', async () => {
       mockUser(USERS.superAdmin);
-      // SUPER_ADMIN gets a bypass in requireSchoolMember — no membership needed
+      // SUPER_ADMIN has NO school membership in this test — must be denied
+      // Administration is platform-level only; education access requires membership
       const token = makeToken('u-super', 'SUPER_ADMIN', 'school-a');
 
       const res = await request(app)
         .get('/api/v1/education/school-a/grades')
         .set(authHeader(token));
 
-      expect(res.status).toBe(200);
+      // No membership record → 403. SUPER_ADMIN has no implicit education bypass.
+      expect(res.status).toBe(403);
     });
   });
 
