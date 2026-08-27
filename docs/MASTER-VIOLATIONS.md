@@ -235,9 +235,16 @@ Admin UI "End" buttons updated to call these endpoints.
 **ID:** PAY-GAP-001  
 **Severity:** 🔴 HIGH  
 **Domain:** Payments  
-**Status:** NOT FIXED
+**Status:** ✅ FIXED — Sprint 8 (commit TBD)
 
-`WalletTransaction.type = 'REFUND'` exists in schema. No API implements coin refunds.
+`POST /api/v1/admin/actions/transactions/:id/refund` added to `admin-actions.routes.js`.
+- Refundable types: `STRIPE_PURCHASE`, `ADMIN_GRANT`
+- Non-refundable: `GIFT_SEND`, `TIP_SEND`, `SUBSCRIPTION`, `REFUND` (returns 400)
+- Atomic: coin deduction + REFUND ledger entry in single DB transaction
+- Idempotency: duplicate refund attempt returns 409
+- Balance guard: refund blocked if user has insufficient coins
+- Full audit log written per INVARIANT-005/006
+- User notified via socket + UI
 
 ---
 
@@ -246,9 +253,15 @@ Admin UI "End" buttons updated to call these endpoints.
 **ID:** PAY-GAP-002  
 **Severity:** 🔴 HIGH  
 **Domain:** Payments / Stripe  
-**Status:** NOT FIXED
+**Status:** ✅ FIXED — Sprint 8 (commit TBD)
 
-Stripe payments that complete successfully cannot be refunded via any platform API.
+Integrated into same `POST /transactions/:id/refund` endpoint:
+- Retrieves Stripe Checkout Session to get `payment_intent` ID
+- Calls `stripe.refunds.create({ payment_intent })` after DB commit
+- Fire-and-forget: Stripe failure is non-fatal (coins still refunded, error logged)
+- `stripeRefund: false` body param skips Stripe call (coins-only refund)
+- Stripe refund ID returned in response for operator confirmation
+- Admin UI: "Refund" button added to STRIPE_PURCHASE/ADMIN_GRANT transaction rows
 
 ---
 
@@ -357,11 +370,7 @@ Stripe payments that complete successfully cannot be refunded via any platform A
 | 🟡 MEDIUM | 6 | 5 (SVSV-001, UIGAP-008✅, FS-GAP-002✅, UIGAP-014✅, GAP-001✅mitigated, GAP-002✅resolved) |
 | 🟢 LOW | 13 | 2 (LCSV-003, VC-SA-002 inert) |
 
-**Sprints 1–7 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001, UIGAP-004, UIGAP-005, UIGAP-002, FS-GAP-002, UIGAP-014, GAP-001 (mitigated), GAP-002 (already resolved)
-
-**Still open (HIGH):**
-- PAY-GAP-001 — No coin refund API
-- PAY-GAP-002 — No Stripe refund integration
+**Sprints 1–8 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001, UIGAP-004, UIGAP-005, UIGAP-002, FS-GAP-002, UIGAP-014, GAP-001 (mitigated), GAP-002 (already resolved), PAY-GAP-001, PAY-GAP-002
 
 **Still open (MEDIUM):**
 - UIGAP-003 — No user profile drill-down page

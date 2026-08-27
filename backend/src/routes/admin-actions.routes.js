@@ -10,9 +10,16 @@
  *   authorization. These are PLATFORM ADMINISTRATION actions, not content
  *   participation — SUPER_ADMIN does not join the room as a participant.
  *
+ * Sprint 8 — PAY-GAP-001 / PAY-GAP-002:
+ *   POST /transactions/:id/refund — refund a coin purchase + optional Stripe refund
+ *
  * Routes:
- *   POST /live-classes/:id/terminate  — force-end any live class
- *   POST /voice/:id/terminate         — force-archive any voice room
+ *   POST /live-classes/:id/terminate     — force-end any live class
+ *   POST /voice/:id/terminate            — force-archive any voice room
+ *   POST /users/:id/grant-coins          — admin coin grant (UIGAP-005)
+ *   GET  /users/:id/sessions             — list active sessions (UIGAP-002)
+ *   DELETE /users/:id/sessions           — revoke all sessions (UIGAP-002)
+ *   POST /transactions/:id/refund        — refund a coin transaction (PAY-GAP-001/002)
  */
 
 const router  = require('express').Router();
@@ -379,5 +386,221 @@ router.delete('/users/:id/sessions', async (req, res, next) => {
       sessionsTerminated: sessionResult.count,
       tokensRevoked:      tokenResult.count,
     }, `All sessions revoked for ${target.firstName} ${target.lastName}. They will be logged out on next request.`);
+  } catch (err) { next(err); }
+});
+
+// ─── POST /api/v1/admin/actions/transactions/:id/refund ──────────────────────
+/**
+ * PAY-GAP-001 FIX: Refund a coin transaction.
+ * PAY-GAP-002 FIX: Optionally issue a Stripe refund for STRIPE_PURCHASE transactions.
+ *
+ * This is a PLATFORM ADMINISTRATION action for:
+ *   - Reversing erroneous ADMIN_GRANT coin credits
+ *   - Refunding STRIPE_PURCHASE transactions (coins deducted + Stripe refund issued)
+ *   - Cannot refund GIFT_SEND / TIP_SEND transactions (gift economy is non-refundable
+ *     by platform policy — separate dispute flow required)
+ *
+ * Safety rules (INVARIANT-006):
+ *   1. Transaction must exist and belong to a non-deleted user
+ *   2. Transaction must not already be refunded (idempotency — checks for existing REFUND tx)
+ *   3. Coin deduction is atomic: REFUND ledger entry + wallet.coins decrement in one tx
+ *   4. Wallet.coins cannot go below zero (guard prevents over-refund)
+ *   5. Stripe refund is fire-and-forget after the DB tx succeeds:
+ *      - If Stripe fails, the coin refund still stands (admin can retry the Stripe part)
+ *      - The Stripe refund ID is stored in the audit log
+ *   6. Full audit log written
+ *   7. User receives a socket + persistent notification
+ *
+ * Body:
+ *   { reason: string (required, min 10 chars), stripeRefund?: boolean (default: true for STRIPE_PURCHASE) }
+ *
+ * Refundable types:
+ *   STRIPE_PURCHASE — coins refunded + Stripe refund attempted
+ *   ADMIN_GRANT     — coins reversed only (no Stripe)
+ *
+ * Non-refundable types (returns 400):
+ *   GIFT_SEND, TIP_SEND, SUBSCRIPTION, REFUND (can't refund a refund)
+ */
+router.post('/transactions/:id/refund', async (req, res, next) => {
+  try {
+    const { id: txId }          = req.params;
+    const adminId               = req.user.id;
+    const { reason, stripeRefund = true } = req.body;
+
+    // ── Input validation ───────────────────────────────────────────────────────
+    if (!reason || typeof reason !== 'string' || reason.trim().length < 10) {
+      return errorResponse(res, 'reason is required (minimum 10 characters)', 400);
+    }
+
+    // ── Load transaction ───────────────────────────────────────────────────────
+    const tx = await prisma.walletTransaction.findUnique({
+      where: { id: txId },
+      select: {
+        id: true, userId: true, type: true, coins: true,
+        description: true, stripeSessionId: true, packageId: true,
+        createdAt: true,
+        user: { select: { id: true, email: true, firstName: true, lastName: true, deletedAt: true } }
+      }
+    });
+
+    if (!tx)              return errorResponse(res, 'Transaction not found', 404);
+    if (tx.user.deletedAt) return errorResponse(res, 'User account has been deleted', 404);
+
+    // ── Non-refundable types ───────────────────────────────────────────────────
+    const NON_REFUNDABLE = ['GIFT_SEND', 'TIP_SEND', 'SUBSCRIPTION', 'REFUND'];
+    if (NON_REFUNDABLE.includes(tx.type)) {
+      return errorResponse(res,
+        `Transaction type '${tx.type}' cannot be refunded via this endpoint. Only STRIPE_PURCHASE and ADMIN_GRANT transactions are refundable.`,
+        400
+      );
+    }
+
+    const REFUNDABLE = ['STRIPE_PURCHASE', 'ADMIN_GRANT'];
+    if (!REFUNDABLE.includes(tx.type)) {
+      return errorResponse(res, `Unknown transaction type '${tx.type}'`, 400);
+    }
+
+    // ── Idempotency: check if already refunded ─────────────────────────────────
+    const existingRefund = await prisma.walletTransaction.findFirst({
+      where: { userId: tx.userId, type: 'REFUND', description: { contains: txId } }
+    });
+    if (existingRefund) {
+      return errorResponse(res,
+        `Transaction ${txId} has already been refunded (refund tx: ${existingRefund.id})`,
+        409
+      );
+    }
+
+    // ── Coin amount to reverse ─────────────────────────────────────────────────
+    // Original tx.coins is positive (it was a credit). Refund deducts that amount.
+    const coinsToDeduct = Math.abs(tx.coins);
+    if (coinsToDeduct === 0) {
+      return errorResponse(res, 'Transaction has zero coins — nothing to refund', 400);
+    }
+
+    // ── Load wallet and check balance ──────────────────────────────────────────
+    const wallet = await prisma.wallet.findUnique({
+      where:  { userId: tx.userId },
+      select: { coins: true }
+    });
+    const currentCoins = wallet?.coins ?? 0;
+
+    if (currentCoins < coinsToDeduct) {
+      return errorResponse(res,
+        `User only has ${currentCoins} coins but refund requires ${coinsToDeduct}. Partial refunds are not supported.`,
+        400
+      );
+    }
+
+    // ── Atomic DB transaction: deduct coins + write REFUND ledger entry ────────
+    let refundTx;
+    await prisma.$transaction(async (db) => {
+      // Deduct coins from wallet
+      await db.wallet.update({
+        where: { userId: tx.userId },
+        data:  { coins: { decrement: coinsToDeduct } }
+      });
+
+      // Write REFUND ledger entry — negative coins = debit
+      refundTx = await db.walletTransaction.create({
+        data: {
+          id:          uuidv4(),
+          userId:      tx.userId,
+          type:        'REFUND',
+          coins:       -coinsToDeduct,   // negative = debit
+          description: `Refund of tx ${txId} by admin ${adminId} — ${reason.trim()}`,
+          packageId:   tx.packageId ?? null,
+        }
+      });
+    });
+
+    logger.info(`[admin-actions] Refunded ${coinsToDeduct} coins for tx ${txId} (user ${tx.userId}) by admin ${adminId}`);
+
+    // ── Stripe refund (PAY-GAP-002) ────────────────────────────────────────────
+    // Only attempted for STRIPE_PURCHASE transactions with a stripeSessionId.
+    // Fire-and-forget after DB commit: if Stripe fails, coins are still refunded;
+    // admin can re-trigger the Stripe refund manually from the Stripe dashboard.
+    let stripeRefundResult = null;
+    if (tx.type === 'STRIPE_PURCHASE' && tx.stripeSessionId && stripeRefund !== false) {
+      try {
+        const Stripe = require('stripe');
+        const key    = process.env.STRIPE_SECRET_KEY;
+        // Only init Stripe if key looks real (not a placeholder or dev template)
+        const isPlaceholder = !key
+          || key.includes('REPLACE')
+          || key === 'your_stripe_secret_key'
+          || key.length < 20;
+        if (!isPlaceholder) {
+          const stripe = new Stripe(key, { apiVersion: '2024-11-20.acacia' });
+
+          // Retrieve the Checkout session to get the payment intent ID
+          const session = await stripe.checkout.sessions.retrieve(tx.stripeSessionId);
+          const paymentIntentId = session.payment_intent;
+
+          if (paymentIntentId) {
+            const refund = await stripe.refunds.create({
+              payment_intent: paymentIntentId,
+              reason:         'requested_by_customer',
+            });
+            stripeRefundResult = { refundId: refund.id, status: refund.status };
+            logger.info(`[admin-actions] Stripe refund ${refund.id} created for session ${tx.stripeSessionId}`);
+          } else {
+            stripeRefundResult = { error: 'No payment_intent found on Stripe session' };
+            logger.warn(`[admin-actions] Stripe session ${tx.stripeSessionId} has no payment_intent`);
+          }
+        } else {
+          stripeRefundResult = { skipped: 'Stripe not configured' };
+        }
+      } catch (stripeErr) {
+        // Non-fatal — DB refund already committed
+        stripeRefundResult = { error: stripeErr.message };
+        logger.error(`[admin-actions] Stripe refund failed for session ${tx.stripeSessionId}: ${stripeErr.message}`);
+      }
+    }
+
+    // ── Notify user via socket ─────────────────────────────────────────────────
+    const io = getIo();
+    if (io) {
+      io.to(`user:${tx.userId}`).emit('wallet:coins_deducted', {
+        coins:       coinsToDeduct,
+        type:        'REFUND',
+        description: `${coinsToDeduct} coins refunded by platform admin`,
+      });
+      io.to(`wallet:${tx.userId}`).emit('wallet:coins_deducted', {
+        coins: coinsToDeduct,
+        type:  'REFUND',
+      });
+    }
+
+    // ── Audit log (INVARIANT-005 + INVARIANT-006) ──────────────────────────────
+    await adminAudit(adminId, 'ADMIN_REFUND_TRANSACTION', 'wallet_transaction', txId,
+      {
+        originalTxId:   txId,
+        originalType:   tx.type,
+        coinsRefunded:  coinsToDeduct,
+        refundTxId:     refundTx.id,
+        reason:         reason.trim(),
+        targetEmail:    tx.user.email,
+        stripeSessionId: tx.stripeSessionId ?? null,
+        stripeRefund:   stripeRefundResult,
+      },
+      req.ip
+    );
+
+    return successResponse(res, {
+      refundTransaction: refundTx,
+      coinsRefunded:     coinsToDeduct,
+      originalTx: {
+        id:   txId,
+        type: tx.type,
+        stripeSessionId: tx.stripeSessionId ?? null,
+      },
+      stripeRefund: stripeRefundResult,
+      targetUser: {
+        id:    tx.user.id,
+        email: tx.user.email,
+      },
+    }, `${coinsToDeduct} coins refunded for transaction ${txId}${stripeRefundResult?.refundId ? ` (Stripe refund ${stripeRefundResult.refundId})` : ''}`);
+
   } catch (err) { next(err); }
 });

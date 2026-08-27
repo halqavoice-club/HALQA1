@@ -7,6 +7,7 @@
  *
  * Sprint 3 — UIGAP-004: Added Payout Management section
  * Sprint 3 — PAY-GAP-003: Fixed TX_TYPE_STYLE keys to match actual DB values
+ * Sprint 8 — PAY-GAP-001/002: Added transaction refund (coin reversal + Stripe)
  */
 
 import { useState } from 'react'
@@ -26,7 +27,7 @@ import {
 import { Textarea } from '@/components/ui/textarea'
 import {
   CreditCard, Search, ChevronLeft, ChevronRight, RefreshCw,
-  Banknote, CheckCircle, XCircle, Clock, AlertTriangle
+  Banknote, CheckCircle, XCircle, Clock, AlertTriangle, RotateCcw
 } from 'lucide-react'
 
 // PAY-GAP-003 FIX: Keys now match actual WalletTransaction.type DB values
@@ -75,7 +76,11 @@ export default function AdminPaymentsPage() {
   const [lookupResult, setLookupResult]     = useState<any>(null)
   const [lookupLoading, setLookupLoading]   = useState(false)
 
-  // ── Wallet transactions query ─────────────────────────────────────────────
+  // Refund section state (PAY-GAP-001/002)
+  const [refundTx, setRefundTx]         = useState<any>(null)
+  const [refundReason, setRefundReason] = useState('')
+  const [refundStripe, setRefundStripe] = useState(true)
+
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['admin-payments'],
     queryFn:  () => api.get('/admin/stats/payments').then(r => r.data.data as {
@@ -153,6 +158,31 @@ export default function AdminPaymentsPage() {
       toast({ title: 'Grant failed', description: e.response?.data?.message, variant: 'destructive' })
     }
   }, isPending: false }
+
+  // ── Refund transaction mutation (PAY-GAP-001/002) ────────────────────────
+  const refundMutation = useMutation({
+    mutationFn: ({ txId, reason, stripeRefund }: { txId: string; reason: string; stripeRefund: boolean }) =>
+      api.post(`/admin/actions/transactions/${txId}/refund`, { reason, stripeRefund }),
+    onSuccess: (res, vars) => {
+      const d = res.data.data
+      const stripeMsg = d.stripeRefund?.refundId
+        ? ` · Stripe refund ${d.stripeRefund.refundId}`
+        : d.stripeRefund?.error
+          ? ` · Stripe failed: ${d.stripeRefund.error}`
+          : ''
+      toast({
+        title: `✅ ${d.coinsRefunded} coins refunded`,
+        description: `Transaction ${vars.txId}${stripeMsg}`,
+      })
+      qc.invalidateQueries({ queryKey: ['admin-payments'] })
+      setRefundTx(null)
+      setRefundReason('')
+      setRefundStripe(true)
+    },
+    onError: (e: any) => {
+      toast({ title: 'Refund failed', description: e.response?.data?.message ?? e.message, variant: 'destructive' })
+    },
+  })
 
   const txs = (data?.recentTransactions ?? []).filter((t: any) => {
     if (!search) return true
@@ -329,6 +359,7 @@ export default function AdminPaymentsPage() {
                   <th className="text-right px-4 py-3 font-semibold text-gray-600 dark:text-gray-400">Coins</th>
                   <th className="text-left px-4 py-3 font-semibold text-gray-600 dark:text-gray-400 hidden md:table-cell">Description</th>
                   <th className="text-left px-4 py-3 font-semibold text-gray-600 dark:text-gray-400 hidden lg:table-cell">Date</th>
+                  <th className="px-4 py-3" />
                 </tr>
               </thead>
               <tbody>
@@ -351,6 +382,18 @@ export default function AdminPaymentsPage() {
                     <td className="px-4 py-3 text-gray-400 text-xs truncate max-w-48 hidden md:table-cell">{t.description || '—'}</td>
                     <td className="px-4 py-3 text-xs text-gray-400 hidden lg:table-cell">
                       {new Date(t.createdAt).toLocaleDateString()}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {/* PAY-GAP-001/002 FIX: Only show refund for refundable types */}
+                      {(t.type === 'STRIPE_PURCHASE' || t.type === 'ADMIN_GRANT') && t.coins > 0 && (
+                        <Button
+                          size="sm" variant="outline"
+                          className="text-orange-600 border-orange-300 hover:bg-orange-50 dark:text-orange-400 dark:border-orange-700 text-xs px-2 py-1 h-7"
+                          onClick={() => { setRefundTx(t); setRefundReason(''); setRefundStripe(true) }}
+                        >
+                          <RotateCcw className="w-3 h-3 mr-1" />Refund
+                        </Button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -529,6 +572,103 @@ export default function AdminPaymentsPage() {
               disabled={!payoutAction || (payoutAction === 'complete' && !transactionRef) || processMutation.isPending}
             >
               {processMutation.isPending ? 'Processing…' : payoutAction ? `${payoutAction.charAt(0).toUpperCase() + payoutAction.slice(1)} Payout` : 'Select action'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Refund Transaction Dialog (PAY-GAP-001/002) ──────────────── */}
+      <Dialog open={!!refundTx} onOpenChange={open => { if (!open) { setRefundTx(null); setRefundReason(''); setRefundStripe(true) } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <RotateCcw className="w-4 h-4 text-orange-500" />
+              Refund Transaction
+            </DialogTitle>
+          </DialogHeader>
+          {refundTx && (
+            <div className="space-y-4">
+              {/* Warning banner */}
+              <div className="p-3 bg-orange-50 dark:bg-orange-900/20 rounded-lg text-xs text-orange-800 dark:text-orange-200 space-y-1">
+                <p className="font-semibold">⚠️ This action is irreversible once submitted.</p>
+                <p>The user's wallet will be debited {Math.abs(refundTx.coins)} coins. A REFUND ledger entry will be created and this action will be audit logged.</p>
+              </div>
+
+              {/* Transaction summary */}
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Transaction ID</span>
+                  <span className="font-mono text-xs text-gray-700 dark:text-gray-300">{refundTx.id?.slice(0, 16)}…</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Type</span>
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${TX_TYPE_STYLE[refundTx.type] ?? ''}`}>
+                    {refundTx.type?.replace(/_/g,' ')}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">User</span>
+                  <span className="font-medium text-xs">{refundTx.wallet?.user?.firstName} {refundTx.wallet?.user?.lastName}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Coins</span>
+                  <span className="font-mono font-bold text-green-700 dark:text-green-400">+{refundTx.coins?.toLocaleString()}</span>
+                </div>
+                {refundTx.stripeSessionId && (
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Stripe Session</span>
+                    <span className="font-mono text-xs text-gray-500">{refundTx.stripeSessionId?.slice(0, 20)}…</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Stripe refund toggle — only for STRIPE_PURCHASE */}
+              {refundTx.type === 'STRIPE_PURCHASE' && refundTx.stripeSessionId && (
+                <div className="flex items-center justify-between p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                  <div>
+                    <p className="text-sm font-medium text-blue-900 dark:text-blue-200">Issue Stripe refund</p>
+                    <p className="text-xs text-blue-600 dark:text-blue-400">Refund the real-money payment via Stripe</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setRefundStripe(r => !r)}
+                    className={`relative w-10 h-5 rounded-full transition-colors ${refundStripe ? 'bg-blue-500' : 'bg-gray-300 dark:bg-gray-600'}`}
+                    aria-pressed={refundStripe}
+                    aria-label="Toggle Stripe refund"
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${refundStripe ? 'translate-x-5' : ''}`} />
+                  </button>
+                </div>
+              )}
+
+              {/* Reason */}
+              <div>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">
+                  Reason <span className="text-red-500">*</span> (min 10 chars)
+                </label>
+                <Textarea
+                  value={refundReason}
+                  onChange={e => setRefundReason(e.target.value)}
+                  placeholder="Why is this transaction being refunded?"
+                  rows={2}
+                  maxLength={500}
+                />
+                <p className="text-xs text-gray-400 mt-1">{refundReason.length}/500</p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRefundTx(null)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={() => refundTx && refundMutation.mutate({
+                txId:         refundTx.id,
+                reason:       refundReason,
+                stripeRefund: refundStripe,
+              })}
+              disabled={refundReason.trim().length < 10 || refundMutation.isPending}
+            >
+              {refundMutation.isPending ? 'Refunding…' : `Refund ${refundTx?.coins ?? '?'} Coins`}
             </Button>
           </DialogFooter>
         </DialogContent>
