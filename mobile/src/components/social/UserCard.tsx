@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image } from 'react-native';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
@@ -18,11 +19,18 @@ export default function UserCard({ user, onPress }: Props) {
   const initials    = getAvatarInitials(user.firstName, user.lastName);
   const bg          = avatarColor(`${user.firstName}${user.lastName}`);
 
+  // Local optimistic state — seeded from server, toggles instantly
+  const [isFollowing, setIsFollowing] = useState(user.isFollowing ?? false);
+
   const followMutation = useMutation({
-    mutationFn: () => user.isFollowing
+    mutationFn: () => isFollowing
       ? api.delete(`/social/follow/${user.id}`)
       : api.post(`/social/follow/${user.id}`),
-    onSuccess: () => {
+    onMutate: () => setIsFollowing(v => !v),   // instant toggle
+    onError:  () => {
+      setIsFollowing(v => !v);                  // roll back on failure
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['explore-search'] });
       queryClient.invalidateQueries({ queryKey: ['explore-feed']   });
     },
@@ -41,12 +49,12 @@ export default function UserCard({ user, onPress }: Props) {
         {user.bio && <Text allowFontScaling={false} style={styles.bio} numberOfLines={1}>{user.bio}</Text>}
       </View>
       <TouchableOpacity
-        style={[styles.followBtn, user.isFollowing && styles.followingBtn]}
+        style={[styles.followBtn, isFollowing && styles.followingBtn]}
         onPress={() => followMutation.mutate()}
         disabled={followMutation.isPending}
       >
-        <Text allowFontScaling={false} style={[styles.followText, user.isFollowing && { color: '#6b7280' }]}>
-          {user.isFollowing ? 'Following' : 'Follow'}
+        <Text allowFontScaling={false} style={[styles.followText, isFollowing && { color: '#6b7280' }]}>
+          {isFollowing ? 'Following' : 'Follow'}
         </Text>
       </TouchableOpacity>
     </TouchableOpacity>

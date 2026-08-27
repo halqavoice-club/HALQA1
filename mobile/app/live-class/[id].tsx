@@ -203,8 +203,15 @@ export default function LiveClassScreen() {
   const whiteboardRef = useRef<WhiteboardHandle>(null);
   const [showReactions, setShowReactions] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  // DI-01: Attendance state for teachers
+  const [attendance, setAttendance] = useState<any[]>([]);
+  const [loadingAttendance, setLoadingAttendance] = useState(false);
 
-  const isTeacher = ['TEACHER','SCHOOL_ADMIN','SUPER_ADMIN'].includes(user?.role || '');
+  // isTeacher determines host-level controls in the live class UI.
+  // SUPER_ADMIN is platform-admin only — they must NOT automatically become host
+  // in any live class. They are treated as regular participants unless they are
+  // the actual class host (checked via liveClass.host.id === user.id below).
+  const isTeacher = ['TEACHER','SCHOOL_ADMIN'].includes(user?.role || '');
   // LiveKit real audio (native builds only — degrades gracefully in Expo Go)
   const lk = useLiveKitAudio();
 
@@ -237,6 +244,20 @@ export default function LiveClassScreen() {
   useEffect(() => {
     if (liveClass) setIsOpenMic((liveClass as any).isOpenMic ?? false);
   }, [(liveClass as any)?.isOpenMic]);
+
+  // DI-01: load attendance when host opens the controls tab
+  const loadAttendance = useCallback(async () => {
+    if (!isHost || !id) return;
+    setLoadingAttendance(true);
+    try {
+      const r = await api.get(`/live-classes/${id}/attendance`);
+      setAttendance(r.data.data ?? []);
+    } catch {
+      // non-fatal — tab still renders, just empty
+    } finally {
+      setLoadingAttendance(false);
+    }
+  }, [id, isHost]);
 
   // ── Load hand queue (teachers only) ─────────────────────────────────────────
   const loadHands = useCallback(async () => {
@@ -398,10 +419,15 @@ export default function LiveClassScreen() {
         if (ev.type === 'vote' && ev.pollId && ev.optionId && ev.userId) {
           return prev.map(p => p.id === ev.pollId ? {
             ...p,
-            options: p.options.map(o => o.id === ev.optionId
-              ? { ...o, votes: o.votes.includes(ev.userId!) ? o.votes : [...o.votes, ev.userId!] }
-              : { ...o, votes: o.votes.filter(v => v !== ev.userId) }
-            ),
+            // DI-02 FIX: idempotent add — skip if voter already in votes array to
+            // prevent duplicate entries when optimistic update and server echo both fire.
+            options: p.options.map(o => {
+              if (o.id !== ev.optionId) {
+                return { ...o, votes: o.votes.filter((v: string) => v !== ev.userId) };
+              }
+              if (o.votes.includes(ev.userId!)) return o; // already recorded — no-op
+              return { ...o, votes: [...o.votes, ev.userId!] };
+            }),
           } : p);
         }
         if (ev.type === 'close' && ev.pollId) {
@@ -728,10 +754,15 @@ export default function LiveClassScreen() {
       if (ev.type === 'vote' && ev.pollId && ev.optionId && ev.userId) {
         return prev.map(p => p.id === ev.pollId ? {
           ...p,
-          options: p.options.map(o => o.id === ev.optionId
-            ? { ...o, votes: o.votes.includes(ev.userId!) ? o.votes : [...o.votes, ev.userId!] }
-            : { ...o, votes: o.votes.filter(v => v !== ev.userId) }
-          ),
+          options: p.options.map(o => {
+            if (o.id !== ev.optionId) {
+              // DI-02 FIX: remove this voter from other options (single-choice dedup)
+              return { ...o, votes: o.votes.filter((v: string) => v !== ev.userId) };
+            }
+            // Idempotent add — skip if already present (prevents double from echo)
+            if (o.votes.includes(ev.userId!)) return o;
+            return { ...o, votes: [...o.votes, ev.userId!] };
+          }),
         } : p);
       }
       if (ev.type === 'close' && ev.pollId) {
@@ -826,12 +857,14 @@ export default function LiveClassScreen() {
       const next = !isCameraOn;
       await participant.setCameraEnabled(next);
       setIsCameraOn(next);
-      // Notify other participants via API + socket
+      // MOB-DUP FIX: Removed redundant socket.emit('liveclass:video_changed') here.
+      // The API PATCH below calls setVideoState on the backend, which already emits
+      // liveclass:video_changed to the room via Socket.IO. Emitting from the client
+      // socket as well caused room members to receive the event twice.
+      // DB persistence + server-side relay via API is the single canonical path.
       if (user?.id) {
         await api.patch(`/live-classes/${id}/participants/${user.id}/video`, { isVideoOn: next }).catch(() => {});
       }
-      const socket = getSocket();
-      socket?.emit('liveclass:video_changed', { liveClassId: id, isVideoOn: next });
       showMessage({
         message: next ? '📷 Camera on' : '📷 Camera off',
         type: 'info',
@@ -1178,6 +1211,57 @@ export default function LiveClassScreen() {
               <Ionicons name="people" size={18} color="#fff" />
               <Text style={styles.controlBtnText}>Manage Participants</Text>
             </TouchableOpacity>
+
+            {/* ── DI-01: Attendance report ─────────────────────────────── */}
+            {/* Only shown for SCHOOL streams (attendance is tracked per student) */}
+            {(liveClass as any).streamType !== 'PUBLIC' && (
+              <>
+                <Text style={[styles.sectionTitle, { marginTop: 8 }]}>📋 Attendance</Text>
+                <TouchableOpacity
+                  style={[styles.controlBtn, { backgroundColor: '#0f172a', borderWidth: 1, borderColor: '#334155' }]}
+                  onPress={loadAttendance}
+                  disabled={loadingAttendance}
+                >
+                  <Ionicons name="refresh-outline" size={18} color="#a5b4fc" />
+                  <Text style={[styles.controlBtnText, { color: '#a5b4fc' }]}>
+                    {loadingAttendance ? 'Loading…' : 'Refresh Attendance'}
+                  </Text>
+                </TouchableOpacity>
+
+                {attendance.length === 0 && !loadingAttendance && (
+                  <Text style={styles.noHandsText}>No attendance records yet</Text>
+                )}
+
+                {attendance.map((a: any) => {
+                  const name = a.student?.user
+                    ? `${a.student.user.firstName} ${a.student.user.lastName}`.trim()
+                    : 'Unknown';
+                  const statusColor =
+                    a.status === 'PRESENT'  ? '#10b981' :
+                    a.status === 'PARTIAL'  ? '#f59e0b' : '#6b7280';
+                  const mins = a.totalMinutes ?? 0;
+                  return (
+                    <View key={a.id} style={[styles.handRow, { paddingVertical: 10 }]}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.handName}>{name}</Text>
+                        <Text style={styles.handTime}>
+                          {mins > 0 ? `${mins} min attended` : 'No duration yet'}
+                        </Text>
+                      </View>
+                      <View style={{
+                        paddingHorizontal: 10, paddingVertical: 4,
+                        backgroundColor: statusColor + '22',
+                        borderRadius: 8, borderWidth: 1, borderColor: statusColor + '66',
+                      }}>
+                        <Text style={{ color: statusColor, fontSize: 11, fontWeight: '700' }}>
+                          {a.status}
+                        </Text>
+                      </View>
+                    </View>
+                  );
+                })}
+              </>
+            )}
           </ScrollView>
         )}
 

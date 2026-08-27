@@ -56,6 +56,7 @@ export interface ActiveVoiceRoom {
   hostId: string;
   isOpenMic: boolean;
   micLocked: boolean;
+  lockedSeats: number[];   // individual seat indices locked by host
   commentsEnabled: boolean;
   slowMode: boolean;
   messageType: 'all' | 'followers' | 'none';

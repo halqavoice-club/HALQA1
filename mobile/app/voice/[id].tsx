@@ -23,6 +23,7 @@ import { initSocket, getSocket } from '@/lib/socket';
 import { useLiveKitAudio } from '@/hooks/useLiveKitAudio';
 import { useNetworkQuality, qualityToPollInterval } from '@/hooks/useNetworkQuality';
 import MicPassModal, { type MicPassUser } from '@/components/voice/MicPassModal';
+import { MemberManagementPanel } from '@/components/voice/MemberManagementPanel';
 import { useVoiceStore } from '@/store/voice.store';
 
 // ─── Background Music Panel ───────────────────────────────────────────────────
@@ -496,35 +497,140 @@ interface ChatMsg {
   createdAt: string;
 }
 
-// ─── Gift Animation Overlay ───────────────────────────────────────────────────
+// ─── Gift Animation Overlay — rarity & animationType aware (MOB-5 fix) ──────
+// Each rarity tier has distinct visual treatment:
+//   common/standard  — simple scale + fade (original behaviour)
+//   rare             — blue glow + bounce
+//   epic             — purple glow + bigger scale + particle burst label
+//   legendary        — gold glow + full-screen tint + shake + longer hold
+//   ultimate         — red glow + full-screen overlay + rotation + max hold
+// animationType is also respected for UI hints (rocket, cinematic, etc.)
 function GiftAnimOverlay({ gift, senderName, onDone }: {
   gift: Gift; senderName: string; onDone: () => void;
 }) {
-  const scaleAnim  = useRef(new Animated.Value(0)).current;
+  const scaleAnim   = useRef(new Animated.Value(0)).current;
   const opacityAnim = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    Animated.sequence([
-      Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, tension: 60, friction: 6 }),
-      Animated.delay(1800),
-      Animated.timing(opacityAnim, { toValue: 0, duration: 400, useNativeDriver: true }),
-    ]).start(() => onDone());
-  }, []);
+  const shakeAnim   = useRef(new Animated.Value(0)).current;
+  const rotateAnim  = useRef(new Animated.Value(0)).current;
 
   const rarityColors: Record<string, string> = {
-    common: '#94a3b8', rare: '#6366f1', epic: '#8b5cf6',
-    legendary: '#f59e0b', ultimate: '#ef4444',
+    common:    '#94a3b8',
+    standard:  '#60a5fa',
+    rare:      '#6366f1',
+    epic:      '#8b5cf6',
+    legendary: '#f59e0b',
+    ultimate:  '#ef4444',
   };
-  const glow = rarityColors[gift.rarity] || '#94a3b8';
+  const glow = rarityColors[gift.rarity] ?? '#94a3b8';
+
+  // Hold duration by rarity — longer for rarer gifts
+  const holdMs = gift.rarity === 'ultimate'  ? 3500
+               : gift.rarity === 'legendary' ? 2800
+               : gift.rarity === 'epic'      ? 2200
+               : gift.rarity === 'rare'      ? 1800
+               :                               1400;
+
+  // Spring tension by rarity — more dramatic for higher tiers
+  const tension = gift.rarity === 'ultimate'  ? 120
+                : gift.rarity === 'legendary' ? 100
+                : gift.rarity === 'epic'      ? 80
+                :                               60;
+
+  useEffect(() => {
+    // Build animation sequence based on rarity
+    const enterAnim = gift.rarity === 'ultimate' || gift.rarity === 'legendary'
+      ? Animated.parallel([
+          Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, tension, friction: 5 }),
+          // Shake for legendary/ultimate
+          Animated.sequence([
+            Animated.timing(shakeAnim, { toValue: 8,  duration: 60, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: -8, duration: 60, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: 6,  duration: 50, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: -6, duration: 50, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: 0,  duration: 40, useNativeDriver: true }),
+          ]),
+        ])
+      : gift.rarity === 'epic'
+      ? Animated.parallel([
+          Animated.spring(scaleAnim, { toValue: 1.1, useNativeDriver: true, tension, friction: 5 }),
+          Animated.spring(rotateAnim, { toValue: 1, useNativeDriver: true, tension: 40, friction: 8 }),
+        ])
+      : Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, tension, friction: 6 });
+
+    Animated.sequence([
+      enterAnim,
+      Animated.delay(holdMs),
+      Animated.timing(opacityAnim, { toValue: 0, duration: 500, useNativeDriver: true }),
+    ]).start(() => onDone());
+  }, []); // eslint-disable-line
+
+  const rotateDeg = rotateAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '5deg'],
+  });
+
+  // Full-screen background tint for legendary/ultimate
+  const isFullscreen = gift.rarity === 'ultimate' || gift.rarity === 'legendary';
+  // Emoji scale boost for higher rarities
+  const emojiSize = gift.rarity === 'ultimate' ? 80
+                  : gift.rarity === 'legendary' ? 72
+                  : gift.rarity === 'epic'      ? 64
+                  : 56;
+
+  // Rarity label decorators
+  const rarityDecorator = gift.rarity === 'ultimate'  ? '✨ ULTIMATE ✨'
+                        : gift.rarity === 'legendary' ? '🌟 LEGENDARY'
+                        : gift.rarity === 'epic'      ? '💫 EPIC'
+                        : gift.rarity === 'rare'      ? '💠 RARE'
+                        : gift.rarity.toUpperCase();
+
+  // animationType hint (shown as subtitle for rocket/cinematic/etc.)
+  const animHint = gift.animationType === 'rocket_launch'    ? '🚀 Launching!'
+                 : gift.animationType === 'rocket_cinematic' ? '🚀 Cinematic!'
+                 : gift.animationType === 'racing'           ? '🏎️ Racing!'
+                 : gift.animationType === 'spotlight'        ? '🔦 Spotlight!'
+                 : gift.animationType === 'cinematic'        ? '🎬 Cinematic!'
+                 : gift.animationType === 'fullscreen'       ? '🌟 Fullscreen!'
+                 : null;
 
   return (
-    <Animated.View style={[styles.giftOverlay, { opacity: opacityAnim }]}>
-      <Animated.View style={[styles.giftAnimCard, { transform: [{ scale: scaleAnim }], borderColor: glow, shadowColor: glow }]}>
-        <Text style={styles.giftAnimEmoji}>{gift.emoji}</Text>
-        <Text style={styles.giftAnimName}>{gift.name}</Text>
+    <Animated.View style={[
+      styles.giftOverlay,
+      { opacity: opacityAnim },
+      // Full-screen tint overlay for legendary/ultimate
+      isFullscreen && { backgroundColor: glow + '18' },
+    ]}>
+      <Animated.View style={[
+        styles.giftAnimCard,
+        {
+          transform: [
+            { scale: scaleAnim },
+            { translateX: shakeAnim },
+            { rotate: rotateDeg },
+          ],
+          borderColor: glow,
+          shadowColor: glow,
+          // Bigger card for higher rarity
+          ...(gift.rarity === 'ultimate'  && { minWidth: 220, padding: 32, borderWidth: 3 }),
+          ...(gift.rarity === 'legendary' && { minWidth: 200, padding: 28, borderWidth: 2.5 }),
+          ...(gift.rarity === 'epic'      && { minWidth: 190, padding: 24 }),
+        },
+      ]}>
+        <Text style={[styles.giftAnimEmoji, { fontSize: emojiSize }]}>{gift.emoji}</Text>
+        <Text style={[styles.giftAnimName, gift.rarity === 'ultimate' && { fontSize: 22, color: glow }]}>
+          {gift.name}
+        </Text>
         <Text style={styles.giftAnimSender}>from {senderName}</Text>
-        <View style={[styles.giftRarityBadge, { backgroundColor: glow + '33', borderColor: glow }]}>
-          <Text style={[styles.giftRarityText, { color: glow }]}>{gift.rarity.toUpperCase()}</Text>
+        {animHint && (
+          <Text style={{ color: glow, fontSize: 12, fontWeight: '700', marginTop: 4 }}>{animHint}</Text>
+        )}
+        <View style={[styles.giftRarityBadge, {
+          backgroundColor: glow + '33',
+          borderColor: glow,
+          marginTop: gift.rarity === 'ultimate' ? 16 : 12,
+          paddingHorizontal: gift.rarity === 'ultimate' ? 18 : 14,
+        }]}>
+          <Text style={[styles.giftRarityText, { color: glow }]}>{rarityDecorator}</Text>
         </View>
       </Animated.View>
     </Animated.View>
@@ -844,6 +950,7 @@ export default function VoiceRoomScreen() {
   const [isMuted,        setIsMuted]        = useState(true);
   const [handRaised,     setHandRaised]     = useState(false);
   const [participants,   setParticipants]   = useState<Participant[]>([]);
+  const [lockedSeats,    setLockedSeats]    = useState<number[]>([]);  // individual seat indices locked by host
   const [showGiftPanel,  setShowGiftPanel]  = useState(false);
   const [showLeaderboard,setShowLeaderboard]= useState(false);
   const [showChat,       setShowChat]       = useState(false);
@@ -862,6 +969,7 @@ export default function VoiceRoomScreen() {
   // ── Background music state ───────────────────────────────────────────────────
   const [showBgMusic,   setShowBgMusic]   = useState(false);
   const [showDotMenu,   setShowDotMenu]   = useState(false);
+  const [showMembersPanel, setShowMembersPanel] = useState(false); // FIX-L12a: member management
   // Room settings (host only)
   const [showRoomSettings, setShowRoomSettings] = useState(false);
   const [settingsTitle,    setSettingsTitle]    = useState('');
@@ -993,13 +1101,20 @@ export default function VoiceRoomScreen() {
       setParticipants(prev => prev.map(p => p.id === d.userId ? { ...p, handRaised: d.raised } : p));
     };
 
-    // Room ended — leave automatically
+    // Room went IDLE (all left) or was explicitly terminated by host/admin
+    // PERMANENT ROOMS: voice:room_ended fires when host calls endRoom() (ENDED terminal state)
+    // OR when the room transitions LIVE → IDLE after 5-min grace (empty room sleep).
+    // We do NOT force the user out — they can stay and wait for others to rejoin.
+    // Only clear the UI if the room is truly ENDED (terminal — host archived it).
     const onRoomEnded = () => {
-      showMessage({ message: '🏁 This room has ended', type: 'info' });
-      lk.disconnect();
-      clearActiveRoom();
-      clearQueuePosition();
+      showMessage({ message: '🔔 Room is now offline — it will be back when the host returns', type: 'info', duration: 3000 });
+      // Do NOT call router.back() — the room is permanent and can be rejoined.
+      // The participant list will empty itself naturally via voice:user_left events.
+      // The room header will reflect IDLE status once the user polls or reconnects.
       setIsJoined(false);
+      lk.disconnect();
+      clearQueuePosition();
+      // Leave the screen so they go back to the lobby (room stays in DB as IDLE)
       router.back();
     };
 
@@ -1016,6 +1131,12 @@ export default function VoiceRoomScreen() {
         old ? { ...old, micLocked: d.micLocked } : old
       );
       showMessage({ message: d.micLocked ? '🔒 Mic locked by host' : '🔓 Mic unlocked', type: 'info' });
+    };
+
+    // Seat lock changed (individual seat)
+    const onSeatLockChanged = (d: { roomId: string; seatIndex: number; locked: boolean; lockedSeats: number[] }) => {
+      if (d.roomId !== id) return;
+      setLockedSeats(d.lockedSeats ?? []);
     };
 
     // Room settings updated (commentsEnabled, reactionsEnabled, etc.)
@@ -1139,6 +1260,7 @@ export default function VoiceRoomScreen() {
     socket.on('voice:room_ended',     onRoomEnded);
     socket.on('voice:open_mic_changed', onOpenMicChanged);
     socket.on('voice:mic_lock_changed', onMicLockChanged);
+    socket.on('voice:seat_lock_changed', onSeatLockChanged);
     socket.on('voice:room_updated',      onRoomUpdated);
     socket.on('voice:join_request',      (d: any) => { if (d.roomId !== id) return; showMessage({ message: `✋ ${d.firstName ?? ''} ${d.lastName ?? ''} wants to join the room`, type: 'info' }); });
     socket.on('voice:join_approved',     (d: any) => { if (d.roomId !== id) return; showMessage({ message: '✅ Your join request was approved!', type: 'success' }); setIsMember(true); setMemberLevel(1); });
@@ -1148,6 +1270,7 @@ export default function VoiceRoomScreen() {
       clearActiveRoom(); clearQueuePosition();
       router.back();
     });
+    // voice:blocked_from_room — emitted by room-member.controller.js blockMember()
     socket.on('voice:blocked_from_room', (d: any) => {
       if (d.roomId !== id) return;
       showMessage({ message: '⛔ You were blocked from this room', type: 'danger' });
@@ -1179,6 +1302,7 @@ export default function VoiceRoomScreen() {
       socket.off('voice:room_ended',       onRoomEnded);
       socket.off('voice:open_mic_changed', onOpenMicChanged);
       socket.off('voice:mic_lock_changed', onMicLockChanged);
+      socket.off('voice:seat_lock_changed', onSeatLockChanged);
       socket.off('voice:room_updated',      onRoomUpdated);
       socket.off('voice:join_request');
       socket.off('voice:join_approved');
@@ -1226,6 +1350,7 @@ export default function VoiceRoomScreen() {
           hostId:          roomData?.hostId ?? room.host?.id ?? '',
           isOpenMic:       roomData?.isOpenMic ?? false,
           micLocked:       roomData?.micLocked ?? false,
+          lockedSeats:     Array.isArray(roomData?.lockedSeats) ? roomData.lockedSeats : [],
           commentsEnabled: roomData?.commentsEnabled ?? true,
           slowMode:        roomData?.slowMode ?? false,
           messageType:     (roomData?.messageType ?? 'all') as 'all' | 'followers' | 'none',
@@ -1249,13 +1374,18 @@ export default function VoiceRoomScreen() {
         id: room.host.id, name: room.host.name, avatar: room.host.avatar ?? undefined,
         role: 'HOST', isMuted: false, isSpeaking: false, handRaised: false,
       }]);
+      // Seed locked seats from join response
+      if (Array.isArray(roomData?.lockedSeats)) {
+        setLockedSeats(roomData.lockedSeats);
+      }
       await loadChat();
       // Connect LiveKit for real audio (native builds only)
       try {
         const tokenRes = await api.post(`/voice/${id}/livekit-token`);
         const { token: lkToken, livekitUrl } = tokenRes.data.data;
         if (lkToken && livekitUrl) {
-          await lk.connect(livekitUrl, lkToken, true /* start muted */);
+          // Pass roomId so useLiveKitAudio can emit voice:speaking via socket (FIX-12)
+          await lk.connect(livekitUrl, lkToken, true /* start muted */, id);
         }
       } catch { /* non-fatal — audio not available in Expo Go */ }
       showMessage({ message: `Joined ${room.name}`, type: 'success' });
@@ -1343,6 +1473,41 @@ export default function VoiceRoomScreen() {
         try { await api.delete(`/voice/${id}/kick/${targetId}`); setParticipants(prev => prev.filter(p => p.id !== targetId)); } catch {}
       }},
     ]);
+  }, [id]);
+
+  const handleBan = useCallback((targetId: string, name: string) => {
+    Alert.alert(
+      'Ban from Room',
+      `Ban ${name}? They will be removed and cannot rejoin this room.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Ban', style: 'destructive', onPress: async () => {
+          try {
+            await api.post(`/voice/${id}/ban/${targetId}`, { reason: '' });
+            setParticipants(prev => prev.filter(p => p.id !== targetId));
+            showMessage({ message: `⛔ ${name} banned from room`, type: 'success' });
+          } catch (e: any) {
+            showMessage({ message: e?.response?.data?.message ?? 'Failed to ban', type: 'danger' });
+          }
+        }},
+      ]
+    );
+  }, [id]);
+
+  const handleUnban = useCallback(async (targetId: string, name: string) => {
+    try {
+      await api.delete(`/voice/${id}/ban/${targetId}`);
+      showMessage({ message: `✅ ${name} unbanned`, type: 'success' });
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed to unban', type: 'danger' });
+    }
+  }, [id]);
+
+  const handleUnmuteAll = useCallback(async () => {
+    try {
+      await api.patch(`/voice/${id}/unmute-all`);
+      showMessage({ message: '🎙️ All speakers unmuted', type: 'info' });
+    } catch {}
   }, [id]);
 
   const handleEndRoom = useCallback(async () => {
@@ -1439,8 +1604,43 @@ export default function VoiceRoomScreen() {
     } catch (e: any) { showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' }); }
   }, [id, room?.micLocked]);
 
+  // Toggle individual seat lock (HOST or MODERATOR only)
+  const handleToggleSeatLock = useCallback((seatIndex: number) => {
+    if (!(myRole === 'HOST' || myRole === 'MODERATOR')) return;
+    if (room?.micLocked) {
+      // micLocked already covers all seats — per-seat toggle not meaningful
+      showMessage({ message: '🔒 Mic is globally locked — unlock mic first', type: 'info' });
+      return;
+    }
+    const isLocked = lockedSeats.includes(seatIndex);
+    Alert.alert(
+      isLocked ? `🔓 Unlock Seat ${seatIndex + 1}` : `🔒 Lock Seat ${seatIndex + 1}`,
+      isLocked
+        ? `Allow speakers to occupy seat ${seatIndex + 1}?`
+        : `Prevent anyone from taking seat ${seatIndex + 1}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: isLocked ? 'Unlock' : 'Lock',
+          style: isLocked ? 'default' : 'destructive',
+          onPress: async () => {
+            try {
+              await api.patch(`/voice/${id}/seat-lock`, { seatIndex });
+              // Optimistic update — server will confirm via socket
+              setLockedSeats(prev =>
+                isLocked ? prev.filter(s => s !== seatIndex) : [...prev, seatIndex]
+              );
+              showMessage({ message: isLocked ? `🔓 Seat ${seatIndex + 1} unlocked` : `🔒 Seat ${seatIndex + 1} locked`, type: 'info' });
+            } catch (e: any) {
+              showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+            }
+          },
+        },
+      ]
+    );
+  }, [id, lockedSeats, room?.micLocked, myRole]);
 
-  // ── Room membership constants ─────────────────────────────────────────────
+
   const ROOM_LEVEL_CAPACITY: Record<number, number> = { 1:500,2:1000,3:2000,4:3500,5:5000,6:8000,7:12000,8:18000,9:25000,10:50000 };
   const MEMBER_LEVEL_META: Record<number, { label: string; emoji: string; color: string }> = {
     1:{label:'Fan',emoji:'⭐',color:'#9ca3af'},2:{label:'Regular',emoji:'🌟',color:'#6366f1'},
@@ -1652,25 +1852,79 @@ export default function VoiceRoomScreen() {
 
         {!showChat ? (
           /* Participants view */
-          <FlatList
-            data={[...speakers, ...audience]}
-            numColumns={3}
-            keyExtractor={p => p.id}
-            renderItem={({ item }) => {
-              // Calculate queue position for raised-hand audience members
-              const raisedAudience = audience.filter(p => p.handRaised);
-              const queuePos = item.role === 'AUDIENCE' && item.handRaised
-                ? raisedAudience.findIndex(p => p.id === item.id) + 1
-                : undefined;
-              return <ParticipantTile participant={item} queuePosition={queuePos} />;
-            }}
-            contentContainerStyle={styles.grid}
-            style={{ flex: 1 }}
-            ListEmptyComponent={<Text style={styles.emptyText}>{isJoined ? 'Waiting for participants…' : 'Join to see participants'}</Text>}
-            ListHeaderComponent={speakers.length > 0 && audience.length > 0 ? (
-              <Text style={styles.gridSectionLabel}>🎙 On Stage ({speakers.length})</Text>
-            ) : null}
-          />
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.grid}>
+            {/* ── Stage Section: Speaker Slots ─────────────────── */}
+            {(speakers.length > 0 || canModerate) && (
+              <>
+                <Text style={styles.gridSectionLabel}>
+                  🎙 On Stage ({speakers.length}/{room?.micLocked ? '🔒' : (room as any)?.maxSpeakers ?? 10})
+                </Text>
+                {/* Speaker slot grid */}
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginBottom: 8 }}>
+                  {Array.from({ length: (room as any)?.maxSpeakers ?? 10 }, (_, slotIdx) => {
+                    const occupant = speakers[slotIdx] ?? null;
+                    if (occupant) {
+                      return (
+                        <View key={`slot-${slotIdx}`} style={{ width: '33.33%', alignItems: 'center', marginBottom: 12 }}>
+                          <ParticipantTile participant={occupant} />
+                        </View>
+                      );
+                    }
+                    // Empty slot
+                    const isSeatLocked = room?.micLocked || lockedSeats.includes(slotIdx);
+                    const canTap = canModerate && !room?.micLocked;
+                    return (
+                      <TouchableOpacity
+                        key={`empty-${slotIdx}`}
+                        style={{ width: '33.33%', alignItems: 'center', marginBottom: 12, opacity: canTap ? 1 : 0.6 }}
+                        onPress={() => canTap && handleToggleSeatLock(slotIdx)}
+                        activeOpacity={canTap ? 0.7 : 1}
+                        accessibilityLabel={isSeatLocked ? `Seat ${slotIdx + 1} locked. Tap to unlock.` : `Seat ${slotIdx + 1} empty. Tap to lock.`}
+                      >
+                        <View style={[
+                          styles.emptySlot,
+                          isSeatLocked && styles.emptySlotLocked,
+                          lockedSeats.includes(slotIdx) && !room?.micLocked && { borderColor: '#f59e0b' },
+                        ]}>
+                          <Text style={{ fontSize: 20 }}>
+                            {isSeatLocked ? '🔒' : '🎤'}
+                          </Text>
+                          {canTap && !isSeatLocked && (
+                            <Text style={styles.emptySlotHint}>tap to lock</Text>
+                          )}
+                        </View>
+                        <Text style={styles.emptySlotNum}>{slotIdx + 1}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+
+            {/* ── Audience Section ─────────────────────────────── */}
+            {audience.length > 0 && (
+              <>
+                <Text style={styles.gridSectionLabel}>👂 Listening ({audience.length})</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+                  {audience.map(item => {
+                    const raisedAudience = audience.filter(p => p.handRaised);
+                    const queuePos = item.handRaised
+                      ? raisedAudience.findIndex(p => p.id === item.id) + 1
+                      : undefined;
+                    return (
+                      <View key={item.id} style={{ width: '33.33%', alignItems: 'center', marginBottom: 12 }}>
+                        <ParticipantTile participant={item} queuePosition={queuePos} />
+                      </View>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+
+            {participants.length === 0 && (
+              <Text style={styles.emptyText}>{isJoined ? 'Waiting for participants…' : 'Join to see participants'}</Text>
+            )}
+          </ScrollView>
         ) : (
           /* Chat view */
           <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -1835,6 +2089,7 @@ export default function VoiceRoomScreen() {
             { icon: '🏆', label: 'Leaderboard',       onPress: () => { setShowDotMenu(false); setShowLeaderboard(true); } },
             { icon: '📊', label: 'My Stats',           onPress: () => { setShowDotMenu(false); router.push('/voice/stats' as any); } },
             { icon: '🎵', label: 'Background Music',   onPress: () => { setShowDotMenu(false); setShowBgMusic(true); } },
+            ...(canManage ? [{ icon: '⭐', label: 'Members', onPress: () => { setShowDotMenu(false); setShowMembersPanel(true); } }] : []),
             ...(myRole === 'HOST' ? [{ icon: '⚙️', label: 'Room Settings', onPress: () => { setShowDotMenu(false); setShowRoomSettings(true); } }] : []),
           ].map((item, i, arr) => (
             <TouchableOpacity
@@ -1857,6 +2112,16 @@ export default function VoiceRoomScreen() {
         onClose={() => setShowBgMusic(false)}
         onNowPlayingChange={(track, playing) => { setBgMusicTrack(track); setBgMusicPlaying(playing); }}
       />
+
+      {/* ── Member Management Panel (FIX-L12a) ──────────────────── */}
+      {isJoined && (
+        <MemberManagementPanel
+          visible={showMembersPanel}
+          roomId={id!}
+          myRole={myRole as 'HOST' | 'MODERATOR' | 'SPEAKER' | 'AUDIENCE'}
+          onClose={() => setShowMembersPanel(false)}
+        />
+      )}
 
       {/* ── Room Settings Modal (host only) ─────────────────────── */}
       <Modal
@@ -1979,6 +2244,12 @@ export default function VoiceRoomScreen() {
               <Ionicons name="mic-off" size={22} color="#f59e0b" />
               <Text style={{ color: '#f59e0b', fontSize: 12, fontWeight: '600' }}>Mute All</Text>
             </TouchableOpacity>
+            {/* Unmute All */}
+            <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#22c55e22', borderWidth: 1, borderColor: '#22c55e44', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
+              onPress={handleUnmuteAll}>
+              <Ionicons name="mic" size={22} color="#22c55e" />
+              <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '600' }}>Unmute All</Text>
+            </TouchableOpacity>
             <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#10b98122', borderWidth: 1, borderColor: '#10b98144', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
               onPress={handleApproveQueue}>
               <Ionicons name="checkmark-circle" size={22} color="#10b981" />
@@ -2054,12 +2325,20 @@ export default function VoiceRoomScreen() {
               </TouchableOpacity>
             )}
             {myRole === 'HOST' && (
-              <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#ef444422', borderWidth: 1, borderColor: '#ef444444', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
-                onPress={() => { setShowHostControls(false); handleEndRoom(); }}>
-                <Ionicons name="stop-circle" size={22} color="#ef4444" />
-                <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: '600' }}>End Room</Text>
-              </TouchableOpacity>
+              // Rooms are PERMANENT — "End Room" terminates the room forever.
+              // Hosts should just "Leave" — the room stays as IDLE and can be rejoined.
+              // This button is intentionally hidden from the UI to prevent accidental termination.
+              // SUPER_ADMIN can terminate via the admin panel if needed.
+              null
             )}
+            {/* Members management — FIX-L12a */}
+            <TouchableOpacity
+              style={{ flex: 1, minWidth: '45%', backgroundColor: '#6366f122', borderWidth: 1, borderColor: '#6366f155', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
+              onPress={() => { setShowHostControls(false); setShowMembersPanel(true); }}
+            >
+              <Ionicons name="people" size={22} color="#a5b4fc" />
+              <Text style={{ color: '#a5b4fc', fontSize: 12, fontWeight: '600' }}>Members</Text>
+            </TouchableOpacity>
           </View>
 
           {/* Participant list with actions */}
@@ -2134,9 +2413,19 @@ export default function VoiceRoomScreen() {
                       {myRole === 'HOST' && p.role === 'MODERATOR' && (
                         <TouchableOpacity style={{ padding: 7, backgroundColor: '#6b728022', borderRadius: 8 }}
                           onPress={() => handleRemoveMod(p.id, p.name)}>
-                          <Ionicons name="shield-outline" size={16} color="#6b7280" />
+                          <Ionicons name="shield-checkmark-outline" size={16} color="#9ca3af" />
                         </TouchableOpacity>
                       )}
+                      {/* Ban from room (HOST/MOD only) */}
+                      <TouchableOpacity style={{ padding: 7, backgroundColor: '#ef444422', borderRadius: 8 }}
+                        onPress={() => handleBan(p.id, p.name)}>
+                        <Ionicons name="ban-outline" size={16} color="#ef4444" />
+                      </TouchableOpacity>
+                      {/* Kick from room */}
+                      <TouchableOpacity style={{ padding: 7, backgroundColor: '#f97316' + '22', borderRadius: 8 }}
+                        onPress={() => handleKick(p.id, p.name)}>
+                        <Ionicons name="log-out-outline" size={16} color="#f97316" />
+                      </TouchableOpacity>
                       {/* Transfer Host (HOST only) */}
                       {myRole === 'HOST' && (
                         <TouchableOpacity style={{ padding: 7, backgroundColor: '#f59e0b22', borderRadius: 8 }}
@@ -2219,6 +2508,11 @@ const styles = StyleSheet.create({
   queueBadge:       { position: 'absolute', top: -4, left: -4, backgroundColor: '#4f46e5', borderRadius: 8, paddingHorizontal: 4, paddingVertical: 1, minWidth: 18, alignItems: 'center' },
   queueBadgeText:   { color: '#fff', fontSize: 9, fontWeight: '800' },
   queueLabel:       { color: '#6366f1', fontSize: 8, fontWeight: '700', marginTop: 2 },
+  // Empty speaker slot
+  emptySlot:        { width: 56, height: 56, borderRadius: 28, backgroundColor: '#111827', borderWidth: 1.5, borderStyle: 'dashed', borderColor: '#374151', alignItems: 'center', justifyContent: 'center' },
+  emptySlotLocked:  { backgroundColor: '#1a1020', borderColor: '#7c3aed', borderStyle: 'solid' },
+  emptySlotHint:    { fontSize: 7, color: '#6b7280', marginTop: 2, textAlign: 'center' },
+  emptySlotNum:     { fontSize: 9, color: '#6b7280', marginTop: 4, fontWeight: '600' },
 
   // Chat
   chatList:         { padding: 10, gap: 8 },

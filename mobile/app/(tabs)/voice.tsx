@@ -219,6 +219,7 @@ export default function VoiceClubScreen() {
         hostId:          room.host?.id ?? '',
         isOpenMic:       room.isOpenMic ?? false,
         micLocked:       false,
+        lockedSeats:     [],
         commentsEnabled: true,
         slowMode:        false,
         messageType:     'all',

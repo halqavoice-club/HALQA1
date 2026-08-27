@@ -9,7 +9,7 @@ import {
   ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform,
   Image, Alert,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -37,6 +37,12 @@ export default function CreatePostScreen() {
   const router = useRouter();
   const { user } = useAuthStore();
   const queryClient = useQueryClient();
+
+  // communityId is passed when navigating from a community detail page
+  const { communityId, communityName } = useLocalSearchParams<{
+    communityId?: string;
+    communityName?: string;
+  }>();
 
   const [body,       setBody]       = useState('');
   const [visibility, setVisibility] = useState('PUBLIC');
@@ -122,10 +128,16 @@ export default function CreatePostScreen() {
         visibility,
         media:      mediaPayload,
         ...(location.trim() ? { location: location.trim() } : {}),
+        // Include communityId if posting from a community page
+        ...(communityId ? { communityId } : {}),
       });
 
       showMessage({ message: '✅ Posted!', type: 'success' });
       queryClient.invalidateQueries({ queryKey: ['feed'] });
+      // Also invalidate the community feed if posting in a community
+      if (communityId) {
+        queryClient.invalidateQueries({ queryKey: ['community-feed'] });
+      }
       router.back();
     } catch (e: any) {
       const msg = e?.response?.data?.message ?? e?.message ?? 'Failed to post';
@@ -133,10 +145,12 @@ export default function CreatePostScreen() {
     } finally {
       setUploading(false);
     }
-  }, [body, media, visibility, location, queryClient, router]);
+  }, [body, media, visibility, location, communityId, queryClient, router]);
 
   const canPost = (body.trim().length > 0 || !!media) && !uploading;
   const visLabel = VISIBILITY_OPTIONS.find(v => v.value === visibility)?.label ?? '';
+  // Screen title changes when posting in a community
+  const screenTitle = communityName ? `Post to ${communityName}` : 'New Post';
 
   return (
     <SafeAreaView style={s.container} edges={['top']}>
@@ -146,7 +160,7 @@ export default function CreatePostScreen() {
           <TouchableOpacity onPress={() => router.back()} style={s.cancelBtn}>
             <Text style={s.cancelText}>Cancel</Text>
           </TouchableOpacity>
-          <Text style={s.title}>New Post</Text>
+          <Text style={s.title}>{screenTitle}</Text>
           <TouchableOpacity
             style={[s.postBtn, !canPost && s.postBtnDisabled]}
             onPress={handlePost}

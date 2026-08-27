@@ -18,19 +18,20 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { AppState, AppStateStatus, Platform } from 'react-native';
 import { showMessage } from 'react-native-flash-message';
 import { useNetworkQuality, qualityToAudioBitrate, type NetworkQuality } from './useNetworkQuality';
+import { getSocket } from '@/lib/socket';
 
 type DisconnectReason = 'user' | 'server' | 'error';
 
 export interface LiveKitAudioState {
   connected:    boolean;
   micEnabled:   boolean;
-  quality:      NetworkQuality;     // NEW: current network quality
-  connect:      (url: string, token: string, startMuted?: boolean) => Promise<void>;
+  quality:      NetworkQuality;
+  connect:      (url: string, token: string, startMuted?: boolean, roomId?: string) => Promise<void>;
   disconnect:   (reason?: DisconnectReason) => void;
   toggleMic:    () => Promise<void>;
   enableMic:    () => Promise<void>;
   disableMic:   () => Promise<void>;
-  // NEW Phase 7: force reconnect (used after background resume)
+  // Phase 7: force reconnect (used after background resume)
   reconnect:    () => Promise<void>;
 }
 
@@ -59,6 +60,7 @@ export function useLiveKitAudio(): LiveKitAudioState {
   const lastUrlRef          = useRef<string>('');
   const lastTokenRef        = useRef<string>('');
   const lastStartMutedRef   = useRef<boolean>(true);
+  const lastRoomIdRef       = useRef<string>('');   // FIX-12: for speaking indicator
   const reconnectCountRef   = useRef<number>(0);
   const reconnectTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isUnmountedRef      = useRef<boolean>(false);
@@ -123,7 +125,7 @@ export function useLiveKitAudio(): LiveKitAudioState {
   }
 
   // ─── Core connect ─────────────────────────────────────────────────────────
-  const connect = useCallback(async (url: string, token: string, startMuted = true) => {
+  const connect = useCallback(async (url: string, token: string, startMuted = true, roomId?: string) => {
     if (!LiveKitModule) {
       showMessage({
         message: '📱 Audio needs native build',
@@ -141,6 +143,7 @@ export function useLiveKitAudio(): LiveKitAudioState {
     lastUrlRef.current        = url;
     lastTokenRef.current      = token;
     lastStartMutedRef.current = startMuted;
+    if (roomId) lastRoomIdRef.current = roomId;
 
     isConnectingRef.current = true;
     clearReconnectTimer();
@@ -194,6 +197,22 @@ export function useLiveKitAudio(): LiveKitAudioState {
         reconnectCountRef.current = 0;
         clearReconnectTimer();
         showMessage({ message: '✅ Audio restored', type: 'success', duration: 1500 });
+      });
+
+      // ── FIX-12: Speaking indicator — relay to socket so other clients' rings work
+      // LiveKit fires activeSpeakersChanged when audio level detection changes.
+      // We emit voice:speaking via socket so web and other mobile participants
+      // see speaking rings for this mobile user.
+      room.on('activeSpeakersChanged', (speakers: any[]) => {
+        if (isUnmountedRef.current) return;
+        const socket = getSocket();
+        const rid = lastRoomIdRef.current;
+        if (socket && rid) {
+          const localIdentity = room.localParticipant?.identity;
+          const amSpeaking = Array.isArray(speakers) &&
+            speakers.some((s: any) => s.identity === localIdentity);
+          socket.emit('voice:speaking', { roomId: rid, speaking: amSpeaking });
+        }
       });
 
       // ── Connect ─────────────────────────────────────────────────────────
