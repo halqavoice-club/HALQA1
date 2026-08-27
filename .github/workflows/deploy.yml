@@ -99,6 +99,51 @@ jobs:
 
             echo "Deployment complete"
 
+      - name: Post-deploy smoke test
+        # Verify the admin endpoints and new security gates work after deploy.
+        # These are lightweight HTTP checks — no credentials needed for public probes,
+        # token-gated endpoints verified to return 401 (not 500/404).
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key:      ${{ secrets.DEPLOY_SSH_KEY }}
+          port:     ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            set -e
+            BASE="http://localhost:5000"
+
+            echo "=== Smoke test: Public health probes ==="
+            curl -sf "$BASE/health"          || (echo "FAIL: /health" && exit 1)
+            curl -sf "$BASE/health/liveness" || (echo "FAIL: /health/liveness" && exit 1)
+            echo "Public health probes: OK"
+
+            echo "=== Smoke test: /health/detailed token gate ==="
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/health/detailed")
+            if [ "$STATUS" != "401" ] && [ "$STATUS" != "503" ]; then
+              echo "FAIL: /health/detailed without token returned $STATUS (expected 401 or 503)"
+              exit 1
+            fi
+            echo "/health/detailed token gate: OK ($STATUS)"
+
+            echo "=== Smoke test: Admin routes require auth ==="
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/v1/admin/actions/voice/test/inspect")
+            if [ "$STATUS" != "401" ]; then
+              echo "FAIL: Admin inspect without auth returned $STATUS (expected 401)"
+              exit 1
+            fi
+            echo "Admin route auth gate: OK"
+
+            echo "=== Smoke test: /metrics token gate ==="
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/metrics")
+            if [ "$STATUS" != "401" ]; then
+              echo "FAIL: /metrics without token returned $STATUS (expected 401)"
+              exit 1
+            fi
+            echo "/metrics token gate: OK"
+
+            echo "=== All smoke tests passed ==="
+
   # Notify on failure
   notify-failure:
     name: Notify on Failure

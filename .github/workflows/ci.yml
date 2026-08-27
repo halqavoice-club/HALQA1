@@ -42,6 +42,10 @@ jobs:
           JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
           PORT: '5001'
           SERVICE_NAME: 'halqa-ci'
+          # Sprint 7: HEALTH_TOKEN required for /health/detailed token gate tests
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          # Sprint 7: METRICS_TOKEN required for metrics endpoint tests
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'
 
   # ─── Backend Lint + Schema Validate ────────────────────────────────────────
   backend:
@@ -240,6 +244,8 @@ jobs:
           JWT_REFRESH_SECRET: 'ci_integration_refresh_secret_32_chars!!'
           PORT: '5002'
           SERVICE_NAME: 'halqa-integration-ci'
+          HEALTH_TOKEN: 'ci_health_token_integration_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_integration_tests_only_!!'
 
       - name: Verify backup and restore procedure
         # Proves that mysqldump + restore works against the test DB.
@@ -373,6 +379,8 @@ jobs:
           LIVEKIT_URL: 'wss://placeholder.livekit.cloud'
           LIVEKIT_API_KEY: 'ci_placeholder'
           LIVEKIT_API_SECRET: 'ci_placeholder_api_key_only'
+          HEALTH_TOKEN: 'ci_health_token_e2e_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_e2e_tests_only_!!'
 
       - name: Wait for backend
         run: npx wait-on http://localhost:5000/health --timeout 30000

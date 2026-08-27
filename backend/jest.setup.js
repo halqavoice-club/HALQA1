@@ -50,5 +50,10 @@ process.env.STORAGE_TYPE        = 'local';
 // ─── Metrics token ────────────────────────────────────────────────────────────
 process.env.METRICS_TOKEN       = 'test_metrics_token_32_chars_min_!!';
 
+// ─── Health token (UIGAP-014 fix) ─────────────────────────────────────────────
+// Tests that exercise /health/detailed token gate set HEALTH_TOKEN themselves.
+// This default prevents accidental 401s in tests that boot the full app.
+process.env.HEALTH_TOKEN        = 'test_health_token_32_chars_min_!!!!';
+
 // ─── Client URL ──────────────────────────────────────────────────────────────
 process.env.CLIENT_URL          = 'http://localhost:3000';
