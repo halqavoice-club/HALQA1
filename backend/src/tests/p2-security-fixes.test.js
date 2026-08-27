@@ -191,16 +191,18 @@ describe('SEC-HIGH-002: Voice room privacy enforcement', () => {
     expect(res.status).toBe(403);
   });
 
-  test('PRIVATE room: SUPER_ADMIN bypasses participant check on GET /voice/:id', async () => {
+  test('PRIVATE room: SUPER_ADMIN gets 403 on GET /voice/:id (must use inspect endpoint)', async () => {
     asUser(SA_ID, 'SUPER_ADMIN', 'ACTIVE', null);
     prisma.voiceRoom.findUnique.mockResolvedValue(makeRoom('PRIVATE'));
-    // SUPER_ADMIN should NOT call voiceParticipant.findUnique
+    prisma.voiceParticipant.findUnique.mockResolvedValue(null); // SA not a participant
 
+    // VC-SA-002 / SEC-HIGH-002 FIX: SA no longer bypasses privacy check on
+    // GET /voice/:id. SA must use GET /admin/actions/voice/:id/inspect instead.
+    // This is the correct production behaviour documented in Sprint 12.
     const res = await request(voiceApp)
       .get(`/api/v1/voice/${ROOM_ID}`)
       .set('Authorization', tok(SA_ID));
-    expect(res.status).toBe(200);
-    expect(prisma.voiceParticipant.findUnique).not.toHaveBeenCalled();
+    expect(res.status).toBe(403);
   });
 
   test('Non-existent room returns 404', async () => {
@@ -262,16 +264,18 @@ describe('SEC-HIGH-002: Voice room privacy enforcement', () => {
     expect(res.status).toBe(200);
   });
 
-  test('PRIVATE room: SUPER_ADMIN can GET /voice/:id/messages (200)', async () => {
+  test('PRIVATE room: SUPER_ADMIN gets 403 on GET /voice/:id/messages (must use inspect endpoint)', async () => {
     asUser(SA_ID, 'SUPER_ADMIN', 'ACTIVE', null);
     prisma.voiceRoom.findUnique.mockResolvedValue({ privacy: 'PRIVATE', hostId: HOST_ID });
-    prisma.voiceMessage.findMany.mockResolvedValue([]);
+    prisma.voiceParticipant.findUnique.mockResolvedValue(null); // SA not a participant
 
+    // VC-SA-002 / SEC-HIGH-002 FIX: SA no longer bypasses privacy on /messages.
+    // SA must use GET /admin/actions/voice/:id/inspect (Sprint 12) for moderation.
     const res = await request(voiceApp)
       .get(`/api/v1/voice/${ROOM_ID}/messages`)
       .set('Authorization', tok(SA_ID));
-    expect(res.status).toBe(200);
-    expect(prisma.voiceParticipant.findUnique).not.toHaveBeenCalled();
+    expect(res.status).toBe(403);
+    expect(prisma.voiceMessage.findMany).not.toHaveBeenCalled();
   });
 
   // Source-level verification
