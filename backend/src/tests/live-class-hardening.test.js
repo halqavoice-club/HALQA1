@@ -150,14 +150,15 @@ describe('Task 1: Generic LiveKit token (generateToken) guards liveclass-* rooms
     expect(res.status).toHaveBeenCalledWith(400);
   });
 
-  test('liveclass-* roomId: SUPER_ADMIN bypasses school check but still needs participant record', async () => {
+  test('liveclass-* roomId: SUPER_ADMIN with no school membership gets 403 (LTSV-001 fix)', async () => {
+    // LTSV-001 FIX: SA no longer bypasses school check. SA without a membership
+    // in the target school is denied, just like any other user.
     prisma.liveClass.findFirst.mockResolvedValue({ ...LC_LIVE, schoolId: 'school-other' });
-    prisma.liveClassParticipant.findFirst.mockResolvedValue({ id: 'p-1' });
+    prisma.schoolMembership.findUnique.mockResolvedValue(null); // SA has no membership in school-other
     const req = makeReq({ body: { roomId: 'liveclass-class-1' }, user: { id: 'sa', role: 'SUPER_ADMIN', schoolId: null, firstName: 'SA', lastName: 'SA' } });
     const res = makeRes();
     await livekitCtrl.generateToken(req, res, next);
-    expect(next).not.toHaveBeenCalled();
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+    expect(res.status).toHaveBeenCalledWith(403);
   });
 
   test('malformed liveclass- roomId (just prefix) is handled safely', async () => {

@@ -23,7 +23,9 @@ async function getLiveKitToken(req, res, next) {
     // ── Validate room ──────────────────────────────────────────────────────
     const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
-    if (room.status === 'ENDED') return errorResponse(res, 'Room has ended', 400);
+    // PERMANENT ROOMS: Only archived rooms (ENDED) cannot issue tokens.
+    // IDLE rooms can issue tokens — joining them re-activates them to LIVE.
+    if (room.status === 'ENDED') return errorResponse(res, 'This room has been archived', 400);
 
     // ── Validate participant ───────────────────────────────────────────────
     const participant = await prisma.voiceParticipant.findUnique({
@@ -124,17 +126,21 @@ async function generateToken(req, res, next) {
       if (lc.status === 'ENDED') return errorResponse(res, 'Class has ended', 400);
       if (lc.status === 'CANCELLED') return errorResponse(res, 'Class was cancelled', 400);
 
-      // 2. School isolation (H-10 FIX): use SchoolMembership table instead of
-      // legacy user.schoolId. A user whose membership was suspended but whose
-      // user.schoolId still points to the school would previously pass this check.
-      if (req.user.role !== 'SUPER_ADMIN') {
-        // First do the fast legacy check — if schoolId doesn't match at all, reject immediately
-        // without hitting the DB (same cost as before for the common cross-school case)
+      // 2. School isolation — enforced for ALL users including SUPER_ADMIN.
+      // LTSV-001 FIX: The previous code skipped school isolation for SUPER_ADMIN
+      // (if (req.user.role !== 'SUPER_ADMIN')). While the participant check below
+      // still blocked SA from getting a token (no active liveClassParticipant),
+      // the bypass was unnecessary defence-in-depth gap. Removing it ensures
+      // school isolation is uniformly enforced at every layer.
+      //
+      // Uses SchoolMembership table (H-10 FIX) — authoritative for MEMBER users.
+      // Legacy user.schoolId used as fast-path for matching school; if mismatch,
+      // membership table is checked as fallback.
+      {
         const legacyMatch = req.user.schoolId === lc.schoolId;
 
         if (!legacyMatch) {
           // schoolId mismatch — check SchoolMembership as fallback for MEMBER users
-          // whose user.schoolId may differ from their active membership schoolId
           const membership = await prisma.schoolMembership.findUnique({
             where: { userId_schoolId: { userId, schoolId: lc.schoolId } },
             select: { status: true }
@@ -142,19 +148,15 @@ async function generateToken(req, res, next) {
           if (!membership || membership.status !== 'ACTIVE') {
             return errorResponse(res, 'Access denied to this school\'s resource', 403);
           }
-          // membership is ACTIVE — user is allowed through
         } else {
-          // schoolId matches — also verify membership is not suspended
-          // (only DB-check when Redis cache misses, which is the common production path)
+          // schoolId matches — verify membership is not suspended
           const membership = await prisma.schoolMembership.findUnique({
             where: { userId_schoolId: { userId, schoolId: lc.schoolId } },
             select: { status: true }
           });
-          // If a membership record exists and is suspended/inactive — deny
           if (membership && membership.status !== 'ACTIVE') {
             return errorResponse(res, 'Access denied — your school membership is not active', 403);
           }
-          // No membership record + schoolId matches → legacy user, allow through
         }
       }
 
