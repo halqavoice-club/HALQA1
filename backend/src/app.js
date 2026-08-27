@@ -874,11 +874,50 @@ app.use('/api/v1', cacheMiddleware.shortCache);
 // /health/readiness— Kubernetes readiness probe (checks DB + Redis + circuit breakers)
 // /health/startup  — Kubernetes startup probe
 // /health/detailed — full diagnostic (DB, Redis, memory, event loop, disk)
+//
+// UIGAP-014 FIX: /health/detailed is protected by HEALTH_TOKEN.
+// This endpoint exposes internal infrastructure details (DB latency, Redis state,
+// memory usage, circuit breaker states, LiveKit connectivity) that should not be
+// publicly accessible. An attacker could use this to fingerprint the stack,
+// identify degraded dependencies for targeted timing attacks, or confirm Redis
+// is down before attempting cache-bypass attacks.
+//
+// Token rules (same pattern as /metrics):
+//   Development: if HEALTH_TOKEN is set, it is enforced; if unset → 401 (not open).
+//   Production:  HEALTH_TOKEN MUST be set and non-default; unset → 503.
+//   Token supplied via:  Authorization: Bearer <token>
+//                    or: ?token=<token>
+//
+// /health/liveness, /health/readiness, /health/startup remain public — they are
+// Kubernetes probes and MUST be reachable by the cluster without credentials.
 app.get('/health', health.liveness);
 app.get('/health/liveness', health.liveness);
 app.get('/health/readiness', health.readiness);
 app.get('/health/startup', health.startup);
-app.get('/health/detailed', health.detailed);
+app.get('/health/detailed', (req, res, next) => {
+  // UIGAP-014 FIX: token-gate detailed diagnostic endpoint
+  const configuredToken = process.env.HEALTH_TOKEN;
+  const DEFAULT_TOKEN   = 'halqa_health_dev_token_change_in_production';
+  const IS_PROD         = process.env.NODE_ENV === 'production';
+
+  if (IS_PROD) {
+    if (!configuredToken || configuredToken === DEFAULT_TOKEN) {
+      logger.error('[health] HEALTH_TOKEN is not set or is still the default. /health/detailed blocked in production.');
+      return res.status(503).json({ error: 'Health detail endpoint is not configured for production. Set HEALTH_TOKEN.' });
+    }
+  }
+
+  if (!configuredToken) {
+    return res.status(401).json({ error: 'Unauthorized. Set HEALTH_TOKEN to access /health/detailed.' });
+  }
+
+  const supplied = (req.headers.authorization || '').replace('Bearer ', '').trim() || req.query.token;
+  if (!supplied || supplied !== configuredToken) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  return health.detailed(req, res, next);
+});
 
 // ─── Prometheus /metrics endpoint (protected by METRICS_TOKEN) ───────────────
 // SECURITY FIX: Always require a valid token. The previous logic allowed access
@@ -1429,6 +1468,18 @@ async function startServer() {
 
         // Mark startup complete so /health/startup returns 200
         health.markStartupComplete();
+
+        // ── GAP-001 FIX: Warn on missing ADMIN_IP_ALLOWLIST in production ──────
+        // The IP allowlist is intentionally disabled when ADMIN_IP_ALLOWLIST is
+        // empty (to avoid locking out dev/staging environments). In production
+        // this means admin routes have no IP-level restriction — a misconfiguration
+        // risk. Log a prominent warning so ops teams are aware.
+        if (process.env.NODE_ENV === 'production' && !process.env.ADMIN_IP_ALLOWLIST) {
+          logger.warn('[security] ADMIN_IP_ALLOWLIST is not set. Admin routes (/api/v1/admin/*) have no IP restriction in production. Set this to a comma-separated list of trusted IPs/CIDRs.');
+        }
+        if (process.env.NODE_ENV === 'production' && !process.env.HEALTH_TOKEN) {
+          logger.warn('[security] HEALTH_TOKEN is not set. /health/detailed is blocked in production until HEALTH_TOKEN is configured.');
+        }
 
         // ── GAP-04 FIX: Recover in-process auto-end timers after server restart ──
         // scheduleAutoEnd() stores timers in a Node.js Map — they are lost on restart.

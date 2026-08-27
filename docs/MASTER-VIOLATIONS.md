@@ -272,7 +272,54 @@ Stripe payments that complete successfully cannot be refunded via any platform A
 
 ---
 
-## Additional Gaps from Domain Documentation
+## UIGAP-014 — `/health/detailed` Exposed Without Authentication
+
+**ID:** UIGAP-014  
+**Severity:** 🟡 MEDIUM  
+**Domain:** System Health / Security  
+**Status:** ✅ FIXED — Sprint 7 (commit TBD)
+
+| Field | Value |
+|-------|-------|
+| File | `backend/src/app.js` |
+| Current behavior | `GET /health/detailed` returned full infrastructure diagnostics (DB latency, Redis state, memory, circuit breakers, LiveKit) without any authentication |
+| Expected behavior | Requires `HEALTH_TOKEN` via `Authorization: Bearer <token>` or `?token=` param |
+| Security impact | Attacker could fingerprint stack, identify degraded dependencies for timing attacks, or confirm Redis is down |
+| Required fix | Token-gate `/health/detailed` following same pattern as `/metrics`. Kubernetes probes (`/liveness`, `/readiness`, `/startup`) remain public. |
+| Fix applied | Inline token guard in `app.js`. `HEALTH_TOKEN` env var added to `.env.example` and `.env.production.example`. Production startup warns if unset. |
+| Regression test | `sprint7-security.test.js: UIGAP-014` (11 tests) |
+
+---
+
+## GAP-001 — IP Allowlist Silent Pass-Through in Production
+
+**ID:** GAP-001  
+**Severity:** 🟡 MEDIUM  
+**Domain:** Security / Admin Routes  
+**Status:** ✅ MITIGATED — Sprint 7 (commit TBD)
+
+| Field | Value |
+|-------|-------|
+| File | `backend/src/middleware/ipAllowlist.js`, `backend/src/app.js` |
+| Current behavior | When `ADMIN_IP_ALLOWLIST` is empty/unset, all IPs are allowed through (intentional for dev). No warning in production if unset. |
+| Expected behavior | Pass-through in dev is correct. Production should warn loudly at startup so ops teams notice the misconfiguration. |
+| Risk | If `ADMIN_IP_ALLOWLIST` is forgotten in a production deployment, admin routes have no IP restriction. No runtime indication that protection is absent. |
+| Fix applied | Production startup warning logged when `ADMIN_IP_ALLOWLIST` is empty (NODE_ENV=production). Checklist updated in `.env.production.example`. |
+| Note | Behavior unchanged — pass-through is intentional. The fix adds visibility only. A hard block would break cloud deployments with dynamic IPs. |
+| Regression test | `sprint7-security.test.js: GAP-001` (4 tests) |
+
+---
+
+## GAP-002 — `assertSchoolAccess` Uses Legacy `user.schoolId`
+
+**ID:** GAP-002  
+**Severity:** 🟡 MEDIUM  
+**Domain:** School Isolation  
+**Status:** ✅ RESOLVED — Already Fixed (pre-Sprint 7)
+
+`requireSchoolAccess` in `schoolAuth.middleware.js` already checks `SchoolMembership` as the authoritative source. Legacy `user.schoolId` is only used as a fallback for pre-migration users who have no `SchoolMembership` record yet (documented transition path). The violation register entry was outdated. Confirmed by Sprint 7 regression tests.
+
+---
 
 | ID | Severity | Domain | Description |
 |----|---------|--------|-------------|
@@ -306,10 +353,19 @@ Stripe payments that complete successfully cannot be refunded via any platform A
 | Severity | Open | Fixed/Resolved |
 |---------|------|---------------|
 | 🚨 CRITICAL | 0 | 3 (LCSV-001, UIGAP-004✅, LS-GAP-001) |
-| 🔴 HIGH | 7 | 4 (LCSV-002, UIGAP-007, UIGAP-013, LS-GAP-001, UILEAK-001) |
-| 🟡 MEDIUM | 9 | 2 (SVSV-001, UIGAP-008✅) |
-| 🟢 LOW | 14 | 1 (LCSV-003) |
+| 🔴 HIGH | 2 | 9 (LCSV-002, UIGAP-007, UIGAP-013, UIGAP-005, LS-GAP-001, FS-GAP-003, UILEAK-001, UIGAP-002✅) |
+| 🟡 MEDIUM | 6 | 5 (SVSV-001, UIGAP-008✅, FS-GAP-002✅, UIGAP-014✅, GAP-001✅mitigated, GAP-002✅resolved) |
+| 🟢 LOW | 13 | 2 (LCSV-003, VC-SA-002 inert) |
 
-**Sprints 1 & 2 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001
+**Sprints 1–7 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001, UIGAP-004, UIGAP-005, UIGAP-002, FS-GAP-002, UIGAP-014, GAP-001 (mitigated), GAP-002 (already resolved)
 
-**Still open (critical):** UIGAP-004 (payout management UI — API exists, needs frontend wiring)
+**Still open (HIGH):**
+- PAY-GAP-001 — No coin refund API
+- PAY-GAP-002 — No Stripe refund integration
+
+**Still open (MEDIUM):**
+- UIGAP-003 — No user profile drill-down page
+- UIGAP-012 — No platform announcement creation
+- CHAT-GAP-003 — ALLOW_DM_NON_FRIENDS not verified at API level
+- VC-GAP-003 — No admin room inspection without participation
+- LTSV-001 — Generic LiveKit token school bypass (LOW/mitigated)
