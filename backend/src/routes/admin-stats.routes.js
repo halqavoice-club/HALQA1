@@ -135,9 +135,63 @@ router.get('/users', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-// PATCH /api/v1/admin/stats/users/:id/status — suspend/ban/activate a user
-router.patch('/users/:id/status', async (req, res, next) => {
+// GET /api/v1/admin/stats/users/:id/wallet — wallet + recent transactions + school memberships for profile drill-down
+// UIGAP-003 FIX: Provides all data needed by the admin user profile page without direct DB access.
+router.get('/users/:id/wallet', async (req, res, next) => {
   try {
+    const { id: targetId } = req.params;
+
+    const user = await prisma.user.findUnique({
+      where: { id: targetId, deletedAt: null },
+      select: { id: true, email: true, firstName: true, lastName: true }
+    });
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const [wallet, recentTransactions, schoolMemberships] = await Promise.all([
+      // Wallet balance
+      prisma.wallet.findUnique({
+        where:  { userId: targetId },
+        select: { coins: true, diamonds: true, totalSpent: true, totalEarned: true, updatedAt: true }
+      }),
+
+      // Last 20 wallet transactions
+      prisma.walletTransaction.findMany({
+        where:   { userId: targetId },
+        orderBy: { createdAt: 'desc' },
+        take:    20,
+        select: {
+          id: true, type: true, coins: true, description: true,
+          stripeSessionId: true, packageId: true, createdAt: true
+        }
+      }),
+
+      // Active school memberships
+      prisma.schoolMembership.findMany({
+        where:   { userId: targetId, deletedAt: null },
+        orderBy: { joinedAt: 'desc' },
+        include: {
+          school: {
+            select: { id: true, name: true, slug: true, logoUrl: true, type: true, isActive: true }
+          }
+        },
+        select: {
+          id: true, schoolId: true, role: true, status: true, joinedAt: true,
+          school: true
+        }
+      })
+    ]);
+
+    return successResponse(res, {
+      user,
+      wallet: wallet ?? { coins: 0, diamonds: 0, totalSpent: 0, totalEarned: 0 },
+      recentTransactions,
+      schoolMemberships,
+    });
+  } catch (error) { next(error); }
+});
+
+// PATCH /api/v1/admin/stats/users/:id/status — suspend/ban/activate a user
+router.patch('/users/:id/status', async (req, res, next) => {  try {
     const { status, reason } = req.body;
     const allowed = ['ACTIVE', 'SUSPENDED', 'BANNED', 'INACTIVE'];
     if (!allowed.includes(status)) {

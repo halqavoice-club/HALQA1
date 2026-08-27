@@ -352,7 +352,7 @@ Integrated into same `POST /transactions/:id/refund` endpoint:
 | CHAT-GAP-003 | MEDIUM | Chat/DM | ALLOW_DM_NON_FRIENDS not verified at API level |
 | UIGAP-001 | MEDIUM | Admin UI | Route guard is client-side only |
 | UIGAP-002 | HIGH | Admin UI | ✅ FIXED Sprint 5 — Session management (view + revoke) |
-| UIGAP-003 | MEDIUM | Admin UI | No user profile drill-down |
+| UIGAP-003 | MEDIUM | Admin UI | ✅ FIXED Sprint 9 — User profile drill-down page |
 | UIGAP-011 | LOW | Admin UI | No export functionality |
 | UIGAP-012 | MEDIUM | Admin UI | No platform announcement creation |
 | UIGAP-014 | MEDIUM | System Health | `/health/detailed` may not require auth |
@@ -370,10 +370,9 @@ Integrated into same `POST /transactions/:id/refund` endpoint:
 | 🟡 MEDIUM | 6 | 5 (SVSV-001, UIGAP-008✅, FS-GAP-002✅, UIGAP-014✅, GAP-001✅mitigated, GAP-002✅resolved) |
 | 🟢 LOW | 13 | 2 (LCSV-003, VC-SA-002 inert) |
 
-**Sprints 1–8 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001, UIGAP-004, UIGAP-005, UIGAP-002, FS-GAP-002, UIGAP-014, GAP-001 (mitigated), GAP-002 (already resolved), PAY-GAP-001, PAY-GAP-002
+**Sprints 1–9 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001, UIGAP-004, UIGAP-005, UIGAP-002, FS-GAP-002, UIGAP-014, GAP-001 (mitigated), GAP-002 (already resolved), PAY-GAP-001, PAY-GAP-002, UIGAP-003
 
 **Still open (MEDIUM):**
-- UIGAP-003 — No user profile drill-down page
 - UIGAP-012 — No platform announcement creation
 - CHAT-GAP-003 — ALLOW_DM_NON_FRIENDS not verified at API level
 - VC-GAP-003 — No admin room inspection without participation

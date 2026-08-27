@@ -23,10 +23,11 @@ import {
 import { Textarea } from '@/components/ui/textarea'
 import {
   Users, Search, ChevronLeft, ChevronRight,
-  CheckCircle, XCircle, AlertTriangle, Ban, Shield, LogOut, Monitor,
+  CheckCircle, XCircle, AlertTriangle, Ban, Shield, LogOut, Monitor, ExternalLink,
 } from 'lucide-react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { getAvatarUrl } from '@/lib/avatar'
+import Link from 'next/link'
 
 const STATUS_STYLE: Record<string, string> = {
   ACTIVE:    'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300',
@@ -222,6 +223,12 @@ export default function AdminUsersPage() {
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center gap-2 justify-end">
+                      {/* UIGAP-003 FIX: View full profile drill-down */}
+                      <Link href={`/admin/users/${u.id}`}>
+                        <Button size="sm" variant="ghost" className="text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 px-2" title="View profile">
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </Button>
+                      </Link>
                       {u.role !== 'SUPER_ADMIN' && (
                         <Button
                           size="sm"
