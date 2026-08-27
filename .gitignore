@@ -121,3 +121,11 @@ mobile/.jest/
 
 # Demo seed scripts — contain hardcoded credentials, never for production
 backend/prisma/seed-demo-accounts.js
+
+# Browser-downloaded duplicate service worker files
+frontend/public/sw\ (1).js
+frontend/public/sw\ (*).js
+
+# Temporary Google Drive upload cache
+.tmp.driveupload/
+.tmp.drivedownload/
