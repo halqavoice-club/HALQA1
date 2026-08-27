@@ -198,10 +198,12 @@ export default function LiveClassPage() {
   // Any authenticated user can go live (public stream).
   // School teachers/admins can also create school class streams.
   const canCreate = true
-  // canManage: controls delete button visibility — user owns the stream
-  // The backend enforces this; here we show the button if they have any manage right
-  const canManage = isTeacher || isAdmin ||
-                    ['TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(user?.role || '')
+  // canManage: controls delete button visibility.
+  // A user manages a stream if they're school staff OR the owner of a PUBLIC stream.
+  // The actual enforcement is on the backend — this only affects UI visibility.
+  // We check per-card in LiveClassCard using lc.hostUser?.id === user?.id for PUBLIC streams.
+  const canManageByRole = isTeacher || isAdmin ||
+    ['TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(user?.role || '')
 
   const { data, isLoading } = useQuery({
     queryKey: ['live-classes', statusFilter],
@@ -253,6 +255,11 @@ export default function LiveClassPage() {
   }, [queryClient, toast, user?.schoolId])
 
   const classes: LiveClass[] = data || []
+
+  // Per-card manage right: staff roles OR the user owns this PUBLIC stream
+  const canManageCard = (lc: LiveClass) =>
+    canManageByRole ||
+    (lc.streamType === 'PUBLIC' && lc.hostUser?.id === user?.id)
 
   // Client-side search filter
   const filtered = classes.filter(lc =>
@@ -362,7 +369,7 @@ export default function LiveClassPage() {
               </h2>
               <div className="space-y-3">
                 {livePublic.map(lc => (
-                  <LiveClassCard key={lc.id} lc={lc} canManage={canManage} onDelete={handleDelete} />
+                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} />
                 ))}
               </div>
             </section>
@@ -377,7 +384,7 @@ export default function LiveClassPage() {
               </h2>
               <div className="space-y-3">
                 {liveSchool.map(lc => (
-                  <LiveClassCard key={lc.id} lc={lc} canManage={canManage} onDelete={handleDelete} />
+                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} />
                 ))}
               </div>
             </section>
@@ -389,7 +396,7 @@ export default function LiveClassPage() {
               <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wide mb-3">Upcoming</h2>
               <div className="space-y-3">
                 {scheduled.map(lc => (
-                  <LiveClassCard key={lc.id} lc={lc} canManage={canManage} onDelete={handleDelete} />
+                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} />
                 ))}
               </div>
             </section>
@@ -401,7 +408,7 @@ export default function LiveClassPage() {
               <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wide mb-3">Past</h2>
               <div className="space-y-3">
                 {past.map(lc => (
-                  <LiveClassCard key={lc.id} lc={lc} canManage={canManage} onDelete={handleDelete} />
+                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} />
                 ))}
               </div>
             </section>

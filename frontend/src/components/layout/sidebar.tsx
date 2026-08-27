@@ -276,7 +276,7 @@ export function Sidebar() {
       ...(canEducation('VIEW_ATTENDANCE') && activeRole !== 'GUARDIAN' ? [
         { label: 'QR Check-in', href: '/attendance/qr-checkin', icon: QrCode }
       ] : []),
-      ...(canEducation('VIEW_ATTENDANCE') && (activeRole === 'TEACHER' || activeRole === 'SCHOOL_ADMIN' || activeRole === 'SUPER_ADMIN') ? [
+      ...(canEducation('VIEW_ATTENDANCE') && (activeRole === 'TEACHER' || activeRole === 'SCHOOL_ADMIN') ? [
         { label: t.attendanceReport, href: '/attendance/report', icon: BarChart3 }
       ] : []),
       ...(canEducation('VIEW_GRADES') ? [
@@ -322,9 +322,13 @@ export function Sidebar() {
     ] : []
 
     // ── Administration items (Education admin only) ──────────────────────────
+    // ── Administration items (Education admin only) ──────────────────────────
     // Administration = school management tools, NOT global HALQA platform admin.
-    // Shown only to users with admin roles in their active school.
-    const administrationItems: NavItem[] = hasSchools && (activeRole === 'SUPER_ADMIN' || activeRole === 'SCHOOL_ADMIN') ? [
+    // Shown only to users with an active SCHOOL_ADMIN membership in their active school.
+    // ARCH-01: SUPER_ADMIN platform role alone does NOT grant these items.
+    // A SUPER_ADMIN who has been explicitly invited as SCHOOL_ADMIN will see these
+    // through their membership (activeRole === 'SCHOOL_ADMIN'), not their platform role.
+    const administrationItems: NavItem[] = hasSchools && activeRole === 'SCHOOL_ADMIN' ? [
       { label: 'Members',  href: '/school-memberships/manage', icon: Users },
       { label: t.users,    href: '/users',    icon: Users },
       { label: t.import,   href: '/import',   icon: Upload },

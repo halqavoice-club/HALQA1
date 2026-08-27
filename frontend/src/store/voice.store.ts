@@ -18,6 +18,7 @@ export interface VoiceParticipant {
   userId: string
   role: VoiceParticipantRole
   isMuted: boolean
+  mutedByModerator: boolean   // when true, user cannot unmute themselves
   handRaised: boolean
   handRaisedAt: string | null
   joinedAt: string
@@ -37,6 +38,7 @@ export interface VoiceRoom {
   maxSpeakers: number
   isOpenMic: boolean
   micLocked: boolean
+  lockedSeats: number[]   // individual seat indices locked by host
   coverEmoji: string
   coverImageUrl?: string | null
   topic: string | null
@@ -163,6 +165,7 @@ interface VoiceState {
   messages: VoiceMessage[]
   addMessage: (msg: VoiceMessage) => void
   setMessages: (msgs: VoiceMessage[]) => void
+  removeMessage: (msgId: string) => void
 
   // Speaking indicators — plain object for Zustand compatibility
   speakingUsers: Record<string, boolean>
@@ -309,6 +312,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   messages: [],
   addMessage: (msg) => set(s => ({ messages: [...s.messages, msg] })),
   setMessages: (msgs) => set({ messages: msgs }),
+  removeMessage: (msgId) => set(s => ({ messages: s.messages.filter(m => m.id !== msgId) })),
 
   speakingUsers: {},
   setSpeaking: (userId, speaking) => {

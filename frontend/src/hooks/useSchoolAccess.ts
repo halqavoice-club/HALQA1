@@ -123,29 +123,33 @@ export function useSchoolAccess() {
   const { activeSchoolId, setActiveSchoolId } = useSchoolStore()
 
   // FIX (HALQA-UI-03): SUPER_ADMIN is a platform-management role.
-  // They must NOT automatically operate inside a school context, even if
-  // they happen to have school memberships from a previous role.
-  // Platform management ≠ operating inside a school.
-  // SUPER_ADMIN can manage schools from /admin/schools, but that is a
-  // platform operation — not the same as being a school member.
+  // They must NOT automatically operate inside a school context purely from
+  // their global role. The school context is determined by their actual
+  // SchoolMembership records (if they have been explicitly invited into a school).
+  // ARCH-01: isSuperAdminPlatform is kept only for the stale-context cleanup effect.
   const isSuperAdminPlatform = user?.role === 'SUPER_ADMIN'
 
-  // Clear stale school context if SUPER_ADMIN has a stored school selection
+  // Clear stale school context if SUPER_ADMIN has no school memberships
   const clearActiveSchool = useSchoolStore(s => s.clearActiveSchool)
   useEffect(() => {
-    if (isSuperAdminPlatform && activeSchoolId) {
+    const activeMemberships = user?.schoolMemberships?.filter(m => m.status === 'ACTIVE') ?? []
+    if (isSuperAdminPlatform && activeSchoolId && activeMemberships.length === 0) {
       clearActiveSchool()
     }
-  }, [isSuperAdminPlatform, activeSchoolId, clearActiveSchool])
+  }, [isSuperAdminPlatform, activeSchoolId, clearActiveSchool, user?.schoolMemberships])
 
   // All active school memberships from the user profile
   const memberships: SchoolMembership[] = useMemo(
     () => {
-      // SUPER_ADMIN: return empty memberships — they have no school context
-      if (isSuperAdminPlatform) return []
+      // ARCH-01: SUPER_ADMIN is a platform administrator.
+      // They operate within a school ONLY via an explicit SCHOOL_ADMIN membership.
+      // We DO show their school memberships (so they can manage schools they've been
+      // explicitly invited into), but activeRole will reflect the membership role
+      // (e.g. SCHOOL_ADMIN), not their global SUPER_ADMIN platform role.
+      // This ensures SUPER_ADMIN never sees school tools purely by platform role.
       return user?.schoolMemberships?.filter(m => m.status === 'ACTIVE') ?? []
     },
-    [user?.schoolMemberships, isSuperAdminPlatform]
+    [user?.schoolMemberships]
   )
 
   // Whether the user belongs to any school

@@ -98,14 +98,49 @@ function AvatarCircle({
   )
 }
 
-// ─── Empty speaker slot — open mic seat or locked ──────────────────────────
-function EmptySlot({ index, micLocked }: { index: number; micLocked: boolean }) {
+// ─── Empty speaker slot — open mic seat or individually locked ────────────────
+function EmptySlot({
+  index, micLocked, seatLocked, amModerating, onLockToggle
+}: {
+  index: number
+  micLocked: boolean
+  seatLocked: boolean      // individually locked by host (this specific seat)
+  amModerating: boolean
+  onLockToggle?: (index: number) => void
+}) {
+  const isLocked = micLocked || seatLocked
+
+  const handleClick = () => {
+    // Only HOST/MOD can tap to lock/unlock individual seats
+    if (!amModerating || micLocked) return  // micLocked applies to all — no per-seat toggle
+    onLockToggle?.(index)
+  }
+
   return (
-    <div className="vc-avatar-wrap" style={{ '--sz': '64px' } as React.CSSProperties}>
-      <div className={micLocked ? 'vc-avatar-img locked' : 'vc-avatar-img open'}>
+    <div
+      className="vc-avatar-wrap"
+      style={{ '--sz': '64px', cursor: amModerating && !micLocked ? 'pointer' : 'default' } as React.CSSProperties}
+      onClick={handleClick}
+      title={
+        micLocked ? 'Mic locked (all seats)' :
+        seatLocked ? 'Seat locked — tap to unlock' :
+        amModerating ? 'Tap to lock this seat' : ''
+      }
+    >
+      <div className={isLocked ? 'vc-avatar-img locked' : 'vc-avatar-img open'}
+        style={seatLocked && !micLocked ? { outline: '2px solid #f59e0b', outlineOffset: 2 } : undefined}
+      >
         <span className="vc-lock-icon">
-          {micLocked ? '🔒' : '🎤'}
+          {seatLocked ? '🔒' : micLocked ? '🔒' : amModerating ? '🎤' : '🎤'}
         </span>
+        {/* Host sees a subtle lock hint on unlocked seats */}
+        {amModerating && !isLocked && (
+          <span style={{
+            position: 'absolute', bottom: 2, right: 2, fontSize: 9,
+            background: 'rgba(0,0,0,0.4)', color: '#fff',
+            borderRadius: 4, padding: '0 3px', lineHeight: '14px',
+          }}>lock</span>
+        )}
       </div>
       <span className="vc-slot-num">{index}</span>
     </div>
@@ -298,8 +333,11 @@ export function VoiceRoomView({ onLeave }: Props) {
     sendMessage,
     promoteUser,
     kickUser,
+    banUser,
+    unbanUser,
     muteUser,
     muteAll,
+    unmuteAll,
     assignModerator,
     removeModerator,
     transferAdmin,
@@ -312,6 +350,7 @@ export function VoiceRoomView({ onLeave }: Props) {
     sendGiftToAll,
     toggleOpenMic,
     toggleMicLock,
+    toggleSeatLock,
     pinSpeaker,
   } = useVoiceRoom(roomId)
 
@@ -353,6 +392,8 @@ export function VoiceRoomView({ onLeave }: Props) {
   const [showMicPassPicker, setShowMicPassPicker] = useState(false)
   const [handLoading, setHandLoading] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showDotMenu, setShowDotMenu] = useState(false)
+  const dotMenuRef = useRef<HTMLDivElement>(null)
   const [participantSearch, setParticipantSearch] = useState('')
   const [profileSheet, setProfileSheet] = useState<SheetParticipant | null>(null)
   const chatEndRef = useRef<HTMLDivElement>(null)
@@ -578,6 +619,8 @@ export function VoiceRoomView({ onLeave }: Props) {
         onMute={profileSheet ? () => muteUser(profileSheet.userId, !profileSheet.isMuted) : undefined}
         onDemote={profileSheet ? () => promoteUser(profileSheet.userId, 'AUDIENCE') : undefined}
         onKick={profileSheet ? () => kickUser(profileSheet.userId) : undefined}
+        onBan={profileSheet && amModerating ? () => banUser(profileSheet.userId) : undefined}
+        onUnban={profileSheet && amModerating ? () => unbanUser(profileSheet.userId) : undefined}
         onMakeMod={profileSheet ? () => assignModerator(profileSheet.userId) : undefined}
         onRemoveMod={profileSheet ? () => removeModerator(profileSheet.userId) : undefined}
         onTransfer={profileSheet ? () => transferAdmin(profileSheet.userId) : undefined}
@@ -822,17 +865,170 @@ export function VoiceRoomView({ onLeave }: Props) {
           <span style={{ fontSize: 9, fontWeight: 800, padding: '2px 5px', borderRadius: 8, background: '#ede9fe', color: '#7c3aed', flexShrink: 0 }}>
             Lv{activeRoom.roomLevel ?? 1}
           </span>
-          <button className="vc-settings-btn" onClick={() => setShowSettings(true)} title="Room settings">⋮</button>
+          <button className="vc-settings-btn" onClick={() => setShowDotMenu(v => !v)} title="Room options">⋮</button>
         </div>
       </div>
 
-      {/* Room Settings Sheet */}
+      {/* ── Three-dot dropdown menu ──────────────────────────────────────────── */}
+      <AnimatePresence>
+        {showDotMenu && (
+          <>
+            {/* Click-away backdrop */}
+            <div
+              style={{ position: 'fixed', inset: 0, zIndex: 138 }}
+              onClick={() => setShowDotMenu(false)}
+            />
+            <motion.div
+              ref={dotMenuRef}
+              initial={{ opacity: 0, scale: 0.9, y: -8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: -8 }}
+              transition={{ duration: 0.12 }}
+              style={{
+                position: 'fixed',
+                top: 52,
+                right: 12,
+                zIndex: 139,
+                background: '#fff',
+                borderRadius: 16,
+                boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+                minWidth: 220,
+                overflow: 'hidden',
+                border: '1px solid #f1f5f9',
+              }}
+            >
+              {/* HOST / MOD quick controls */}
+              {amModerating && (
+                <>
+                  <div style={{ padding: '8px 14px 4px', fontSize: 10, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    Quick Controls
+                  </div>
+
+                  {/* Open Mic toggle */}
+                  <button
+                    onClick={() => { toggleOpenMic(); setShowDotMenu(false) }}
+                    style={{
+                      width: '100%', display: 'flex', alignItems: 'center', gap: 12,
+                      padding: '11px 16px', border: 'none', background: 'transparent',
+                      cursor: 'pointer', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = '#f9fafb')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <span style={{ fontSize: 18, width: 24, textAlign: 'center' }}>🎙️</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: '#1e293b' }}>Open Mic</div>
+                      <div style={{ fontSize: 11, color: '#94a3b8' }}>{activeRoom.isOpenMic ? 'ON — tap to turn off' : 'OFF — tap to turn on'}</div>
+                    </div>
+                    <span style={{
+                      fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
+                      background: activeRoom.isOpenMic ? '#ede9fe' : '#f1f5f9',
+                      color: activeRoom.isOpenMic ? '#7c3aed' : '#94a3b8',
+                    }}>
+                      {activeRoom.isOpenMic ? 'ON' : 'OFF'}
+                    </span>
+                  </button>
+
+                  {/* Lock Mic toggle */}
+                  <button
+                    onClick={() => { toggleMicLock(); setShowDotMenu(false) }}
+                    style={{
+                      width: '100%', display: 'flex', alignItems: 'center', gap: 12,
+                      padding: '11px 16px', border: 'none', background: 'transparent',
+                      cursor: 'pointer', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = '#f9fafb')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <span style={{ fontSize: 18, width: 24, textAlign: 'center' }}>
+                      {(activeRoom.micLocked ?? false) ? '🔒' : '🔓'}
+                    </span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: '#1e293b' }}>Lock Mic</div>
+                      <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                        {(activeRoom.micLocked ?? false) ? 'Locked — tap to unlock' : 'Unlocked — tap to lock'}
+                      </div>
+                    </div>
+                    <span style={{
+                      fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
+                      background: (activeRoom.micLocked ?? false) ? '#fef3c7' : '#f1f5f9',
+                      color: (activeRoom.micLocked ?? false) ? '#d97706' : '#94a3b8',
+                    }}>
+                      {(activeRoom.micLocked ?? false) ? 'Locked' : 'Allow'}
+                    </span>
+                  </button>
+
+                  {/* Divider */}
+                  <div style={{ height: 1, background: '#f1f5f9', margin: '2px 0' }} />
+
+                  {/* Mute All */}
+                  <button
+                    onClick={() => { muteAll(); setShowDotMenu(false) }}
+                    style={{
+                      width: '100%', display: 'flex', alignItems: 'center', gap: 12,
+                      padding: '11px 16px', border: 'none', background: 'transparent',
+                      cursor: 'pointer', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = '#fef2f2')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <span style={{ fontSize: 18, width: 24, textAlign: 'center' }}>🔇</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: '#dc2626' }}>Mute All</div>
+                      <div style={{ fontSize: 11, color: '#94a3b8' }}>Silence all speakers</div>
+                    </div>
+                  </button>
+
+                  {/* Unmute All */}
+                  <button
+                    onClick={() => { unmuteAll(); setShowDotMenu(false) }}
+                    style={{
+                      width: '100%', display: 'flex', alignItems: 'center', gap: 12,
+                      padding: '11px 16px', border: 'none', background: 'transparent',
+                      cursor: 'pointer', textAlign: 'left',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = '#f0fdf4')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  >
+                    <span style={{ fontSize: 18, width: 24, textAlign: 'center' }}>🔊</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: '#16a34a' }}>Unmute All</div>
+                      <div style={{ fontSize: 11, color: '#94a3b8' }}>Allow all speakers</div>
+                    </div>
+                  </button>
+
+                  {/* Divider before more settings */}
+                  <div style={{ height: 1, background: '#f1f5f9', margin: '2px 0' }} />
+                </>
+              )}
+
+              {/* More Settings (opens full sheet) */}
+              <button
+                onClick={() => { setShowDotMenu(false); setShowSettings(true) }}
+                style={{
+                  width: '100%', display: 'flex', alignItems: 'center', gap: 12,
+                  padding: '11px 16px', border: 'none', background: 'transparent',
+                  cursor: 'pointer', textAlign: 'left',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = '#f9fafb')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <span style={{ fontSize: 18, width: 24, textAlign: 'center' }}>⚙️</span>
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#1e293b' }}>More Settings</div>
+              </button>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* Room Settings Sheet (full sheet — opened from More Settings) */}
       <RoomSettingsSheet
         open={showSettings}
         onClose={() => setShowSettings(false)}
         isHost={isHost}
         amModerating={amModerating}
         onMuteAll={amModerating ? () => muteAll() : undefined}
+        onUnmuteAll={amModerating ? () => unmuteAll() : undefined}
         onToggleOpenMic={amModerating ? toggleOpenMic : undefined}
         onToggleMicLock={amModerating ? toggleMicLock : undefined}
         isOpenMic={activeRoom.isOpenMic}
@@ -887,7 +1083,21 @@ export function VoiceRoomView({ onLeave }: Props) {
               localEmojis={localEmojis}
             />
           ) : (
-            <EmptySlot key={`empty-${i}`} index={i + 1} micLocked={activeRoom.micLocked ?? false} />
+            <EmptySlot
+              key={`empty-${i}`}
+              index={i + 1}
+              micLocked={activeRoom.micLocked ?? false}
+              seatLocked={(activeRoom.lockedSeats ?? []).includes(i)}
+              amModerating={amModerating}
+              onLockToggle={(seatIdx) => {
+                const isSeatLocked = (activeRoom.lockedSeats ?? []).includes(i)
+                // Confirm before locking/unlocking
+                const action = isSeatLocked ? 'unlock' : 'lock'
+                if (window.confirm(`${isSeatLocked ? '🔓 Unlock' : '🔒 Lock'} Seat ${seatIdx}?\n\n${isSeatLocked ? 'This seat can be occupied again.' : 'Nobody can take this seat until you unlock it.'}`)) {
+                  toggleSeatLock(i)
+                }
+              }}
+            />
           )
         )}
       </div>
@@ -983,6 +1193,18 @@ export function VoiceRoomView({ onLeave }: Props) {
                         {msg.userId !== user?.id && <p className="vc-chat-sender">{msg.user.firstName}</p>}
                         <p className="vc-chat-text">{msg.body}</p>
                       </div>
+                      {/* Delete button — visible on hover for host/mod or message author */}
+                      {(amModerating || msg.userId === user?.id) && (
+                        <button
+                          className="vc-msg-delete"
+                          title="Delete message"
+                          onClick={async () => {
+                            try { await api.delete(`/voice/${roomId}/messages/${msg.id}`) } catch {}
+                          }}
+                        >
+                          ✕
+                        </button>
+                      )}
                     </div>
                   ))}
                   <div ref={chatEndRef} />
@@ -1280,10 +1502,28 @@ export function VoiceRoomView({ onLeave }: Props) {
             <button
               className={cn('vc-bar-btn', isMicEnabled ? 'active-mic' : '')}
               style={{ flex: '1 1 0', minWidth: 44 }}
-              onClick={async () => { toggleMic().catch(() => {}); toggleMute().catch(() => {}); }}
+              onClick={async () => {
+                // If muted by moderator, self cannot unmute — show a hint instead
+                if (myParticipant?.mutedByModerator && myParticipant.isMuted) {
+                  return // button is visually locked; tooltip explains why
+                }
+                toggleMic().catch(() => {})
+                toggleMute().catch(() => {})
+              }}
+              title={myParticipant?.mutedByModerator && myParticipant?.isMuted
+                ? '🔒 Muted by moderator — only a host/mod can unmute you'
+                : undefined}
             >
-              <span className="vc-bar-icon">{isMicEnabled ? '🎙️' : '🔇'}</span>
-              <span className="vc-bar-label">{isMicEnabled ? 'Mute' : 'Unmute'}</span>
+              <span className="vc-bar-icon">
+                {myParticipant?.mutedByModerator && myParticipant?.isMuted
+                  ? '🔒'
+                  : isMicEnabled ? '🎙️' : '🔇'}
+              </span>
+              <span className="vc-bar-label">
+                {myParticipant?.mutedByModerator && myParticipant?.isMuted
+                  ? 'Mod Muted'
+                  : isMicEnabled ? 'Mute' : 'Unmute'}
+              </span>
             </button>
           )
         ) : speakerLimitReached ? (

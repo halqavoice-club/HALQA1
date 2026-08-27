@@ -45,6 +45,19 @@ export function PollCard({ postId, pollData, isOwn }: Props) {
   const queryClient = useQueryClient()
 
   // ── Normalise legacy / malformed shapes ──────────────────────────────────
+  // voteMutation must be declared before any early returns (React hooks rules)
+  const voteMutation = useMutation({
+    mutationFn: (optionId: string) =>
+      postsApi.votePoll(postId, optionId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['feed'] })
+      queryClient.invalidateQueries({ queryKey: ['post', postId] })
+    },
+    onError: (e: any) => {
+      toast({ title: e?.response?.data?.message || 'Failed to vote', variant: 'destructive' })
+    },
+  })
+
   if (!pollData || typeof pollData !== 'object') return null
 
   // Support legacy shape where options is just string[]
@@ -66,18 +79,6 @@ export function PollCard({ postId, pollData, isOwn }: Props) {
 
   const hasVoted  = !!data.votedOptionId
   const isExpired = data.endsAt ? new Date(data.endsAt) < new Date() : false
-
-  const voteMutation = useMutation({
-    mutationFn: (optionId: string) =>
-      postsApi.votePoll(postId, optionId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['feed'] })
-      queryClient.invalidateQueries({ queryKey: ['post', postId] })
-    },
-    onError: (e: any) => {
-      toast({ title: e?.response?.data?.message || 'Failed to vote', variant: 'destructive' })
-    },
-  })
 
   const canVote = !hasVoted && !isExpired && !isOwn
 

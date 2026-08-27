@@ -21,6 +21,7 @@ import Link from 'next/link'
 import { useAuthStore } from '@/store/auth.store'
 import { useEducationRole } from '@/hooks/useEducationRole'
 import { useSchoolAccess } from '@/hooks/useSchoolAccess'
+import { getFileUrl } from '@/lib/avatar'
 
 const SCHOOL_TYPES = ['school', 'academy', 'college', 'daycare', 'camp', 'sports']
 
@@ -162,7 +163,7 @@ export default function SchoolsPage() {
             {memberships.map(m => (
               <div key={m.schoolId} className="flex items-center gap-2 bg-white border border-gray-200 rounded-xl px-3 py-2 shadow-sm">
                 {m.school.logoUrl
-                  ? <img src={m.school.logoUrl} alt="" className="w-6 h-6 rounded object-contain" />
+                  ? <img src={getFileUrl(m.school.logoUrl)} alt="" className="w-6 h-6 rounded object-contain" />
                   : <School className="w-4 h-4 text-gray-400" />
                 }
                 <span className="text-sm font-medium text-gray-900">{m.school.name}</span>
@@ -228,7 +229,7 @@ export default function SchoolsPage() {
                   <div className="flex items-start justify-between mb-3">
                     <div className="w-12 h-12 rounded-xl overflow-hidden bg-halqa-100 flex items-center justify-center flex-shrink-0">
                       {school.logoUrl
-                        ? <img src={school.logoUrl} alt={school.name} className="w-full h-full object-contain p-1" />
+                        ? <img src={getFileUrl(school.logoUrl)} alt={school.name} className="w-full h-full object-contain p-1" />
                         : <School className="w-6 h-6 text-halqa-700" />
                       }
                     </div>

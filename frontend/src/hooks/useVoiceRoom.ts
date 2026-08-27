@@ -226,6 +226,11 @@ export function useVoiceRoom(roomId: string | null) {
       addMessage(data.message)
     }
 
+    const onMessageDeleted = (data: { roomId: string; msgId: string }) => {
+      if (data.roomId !== roomId) return
+      useVoiceStore.getState().removeMessage(data.msgId)
+    }
+
     const onSpeaking = (data: { userId: string; speaking: boolean }) => {
       setSpeaking(data.userId, data.speaking)
     }
@@ -236,13 +241,22 @@ export function useVoiceRoom(roomId: string | null) {
 
     const onRoomEnded = (data: { roomId: string }) => {
       if (data.roomId !== roomId) return
-      toast({ title: 'Room ended', description: 'The host has ended this room.' })
+      // PERMANENT ROOMS: voice:room_ended means the room went IDLE (all left, 5-min grace elapsed)
+      // OR an admin explicitly archived it. In both cases the room record persists in the DB.
+      // We eject the user from the live session (their participant is now inactive)
+      // but we do NOT tell them the room is gone — it can be rejoined via the lobby.
+      toast({
+        title: '🔔 Room is now offline',
+        description: 'The room is idle — it will be live again when someone joins.',
+      })
       setActiveRoom(null)
     }
 
     const onRoomDeleted = (data: { roomId: string }) => {
       if (data.roomId !== roomId) return
-      toast({ title: 'Room deleted', description: 'This room has been deleted by the host.' })
+      // voice:room_deleted is only emitted when the host explicitly deletes (soft-deletes)
+      // the room record — a destructive action. The room cannot be rejoined after this.
+      toast({ title: '🗑️ Room deleted', description: 'The host has permanently deleted this room.' })
       setActiveRoom(null)
     }
 
@@ -346,6 +360,14 @@ export function useVoiceRoom(roomId: string | null) {
       }
     }
 
+    const onSeatLockChanged = (data: { roomId: string; seatIndex: number; locked: boolean; lockedSeats: number[]; changedBy: string }) => {
+      if (data.roomId !== roomId) return
+      updateRoom({ lockedSeats: data.lockedSeats })
+      if (data.changedBy !== user?.id) {
+        toast({ title: data.locked ? `🔒 Seat ${data.seatIndex + 1} locked` : `🔓 Seat ${data.seatIndex + 1} unlocked` })
+      }
+    }
+
     // ── Membership events ──────────────────────────────────────────────────────
     const onJoinRequest = (d: { roomId: string; userId: string; firstName: string; lastName: string }) => {
       if (d.roomId !== roomId) return
@@ -358,6 +380,27 @@ export function useVoiceRoom(roomId: string | null) {
       if (d.roomId !== roomId) return
       toast({ title: '✅ Your join request was approved!', description: 'You are now a permanent member' })
     }
+    const onJoinRejected = (d: { roomId: string }) => {
+      if (d.roomId !== roomId) return
+      toast({ title: '❌ Join request declined', description: 'Your request to join this room was not approved.', variant: 'destructive' })
+    }
+    const onMemberRoleChanged = (d: { roomId: string; userId: string; role: string; changedBy: string }) => {
+      if (d.roomId !== roomId) return
+      if (d.userId === user?.id) {
+        toast({ title: `🏷️ Your member role changed to ${d.role}` })
+      }
+    }
+    const onMemberUpgraded = (d: { roomId: string; userId: string; memberLevel: number; levelMeta?: any }) => {
+      if (d.roomId !== roomId) return
+      if (d.userId === user?.id) {
+        const meta = d.levelMeta
+        toast({ title: meta ? `${meta.emoji} Member level upgraded to ${meta.label}!` : '🎉 Member level upgraded!' })
+      }
+    }
+    const onYourMemberLevel = (d: { roomId: string; memberLevel: number; levelMeta?: any; message?: string }) => {
+      if (d.roomId !== roomId) return
+      if (d.message) toast({ title: d.message })
+    }
     const onYourMemberRole = (d: { roomId: string; role: string; levelMeta?: any }) => {
       if (d.roomId !== roomId) return
       const meta = d.levelMeta
@@ -368,11 +411,8 @@ export function useVoiceRoom(roomId: string | null) {
       toast({ title: '🚫 You were removed from this room', variant: 'destructive' })
       setActiveRoom(null)
     }
-    const onBlockedFromRoom = (d: { roomId: string }) => {
-      if (d.roomId !== roomId) return
-      toast({ title: '⛔ You were blocked from this room', variant: 'destructive' })
-      setActiveRoom(null)
-    }
+    // voice:blocked_from_room is emitted by room-member.controller.js blockMember().
+    // Handler registered inline below.
 
     const onMicGrabbed = (data: {
       roomId: string; userId: string; firstName: string; lastName: string
@@ -511,6 +551,7 @@ export function useVoiceRoom(roomId: string | null) {
     socket.on('voice:you_are_moderator',  onYouAreModerator)
     socket.on('voice:you_are_host',       onYouAreHost)
     socket.on('voice:message',            onMessage)
+    socket.on('voice:message_deleted',    onMessageDeleted)
     socket.on('voice:speaking',           onSpeaking)
     socket.on('voice:reaction',           onReaction)
     socket.on('voice:room_ended',         onRoomEnded)
@@ -526,11 +567,21 @@ export function useVoiceRoom(roomId: string | null) {
     socket.on('voice:mic_offer_cancelled',onMicOfferCancelled)
     socket.on('voice:open_mic_changed',   onOpenMicChanged)
     socket.on('voice:mic_lock_changed',   onMicLockChanged)
-    socket.on('voice:join_request',      onJoinRequest)
-    socket.on('voice:join_approved',     onJoinApproved)
-    socket.on('voice:your_member_role',  onYourMemberRole)
-    socket.on('voice:removed_from_room', onRemovedFromRoom)
-    socket.on('voice:blocked_from_room', onBlockedFromRoom)
+    socket.on('voice:seat_lock_changed',  onSeatLockChanged)
+    socket.on('voice:join_request',       onJoinRequest)
+    socket.on('voice:join_approved',      onJoinApproved)
+    socket.on('voice:join_rejected',      onJoinRejected)
+    socket.on('voice:member_role_changed',onMemberRoleChanged)
+    socket.on('voice:member_upgraded',    onMemberUpgraded)
+    socket.on('voice:your_member_level',  onYourMemberLevel)
+    socket.on('voice:your_member_role',   onYourMemberRole)
+    socket.on('voice:removed_from_room',  onRemovedFromRoom)
+    socket.on('voice:blocked_from_room', (d: { roomId: string }) => {
+      // Emitted by room-member.controller.js blockMember() — user was blocked from room.
+      if (d.roomId !== roomId) return
+      toast({ title: '⛔ You were blocked from this room', variant: 'destructive' })
+      setActiveRoom(null)
+    })
     socket.on('voice:mic_grabbed',        onMicGrabbed)
     socket.on('voice:queue_updated',      onQueueUpdated)
     socket.on('voice:queue_rejected',     onQueueRejected)
@@ -562,6 +613,7 @@ export function useVoiceRoom(roomId: string | null) {
       socket.off('voice:you_are_moderator',  onYouAreModerator)
       socket.off('voice:you_are_host',       onYouAreHost)
       socket.off('voice:message',            onMessage)
+      socket.off('voice:message_deleted',    onMessageDeleted)
       socket.off('voice:speaking',           onSpeaking)
       socket.off('voice:reaction',           onReaction)
       socket.off('voice:room_ended',         onRoomEnded)
@@ -576,11 +628,17 @@ export function useVoiceRoom(roomId: string | null) {
       socket.off('voice:mic_offer_cancelled',onMicOfferCancelled)
       socket.off('voice:open_mic_changed',   onOpenMicChanged)
       socket.off('voice:mic_lock_changed',   onMicLockChanged)
-    // (duplicate removed)
-      socket.off('voice:join_approved',     onJoinApproved)
-      socket.off('voice:your_member_role',  onYourMemberRole)
-      socket.off('voice:removed_from_room', onRemovedFromRoom)
-      socket.off('voice:blocked_from_room', onBlockedFromRoom)
+      socket.off('voice:seat_lock_changed',  onSeatLockChanged)
+    // (membership cleanup)
+      socket.off('voice:join_request',       onJoinRequest)
+      socket.off('voice:join_approved',      onJoinApproved)
+      socket.off('voice:join_rejected',      onJoinRejected)
+      socket.off('voice:member_role_changed',onMemberRoleChanged)
+      socket.off('voice:member_upgraded',    onMemberUpgraded)
+      socket.off('voice:your_member_level',  onYourMemberLevel)
+      socket.off('voice:your_member_role',   onYourMemberRole)
+      socket.off('voice:removed_from_room',  onRemovedFromRoom)
+      socket.off('voice:blocked_from_room')
       socket.off('voice:mic_grabbed',        onMicGrabbed)
       socket.off('voice:queue_updated',      onQueueUpdated)
       socket.off('voice:queue_rejected',     onQueueRejected)
@@ -686,6 +744,26 @@ export function useVoiceRoom(roomId: string | null) {
     }
   }, [roomId]) // eslint-disable-line
 
+  const banUser = useCallback(async (targetUserId: string, reason?: string) => {
+    if (!roomId) return
+    try {
+      await api.post(`/voice/${roomId}/ban/${targetUserId}`, { reason: reason || '' })
+      toast({ title: '⛔ Participant banned from room' })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to ban user', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const unbanUser = useCallback(async (targetUserId: string) => {
+    if (!roomId) return
+    try {
+      await api.delete(`/voice/${roomId}/ban/${targetUserId}`)
+      toast({ title: '✅ Participant unbanned' })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to unban user', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
   const muteUser = useCallback(async (targetUserId: string, isMuted: boolean) => {
     if (!roomId) return
     try {
@@ -702,6 +780,16 @@ export function useVoiceRoom(roomId: string | null) {
       toast({ title: '🔇 All speakers muted' })
     } catch {
       toast({ title: 'Failed to mute all', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const unmuteAll = useCallback(async () => {
+    if (!roomId) return
+    try {
+      await api.patch(`/voice/${roomId}/unmute-all`)
+      toast({ title: '🎙️ All speakers unmuted' })
+    } catch {
+      toast({ title: 'Failed to unmute all', variant: 'destructive' })
     }
   }, [roomId]) // eslint-disable-line
 
@@ -742,11 +830,16 @@ export function useVoiceRoom(roomId: string | null) {
   }, [roomId]) // eslint-disable-line
 
   const endRoom = useCallback(async () => {
+    // PERMANENT ROOMS: This function is reserved for SUPER_ADMIN platform admins only.
+    // Regular hosts cannot terminate rooms — the room stays alive when they leave.
+    // This function is intentionally kept in the hook for admin tooling but should
+    // NOT be called from any regular host UI.
     if (!roomId) return
     try {
       await api.patch(`/voice/${roomId}/end`)
-    } catch {
-      toast({ title: 'Failed to end room', variant: 'destructive' })
+    } catch (e: any) {
+      const msg = e?.response?.data?.message || 'Failed to archive room'
+      toast({ title: msg, variant: 'destructive' })
     }
   }, [roomId]) // eslint-disable-line
 
@@ -832,6 +925,18 @@ export function useVoiceRoom(roomId: string | null) {
       toast({ title: state ? '🔒 Mic Locked' : '🔓 Mic Unlocked' })
     } catch (e: any) {
       toast({ title: e?.response?.data?.message || 'Failed to toggle Mic Lock', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  const toggleSeatLock = useCallback(async (seatIndex: number) => {
+    if (!roomId) return
+    try {
+      const res = await api.patch(`/voice/${roomId}/seat-lock`, { seatIndex })
+      const { locked, lockedSeats } = res.data.data ?? {}
+      useVoiceStore.getState().updateRoom({ lockedSeats: lockedSeats ?? [] })
+      toast({ title: locked ? `🔒 Seat ${seatIndex + 1} locked` : `🔓 Seat ${seatIndex + 1} unlocked` })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to toggle seat lock', variant: 'destructive' })
     }
   }, [roomId]) // eslint-disable-line
 
@@ -930,13 +1035,13 @@ export function useVoiceRoom(roomId: string | null) {
     toggleMute, raiseHand, sendMessage,
     broadcastReaction, broadcastSpeaking,
     // Open Mic
-    grabMic, dropMic, toggleOpenMic, toggleMicLock,
+    grabMic, dropMic, toggleOpenMic, toggleMicLock, toggleSeatLock,
     // Mic pass
     passMic, acceptMic, declineMic, cancelMicOffer,
     // Gift system
     sendGift, sendGiftToAll,
     // Moderator controls (HOST + MODERATOR)
-    promoteUser, kickUser, muteUser, muteAll,
+    promoteUser, kickUser, banUser, unbanUser, muteUser, muteAll, unmuteAll,
     // Host-only controls
     assignModerator, removeModerator, transferAdmin, endRoom,
     // Host + Mod controls

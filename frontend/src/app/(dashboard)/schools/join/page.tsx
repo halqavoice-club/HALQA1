@@ -14,6 +14,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAuthStore } from '@/store/auth.store'
 import api from '@/lib/api'
+import { getFileUrl } from '@/lib/avatar'
 import {
   Search, School, GraduationCap, Users, UserCheck,
   AlertCircle, CheckCircle2, ArrowRight, Loader2
@@ -151,7 +152,7 @@ export default function JoinSchoolPage() {
                 >
                   <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
                     {school.logoUrl
-                      ? <img src={school.logoUrl} alt="" className="w-8 h-8 rounded object-contain" />
+                      ? <img src={getFileUrl(school.logoUrl)} alt="" className="w-8 h-8 rounded object-contain" />
                       : <School className="w-5 h-5 text-gray-400" />
                     }
                   </div>
@@ -181,7 +182,7 @@ export default function JoinSchoolPage() {
           <div className="flex items-center gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl">
             <div className="w-10 h-10 bg-white rounded-lg flex items-center justify-center flex-shrink-0 border border-blue-200">
               {selected.logoUrl
-                ? <img src={selected.logoUrl} alt="" className="w-8 h-8 rounded object-contain" />
+                ? <img src={getFileUrl(selected.logoUrl)} alt="" className="w-8 h-8 rounded object-contain" />
                 : <School className="w-5 h-5 text-blue-500" />
               }
             </div>

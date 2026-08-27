@@ -60,6 +60,8 @@ interface Props {
   onMute?:       () => void
   onDemote?:     () => void
   onKick?:       () => void
+  onBan?:        () => void
+  onUnban?:      () => void
   onMakeMod?:    () => void
   onRemoveMod?:  () => void
   onTransfer?:   () => void
@@ -129,7 +131,7 @@ function FriendButton({
 // ─── Main component ───────────────────────────────────────────────────────────
 export function UserProfileSheet({
   participant, onClose,
-  onMute, onDemote, onKick, onMakeMod, onRemoveMod, onTransfer, onPassMic,
+  onMute, onDemote, onKick, onBan, onUnban, onMakeMod, onRemoveMod, onTransfer, onPassMic,
   myRole, roomId,
 }: Props) {
   const { user: me } = useAuthStore()
@@ -463,6 +465,27 @@ export function UserProfileSheet({
                   {!isTargetHost && !(isTargetMod && !amHost) && onKick && (
                     <button className="ups-mod-btn danger" onClick={modAction(onKick, `🚫 ${participant.firstName} removed from room`)}>
                       🚫 Remove from Room
+                    </button>
+                  )}
+
+                  {/* Ban — HOST/MOD only; not for HOST target; MOD can't ban MOD */}
+                  {!isTargetHost && !(isTargetMod && !amHost) && onBan && (
+                    <button
+                      className="ups-mod-btn danger"
+                      onClick={() => {
+                        if (confirm(`Ban ${participant.firstName} ${participant.lastName} from this room? They will not be able to rejoin.`)) {
+                          modAction(onBan, `⛔ ${participant.firstName} banned`)()
+                        }
+                      }}
+                    >
+                      ⛔ Ban from Room
+                    </button>
+                  )}
+
+                  {/* Unban — HOST/MOD only */}
+                  {onUnban && (
+                    <button className="ups-mod-btn" onClick={modAction(onUnban, `✅ ${participant.firstName} unbanned`)}>
+                      ✅ Unban
                     </button>
                   )}
                 </div>

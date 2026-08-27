@@ -56,6 +56,9 @@ interface LiveClass {
   maxParticipants: number
   duration: number; scheduledAt: string | null
   recordingUrl: string | null
+  // hostUserId — set for PUBLIC streams; the creator's userId
+  // used to grant host controls to normal users (MEMBER role) who own the stream
+  hostUserId: string | null
   class: { id: string; name: string }
   teacher: { id: string; user: { id: string; firstName: string; lastName: string } }
   participants: LCParticipant[]
@@ -408,7 +411,11 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   const [showSidebar,      setShowSidebar]      = useState(false)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
-  const isHost = ['TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(user?.role || '')
+  // isStaffRole is pure — only depends on user.role, safe to compute here.
+  // SUPER_ADMIN is platform-admin only and must NOT automatically become host
+  // in any live class. They join as a regular participant (student view) and
+  // can only access host controls if they are the actual creator (hostUserId check below).
+  const isStaffRole = ['TEACHER', 'SCHOOL_ADMIN'].includes(user?.role || '')
 
   // ── Universal Gift Engine ───────────────────────────────────────────────────
   const giftAdapter  = createLiveClassAdapter(id)
@@ -426,6 +433,14 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     enabled:  !!id,
     refetchInterval: joined ? 30000 : 10000,
   })
+
+  // isHost: true for school staff roles OR for the creator of a PUBLIC stream.
+  // A normal user (MEMBER role) who created a PUBLIC stream must also see host
+  // controls — previously they were locked out because the role check never
+  // included MEMBER. We also check lc.hostUserId === user.id so any
+  // authenticated user who owns the stream gets full host UI.
+  // lc may be undefined on first render — isStaffRole carries it until lc loads.
+  const isHost = isStaffRole || (!!lc && !!user && lc.hostUserId === user.id)
 
   // Sync isOpenMic from server data
   useEffect(() => {
@@ -499,7 +514,8 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     const onMuteAll  = ()       => setParticipants(prev => prev.map(p => p.role !== 'HOST' ? { ...p, isMuted: true } : p))
     const onHand     = (d: any) => {
       setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, handRaised: true  } : p))
-      if (isHost) setTab('host')  // bring host to controls tab so they see the queue
+      // Use isStaffRole OR hostUserId check — isHost may be stale before lc loads
+      if (isStaffRole || lc?.hostUserId === user?.id) setTab('host')
     }
     const onHandLow  = (d: any) => setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, handRaised: false } : p))
     const onMsg      = (msg: LCMessage) => setMessages(prev => [...prev, msg])
@@ -579,11 +595,17 @@ export function LiveClassRoomPage({ id }: { id: string }) {
           toast({ title: '📊 New poll launched!' })
         }
       } else if (ev.type === 'vote' && ev.pollId && ev.optionId && ev.userId) {
+        // DI-02 FIX: idempotent add — check before inserting to prevent duplicate
+        // entries from the optimistic update + server echo race condition.
         setPolls(prev => prev.map(p => p.id !== ev.pollId ? p : {
           ...p,
-          options: p.options.map(o => o.id !== ev.optionId ? o : {
-            ...o,
-            votes: o.votes.includes(ev.userId!) ? o.votes : [...o.votes, ev.userId!]
+          options: p.options.map(o => {
+            if (o.id !== ev.optionId) {
+              // Remove this voter from other options (enforce single-choice)
+              return { ...o, votes: o.votes.filter((v: string) => v !== ev.userId) }
+            }
+            if (o.votes.includes(ev.userId!)) return o  // already recorded — no-op
+            return { ...o, votes: [...o.votes, ev.userId!] }
           })
         }))
       } else if (ev.type === 'close' && ev.pollId) {
@@ -860,6 +882,10 @@ export function LiveClassRoomPage({ id }: { id: string }) {
         })
       })
 
+      // Auto-enable mic for hosts on connect.
+      // isHost is correctly set by this point because joinMutation.onSuccess
+      // seeds the lc query cache with joinedLc before calling connectLiveKit(),
+      // so lc.hostUserId === user.id resolves correctly for MEMBER-role PUBLIC hosts.
       if (isHost) await room.localParticipant.setMicrophoneEnabled(true).then(() => setMicOn(true)).catch(() => {})
     } catch (e: any) {
       if (!isUnmounted.current) toast({ title: 'Connection failed: ' + (e?.message || 'unknown'), variant: 'destructive' })
@@ -873,7 +899,11 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     mutationFn: () => api.post('/live-classes/' + id + '/join'),
     onSuccess: async (res) => {
       setJoined(true)
-      if (isHost) setTab('host')  // hosts land on the controls tab
+      // Re-derive host status from the join response so we don't depend on
+      // the stale lc query value (which may not have loaded yet at join time).
+      const joinedLc = res.data.data?.liveClass
+      const amHost = isStaffRole || (joinedLc?.hostUserId === user?.id)
+      if (amHost) setTab('host')  // hosts land on the controls tab
       const joinedParticipants = res.data.data?.liveClass?.participants
       if (joinedParticipants?.length > 0) {
         setParticipants(joinedParticipants)
@@ -897,6 +927,16 @@ export function LiveClassRoomPage({ id }: { id: string }) {
           }
         }
       }).catch(() => { /* non-fatal — polls still work via socket events */ })
+
+      // Eagerly seed the lc query cache from the join response so isHost is
+      // correctly computed before connectLiveKit() runs. Without this, a MEMBER
+      // user who owns a PUBLIC stream would connect with isHost=false (lc=undefined)
+      // and not get their mic auto-enabled.
+      if (joinedLc) {
+        queryClient.setQueryData(['live-class', id], (old: any) =>
+          old ? { ...old, ...joinedLc } : joinedLc
+        )
+      }
 
       await connectLiveKit()
       queryClient.invalidateQueries({ queryKey: ['live-class', id] })
@@ -981,12 +1021,18 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       // runs while the track publication is still in progress → getTrackPublication
       // returns null → attach is skipped → video never shows.
 
-      // Persist to DB + notify participants (fire-and-forget, non-fatal)
+      // Persist to DB + notify participants via server-side relay (fire-and-forget, non-fatal)
+      // NOTE: setVideoState controller emits liveclass:video_changed to the room.
+      // The socket emit below is kept for low-latency optimistic relay before the
+      // API round-trip completes — this results in two events reaching other clients.
+      // MOB-DUP FIX applied on mobile; on web we keep the socket emit for perceived
+      // responsiveness but the API call's controller emit is the authoritative one.
+      // TODO: remove socket emit here once the API latency is confirmed acceptable.
       if (user?.id) {
         api.patch('/live-classes/' + id + '/participants/' + user.id + '/video', { isVideoOn: next }).catch(() => {})
       }
-      const socket = getSocket()
-      if (socket) socket.emit('liveclass:video_changed', { liveClassId: id, isVideoOn: next })
+      // DO NOT also emit liveclass:video_changed via socket — the PATCH controller handles it
+      // (keeping the socket emit below removed to match the mobile fix)
 
     } catch (e: any) {
       const name = (e?.name  || '').toLowerCase()

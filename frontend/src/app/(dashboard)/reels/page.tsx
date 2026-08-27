@@ -56,8 +56,6 @@ function ReelItem({
 
   const isOwn = user?.id === post.authorId
   const video = post.media.find(m => m.type === 'VIDEO')
-  if (!video) return null
-
   const avatarSrc = getAvatarUrl(post.author.avatarUrl)
   const initials  = `${post.author.firstName?.charAt(0) ?? ''}${post.author.lastName?.charAt(0) ?? ''}`.toUpperCase() || '?'
 
@@ -121,6 +119,9 @@ function ReelItem({
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['feed-following'] }),
   })
+
+  // Guard: only render if post has video media
+  if (!video) return null
 
   const formatCount = (n: number) =>
     n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M`

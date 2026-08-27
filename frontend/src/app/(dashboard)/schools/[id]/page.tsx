@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import Link from 'next/link'
 import { useAuthStore } from '@/store/auth.store'
+import { getFileUrl } from '@/lib/avatar'
 
 const SCHOOL_TYPES = ['school', 'academy', 'college', 'daycare', 'camp', 'sports']
 
@@ -203,8 +204,11 @@ export default function SchoolManagePage() {
           <Link href="/schools" className="p-2 rounded-xl hover:bg-gray-100 transition-colors">
             <ArrowLeft className="w-5 h-5 text-gray-500" />
           </Link>
-          <div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center">
-            <School className="w-5 h-5 text-indigo-600" />
+          <div className="w-10 h-10 bg-indigo-100 rounded-xl flex items-center justify-center overflow-hidden">
+            {school.logoUrl
+              ? <img src={getFileUrl(school.logoUrl)} alt={school.name} className="w-full h-full object-contain p-0.5" />
+              : <School className="w-5 h-5 text-indigo-600" />
+            }
           </div>
           <div>
             <div className="flex items-center gap-2">

@@ -76,20 +76,23 @@ class Analytics {
   }
 
   private send(event: AnalyticsEvent) {
-    // Send to your analytics service
-    // This is a placeholder - integrate with your analytics provider
     if (process.env.NODE_ENV === 'development') {
       console.log('[Analytics]', event)
     }
 
-    // Example: Send to backend (disabled for now - route not implemented)
-    // fetch('/api/v1/analytics/events', {
-    //   method: 'POST',
-    //   headers: { 'Content-Type': 'application/json' },
-    //   body: JSON.stringify(event),
-    // }).catch((err) => {
-    //   console.error('[Analytics] Failed to send event:', err)
-    // })
+    // Send to backend — non-blocking, fire-and-forget
+    // Route: POST /api/v1/analytics/events (always returns 202)
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL
+    if (apiUrl) {
+      fetch(`${apiUrl}/analytics/events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(event),
+      }).catch(() => {
+        // Silently discard — analytics must never break the UI
+      })
+    }
   }
 
   private processQueue() {
