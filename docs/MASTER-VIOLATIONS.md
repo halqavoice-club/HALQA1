@@ -195,7 +195,8 @@ Payout management section added to `/admin/payments` page. Wired to existing bac
 **ID:** FS-GAP-002  
 **Severity:** 🟡 MEDIUM  
 **Domain:** Feed / School Isolation  
-**Status:** NOT FIXED
+**Status:** ✅ FIXED — Sprint 6 (commit dbaf7c5)
+`visibilityFilter()` now loads `SchoolMembership.schoolId` as fallback. `createPost()` resolves schoolId from membership for MEMBER users. Socket broadcast uses `post.schoolId`.
 
 | Field | Value |
 |-------|-------|
@@ -290,7 +291,7 @@ Stripe payments that complete successfully cannot be refunded via any platform A
 | CHAT-GAP-002 | LOW | Chat/DM | No DM message editing |
 | CHAT-GAP-003 | MEDIUM | Chat/DM | ALLOW_DM_NON_FRIENDS not verified at API level |
 | UIGAP-001 | MEDIUM | Admin UI | Route guard is client-side only |
-| UIGAP-002 | HIGH | Admin UI | No user session management |
+| UIGAP-002 | HIGH | Admin UI | ✅ FIXED Sprint 5 — Session management (view + revoke) |
 | UIGAP-003 | MEDIUM | Admin UI | No user profile drill-down |
 | UIGAP-011 | LOW | Admin UI | No export functionality |
 | UIGAP-012 | MEDIUM | Admin UI | No platform announcement creation |
