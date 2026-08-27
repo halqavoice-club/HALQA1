@@ -139,15 +139,27 @@ async function syncMentions(postId, commentId, body, authorId) {
 //   - Viewers who have an active CreatorSubscription matching the post's tierRequired
 async function visibilityFilter(viewerId) {
   // Run all 4 prerequisite queries in parallel — cuts latency from ~4× to ~1×
-  const [viewer, following, activeSubs] = await Promise.all([
+  const [viewer, following, activeSubs, schoolMembership] = await Promise.all([
     prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } }),
     prisma.follow.findMany({ where: { followerId: viewerId }, select: { followingId: true } }),
     prisma.creatorSubscription.findMany({
       where: { subscriberId: viewerId, status: 'ACTIVE', expiresAt: { gt: new Date() } },
       select: { creatorId: true }
-    }).catch(() => [])  // non-fatal — table may not exist in older DB
+    }).catch(() => []),  // non-fatal — table may not exist in older DB
+    // FS-GAP-002 FIX: Also check SchoolMembership for new-architecture users
+    // whose User.schoolId may be null (MEMBER role with school membership).
+    // Prefer User.schoolId for legacy users; fall back to SchoolMembership.schoolId.
+    prisma.schoolMembership.findFirst({
+      where: { userId: viewerId, status: 'ACTIVE', deletedAt: null },
+      select: { schoolId: true },
+      orderBy: { joinedAt: 'asc' }
+    }).catch(() => null)
   ]);
   const followingIds = following.map(f => f.followingId);
+
+  // FS-GAP-002 FIX: Resolve effective schoolId for feed visibility.
+  // Legacy users: User.schoolId (non-null). New MEMBER users: SchoolMembership.schoolId.
+  const effectiveSchoolId = viewer?.schoolId ?? schoolMembership?.schoolId ?? null;
 
   // Resolve creatorProfile → userId mapping (only if we have active subs)
   let subscribedCreatorIds = [];
@@ -174,8 +186,10 @@ async function visibilityFilter(viewerId) {
       // Own posts always visible (author sees all their own posts)
       { authorId: viewerId },
       // School-only posts visible to school members
-      ...(viewer?.schoolId
-        ? [{ visibility: 'SCHOOL_ONLY', isExclusive: false, schoolId: viewer.schoolId }]
+      // FS-GAP-002 FIX: Uses effectiveSchoolId which resolves from User.schoolId
+      // (legacy) OR SchoolMembership.schoolId (new MEMBER users). Both paths covered.
+      ...(effectiveSchoolId
+        ? [{ visibility: 'SCHOOL_ONLY', isExclusive: false, schoolId: effectiveSchoolId }]
         : []),
       // Exclusive posts: only visible to active subscribers
       ...(subscribedCreatorIds.length > 0
@@ -202,7 +216,14 @@ async function createPost(req, res, next) {
         id: uuidv4(), authorId: req.user.id,
         body: body?.trim() || null, type, visibility, isDraft,
         scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
-        schoolId: visibility === 'SCHOOL_ONLY' ? req.user.schoolId : null,
+        // FS-GAP-002 FIX: Resolve schoolId from SchoolMembership for MEMBER users
+        // whose User.schoolId may be null. Legacy users use User.schoolId directly.
+        schoolId: visibility === 'SCHOOL_ONLY'
+          ? (req.user.schoolId || (await prisma.schoolMembership.findFirst({
+              where: { userId: req.user.id, status: 'ACTIVE', deletedAt: null },
+              select: { schoolId: true }
+            }).then(m => m?.schoolId ?? null).catch(() => null)))
+          : null,
         pollData: pollData || null,
         linkUrl: linkUrl || null, linkTitle: linkTitle || null,
         linkDescription: linkDescription || null, linkImage: linkImage || null,
@@ -235,12 +256,31 @@ async function createPost(req, res, next) {
     // Broadcast to feed rooms via socket
     const io = getIo();
     if (io && !isDraft) {
-      if (post.visibility === 'PUBLIC' || post.visibility === 'FOLLOWERS') {
-        // All connected clients receive this (they filter server-side by visibility)
+      // Posts in PRIVATE or INVITE_ONLY communities must NOT be broadcast to feed:public.
+      // Only emit to the community room so only connected members see the new post.
+      if (communityId) {
+        // Check community privacy before deciding which room to emit to
+        const comm = await prisma.community.findUnique({
+          where: { id: communityId },
+          select: { privacy: true }
+        }).catch(() => null);
+
+        if (!comm || comm.privacy === 'PRIVATE' || comm.privacy === 'INVITE_ONLY') {
+          // Private/invite-only community — emit only to community room
+          io.to(`community:${communityId}`).emit('post:create', { post: full });
+        } else {
+          // Public community — emit to both community room and feed:public
+          io.to(`community:${communityId}`).emit('post:create', { post: full });
+          if (post.visibility === 'PUBLIC' || post.visibility === 'FOLLOWERS') {
+            io.to('feed:public').emit('post:create', { post: full });
+          }
+        }
+      } else if (post.visibility === 'PUBLIC' || post.visibility === 'FOLLOWERS') {
+        // Regular (non-community) post — broadcast to all connected clients
         io.to('feed:public').emit('post:create', { post: full });
-      } else if (post.visibility === 'SCHOOL_ONLY' && req.user.schoolId) {
-        // Broadcast to school-scoped room — clients join `feed:school:<schoolId>` on connect
-        io.to(`feed:school:${req.user.schoolId}`).emit('post:create', { post: full });
+      } else if (post.visibility === 'SCHOOL_ONLY' && post.schoolId) {
+        // FS-GAP-002 FIX: Use post.schoolId (resolved at creation) not req.user.schoolId
+        io.to(`feed:school:${post.schoolId}`).emit('post:create', { post: full });
       }
       // PRIVATE posts are not broadcast
     }

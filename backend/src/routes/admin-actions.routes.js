@@ -276,3 +276,108 @@ router.post('/users/:id/grant-coins', async (req, res, next) => {
       `${coinsInt} coins granted to ${target.firstName} ${target.lastName}`);
   } catch (err) { next(err); }
 });
+
+// ─── GET /api/v1/admin/actions/users/:id/sessions ────────────────────────────
+/**
+ * List a user's active sessions.
+ * UIGAP-002 FIX: Platform admin can now inspect session activity.
+ */
+router.get('/users/:id/sessions', async (req, res, next) => {
+  try {
+    const { id: targetUserId } = req.params;
+    const target = await prisma.user.findUnique({
+      where: { id: targetUserId, deletedAt: null },
+      select: { id: true, email: true, firstName: true, lastName: true }
+    });
+    if (!target) return errorResponse(res, 'User not found', 404);
+
+    const sessions = await prisma.session.findMany({
+      where: { userId: targetUserId, isActive: true },
+      orderBy: { lastSeenAt: 'desc' },
+      select: {
+        id: true, deviceName: true, deviceType: true,
+        ipAddress: true, lastSeenAt: true, createdAt: true,
+      }
+    });
+
+    const refreshCount = await prisma.refreshToken.count({
+      where: { userId: targetUserId, isRevoked: false, expiresAt: { gt: new Date() } }
+    });
+
+    return successResponse(res, {
+      user: target,
+      sessions,
+      activeSessionCount: sessions.length,
+      activeRefreshTokens: refreshCount,
+    });
+  } catch (err) { next(err); }
+});
+
+// ─── DELETE /api/v1/admin/actions/users/:id/sessions ─────────────────────────
+/**
+ * Revoke all active sessions and refresh tokens for a user.
+ * UIGAP-002 FIX: Force-logout a user without suspending their account.
+ * Use case: compromised credential; security incident; account handover.
+ *
+ * Effect:
+ * 1. Mark all Session records inactive
+ * 2. Revoke all active RefreshTokens
+ * 3. Invalidate Redis auth cache (next request re-reads from DB)
+ * 4. Write audit log
+ */
+router.delete('/users/:id/sessions', async (req, res, next) => {
+  try {
+    const { id: targetUserId } = req.params;
+    const adminId = req.user.id;
+    const { reason } = req.body;
+
+    if (adminId === targetUserId) {
+      return errorResponse(res, 'Cannot revoke your own sessions via this endpoint', 400);
+    }
+
+    const target = await prisma.user.findUnique({
+      where: { id: targetUserId, deletedAt: null },
+      select: { id: true, email: true, firstName: true, lastName: true, role: true }
+    });
+    if (!target) return errorResponse(res, 'User not found', 404);
+    if (target.role === 'SUPER_ADMIN') {
+      return errorResponse(res, 'Cannot revoke sessions of another SUPER_ADMIN', 403);
+    }
+
+    const now = new Date();
+
+    // 1. Terminate all active Session records
+    const sessionResult = await prisma.session.updateMany({
+      where: { userId: targetUserId, isActive: true },
+      data:  { isActive: false, terminatedAt: now, terminationReason: 'ADMIN_REVOKE' }
+    });
+
+    // 2. Revoke all active RefreshTokens
+    const tokenResult = await prisma.refreshToken.updateMany({
+      where: { userId: targetUserId, isRevoked: false },
+      data:  { isRevoked: true }
+    });
+
+    // 3. Invalidate Redis auth cache so next request re-reads from DB
+    const { invalidateUserCache } = require('../middleware/auth.middleware');
+    await invalidateUserCache(targetUserId);
+
+    // 4. Audit log — INVARIANT-005: privileged admin actions must be audited
+    await adminAudit(adminId, 'ADMIN_REVOKE_ALL_SESSIONS', 'user_sessions', targetUserId,
+      {
+        sessionsTerminated: sessionResult.count,
+        tokensRevoked: tokenResult.count,
+        reason: reason || null,
+        targetEmail: target.email,
+      },
+      req.ip
+    );
+
+    logger.info(`[admin-actions] All sessions revoked for ${targetUserId} by admin ${adminId} — ${sessionResult.count} sessions, ${tokenResult.count} tokens`);
+
+    return successResponse(res, {
+      sessionsTerminated: sessionResult.count,
+      tokensRevoked:      tokenResult.count,
+    }, `All sessions revoked for ${target.firstName} ${target.lastName}. They will be logged out on next request.`);
+  } catch (err) { next(err); }
+});

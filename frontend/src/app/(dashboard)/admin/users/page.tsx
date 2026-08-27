@@ -23,7 +23,7 @@ import {
 import { Textarea } from '@/components/ui/textarea'
 import {
   Users, Search, ChevronLeft, ChevronRight,
-  CheckCircle, XCircle, AlertTriangle, Ban, Shield,
+  CheckCircle, XCircle, AlertTriangle, Ban, Shield, LogOut, Monitor,
 } from 'lucide-react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { getAvatarUrl } from '@/lib/avatar'
@@ -58,6 +58,12 @@ export default function AdminUsersPage() {
   const [selected, setSelected] = useState<any>(null)
   const [newStatus, setNewStatus] = useState('')
   const [reason, setReason]     = useState('')
+
+  // Session management state (UIGAP-002)
+  const [sessionTarget, setSessionTarget]   = useState<any>(null)
+  const [sessionReason, setSessionReason]   = useState('')
+  const [sessionData, setSessionData]       = useState<any>(null)
+  const [sessionLoading, setSessionLoading] = useState(false)
 
   const { data, isLoading } = useQuery({
     queryKey: ['admin-users', page, search, status, role],
@@ -215,15 +221,37 @@ export default function AdminUsersPage() {
                     {u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleDateString() : '—'}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    {u.role !== 'SUPER_ADMIN' && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => { setSelected(u); setNewStatus(u.status) }}
-                      >
-                        Manage
-                      </Button>
-                    )}
+                    <div className="flex items-center gap-2 justify-end">
+                      {u.role !== 'SUPER_ADMIN' && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => { setSelected(u); setNewStatus(u.status) }}
+                        >
+                          Manage
+                        </Button>
+                      )}
+                      {u.role !== 'SUPER_ADMIN' && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="text-orange-600 border-orange-200 hover:bg-orange-50"
+                          title="View & revoke sessions"
+                          onClick={async () => {
+                            setSessionTarget(u)
+                            setSessionLoading(true)
+                            setSessionData(null)
+                            try {
+                              const r = await api.get(`/admin/actions/users/${u.id}/sessions`)
+                              setSessionData(r.data.data)
+                            } catch { /* show empty state */ }
+                            setSessionLoading(false)
+                          }}
+                        >
+                          <Monitor className="w-3.5 h-3.5" />
+                        </Button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -320,6 +348,82 @@ export default function AdminUsersPage() {
               disabled={!newStatus || newStatus === selected?.status || mutation.isPending}
             >
               {mutation.isPending ? 'Saving…' : 'Update Status'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Session Management Dialog (UIGAP-002) */}
+      <Dialog open={!!sessionTarget} onOpenChange={open => { if (!open) { setSessionTarget(null); setSessionData(null); setSessionReason('') } }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Monitor className="w-4 h-4 text-orange-500" />
+              Sessions — {sessionTarget?.firstName} {sessionTarget?.lastName}
+            </DialogTitle>
+          </DialogHeader>
+          {sessionLoading ? (
+            <div className="space-y-2 py-4">
+              {Array.from({ length: 3 }).map((_, i) => <div key={i} className="h-10 bg-gray-100 dark:bg-gray-800 rounded animate-pulse" />)}
+            </div>
+          ) : sessionData ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div className="p-3 bg-orange-50 dark:bg-orange-900/20 rounded-lg text-center">
+                  <p className="text-2xl font-bold text-orange-700 dark:text-orange-300">{sessionData.activeSessionCount}</p>
+                  <p className="text-xs text-gray-500">Active Sessions</p>
+                </div>
+                <div className="p-3 bg-red-50 dark:bg-red-900/20 rounded-lg text-center">
+                  <p className="text-2xl font-bold text-red-700 dark:text-red-300">{sessionData.activeRefreshTokens}</p>
+                  <p className="text-xs text-gray-500">Refresh Tokens</p>
+                </div>
+              </div>
+              {sessionData.sessions?.length > 0 && (
+                <div className="space-y-2 max-h-48 overflow-y-auto">
+                  {sessionData.sessions.map((s: any) => (
+                    <div key={s.id} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800 rounded text-xs">
+                      <div>
+                        <p className="font-medium">{s.deviceName || 'Unknown device'}</p>
+                        <p className="text-gray-400">{s.ipAddress || '—'} · Last seen {s.lastSeenAt ? new Date(s.lastSeenAt).toLocaleString() : '—'}</p>
+                      </div>
+                      <span className="text-green-600 font-semibold">Active</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {sessionData.activeSessionCount === 0 && (
+                <p className="text-sm text-gray-400 text-center py-4">No active sessions</p>
+              )}
+              <div>
+                <label className="text-xs font-medium text-gray-600 dark:text-gray-400 block mb-1">Reason for revocation (optional)</label>
+                <Input value={sessionReason} onChange={e => setSessionReason(e.target.value)} placeholder="Security incident, account review, etc." />
+              </div>
+              <div className="p-3 bg-red-50 dark:bg-red-900/20 rounded text-xs text-red-700 dark:text-red-300">
+                Revoking sessions will log the user out immediately on their next API call. Their account remains active.
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-400 text-center py-6">Failed to load session data</p>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSessionTarget(null)}>Close</Button>
+            <Button
+              variant="destructive"
+              disabled={!sessionData || sessionData.activeSessionCount === 0}
+              onClick={async () => {
+                try {
+                  await api.delete(`/admin/actions/users/${sessionTarget.id}/sessions`, { data: { reason: sessionReason } })
+                  toast({ title: 'Sessions revoked', description: `All sessions for ${sessionTarget.firstName} have been terminated.` })
+                  setSessionTarget(null)
+                  setSessionData(null)
+                  setSessionReason('')
+                } catch (e: any) {
+                  toast({ title: 'Failed', description: e.response?.data?.message, variant: 'destructive' })
+                }
+              }}
+            >
+              <LogOut className="w-3.5 h-3.5 mr-1.5" />
+              Revoke All Sessions
             </Button>
           </DialogFooter>
         </DialogContent>
