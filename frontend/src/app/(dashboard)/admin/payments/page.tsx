@@ -27,7 +27,7 @@ import {
 import { Textarea } from '@/components/ui/textarea'
 import {
   CreditCard, Search, ChevronLeft, ChevronRight, RefreshCw,
-  Banknote, CheckCircle, XCircle, Clock, AlertTriangle, RotateCcw
+  Banknote, CheckCircle, XCircle, Clock, AlertTriangle, RotateCcw, Download
 } from 'lucide-react'
 
 // PAY-GAP-003 FIX: Keys now match actual WalletTransaction.type DB values
@@ -327,13 +327,24 @@ export default function AdminPaymentsPage() {
       <section>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-bold text-gray-900 dark:text-white">Recent Wallet Transactions</h2>
-          <Button
-            size="sm" variant="outline"
-            className="text-yellow-700 border-yellow-300 hover:bg-yellow-50 dark:text-yellow-300 dark:border-yellow-700"
-            onClick={() => setGrantOpen(true)}
-          >
-            + Grant Coins
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* UIGAP-011 FIX: CSV export for transactions */}
+            <a
+              href="/api/v1/admin/stats/export/transactions"
+              download
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+              title="Export transactions as CSV"
+            >
+              <Download className="w-3.5 h-3.5" />Export CSV
+            </a>
+            <Button
+              size="sm" variant="outline"
+              className="text-yellow-700 border-yellow-300 hover:bg-yellow-50 dark:text-yellow-300 dark:border-yellow-700"
+              onClick={() => setGrantOpen(true)}
+            >
+              + Grant Coins
+            </Button>
+          </div>
         </div>
 
         <div className="relative max-w-sm mb-4">

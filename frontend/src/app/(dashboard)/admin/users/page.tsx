@@ -23,7 +23,7 @@ import {
 import { Textarea } from '@/components/ui/textarea'
 import {
   Users, Search, ChevronLeft, ChevronRight,
-  CheckCircle, XCircle, AlertTriangle, Ban, Shield, LogOut, Monitor, ExternalLink,
+  CheckCircle, XCircle, AlertTriangle, Ban, Shield, LogOut, Monitor, ExternalLink, Download,
 } from 'lucide-react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { getAvatarUrl } from '@/lib/avatar'
@@ -110,14 +110,25 @@ export default function AdminUsersPage() {
   return (
     <div className="max-w-6xl mx-auto py-8 px-4 space-y-6">
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <Users className="w-6 h-6 text-indigo-500" />
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">User Management</h1>
-          <p className="text-sm text-gray-500">
-            {pagination?.total?.toLocaleString() ?? '—'} total users
-          </p>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <Users className="w-6 h-6 text-indigo-500" />
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">User Management</h1>
+            <p className="text-sm text-gray-500">
+              {pagination?.total?.toLocaleString() ?? '—'} total users
+            </p>
+          </div>
         </div>
+        {/* UIGAP-011 FIX: CSV export */}
+        <a
+          href={`/api/v1/admin/stats/export/users${status !== 'all' ? `?status=${status}` : ''}${role !== 'all' ? `${status !== 'all' ? '&' : '?'}role=${role}` : ''}`}
+          download
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+          title="Export current filter as CSV"
+        >
+          <Download className="w-3.5 h-3.5" />Export CSV
+        </a>
       </div>
 
       {/* Filters */}

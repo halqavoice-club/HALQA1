@@ -743,3 +743,104 @@ router.get('/security', async (req, res, next) => {
     });
   } catch (error) { next(error); }
 });
+
+// ─── GET /api/v1/admin/stats/export/users ─────────────────────────────────────
+// UIGAP-011 FIX: Export user list as CSV.
+// SA can download all platform users as CSV for offline analysis / compliance.
+// Columns: id, email, firstName, lastName, role, status, schoolId, createdAt, lastLoginAt
+//
+// Query params:
+//   status (optional): filter by user status
+//   role   (optional): filter by user role
+//   limit  (optional): max rows, default 10000, max 50000
+router.get('/export/users', async (req, res, next) => {
+  try {
+    const { status, role, limit = 10000 } = req.query;
+    const take = Math.min(parseInt(limit) || 10000, 50000);
+
+    const where = {
+      deletedAt: null,
+      ...(status && { status: String(status) }),
+      ...(role   && { role:   String(role) }),
+    };
+
+    const users = await prisma.user.findMany({
+      where,
+      select: {
+        id: true, email: true, firstName: true, lastName: true,
+        role: true, status: true, schoolId: true,
+        createdAt: true, lastLoginAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+    });
+
+    // Build CSV without external library — avoids xlsx dependency for simple flat data
+    const header = 'id,email,firstName,lastName,role,status,schoolId,createdAt,lastLoginAt';
+    const escape = v => v == null ? '' : String(v).replace(/"/g, '""').includes(',') ? `"${v}"` : String(v).replace(/"/g, '""');
+    const rows = users.map(u =>
+      [u.id, u.email, u.firstName, u.lastName, u.role, u.status, u.schoolId ?? '',
+       u.createdAt ? new Date(u.createdAt).toISOString() : '',
+       u.lastLoginAt ? new Date(u.lastLoginAt).toISOString() : ''
+      ].map(escape).join(',')
+    );
+    const csv = [header, ...rows].join('\r\n');
+
+    const filename = `halqa-users-${new Date().toISOString().slice(0,10)}.csv`;
+    res.setHeader('Content-Type',        'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('X-Row-Count',         String(users.length));
+    return res.send(csv);
+  } catch (error) { next(error); }
+});
+
+// ─── GET /api/v1/admin/stats/export/transactions ──────────────────────────────
+// UIGAP-011 FIX: Export wallet transaction list as CSV.
+// Columns: id, userId, userEmail, type, coins, description, stripeSessionId, createdAt
+//
+// Query params:
+//   type   (optional): filter by transaction type
+//   userId (optional): filter by specific user
+//   limit  (optional): max rows, default 5000, max 20000
+router.get('/export/transactions', async (req, res, next) => {
+  try {
+    const { type, userId, limit = 5000 } = req.query;
+    const take = Math.min(parseInt(limit) || 5000, 20000);
+
+    const where = {
+      ...(type   && { type:   String(type) }),
+      ...(userId && { userId: String(userId) }),
+    };
+
+    const txs = await prisma.walletTransaction.findMany({
+      where,
+      select: {
+        id: true, userId: true, type: true, coins: true,
+        description: true, stripeSessionId: true, createdAt: true,
+        user: { select: { email: true, firstName: true, lastName: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take,
+    });
+
+    const header = 'id,userId,userEmail,firstName,lastName,type,coins,description,stripeSessionId,createdAt';
+    const escape = v => {
+      if (v == null) return '';
+      const s = String(v).replace(/"/g, '""');
+      return s.includes(',') || s.includes('\n') || s.includes('"') ? `"${s}"` : s;
+    };
+    const rows = txs.map(t =>
+      [t.id, t.userId, t.user?.email ?? '', t.user?.firstName ?? '', t.user?.lastName ?? '',
+       t.type, t.coins, t.description ?? '', t.stripeSessionId ?? '',
+       t.createdAt ? new Date(t.createdAt).toISOString() : ''
+      ].map(escape).join(',')
+    );
+    const csv = [header, ...rows].join('\r\n');
+
+    const filename = `halqa-transactions-${new Date().toISOString().slice(0,10)}.csv`;
+    res.setHeader('Content-Type',        'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('X-Row-Count',         String(txs.length));
+    return res.send(csv);
+  } catch (error) { next(error); }
+});

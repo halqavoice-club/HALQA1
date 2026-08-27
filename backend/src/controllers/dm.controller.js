@@ -382,7 +382,63 @@ async function deleteMessage(req, res, next) {
   } catch (err) { next(err); }
 }
 
-// ─── GET /dm/unread-count ─────────────────────────────────────────────────────
+// ─── PATCH /dm/messages/:msgId ───────────────────────────────────────────────
+// CHAT-GAP-002 FIX: DM message editing.
+// Only the sender can edit their own messages.
+// Edits are time-limited: messages older than 15 minutes cannot be edited.
+// An edited flag + editedAt timestamp is recorded for transparency.
+async function editMessage(req, res, next) {
+  try {
+    const meId  = req.user.id;
+    const msgId = req.params.msgId;
+    const { body } = req.body;
+
+    if (!body?.trim()) return errorResponse(res, 'Message body required', 400);
+    if (body.trim().length > 5000) return errorResponse(res, 'Message too long (max 5000 chars)', 400);
+
+    const msg = await prisma.directMessage.findUnique({ where: { id: msgId } });
+    if (!msg) return errorResponse(res, 'Message not found', 404);
+
+    // Only sender can edit
+    if (msg.senderId !== meId) {
+      return errorResponse(res, 'You can only edit your own messages', 403);
+    }
+
+    // Cannot edit deleted messages
+    if (msg.deletedBySender) {
+      return errorResponse(res, 'Cannot edit a deleted message', 400);
+    }
+
+    // 15-minute edit window
+    const EDIT_WINDOW_MS = 15 * 60 * 1000;
+    if (Date.now() - new Date(msg.createdAt).getTime() > EDIT_WINDOW_MS) {
+      return errorResponse(res, 'Messages can only be edited within 15 minutes of sending', 400);
+    }
+
+    const updated = await prisma.directMessage.update({
+      where: { id: msgId },
+      data:  {
+        body:     body.trim(),
+        isEdited: true,
+        editedAt: new Date(),
+      },
+      include: { sender: { select: USER_SELECT } }
+    });
+
+    // Notify receiver via socket so their UI updates in real-time
+    const io = getIo();
+    if (io) {
+      io.to(`user:${msg.receiverId}`).emit('dm:message_edited', {
+        convId:    msg.conversationId,
+        messageId: msgId,
+        newBody:   body.trim(),
+        editedAt:  updated.editedAt,
+      });
+    }
+
+    return successResponse(res, updated, 'Message edited');
+  } catch (err) { next(err); }
+}
 async function getUnreadCount(req, res, next) {
   try {
     const meId = req.user.id;
@@ -402,5 +458,5 @@ async function getUnreadCount(req, res, next) {
 
 module.exports = {
   getConversations, getOrStartConversation,
-  getMessages, sendMessage, markRead, deleteMessage, getUnreadCount
+  getMessages, sendMessage, markRead, deleteMessage, editMessage, getUnreadCount
 };

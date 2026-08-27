@@ -5,7 +5,7 @@ const { authenticate } = require('../middleware/auth.middleware');
 const rateLimit = require('express-rate-limit');
 const {
   getConversations, getOrStartConversation,
-  getMessages, sendMessage, markRead, deleteMessage, getUnreadCount
+  getMessages, sendMessage, markRead, deleteMessage, editMessage, getUnreadCount
 } = require('../controllers/dm.controller');
 
 // 60 messages per minute per user
@@ -39,5 +39,12 @@ router.post('/conversations/:convId/messages',
 
 router.patch('/conversations/:convId/read',    markRead);
 router.delete('/messages/:msgId',              deleteMessage);
+
+// CHAT-GAP-002 FIX: DM message editing — sender only, 15-minute window
+router.patch('/messages/:msgId',
+  [body('body').trim().notEmpty().withMessage('Message body required')],
+  validate,
+  editMessage
+);
 
 module.exports = router;

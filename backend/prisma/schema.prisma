@@ -142,6 +142,7 @@ model School {
   name        String
   slug        String   @unique
   type        String   @default("school") // school, academy, college, daycare, camp
+  description String?  @db.Text           // school bio / about text
   address     String?  @db.Text
   city        String?
   state       String?
@@ -318,8 +319,12 @@ model User {
   storyViews         StoryView[]        @relation("StoryViewer")
   storyReactions     StoryReaction[]    @relation("StoryReactions")
   // Communities (Phase B-4)
-  ownedCommunities   Community[]        @relation("CommunityOwner")
-  communityMemberships CommunityMember[] @relation("CommunityMembers")
+  ownedCommunities     Community[]            @relation("CommunityOwner")
+  communityMemberships CommunityMember[]      @relation("CommunityMembers")
+  communityJoinRequests CommunityJoinRequest[] @relation("CommunityJoinRequests")
+  communityBans        CommunityBan[]         @relation("CommunityBans")
+  communityInvitesSent CommunityInvite[]      @relation("CommunityInviteSender")
+  communityInvitesReceived CommunityInvite[]  @relation("CommunityInviteReceiver")
   // Creator Economy (Phase B-6)
   creatorProfile     CreatorProfile?    @relation("CreatorProfile")
   creatorSubscriptions CreatorSubscription[] @relation("CreatorSubscriber")
@@ -1229,6 +1234,7 @@ model VoiceRoom {
   slowMode        Boolean           @default(false)  // 1 message per 5s per user
   messageType     String            @default("all")  // "all" | "followers" | "none"
   reactionsEnabled Boolean          @default(true)   // allow emoji reactions in room
+  lockedSeats     Json?                               // array of locked seat indices e.g. [0,2,4]
   deletedAt       DateTime?
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
@@ -1257,6 +1263,7 @@ model VoiceParticipant {
   user         User                 @relation("VoiceParticipant", fields: [userId], references: [id], onDelete: Cascade)
   role         VoiceParticipantRole @default(AUDIENCE)
   isMuted      Boolean              @default(true)
+  mutedByModerator Boolean          @default(false)  // P1-2: when true, only HOST/MOD can unmute
   handRaised   Boolean              @default(false)
   handRaisedAt DateTime?
   isPinned     Boolean              @default(false)   // pinned to top of stage grid by host/mod
@@ -1628,7 +1635,7 @@ model LiveClass {
   // SCHOOL = traditional school class (requires schoolId + classId + teacherId)
   // PUBLIC = open broadcast — any authenticated user can host; anyone can join.
   //          schoolId, classId, teacherId are null for PUBLIC streams.
-  streamType         String          @default("SCHOOL") @db.VarChar(20)
+  streamType         String          @default("SCHOOL") @db.VarChar(20) @map("stream_type")
   schoolId           String?
   school             School?         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   classId            String?
@@ -1637,7 +1644,7 @@ model LiveClass {
   teacher            Teacher?        @relation(fields: [teacherId], references: [id], onDelete: Cascade)
   // hostUserId: used for PUBLIC streams where there is no Teacher record.
   // For SCHOOL streams this duplicates teacher.userId but is set for consistency.
-  hostUserId         String?
+  hostUserId         String?         @map("host_user_id")
   hostUser           User?           @relation("LiveClassHost", fields: [hostUserId], references: [id], onDelete: SetNull)
   title              String
   description        String?         @db.Text
@@ -1800,6 +1807,8 @@ model DirectMessage {
   status         DmStatus       @default(SENT)
   deliveredAt    DateTime?
   readAt         DateTime?
+  isEdited       Boolean        @default(false)   // CHAT-GAP-002: true when sender has edited the message
+  editedAt       DateTime?                        // CHAT-GAP-002: timestamp of last edit
   deletedBySender   Boolean     @default(false)
   deletedByReceiver Boolean     @default(false)
   // Story reply context — L8 fix: allows replying to a story via DM.
@@ -2124,8 +2133,11 @@ model Community {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  members CommunityMember[]
-  posts   Post[]
+  members      CommunityMember[]
+  posts        Post[]
+  joinRequests CommunityJoinRequest[] @relation("CommunityJoinRequests")
+  bans         CommunityBan[]         @relation("CommunityBans")
+  invites      CommunityInvite[]      @relation("CommunityInvites")
 
   @@index([ownerId])
   @@index([privacy])
@@ -2149,6 +2161,76 @@ model CommunityMember {
   @@index([userId])
   @@index([role])
   @@map("community_members")
+}
+
+// ─── Community Join Requests ──────────────────────────────────────────────────
+// Created when a user requests to join a PRIVATE or INVITE_ONLY community.
+// Replaces the Redis-only stub. Admins review via GET /join-requests.
+model CommunityJoinRequest {
+  id          String    @id @default(uuid())
+  communityId String
+  community   Community @relation("CommunityJoinRequests", fields: [communityId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation("CommunityJoinRequests", fields: [userId], references: [id], onDelete: Cascade)
+  status      String    @default("PENDING")  // PENDING | ACCEPTED | DECLINED
+  message     String?   @db.VarChar(500)
+  reviewedBy  String?
+  reviewedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([communityId, userId, status])
+  @@index([communityId])
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("community_join_requests")
+}
+
+// ─── Community Bans ───────────────────────────────────────────────────────────
+// Persistent ban records — source of truth. Redis SET is a fast cache layer.
+model CommunityBan {
+  id          String    @id @default(uuid())
+  communityId String
+  community   Community @relation("CommunityBans", fields: [communityId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation("CommunityBans", fields: [userId], references: [id], onDelete: Cascade)
+  bannedBy    String
+  reason      String?   @db.VarChar(500)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([communityId, userId])
+  @@index([communityId])
+  @@index([userId])
+  @@map("community_bans")
+}
+
+// ─── Community Invites ────────────────────────────────────────────────────────
+// Admin/Owner can invite specific users to INVITE_ONLY (or any) community.
+// Token is a cryptographically random UUID — used in accept/decline links.
+// Status: PENDING → ACCEPTED | DECLINED | EXPIRED
+model CommunityInvite {
+  id            String    @id @default(uuid())
+  communityId   String
+  community     Community @relation("CommunityInvites", fields: [communityId], references: [id], onDelete: Cascade)
+  invitedBy     String
+  inviter       User      @relation("CommunityInviteSender", fields: [invitedBy], references: [id], onDelete: Cascade)
+  invitedUserId String
+  invitee       User      @relation("CommunityInviteReceiver", fields: [invitedUserId], references: [id], onDelete: Cascade)
+  token         String    @unique @db.VarChar(36)  // UUID v4 — never sequential
+  status        String    @default("PENDING")      // PENDING | ACCEPTED | DECLINED | EXPIRED
+  expiresAt     DateTime
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // One pending invite per user per community at a time
+  @@unique([communityId, invitedUserId, status])
+  @@index([communityId])
+  @@index([invitedUserId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("community_invites")
 }
 
 // ─── CREATOR ECONOMY ──────────────────────────────────────────────────────────
