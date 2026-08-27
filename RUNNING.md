@@ -250,6 +250,34 @@ npx prisma db push   # applies isPinned + parentMessageId schema changes
 
 ## ✅ Fix Log (August 2026)
 
+### ARCH-01 — SUPER_ADMIN strict platform separation
+
+**SUPER_ADMIN is now a pure platform administrator and no longer has implicit access to individual school operational data.**
+
+Previously `requireSchoolMember()` injected a synthetic global membership for any SUPER_ADMIN, giving them unrestricted read/write access to every school's students, teachers, grades, and attendance records. This has been removed.
+
+**What changed:**
+- `requireSchoolMember()` — removed global bypass; SUPER_ADMIN must have a real `SchoolMembership` record
+- `requireSchoolAccess()` — removed bypass
+- `assertSchoolAccess()` in live-class controller — removed bypass
+- `assertHostAccess()` in live-class controller — removed bypass  
+- `listStudents`, `listTeachers`, `getStudent`, `getTeacher`, etc. — removed `...(role !== 'SUPER_ADMIN' && schoolId && { schoolId })` patterns; school filter now always applies
+- `listLiveClasses` — SUPER_ADMIN now sees the same filtered view as any user
+- School membership approval/role-change routes — `isLegacySuperAdmin` bypass removed; must have an active school membership
+- `PUT /schools/:id` and `PUT /schools/:id/settings` — require explicit school membership
+
+**What SUPER_ADMIN can still do (platform admin):**
+- All `/admin/*` routes (users, schools list, payments, moderation, system health)
+- Emergency live class/voice room termination via admin dashboard
+- Social content moderation (post/story/comment deletion)
+- User status management (suspend/ban)
+
+**To give a SUPER_ADMIN access to a specific school's operational data:**
+```bash
+POST /api/v1/school-memberships/invite
+{ schoolId: "<id>", userEmail: "admin@halqa.com", role: "SCHOOL_ADMIN" }
+```
+
 ### Public Live Stream feature
 The `stream_type` and `host_user_id` columns were added to `live_classes` via migration
 `20260819_add_public_livestream`. These columns ARE in the database but the Prisma
