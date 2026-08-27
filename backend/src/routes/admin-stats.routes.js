@@ -375,6 +375,155 @@ router.get('/announcements', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// POST /api/v1/admin/stats/announcements — create platform announcement (SA only)
+// UIGAP-012 FIX: Platform admin can now create announcements without school membership.
+//
+// schoolId behaviour:
+//   - Provided:  creates one announcement for that specific school
+//   - Omitted:   fans out to ALL active schools (platform-wide broadcast)
+//
+// Note: The Announcement model requires schoolId (non-nullable FK), so a true
+// "schoolless" announcement is not possible without a migration. Fan-out to all
+// active schools achieves the same UX effect without a schema change.
+router.post('/announcements', async (req, res, next) => {
+  try {
+    const { title, content, schoolId, targetRoles, isPinned, publishAt, expiresAt } = req.body;
+
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ success: false, message: 'title is required' });
+    }
+    if (!content || !String(content).trim()) {
+      return res.status(400).json({ success: false, message: 'content is required' });
+    }
+
+    const { v4: uuidv4 } = require('uuid');
+    const { notifySchool } = require('../services/notification.service');
+    const authorId  = req.user.id;
+    const pubAt     = publishAt ? new Date(publishAt) : new Date();
+    const expAt     = expiresAt  ? new Date(expiresAt) : null;
+    const roles     = Array.isArray(targetRoles) && targetRoles.length > 0
+      ? targetRoles
+      : ['TEACHER', 'STUDENT', 'GUARDIAN'];
+    const pinned    = Boolean(isPinned);
+
+    if (schoolId) {
+      // Single-school announcement
+      const school = await prisma.school.findUnique({ where: { id: String(schoolId), deletedAt: null }, select: { id: true, name: true } });
+      if (!school) return res.status(404).json({ success: false, message: 'School not found' });
+
+      const ann = await prisma.announcement.create({
+        data: {
+          id: uuidv4(), schoolId: school.id, authorId,
+          title: String(title).trim(), content: String(content).trim(),
+          targetRoles: roles, isPinned: pinned,
+          publishAt: pubAt, expiresAt: expAt,
+        }
+      });
+
+      await notifySchool(school.id, roles, {
+        type: 'ANNOUNCEMENT',
+        title: `📢 ${String(title).trim()}`,
+        body:  String(content).trim().substring(0, 120),
+        data:  { announcementId: ann.id, source: 'platform_admin' }
+      }).catch(() => {});
+
+      // Audit log
+      await prisma.auditLog.create({
+        data: {
+          id: uuidv4(), userId: authorId, schoolId: school.id,
+          action: 'CREATE', entity: 'announcement', entityId: ann.id,
+          newValues: { title: ann.title, targetRoles: roles, schoolId: school.id },
+          ipAddress: req.ip || null,
+        }
+      }).catch(() => {});
+
+      return successResponse(res, { announcements: [ann], count: 1 }, 'Announcement created', 201);
+    }
+
+    // Platform-wide fan-out: create one announcement per active school
+    const schools = await prisma.school.findMany({
+      where: { isActive: true, deletedAt: null },
+      select: { id: true, name: true }
+    });
+    if (schools.length === 0) {
+      return res.status(400).json({ success: false, message: 'No active schools found for platform-wide announcement' });
+    }
+
+    const created = await prisma.$transaction(
+      schools.map(sch => prisma.announcement.create({
+        data: {
+          id: uuidv4(), schoolId: sch.id, authorId,
+          title: String(title).trim(), content: String(content).trim(),
+          targetRoles: roles, isPinned: pinned,
+          publishAt: pubAt, expiresAt: expAt,
+        }
+      }))
+    );
+
+    // Notify all schools in background — non-fatal
+    Promise.allSettled(
+      schools.map((sch, i) =>
+        notifySchool(sch.id, roles, {
+          type: 'ANNOUNCEMENT',
+          title: `📢 ${String(title).trim()}`,
+          body:  String(content).trim().substring(0, 120),
+          data:  { announcementId: created[i].id, source: 'platform_admin' }
+        })
+      )
+    ).catch(() => {});
+
+    // Single audit log for the platform broadcast
+    await prisma.auditLog.create({
+      data: {
+        id: uuidv4(), userId: authorId, schoolId: null,
+        action: 'CREATE', entity: 'platform_announcement', entityId: created[0].id,
+        newValues: { title: String(title).trim(), targetRoles: roles, schoolCount: schools.length },
+        ipAddress: req.ip || null,
+      }
+    }).catch(() => {});
+
+    return successResponse(res,
+      { announcements: created, count: created.length },
+      `Platform announcement sent to ${created.length} school${created.length !== 1 ? 's' : ''}`,
+      201
+    );
+  } catch (error) { next(error); }
+});
+
+// PATCH /api/v1/admin/stats/announcements/:id — update a specific announcement (SA only)
+// UIGAP-012: SA can edit any announcement regardless of school membership.
+router.patch('/announcements/:id', async (req, res, next) => {
+  try {
+    const existing = await prisma.announcement.findUnique({
+      where: { id: req.params.id, deletedAt: null }
+    });
+    if (!existing) return res.status(404).json({ success: false, message: 'Announcement not found' });
+
+    const { title, content, isPinned, expiresAt, targetRoles } = req.body;
+    const data = {};
+    if (title       !== undefined) data.title       = String(title).trim();
+    if (content     !== undefined) data.content     = String(content).trim();
+    if (isPinned    !== undefined) data.isPinned    = Boolean(isPinned);
+    if (expiresAt   !== undefined) data.expiresAt   = expiresAt ? new Date(expiresAt) : null;
+    if (targetRoles !== undefined) data.targetRoles = Array.isArray(targetRoles) ? targetRoles : [];
+
+    const announcement = await prisma.announcement.update({ where: { id: req.params.id }, data });
+    return successResponse(res, announcement, 'Announcement updated');
+  } catch (error) { next(error); }
+});
+
+// DELETE /api/v1/admin/stats/announcements/:id — soft-delete (SA only)
+router.delete('/announcements/:id', async (req, res, next) => {
+  try {
+    const existing = await prisma.announcement.findUnique({
+      where: { id: req.params.id, deletedAt: null }
+    });
+    if (!existing) return res.status(404).json({ success: false, message: 'Announcement not found' });
+    await prisma.announcement.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
+    return successResponse(res, null, 'Announcement deleted');
+  } catch (error) { next(error); }
+});
+
 module.exports = router;
 
 // ─── GET /api/v1/admin/stats/live-voice ──────────────────────────────────────

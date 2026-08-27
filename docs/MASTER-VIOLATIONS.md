@@ -370,10 +370,9 @@ Integrated into same `POST /transactions/:id/refund` endpoint:
 | 🟡 MEDIUM | 6 | 5 (SVSV-001, UIGAP-008✅, FS-GAP-002✅, UIGAP-014✅, GAP-001✅mitigated, GAP-002✅resolved) |
 | 🟢 LOW | 13 | 2 (LCSV-003, VC-SA-002 inert) |
 
-**Sprints 1–9 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001, UIGAP-004, UIGAP-005, UIGAP-002, FS-GAP-002, UIGAP-014, GAP-001 (mitigated), GAP-002 (already resolved), PAY-GAP-001, PAY-GAP-002, UIGAP-003
+**Sprints 1–10 closed:** LCSV-001, LCSV-002, LCSV-003, SVSV-001, UIGAP-007, UIGAP-008 (confirmed not a bug), UIGAP-013, FS-GAP-003, LS-GAP-001, UILEAK-001, UIGAP-004, UIGAP-005, UIGAP-002, FS-GAP-002, UIGAP-014, GAP-001 (mitigated), GAP-002 (already resolved), PAY-GAP-001, PAY-GAP-002, UIGAP-003, UIGAP-012
 
 **Still open (MEDIUM):**
-- UIGAP-012 — No platform announcement creation
 - CHAT-GAP-003 — ALLOW_DM_NON_FRIENDS not verified at API level
-- VC-GAP-003 — No admin room inspection without participation
+- VC-GAP-003 — No admin voice room inspection without participation
 - LTSV-001 — Generic LiveKit token school bypass (LOW/mitigated)
