@@ -91,4 +91,4 @@ The FIFO speaker queue lives in Redis. If Redis flushes (restart, OOM), the queu
 | VC-GAP-003 | MEDIUM | No admin room inspection without participation | ✅ Fixed Sprint 12 |
 | VC-GAP-004 | LOW | Kick socket eviction may miss multi-tab users | ✅ Fixed Sprint 18 — socketsLeave() used in voice, room-member, community controllers |
 | VC-GAP-005 | MEDIUM | Kick/ban not audit-logged | ✅ Already implemented (voiceAudit called) |
-| VC-GAP-006 | LOW | Speaker queue lost on Redis flush | ❌ (DB fallback exists) |
+| VC-GAP-006 | LOW | Speaker queue lost on Redis flush | ✅ Fixed Sprint 19 — getQueue() re-hydrates from DB on flush recovery; getQueueFromDB() used when Redis unavailable |
