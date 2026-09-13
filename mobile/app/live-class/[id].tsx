@@ -1070,6 +1070,18 @@ export default function LiveClassScreen() {
 
   }, [id, liveClass, isHost, isTeacher, loadHands]); // eslint-disable-line
 
+  // ── Auto-join for the creator after immediate/permanent go-live ──────────────
+  // When the host lands here right after "Go Live Now", the stream is already LIVE.
+  // Skip the lobby and join automatically — no extra tap needed.
+  // Guards: fires once (isJoined=false, not connecting), creator only, LIVE status only.
+  useEffect(() => {
+    if (!liveClass || isJoined || isConnecting) return;
+    if (liveClass.status !== 'LIVE') return;
+    if (!isCreator) return;
+    handleJoin();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveClass?.id, liveClass?.status, isCreator]);
+
   const handleLeave = useCallback(() => {
     Alert.alert('Leave Class', 'Are you sure?', [
       { text: 'Stay', style: 'cancel' },
