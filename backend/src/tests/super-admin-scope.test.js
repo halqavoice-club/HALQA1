@@ -542,17 +542,22 @@ describe('SA-FIX-01: isStaffRole and isTeacher do NOT include SUPER_ADMIN', () =
     expect(match[1]).toMatch(/SCHOOL_ADMIN/);
   });
 
-  test('SA-FIX-01b: mobile live-class/[id].tsx isTeacher does not include SUPER_ADMIN', () => {
+  test('SA-FIX-01b: mobile live-class/[id].tsx isTeacher derives from participant record, not school role', () => {
     const src = fs.readFileSync(
       path.join(__dirname, '../../../mobile/app/live-class/[id].tsx'),
       'utf8'
     );
-    // isTeacher is now derived from participant role (isHost || MODERATOR), not a role array.
-    // Verify SUPER_ADMIN is not used as an isTeacher condition, and the correct
-    // participant-record pattern is present.
-    expect(src).not.toMatch(/isTeacher.*SUPER_ADMIN/);
-    expect(src).toMatch(/myParticipantRole.*MODERATOR/);
-    expect(src).toMatch(/isTeacher\s*=\s*isHost/);
+    // In the mobile live-class room, isTeacher is derived from the server-assigned
+    // participant role (isHost || MODERATOR), NOT from a school role array.
+    // This ensures a school teacher does not get host controls on a stream they don't own.
+    const match = src.match(/const isTeacher\s*=\s*(.+)/);
+    expect(match).not.toBeNull();
+    // Must NOT be an array of school roles
+    expect(match[1]).not.toMatch(/\['TEACHER'.*'SCHOOL_ADMIN'\]/);
+    // Must NOT include SUPER_ADMIN in a role array
+    expect(match[1]).not.toMatch(/SUPER_ADMIN/);
+    // Must derive from participant role (isHost or myParticipantRole)
+    expect(match[1]).toMatch(/isHost|myParticipantRole|participant/);
   });
 });
 
@@ -680,9 +685,17 @@ describe('LCSV-001 FIX: joinLiveClass isTeacher/isStaff do NOT include SUPER_ADM
     );
     const fnMatch = src.match(/async function joinLiveClass[\s\S]*?async function leaveLiveClass/);
     const fnBody = fnMatch[0];
+    // After the PUBLIC-ROLE-FIX refactor, isTeacher is an alias for isStaff.
+    // The roles TEACHER and SCHOOL_ADMIN are now in the isStaff definition.
+    // Verify isStaff (which isTeacher aliases) still contains these roles.
+    const isStaffLine = fnBody.match(/const isStaff\s*=.+/);
+    expect(isStaffLine).not.toBeNull();
+    expect(isStaffLine[0]).toMatch(/TEACHER/);
+    expect(isStaffLine[0]).toMatch(/SCHOOL_ADMIN/);
+    // isTeacher is an alias — verify it aliases isStaff (not a different array)
     const isTeacherLine = fnBody.match(/const isTeacher\s*=.+/);
-    expect(isTeacherLine[0]).toMatch(/TEACHER/);
-    expect(isTeacherLine[0]).toMatch(/SCHOOL_ADMIN/);
+    expect(isTeacherLine).not.toBeNull();
+    expect(isTeacherLine[0]).toMatch(/isStaff/); // aliases isStaff
   });
 });
 
@@ -704,7 +717,7 @@ describe('LCSV-002 FIX: createLiveClass/deleteMessage/sendMessage do NOT include
     expect(isAdminLine[0]).toMatch(/SCHOOL_ADMIN/);
   });
 
-  test('LCSV-002b: deleteMessage isHost does not include SUPER_ADMIN', () => {
+  test('LCSV-002b: deleteMessage no longer uses school/global role for authorization (PES-001 fix)', () => {
     const src = fs.readFileSync(
       path.join(__dirname, '../controllers/live-class.controller.js'),
       'utf8'
@@ -712,11 +725,19 @@ describe('LCSV-002 FIX: createLiveClass/deleteMessage/sendMessage do NOT include
     const fnMatch = src.match(/async function deleteMessage[\s\S]*?async function setVideoState/);
     expect(fnMatch).not.toBeNull();
     const fnBody = fnMatch[0];
-    // FINAL-AUTH-01: deleteMessage now uses participant record role check (isModeratorBySession)
-    // and a staff fallback (isStaffModerator) — neither contains SUPER_ADMIN
+    // PES-001 fix: isHost derived from school role is REMOVED.
+    // Authorization now uses callerParticipant.role (HOST or MODERATOR).
+    // There is no longer a bare 'const isHost = [school roles]' line.
+    // Verify the old school-role pattern is gone (non-comment lines only).
+    const nonCommentLines = fnBody.split('\n').filter(l => !l.trim().startsWith('//'));
+    const hasSchoolRoleIsHost = nonCommentLines.some(l =>
+      /isHost\s*=/.test(l) && (/TEACHER/.test(l) || /SCHOOL_ADMIN/.test(l))
+    );
+    expect(hasSchoolRoleIsHost).toBe(false);
+    // Must NOT reference SUPER_ADMIN for authorization
     expect(fnBody).not.toMatch(/SUPER_ADMIN/);
-    // Must use participant-record based check
-    expect(fnBody).toMatch(/sessionRole|isModeratorBySession|isStaffModerator/);
+    // Must use callerParticipant for privilege check
+    expect(fnBody).toMatch(/callerParticipant/);
   });
 
   test('LCSV-002c: sendMessage staff check does not include SUPER_ADMIN', () => {
@@ -727,10 +748,12 @@ describe('LCSV-002 FIX: createLiveClass/deleteMessage/sendMessage do NOT include
     const fnMatch = src.match(/async function sendMessage[\s\S]*?async function getMessages/);
     expect(fnMatch).not.toBeNull();
     const fnBody = fnMatch[0];
-    // FINAL-AUTH-01: renamed from isTeacherOrAdmin to isStaffSender; still excludes SUPER_ADMIN
+    // PES-001 fix: isTeacherOrAdmin is now conditioned on streamType === 'SCHOOL'
+    // The declaration may span multiple lines — check the full function body
+    expect(fnBody).toMatch(/isTeacherOrAdmin/);
     expect(fnBody).not.toMatch(/SUPER_ADMIN/);
-    // Must have the staff check (renamed variable)
-    expect(fnBody).toMatch(/isStaffSender|TEACHER.*SCHOOL_ADMIN|SCHOOL_ADMIN.*TEACHER/);
+    // Must be conditioned on SCHOOL streamType (not a bare school-role check)
+    expect(fnBody).toMatch(/streamType === 'SCHOOL'/);
   });
 });
 

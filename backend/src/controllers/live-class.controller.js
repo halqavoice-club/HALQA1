@@ -10,6 +10,24 @@ const { v4: uuidv4 } = require('uuid');
 
 const userSelect = { id: true, firstName: true, lastName: true, avatarUrl: true, role: true };
 
+// ─── Audit logging helper (LC-AUDIT-001) ──────────────────────────────────────
+// Writes a non-fatal audit record for key live class operations.
+// Action values: CREATE | START | END | KICK | RECORD_START | RECORD_STOP | TERMINATE
+async function liveClassAudit(actorId, action, liveClassId, meta = {}) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        id:        uuidv4(),
+        userId:    actorId,
+        action:    action === 'CREATE' ? 'CREATE' : 'UPDATE',
+        entity:    'LiveClass',
+        entityId:  liveClassId,
+        newValues: { liveClassAction: action, ...meta },
+      }
+    });
+  } catch (_auditErr) { /* non-fatal — never let audit failure break the flow */ }
+}
+
 // ─── Raw SQL helper for live_classes ──────────────────────────────────────────
 // The Prisma client binary was compiled before the streamType/hostUserId columns
 // were added. Until `prisma generate` is run (requires backend restart), Prisma
@@ -60,7 +78,7 @@ async function rawCreateLiveClass(data) {
     data.quranPanelEnabled   ? 1 : 0,
     data.isOpenMic           ? 1 : 0,
     data.screenShareEnabled  ? 1 : 0,
-    data.maxSpeakers         ?? 20,
+    data.maxParticipants != null ? data.maxParticipants : null,
     data.isRecorded          ? 1 : 0,
     now, now
   );
@@ -126,6 +144,7 @@ function shapeLiveClassRow(row) {
     livekitRoomName:  row.livekitRoomName ?? null,
     recordingUrl:     row.recordingUrl    ?? null,
     coverImageUrl:    row.coverImageUrl   ?? null,
+    maxParticipants:  row.maxParticipants ?? null,
     maxSpeakers:      row.maxSpeakers != null ? Number(row.maxSpeakers) : 20,
     isRecorded:       !!row.isRecorded,
     recordingStartedAt: row.recordingStartedAt ?? null,
@@ -185,7 +204,7 @@ async function findLiveClass(id) {
              title, description, status,
              livekitRoomName, duration, chatEnabled, handRaiseEnabled,
              whiteboardEnabled, quranPanelEnabled, isOpenMic, screenShareEnabled,
-             maxSpeakers, isRecorded, recordingStartedAt,
+             maxParticipants, maxSpeakers, isRecorded, recordingStartedAt,
              startedAt, endedAt, deletedAt, createdAt, updatedAt
       FROM live_classes
       WHERE id = ? AND deletedAt IS NULL
@@ -214,6 +233,7 @@ async function findLiveClass(id) {
         quranPanelEnabled: !!r.quranPanelEnabled,
         isOpenMic: !!r.isOpenMic,
         screenShareEnabled: !!r.screenShareEnabled,
+        maxParticipants: r.maxParticipants ?? null,
         maxSpeakers: r.maxSpeakers != null ? Number(r.maxSpeakers) : 20,
         isRecorded: !!r.isRecorded,
         recordingStartedAt: r.recordingStartedAt ?? null,
@@ -251,98 +271,82 @@ function getEffectiveRole(req) {
 // any authenticated user can access them.
 // ARCH-01: SUPER_ADMIN no longer bypasses school isolation. They must have a
 // real SchoolMembership to access school-scoped live classes.
-//
-// F-02 FIX: Added explicit SUPER_ADMIN early-exit for SCHOOL streams.
-// The previous implementation only checked lc.schoolId !== user.schoolId,
-// which meant a SUPER_ADMIN with a legacy user.schoolId matching the school
-// would pass the check — violating the SUPER_ADMIN = platform-only invariant.
-// This guard now explicitly denies SUPER_ADMIN before any schoolId comparison,
-// regardless of what legacy data exists on the user object or in the DB.
-//
-// MEMBERSHIP FIX (GAP-SEC-06): Uses req.schoolId (set by requireSchoolMember()
-// from the SchoolMembership table) when available. Falls back to user.schoolId
-// only when req.schoolId is absent (e.g. in test environments or direct DB access).
-// This prevents a user whose legacy user.schoolId still matches school A but whose
-// active membership is in school B from accessing school A's live classes.
-function assertSchoolAccess(lc, user, reqSchoolId) {
-  if (lc.streamType === 'PUBLIC') return;   // PUBLIC streams are open to all
-
-  // F-02 FIX: SUPER_ADMIN is a platform administrator and must NEVER access
-  // school-scoped live classes, even if legacy user.schoolId matches or legacy
-  // SchoolMembership records exist. Platform authority ≠ school authority.
-  if (user.role === 'SUPER_ADMIN') {
-    const err = new Error('Platform administrators cannot access school live classes');
-    err.status = 403;
-    throw err;
-  }
-
-  // Use membership-verified schoolId (from requireSchoolMember) if available,
-  // otherwise fall back to legacy user.schoolId.
-  const effectiveSchoolId = reqSchoolId || user.schoolId;
-
-  if (lc.schoolId !== effectiveSchoolId) {
+function assertSchoolAccess(lc, user, req) {
+  // PES-002 FIX: Normalise streamType internally so this function is safe even
+  // when callers pass a row with null/undefined streamType (legacy data or DB
+  // corruption). Unknown/missing streamType defaults to 'SCHOOL' — never 'PUBLIC'.
+  // This ensures the PUBLIC bypass can only be reached by an explicit 'PUBLIC' value.
+  const streamType = lc.streamType || 'SCHOOL';
+  if (streamType === 'PUBLIC') return;   // PUBLIC streams are open to all
+  if (req && req.schoolMembership && req.schoolMembership.schoolId === lc.schoolId) return;
+  if (lc.schoolId !== user.schoolId) {
     const err = new Error('Access denied to this school\'s resource');
     err.status = 403;
     throw err;
   }
 }
 
-// ─── Host access guard (GAP-01: defence-in-depth for bulk moderation) ────────
-// Verifies the caller is the HOST of the given live class.
-// ARCH-01: SUPER_ADMIN no longer gets an implicit bypass — they must be the
-// actual host (via hostUserId) or a school member with staff role.
-//
-// FIX: For SCHOOL streams, `assertHostAccess` previously allowed ANY SCHOOL_ADMIN
-// in the same school to pass (it only checked school membership, not hostUserId).
-// This let a non-creator admin perform host-only actions on another teacher's class.
-// Fixed: both stream types now enforce hostUserId === user.id (creator-only).
-// This function is now equivalent to assertOwner but kept separately for callsite clarity.
-function assertHostAccess(lc, user) {
-  if (lc.hostUserId !== user.id) {
-    const err = new Error('Only the host can perform this action');
-    err.status = 403;
-    throw err;
-  }
+// ─── LiveKit RoomServiceClient factory (P0-05: BUG-01 server-side kick) ───────
+// Returns null when LiveKit env vars are not configured.
+// A new client is created per kick call (stateless HTTP API — no pooling needed).
+function getLivekitRoomService() {
+  const url    = process.env.LIVEKIT_URL;
+  const key    = process.env.LIVEKIT_API_KEY;
+  const secret = process.env.LIVEKIT_API_SECRET;
+  if (!url || !key || !secret) return null;
+  return new RoomServiceClient(url, key, secret);
 }
-
-// ─── Ownership guard for mutating operations (update / delete / start / end) ──
-// Only the original creator (hostUserId) may host, edit, delete, start, or end
-// a live class or live stream — for BOTH SCHOOL and PUBLIC stream types.
-// No admin override. No school-staff bypass. Creator only.
-function assertOwner(lc, user) {
-  if (lc.hostUserId !== user.id) {
-    const err = new Error('Only the creator can perform this action on this live class');
-    err.status = 403;
-    throw err;
-  }
-}
-
-// ─── Delegated-host + owner guard for operational HOST operations ─────────────
-// Allows the original creator OR the currently designated delegated host to
-// perform operational host actions (start, end, mute, kick, recording, etc.).
-//
-// DELEGATED HOST RULES:
-//   - Only applies to SCHOOL streams (delegatedHostId is always NULL for PUBLIC)
-//   - Creator (hostUserId) is always allowed regardless of delegatedHostId
-//   - Delegated host requires: streamType === SCHOOL AND delegatedHostId === user.id
-//   - SUPER_ADMIN is blocked upstream by assertSchoolAccess before reaching here
-//   - PUBLIC streams use assertOwner (hostUserId only) via resolveStreamStaffAccess
-function assertHostOrDelegate(lc, user) {
-  const isCreator = lc.hostUserId === user.id;
-  const isDelegatedHost =
-    lc.streamType === 'SCHOOL' &&
-    lc.delegatedHostId != null &&
-    lc.delegatedHostId === user.id;
-  if (!isCreator && !isDelegatedHost) {
-    const err = new Error('Only the host or delegated host can perform this action');
-    err.status = 403;
-    throw err;
-  }
-}
-
 
 // between leaveLiveClass() and the auto-end cron in app.js.
 const MIN_PRESENT_MINUTES = 10;
+
+// ─── assertOwnerOrModerator ───────────────────────────────────────────────────
+// Verifies the caller is the HOST or a MODERATOR of this live class.
+// Used as a defence-in-depth guard for actions that both HOST and MODERATOR
+// are allowed to perform: approve/reject hands, demote speakers, invite to stage.
+//
+// The route-level middleware (resolveStreamAccess / resolveStreamStaffAccess)
+// already checks school membership; this check verifies the specific participant
+// role within the live class itself.
+//
+// FINAL-MOD-01 FIX: Removed the PUBLIC fast-path that checked lc.hostUserId === userId.
+//
+// Previous code:
+//   if (lc.streamType === 'PUBLIC' && lc.hostUserId === userId) return;
+//
+// That fast-path was a race hazard: lc.hostUserId is read earlier in the
+// request pipeline and may reflect the PREVIOUS host during the brief window
+// after transferHost() commits the participant-record update but before the
+// caller's lc object is refreshed. The old host would bypass the participant
+// check and pass assertOwnerOrModerator for one request even though their
+// participant.role is already STUDENT.
+//
+// The correct authority source is the live_class_participants.role column,
+// which is updated atomically inside transferHost(). Removing the fast-path
+// forces every call through the DB participant lookup regardless of stream type.
+// This is slightly more expensive (one extra DB read) but is always correct.
+//
+// Authorization logic (both PUBLIC and SCHOOL streams):
+//   - Caller must have an ACTIVE participant record in THIS live class.
+//   - Caller's participant.role must be 'HOST' or 'MODERATOR'.
+//   - No school role (TEACHER, SCHOOL_ADMIN, etc.) grants this authority.
+//   - No global User.role grants this authority.
+//   - No client-supplied field grants this authority.
+async function assertOwnerOrModerator(lc, req, prismaClient) {
+  const userId = req.user.id;
+
+  const p = await prismaClient.liveClassParticipant.findFirst({
+    where: { liveClassId: lc.id, userId, isActive: true },
+    select: { role: true },
+  });
+  if (!p || (p.role !== 'HOST' && p.role !== 'MODERATOR')) {
+    const err = new Error('Only the host or a moderator can perform this action');
+    err.status = 403;
+    throw err;
+  }
+}
+
+
 
 // ─── BUG-05 FIX: Auto-end timer registry ──────────────────────────────────────
 // Duration-limited live classes were never automatically ended when their scheduled
@@ -354,8 +358,8 @@ const MIN_PRESENT_MINUTES = 10;
 // Usage:
 //   scheduleAutoEnd(liveClassId, startedAt, durationMinutes) — called on class start
 //   cancelAutoEnd(liveClassId)                               — called on manual end
-const autoEndTimers = new Map(); // liveClassId → NodeJS.Timeout
-
+// autoEndTimers Map kept as in-memory fallback when Redis/BullMQ unavailable
+const autoEndTimers = new Map(); // fallback only
 async function _endLiveClassById(lc) {
   const now = new Date();
   const active = await prisma.liveClassParticipant.findMany({
@@ -539,7 +543,7 @@ async function getLiveClass(req, res, next) {
     const lc = await rawFindLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     // School isolation: PUBLIC streams are accessible to all; SCHOOL streams check school
-    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req.schoolId);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
 
     // Fetch participants and message count (may not be available in test mocks — default to empty)
     let participants = [];
@@ -575,7 +579,7 @@ async function createLiveClass(req, res, next) {
       title: rawTitle, description,
       scheduledAt, duration = null,
       chatEnabled = true, handRaiseEnabled = true, whiteboardEnabled = true,
-      quranPanelEnabled = false, isRecorded = false,
+      quranPanelEnabled = false, maxParticipants, isRecorded = false,
       teacherId: explicitTeacherId,
       tags,
     } = req.body;
@@ -602,6 +606,8 @@ async function createLiveClass(req, res, next) {
         handRaiseEnabled,
         whiteboardEnabled,
         quranPanelEnabled,
+        // PUBLIC streams default to null (unlimited) unless the host explicitly sets a cap
+        maxParticipants: maxParticipants != null ? Number(maxParticipants) : null,
         isRecorded,
         status: 'SCHEDULED',
         isOpenMic: true,
@@ -611,6 +617,7 @@ async function createLiveClass(req, res, next) {
       const io = getIo();
       if (io) io.to('feed:public').emit('liveclass:scheduled', { liveClass: lc });
 
+      liveClassAudit(req.user.id, 'CREATE', lc.id, { streamType: 'PUBLIC', title: lc.title }).catch(() => {});
       return successResponse(res, lc, 'Live stream created', 201);
     }
 
@@ -678,7 +685,7 @@ async function createLiveClass(req, res, next) {
       description,
       scheduledAt,
       duration, chatEnabled, handRaiseEnabled, whiteboardEnabled,
-      quranPanelEnabled, isRecorded,
+      quranPanelEnabled, maxParticipants: maxParticipants != null ? Number(maxParticipants) : 100, isRecorded,
       status: 'SCHEDULED',
       isOpenMic: false,
       screenShareEnabled: true,
@@ -687,6 +694,7 @@ async function createLiveClass(req, res, next) {
     const io = getIo();
     if (io) io.to(`school:${lc.schoolId}`).emit('liveclass:scheduled', { liveClass: lc });
 
+    liveClassAudit(req.user.id, 'CREATE', lc.id, { streamType: 'SCHOOL', title: lc.title }).catch(() => {});
     return successResponse(res, lc, 'Live class created', 201);
   } catch (e) { next(e); }
 }
@@ -696,7 +704,7 @@ async function updateLiveClass(req, res, next) {
   try {
     const lc = await rawFindLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req.schoolId);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     if (lc.status === 'ENDED' || lc.status === 'CANCELLED') return errorResponse(res, 'Cannot edit ended/cancelled class', 400);
 
     // DEL-HOST: Field-level authorization for delegated hosts.
@@ -763,9 +771,7 @@ async function deleteLiveClass(req, res, next) {
   try {
     const lc = await rawFindLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req.schoolId);
-    // OWN-01: only the creator can delete the class
-    assertOwner(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     if (lc.status === 'LIVE') return errorResponse(res, 'End the class before deleting', 400);
     await rawUpdateLiveClassStatus(lc.id, { deletedAt: new Date(), status: 'CANCELLED' });
     return successResponse(res, null, 'Live class deleted');
@@ -777,9 +783,7 @@ async function startLiveClass(req, res, next) {
   try {
     const lc = await rawFindLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req.schoolId);
-    // OWN-01 / DEL-HOST: creator or delegated host can start the class
-    assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     if (lc.status === 'LIVE') return errorResponse(res, 'Class already live', 400);
     if (lc.status === 'ENDED') return errorResponse(res, 'Class already ended', 400);
 
@@ -809,6 +813,7 @@ async function startLiveClass(req, res, next) {
 
     if (lc.duration) scheduleAutoEnd(lc.id, now, lc.duration);
 
+    liveClassAudit(req.user.id, 'START', lc.id, { title: lc.title }).catch(() => {});
     return successResponse(res, updated, 'Class started');
   } catch (e) { next(e); }
 }
@@ -818,9 +823,7 @@ async function endLiveClass(req, res, next) {
   try {
     const lc = await rawFindLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req.schoolId);
-    // OWN-01 / DEL-HOST: creator or delegated host can end the class
-    assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     if (lc.status !== 'LIVE') return errorResponse(res, 'Class is not live', 400);
 
     // BUG-05 FIX: Cancel any pending auto-end timer before manually ending.
@@ -878,7 +881,7 @@ async function joinLiveClass(req, res, next) {
   try {
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req.schoolId);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     if (lc.status === 'ENDED' || lc.status === 'CANCELLED') return errorResponse(res, 'Class is not available', 400);
 
     // SEC-BAN-01: Banned users cannot join any live session.
@@ -894,68 +897,39 @@ async function joinLiveClass(req, res, next) {
 
     const userId = req.user.id;
     const effectiveRole = getEffectiveRole(req);
-
-    // LCSV-001 / FINAL-AUTH-01: Staff flags are used ONLY for enrollment bypass.
-    // They MUST NOT determine the session role (HOST/MODERATOR/STUDENT).
-    // A TEACHER or SCHOOL_ADMIN who is NOT the creator joins as MODERATOR on SCHOOL
-    // streams and STUDENT on PUBLIC streams. Only hostUserId === userId → HOST.
-    const isTeacher = req.user.role === 'TEACHER' || req.user.role === 'SCHOOL_ADMIN';
+    // LCSV-001 FIX: SUPER_ADMIN is a platform administrator, NOT a live class teacher/host.
+    // Removed 'SUPER_ADMIN' from both checks so a platform admin joining a live class
+    // receives STUDENT role (same as any other viewer) unless they are the actual
+    // stream creator (isPublicHost check below covers that case).
+    // Use effectiveRole (school membership role) — NOT req.user.role — so MEMBER users
+    // with a TEACHER school membership are correctly identified as teachers.
     const isStaff = ['TEACHER', 'SCHOOL_ADMIN'].includes(effectiveRole);
+    const isTeacher = isStaff; // alias: same role set — used below for isMuted/role decisions
 
     // Normalise streamType — old rows and mocks may not have it set
     const streamType = lc.streamType || 'SCHOOL';
 
-    // ── FINAL ROLE ASSIGNMENT ─────────────────────────────────────────────
-    // HOST  = creator (hostUserId === userId) OR delegated host (SCHOOL only)
-    // MODERATOR = non-creator, non-delegated staff on SCHOOL streams
-    // STUDENT   = everyone else (enrolled students, public audience)
-    // This applies to BOTH SCHOOL and PUBLIC streams.
-    const isCreator = lc.hostUserId === userId;
-
-    // DEL-HOST: Delegated host check — SCHOOL streams only.
-    // delegatedHostId is always NULL for PUBLIC streams (enforced at assignment).
-    // GAP-2 FIX: Re-validate current SchoolMembership at join time so a user whose
-    // role changed from TEACHER→STUDENT (or membership suspended/deleted) after
-    // delegation does NOT receive HOST. Stale delegatedHostId in DB is not enough.
-    let isDelegatedHost = false;
-    if (streamType === 'SCHOOL' && lc.delegatedHostId != null && lc.delegatedHostId === userId) {
-      const membership = await prisma.schoolMembership.findFirst({
-        where: { userId, schoolId: lc.schoolId, deletedAt: null },
-        select: { role: true, status: true },
-      });
-      isDelegatedHost =
-        !!membership &&
-        membership.status === 'ACTIVE' &&
-        ['TEACHER', 'SCHOOL_ADMIN'].includes(membership.role);
-    }
-
-    let role;
-    if (isCreator) {
-      // Creator always gets HOST regardless of stream type
-      role = 'HOST';
-    } else if (isDelegatedHost) {
-      // DEL-HOST: Delegated host gets HOST on SCHOOL streams.
-      // isEffectivelyStaff check is intentionally bypassed — delegation was
-      // explicitly granted by the creator; school staff check was applied at
-      // assignment time. If membership was subsequently suspended, the user
-      // will fail assertSchoolAccess above and never reach this point.
-      role = 'HOST';
-    } else if (streamType === 'SCHOOL' && (isTeacher || isStaff)) {
-      // Non-creator, non-delegated staff on SCHOOL streams get MODERATOR
-      // (classroom moderation rights) but NOT HOST (owner rights)
-      role = 'MODERATOR';
-    } else {
-      role = 'STUDENT';
-    }
-
-    // isEffectivelyStaff: used ONLY for enrollment bypass and attendance tracking.
-    // Does NOT determine session role.
-    const isEffectivelyStaff = streamType === 'SCHOOL' && (isTeacher || isStaff);
+    // PUBLIC-ROLE-FIX (M-1): School roles MUST NOT grant HOST on PUBLIC streams.
+    //
+    // Previously: (isStaff || isPublicHost) — a legacy TEACHER/SCHOOL_ADMIN global role
+    // would make the user HOST on every PUBLIC stream, even streams they did not create.
+    // This violates the architectural rule: School Role ≠ Public Live Stream Role.
+    //
+    // Corrected logic:
+    //   - PUBLIC stream: HOST only if lc.hostUserId === userId (explicit creator check).
+    //     All school roles (TEACHER, SCHOOL_ADMIN, STUDENT) receive STUDENT/VIEWER.
+    //   - SCHOOL stream: HOST if isStaff (school role is authoritative here).
+    //
+    // isEffectivelyStaff is false for PUBLIC streams by construction, so school staff
+    // arriving at a PUBLIC stream via the existing flow are correctly downgraded to STUDENT.
+    const isPublicHost       = streamType === 'PUBLIC' && lc.hostUserId === userId;
+    const isEffectivelyStaff = streamType === 'SCHOOL' && isStaff;
+    const role = (isEffectivelyStaff || isPublicHost) ? 'HOST' : 'STUDENT';
 
     let student = null;
 
-    // Enrollment check — only applies to SCHOOL streams for non-staff non-creator
-    if (streamType === 'SCHOOL' && !isCreator && !isEffectivelyStaff) {
+    // Enrollment check — only applies to SCHOOL streams for non-staff
+    if (streamType === 'SCHOOL' && !isStaff) {
       student = await prisma.student.findFirst({ where: { userId } });
       if (!student) return errorResponse(res, 'Student profile not found', 403);
       const enrolled = await prisma.enrollment.findFirst({
@@ -970,6 +944,17 @@ async function joinLiveClass(req, res, next) {
       if (existingRecord?.wasKicked) {
         return errorResponse(res, 'You have been removed from this class by the host', 403);
       }
+
+      // Only enforce capacity if maxParticipants is a positive number.
+      // null means unlimited; 0 or negative is treated as unlimited (safety guard).
+      if (lc.maxParticipants != null && lc.maxParticipants > 0) {
+        const currentCount = await prisma.liveClassParticipant.count({
+          where: { liveClassId: lc.id, isActive: true }
+        });
+        if (currentCount >= lc.maxParticipants) {
+          return errorResponse(res, `Class is full (max ${lc.maxParticipants} participants)`, 403);
+        }
+      }
     }
 
     // For PUBLIC streams: anyone (non-creator) can join as STUDENT
@@ -983,31 +968,29 @@ async function joinLiveClass(req, res, next) {
       if (existingRecord?.wasKicked) {
         return errorResponse(res, 'You have been removed from this stream by the host', 403);
       }
-      // No maxParticipants check — PUBLIC streams allow unlimited viewers
+      // Only enforce capacity if maxParticipants is a positive number.
+      // null means unlimited (public streams default to null = open to all).
+      if (lc.maxParticipants != null && lc.maxParticipants > 0) {
+        const currentCount = await prisma.liveClassParticipant.count({
+          where: { liveClassId: lc.id, isActive: true }
+        });
+        if (currentCount >= lc.maxParticipants) {
+          return errorResponse(res, `Stream is full (max ${lc.maxParticipants} viewers)`, 403);
+        }
+      }
     }
 
     const participant = await prisma.liveClassParticipant.upsert({
       where: { liveClassId_userId: { liveClassId: lc.id, userId } },
-      create: { liveClassId: lc.id, userId, role, isMuted: !(isCreator || isDelegatedHost || lc.isOpenMic), isActive: true },
-      // H-7 FIX: On rejoin, reset speakerSlot to null so a previously-promoted
-      // participant does not ghost-occupy a stage slot. They must be re-approved.
-      // Also reset handRaised so stale hand state from a previous session is cleared.
-      //
-      // OWN-REJOIN FIX: Also reset `role` on rejoin. Previously the update path did
-      // not include role, which meant a participant whose DB record had a stale/incorrect
-      // role (e.g. HOST written before a backend fix was deployed) would keep that role
-      // on every subsequent rejoin. The role is re-derived from server-side logic every
-      // time joinLiveClass runs, so the update path must apply it to correct stale records.
-      update: { role, isActive: true, joinedAt: new Date(), leftAt: null, isMuted: !(isCreator || isDelegatedHost || lc.isOpenMic), speakerSlot: null, handRaised: false },
+      create: { liveClassId: lc.id, userId, role, isMuted: !(isEffectivelyStaff || isPublicHost || lc.isOpenMic), isActive: true },
+      update: { isActive: true, joinedAt: new Date(), leftAt: null, isMuted: !(isEffectivelyStaff || isPublicHost || lc.isOpenMic) },
       include: { user: { select: userSelect } }
     });
 
     const io = getIo();
 
-    // Auto-start if CREATOR or DELEGATED HOST joins a SCHEDULED stream
-    // DEL-HOST: v1 behavior — delegated host joining SCHEDULED triggers auto-start
-    // same as creator. No scheduledAt time-window enforcement in v1.
-    const isHost = isCreator || isDelegatedHost;
+    // Auto-start if host joins a SCHEDULED stream
+    const isHost = isEffectivelyStaff || isPublicHost;
     if (isHost && lc.status === 'SCHEDULED') {
       const autoStartedAt = new Date();
       await rawUpdateLiveClassStatus(lc.id, {
@@ -1030,8 +1013,7 @@ async function joinLiveClass(req, res, next) {
     }
 
     // Attendance tracking — only for SCHOOL streams with a student record
-    // Staff (teachers/admins) don't get attendance records; only enrolled students do
-    if (streamType === 'SCHOOL' && !isCreator && !isEffectivelyStaff && student) {
+    if (streamType === 'SCHOOL' && !isEffectivelyStaff && student) {
       await prisma.liveClassAttendance.upsert({
         where: { liveClassId_studentId: { liveClassId: lc.id, studentId: student.id } },
         create: { liveClassId: lc.id, studentId: student.id, status: 'PRESENT' },
@@ -1083,7 +1065,7 @@ async function leaveLiveClass(req, res, next) {
 
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req.schoolId);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
 
     const participant = await prisma.liveClassParticipant.findFirst({
       where: { liveClassId: id, userId, isActive: true }
@@ -1140,7 +1122,7 @@ async function getLiveKitToken(req, res, next) {
   try {
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req.schoolId);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     if (lc.status === 'ENDED')     return errorResponse(res, 'Class has ended', 400);
     if (lc.status === 'CANCELLED') return errorResponse(res, 'Class was cancelled', 400);
 
@@ -1227,7 +1209,7 @@ async function getParticipants(req, res, next) {
   try {
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req.schoolId);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     const participants = await prisma.liveClassParticipant.findMany({
       where: { liveClassId: req.params.id, isActive: true },
       include: { user: { select: userSelect } },
@@ -1244,13 +1226,12 @@ async function muteParticipant(req, res, next) {
     const { muted = true } = req.body;
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req.schoolId);
-    // OWN-02 / DEL-HOST: creator or delegated host can mute individual participants.
-    // A same-school SCHOOL_ADMIN who joined as MODERATOR must not be able to mute
-    // participants in a class they did not create.
-    assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+    // Only HOST or MODERATOR can mute others
+    await assertOwnerOrModerator(lc, req, prisma);
     const p = await prisma.liveClassParticipant.findFirst({ where: { liveClassId: id, userId, isActive: true } });
     if (!p) return errorResponse(res, 'Participant not found', 404);
+    if (p.role === 'HOST') return errorResponse(res, 'Cannot mute the host', 403);
     await prisma.liveClassParticipant.update({ where: { id: p.id }, data: { isMuted: muted } });
     const io = getIo();
     if (io) io.to(`liveclass:${id}`).emit('liveclass:mute_changed', { liveClassId: id, userId, isMuted: muted });
@@ -1264,17 +1245,9 @@ async function muteAll(req, res, next) {
     const { id } = req.params;
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // Allow HOST or MODERATOR (participant record is authoritative for role)
-    const caller = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId: req.user.id, isActive: true },
-    });
-    const isHostOrModerator = caller && (caller.role === 'HOST' || caller.role === 'MODERATOR');
-    if (!isHostOrModerator) {
-      return errorResponse(res, 'Only the host or moderator can mute all', 403);
-    }
-
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+    // HOST or MODERATOR can mute all
+    await assertOwnerOrModerator(lc, req, prisma);
     await prisma.liveClassParticipant.updateMany({
       where: { liveClassId: id, isActive: true, role: { not: 'HOST' } },
       data: { isMuted: true }
@@ -1291,17 +1264,9 @@ async function unmuteAll(req, res, next) {
     const { id } = req.params;
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // Allow HOST or MODERATOR (participant record is authoritative for role)
-    const caller = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId: req.user.id, isActive: true },
-    });
-    const isHostOrModerator = caller && (caller.role === 'HOST' || caller.role === 'MODERATOR');
-    if (!isHostOrModerator) {
-      return errorResponse(res, 'Only the host or moderator can unmute all', 403);
-    }
-
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+    // HOST or MODERATOR can unmute all
+    await assertOwnerOrModerator(lc, req, prisma);
     await prisma.liveClassParticipant.updateMany({
       where: { liveClassId: id, isActive: true, role: { not: 'HOST' } },
       data: { isMuted: false }
@@ -1316,12 +1281,11 @@ async function unmuteAll(req, res, next) {
 async function lowerAllHands(req, res, next) {
   try {
     const { id } = req.params;
-    // P0-01: school isolation check
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-    // GAP-01 / DEL-HOST: defence-in-depth — creator or delegated host can lower all hands
-    assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+    // HOST or MODERATOR can lower all hands
+    await assertOwnerOrModerator(lc, req, prisma);
     await prisma.liveClassParticipant.updateMany({
       where: { liveClassId: id, isActive: true, handRaised: true },
       data: { handRaised: false, handRaisedAt: null }
@@ -1340,14 +1304,14 @@ async function lowerAllHands(req, res, next) {
 async function kickParticipant(req, res, next) {
   try {
     const { id, userId } = req.params;
-    // P0-01: school isolation check — fetch lc to verify school ownership
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-    // OWN-03 / DEL-HOST: creator or delegated host can kick participants.
-    assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+    // Only HOST or MODERATOR can kick
+    await assertOwnerOrModerator(lc, req, prisma);
     const p = await prisma.liveClassParticipant.findFirst({ where: { liveClassId: id, userId, isActive: true } });
     if (!p) return errorResponse(res, 'Participant not found', 404);
+    if (p.role === 'HOST') return errorResponse(res, 'Cannot kick the host', 403);
     // Task 3: set wasKicked=true so the participant cannot immediately rejoin
     await prisma.liveClassParticipant.update({ where: { id: p.id }, data: { isActive: false, leftAt: new Date(), wasKicked: true } });
     const io = getIo();
@@ -1364,6 +1328,7 @@ async function kickParticipant(req, res, next) {
         logger.warn(`[kick] LiveKit eviction failed for ${userId} in ${lc.livekitRoomName}: ${err.message}`)
       );
     }
+    liveClassAudit(req.user.id, 'KICK', id, { kickedUserId: userId }).catch(() => {});
     return successResponse(res, null, 'Participant kicked');
   } catch (e) { next(e); }
 }
@@ -1374,32 +1339,10 @@ async function raiseHand(req, res, next) {
     const { id } = req.params;
     const userId = req.user.id;
     const now = new Date();
-    // P0-01: school isolation check
+    // P0-01: school isolation check (explicit PUBLIC guard for clarity)
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // VULN-LIVE-002 FIX: Enforce handRaiseEnabled server-side.
-    // The frontend disabling the button is UI-only and trivially bypassed
-    // by a direct API call. The flag must be enforced here.
-    if (!lc.handRaiseEnabled) {
-      return errorResponse(res, 'Hand raising is disabled for this class', 403);
-    }
-
-    // VULN-LIVE-001/008 FIX: Require an active participant record before
-    // accepting a hand raise. Without this guard a school member (or any
-    // authenticated user on a PUBLIC stream) who never called join could:
-    //   a) poison the hand queue with a ghost entry, and
-    //   b) trigger liveclass:hand_raised events to all room participants.
-    // Applies equally to SCHOOL and PUBLIC streams.
-    const participant = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId, isActive: true },
-      select: { id: true },
-    });
-    if (!participant) {
-      return errorResponse(res, 'Join the class before raising your hand', 403);
-    }
-
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     await prisma.liveClassParticipant.updateMany({ where: { liveClassId: id, userId }, data: { handRaised: true, handRaisedAt: now } });
     await prisma.liveClassHandQueue.upsert({
       where: { liveClassId_userId: { liveClassId: id, userId } },
@@ -1420,25 +1363,10 @@ async function lowerHand(req, res, next) {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    // P0-01: school isolation check
+    // P0-01: school isolation check (explicit PUBLIC guard for clarity)
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // VULN-LIVE-004 FIX: Require an active participant record before
-    // accepting a hand lower. A non-participant could otherwise emit
-    // liveclass:hand_lowered socket events for userId values they supply
-    // via their own auth token — causing spurious UI state changes.
-    // lowerHand only operates on req.user.id (own hand), but the
-    // participant check ensures only actual room members can trigger it.
-    const participant = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId, isActive: true },
-      select: { id: true },
-    });
-    if (!participant) {
-      return errorResponse(res, 'Join the class before lowering your hand', 403);
-    }
-
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     await prisma.liveClassParticipant.updateMany({ where: { liveClassId: id, userId }, data: { handRaised: false, handRaisedAt: null } });
     await prisma.liveClassHandQueue.updateMany({ where: { liveClassId: id, userId, status: 'WAITING' }, data: { status: 'CANCELLED' } });
     const io = getIo();
@@ -1451,19 +1379,10 @@ async function lowerHand(req, res, next) {
 async function approveHand(req, res, next) {
   try {
     const { id, userId } = req.params;
-    // P0-01: school isolation check
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // H-8 FIX: Verify caller is HOST or MODERATOR via participant record,
-    // not just the global school role. Matches inviteToStage authorization.
-    const caller = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId: req.user.id, isActive: true },
-    });
-    if (!caller || (caller.role !== 'HOST' && caller.role !== 'MODERATOR')) {
-      return errorResponse(res, 'Only the host or moderator can approve hands', 403);
-    }
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+    await assertOwnerOrModerator(lc, req, prisma);
 
     // H-5 FIX: Concurrency-safe promotion using a raw UPDATE with an embedded
     // subquery count. The UPDATE atomically:
@@ -1571,25 +1490,10 @@ async function approveHand(req, res, next) {
 async function rejectHand(req, res, next) {
   try {
     const { id, userId } = req.params;
-    // P0-01: school isolation check
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // F-07 FIX: Verify caller is an active HOST or MODERATOR in this live room.
-    // The route uses resolveStreamStaffAccess (staff-level for SCHOOL, host-only
-    // for PUBLIC), but that does not verify the caller holds an active session role.
-    // approveHand already requires caller.role === HOST|MODERATOR from the
-    // participant record. rejectHand must be consistent — any staff member without
-    // an active session role (SCHOOL_ADMIN, TEACHER, SUPER_ADMIN) must be denied.
-    const caller = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId: req.user.id, isActive: true },
-      select: { role: true },
-    });
-    if (!caller || (caller.role !== 'HOST' && caller.role !== 'MODERATOR')) {
-      return errorResponse(res, 'Only the host or moderator can reject hands', 403);
-    }
-
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+    await assertOwnerOrModerator(lc, req, prisma);
     await prisma.liveClassHandQueue.updateMany({ where: { liveClassId: id, userId, status: 'WAITING' }, data: { status: 'REJECTED' } });
     await prisma.liveClassParticipant.updateMany({ where: { liveClassId: id, userId }, data: { handRaised: false } });
     const io = getIo();
@@ -1598,13 +1502,101 @@ async function rejectHand(req, res, next) {
   } catch (e) { next(e); }
 }
 
+// ─── DROP MIC ─────────────────────────────────────────────────────────────────
+async function dropMic(req, res, next) {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+    const lc = await findLiveClass(id);
+    if (!lc) return errorResponse(res, 'Live class not found', 404);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+    const slotCheck = await prisma.$queryRawUnsafe(
+      `SELECT speakerSlot, role FROM live_class_participants WHERE liveClassId = ? AND userId = ? AND isActive = 1 LIMIT 1`,
+      id, userId
+    );
+    if (!slotCheck || slotCheck.length === 0) return errorResponse(res, 'Not in this class', 404);
+    const isMgr = slotCheck[0].role === 'HOST' || slotCheck[0].role === 'MODERATOR';
+    const hasSlot = slotCheck[0].speakerSlot !== null;
+    if (!hasSlot && !isMgr) return errorResponse(res, 'You are not an active speaker', 400);
+    await prisma.$executeRawUnsafe(
+      `UPDATE live_class_participants SET speakerSlot = NULL, isMuted = 1 WHERE liveClassId = ? AND userId = ?`,
+      id, userId
+    );
+    const io = getIo();
+    if (io) {
+      io.to(`liveclass:${id}`).emit('liveclass:speaker_removed', { liveClassId: id, userId });
+      io.to(`liveclass:${id}`).emit('liveclass:mute_changed', { liveClassId: id, userId, isMuted: true });
+      io.to(`user:${userId}`).emit('liveclass:revoke_mic', { liveClassId: id });
+    }
+    return successResponse(res, null, 'Mic dropped');
+  } catch (e) { next(e); }
+}
+
+// ─── DEMOTE SPEAKER ───────────────────────────────────────────────────────────
+async function demoteSpeaker(req, res, next) {
+  try {
+    const { id, userId } = req.params;
+    const lc = await findLiveClass(id);
+    if (!lc) return errorResponse(res, 'Live class not found', 404);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+    await assertOwnerOrModerator(lc, req, prisma);
+    const participant = await prisma.liveClassParticipant.findFirst({ where: { liveClassId: id, userId, isActive: true } });
+    if (!participant) return errorResponse(res, 'Participant not found', 404);
+    if (participant.role === 'HOST') return errorResponse(res, 'Cannot demote the host', 403);
+    await prisma.$executeRawUnsafe(
+      `UPDATE live_class_participants SET speakerSlot = NULL, isMuted = 1 WHERE liveClassId = ? AND userId = ?`,
+      id, userId
+    );
+    const io = getIo();
+    if (io) {
+      io.to(`liveclass:${id}`).emit('liveclass:speaker_removed', { liveClassId: id, userId });
+      io.to(`liveclass:${id}`).emit('liveclass:mute_changed', { liveClassId: id, userId, isMuted: true });
+      io.to(`user:${userId}`).emit('liveclass:revoke_mic', { liveClassId: id });
+    }
+    return successResponse(res, null, 'Speaker demoted to audience');
+  } catch (e) { next(e); }
+}
+
+// ─── INVITE TO STAGE ─────────────────────────────────────────────────────────
+async function inviteToStage(req, res, next) {
+  try {
+    const { id, userId } = req.params;
+    const lc = await findLiveClass(id);
+    if (!lc) return errorResponse(res, 'Live class not found', 404);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+    await assertOwnerOrModerator(lc, req, prisma);
+    const target = await prisma.liveClassParticipant.findFirst({ where: { liveClassId: id, userId, isActive: true } });
+    if (!target) return errorResponse(res, 'Participant not found', 404);
+    const maxSpeakers = lc.maxSpeakers || 20;
+    const slotRows = await prisma.$queryRawUnsafe(
+      `SELECT COUNT(*) as cnt FROM live_class_participants WHERE liveClassId = ? AND isActive = 1 AND speakerSlot IS NOT NULL`,
+      id
+    );
+    const activeSpeakerCount = Number(slotRows[0]?.cnt ?? 0);
+    if (activeSpeakerCount >= maxSpeakers) return errorResponse(res, `Stage is full (${activeSpeakerCount}/${maxSpeakers})`, 400);
+    const nextSlot = activeSpeakerCount;
+    await prisma.liveClassParticipant.updateMany({ where: { liveClassId: id, userId }, data: { handRaised: false, handRaisedAt: null, isMuted: false } });
+    await prisma.$executeRawUnsafe(
+      `UPDATE live_class_participants SET speakerSlot = ? WHERE liveClassId = ? AND userId = ?`,
+      nextSlot, id, userId
+    );
+    const io = getIo();
+    if (io) {
+      io.to(`liveclass:${id}`).emit('liveclass:speaker_added', { liveClassId: id, userId, speakerSlot: nextSlot, activeSpeakerCount: activeSpeakerCount + 1, maxSpeakers });
+      io.to(`user:${userId}`).emit('liveclass:grant_mic', { liveClassId: id });
+      io.to(`user:${userId}`).emit('liveclass:you_can_speak', { liveClassId: id });
+    }
+    return successResponse(res, { speakerSlot: nextSlot }, 'Participant invited to stage');
+  } catch (e) { next(e); }
+}
+
 //  HAND QUEUE 
 async function getHandQueue(req, res, next) {
   try {
-    // P0-01: school isolation check
+    // P0-01: school isolation check (explicit PUBLIC guard for clarity)
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     const queue = await prisma.liveClassHandQueue.findMany({
       where: { liveClassId: req.params.id, status: 'WAITING' },
       include: { user: { select: userSelect } },
@@ -1623,15 +1615,27 @@ async function sendMessage(req, res, next) {
 
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId); // P0-01
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req); // P0-01
     if (!lc.chatEnabled) return errorResponse(res, 'Chat is disabled', 403);
 
-    // Verify the sender is an active participant OR school staff
-    // Staff (TEACHER/SCHOOL_ADMIN) can send messages even before formally joining
-    // FINAL-AUTH-01: Uses global staff role for message sending (moderation right),
-    // not for ownership determination. This is intentional — chat is moderation, not ownership.
-    const isStaffSender = ['TEACHER', 'SCHOOL_ADMIN'].includes(getEffectiveRole(req));
-    if (!isStaffSender) {
+    // PES-001 FIX: The school-role shortcut (isTeacherOrAdmin) that previously
+    // bypassed the active-participant check now applies ONLY to SCHOOL streams.
+    //
+    // SCHOOL streams: a teacher/admin may send messages without a participant
+    //   record because they manage the class as staff and may not have formally
+    //   "joined" it via the join endpoint. This preserves existing SCHOOL behavior.
+    //
+    // PUBLIC streams: school role confers NO chat authority. Every user —
+    //   including TEACHER and SCHOOL_ADMIN — must hold an active participant
+    //   record (i.e. have called POST /:id/join) to send messages.
+    //   A school staff user who has not joined the PUBLIC stream gets 403.
+    //   A kicked/inactive participant (isActive: false) also gets 403.
+    const streamType = lc.streamType || 'SCHOOL';
+    const isTeacherOrAdmin =
+      streamType === 'SCHOOL' &&
+      ['TEACHER', 'SCHOOL_ADMIN'].includes(getEffectiveRole(req));
+
+    if (!isTeacherOrAdmin) {
       const participant = await prisma.liveClassParticipant.findFirst({
         where: { liveClassId: id, userId: req.user.id, isActive: true },
       });
@@ -1655,10 +1659,10 @@ async function getMessages(req, res, next) {
     const { page = 1, limit = 50 } = req.query;
     const { skip } = getPagination(page, limit);
     const take = Math.min(100, Math.max(1, parseInt(limit)));
-    // P0-01: school isolation check
+    // P0-01: school isolation check (explicit PUBLIC guard for clarity)
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     const [total, messages] = await Promise.all([
       prisma.liveClassMessage.count({ where: { liveClassId: req.params.id, deletedAt: null } }),
       prisma.liveClassMessage.findMany({
@@ -1675,10 +1679,10 @@ async function getMessages(req, res, next) {
 //  ATTENDANCE 
 async function getAttendance(req, res, next) {
   try {
-    // P0-01: school isolation check
+    // P0-01: school isolation check (explicit PUBLIC guard for clarity)
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     const attendance = await prisma.liveClassAttendance.findMany({
       where: { liveClassId: req.params.id },
       include: { student: { include: { user: { select: userSelect } } } },
@@ -1693,9 +1697,9 @@ async function toggleOpenMic(req, res, next) {
   try {
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId); // P0-01
-    // OWN-04 / DEL-HOST: creator or delegated host can toggle open-mic mode.
-    assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+    // Only HOST or MODERATOR can toggle open mic
+    await assertOwnerOrModerator(lc, req, prisma);
     if (lc.status === 'ENDED') return errorResponse(res, 'Class has ended', 400);
 
     // BUG FIX: renamed from 'next' to 'newOpenMic' to avoid shadowing the Express
@@ -1728,23 +1732,10 @@ async function requestSpeak(req, res, next) {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    // P0-01: school isolation check
+    // P0-01: school isolation check (explicit PUBLIC guard for clarity)
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // VULN-LIVE-007 FIX: Require an active participant record before
-    // accepting a speak request. A non-participant could otherwise inject
-    // liveclass:speak_request socket events into any live class room,
-    // creating noise for the host panel without having joined the class.
-    const speakParticipant = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId, isActive: true },
-      select: { id: true },
-    });
-    if (!speakParticipant) {
-      return errorResponse(res, 'Join the class before sending a speak request', 403);
-    }
-
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     const io = getIo();
     if (io) io.to(`liveclass:${id}`).emit('liveclass:speak_request', {
       liveClassId: id, userId,
@@ -1761,9 +1752,7 @@ async function startRecording(req, res, next) {
   try {
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId); // P0-01
-    // OWN-05 / DEL-HOST: creator or delegated host can start/stop recording.
-    assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req); // P0-01
     if (lc.status !== 'LIVE') return errorResponse(res, 'Class must be live to record', 400);
     if (lc.recordingStartedAt) return errorResponse(res, 'Recording already in progress', 400);
 
@@ -1772,6 +1761,7 @@ const updated = await findLiveClass(lc.id);
 
     const io = getIo();
     if (io) io.to(`liveclass:${lc.id}`).emit('liveclass:recording_started', { liveClassId: lc.id });
+    liveClassAudit(req.user.id, 'RECORD_START', lc.id, { title: lc.title }).catch(() => {});
     return successResponse(res, updated, 'Recording started');
   } catch (e) { next(e); }
 }
@@ -1782,9 +1772,7 @@ async function stopRecording(req, res, next) {
     const { recordingUrl } = req.body;
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId); // P0-01
-    // OWN-05 / DEL-HOST: creator or delegated host can stop recording.
-    assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req); // P0-01
     if (!lc.recordingStartedAt) return errorResponse(res, 'No recording in progress', 400);
 
     await prisma.$executeRawUnsafe(`UPDATE live_classes SET recordingUrl = ?, recordingStartedAt = NULL, updatedAt = NOW() WHERE id = ?`, recordingUrl || null, lc.id)
@@ -1792,9 +1780,116 @@ const updated = await findLiveClass(lc.id);
 
     const io = getIo();
     if (io) io.to(`liveclass:${lc.id}`).emit('liveclass:recording_stopped', { liveClassId: lc.id, recordingUrl });
+    liveClassAudit(req.user.id, 'RECORD_STOP', lc.id, { title: lc.title }).catch(() => {});
     return successResponse(res, updated, 'Recording stopped');
   } catch (e) { next(e); }
 }
+// ─── Poll DB helpers (LC-GAP-004: durable persistence) ─────────────────────
+// These functions shadow-write poll state to MySQL so data survives Redis flush.
+// All operations are non-fatal — failure is logged as warn, never thrown.
+
+async function _dbUpsertPoll(liveClassId, poll, createdBy) {
+  try {
+    const { v4: newId } = require('uuid');
+    const existing = await prisma.$queryRawUnsafe(
+      'SELECT id FROM live_class_polls WHERE id = ? LIMIT 1', poll.id
+    );
+    if (existing && existing.length > 0) return; // already exists
+    await prisma.$executeRawUnsafe(
+      'INSERT INTO live_class_polls (id, liveClassId, question, options, isActive, createdBy, createdAt, updatedAt) VALUES (?,?,?,?,1,?,NOW(),NOW())',
+      poll.id, liveClassId, poll.question ?? '', JSON.stringify(poll.options ?? []), createdBy
+    );
+  } catch (err) {
+    logger.warn(`[poll-db] upsert failed: ${err.message}`);
+  }
+}
+
+async function _dbUpdatePollOptions(pollId, options) {
+  try {
+    await prisma.$executeRawUnsafe(
+      'UPDATE live_class_polls SET options = ?, updatedAt = NOW() WHERE id = ?',
+      JSON.stringify(options), pollId
+    );
+  } catch (err) {
+    logger.warn(`[poll-db] options update failed: ${err.message}`);
+  }
+}
+
+async function _dbClosePoll(pollId) {
+  try {
+    await prisma.$executeRawUnsafe(
+      'UPDATE live_class_polls SET isActive = 0, updatedAt = NOW() WHERE id = ?', pollId
+    );
+  } catch (err) {
+    logger.warn(`[poll-db] close failed: ${err.message}`);
+  }
+}
+
+async function _dbLoadPolls(liveClassId) {
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      'SELECT id, question, options, isActive FROM live_class_polls WHERE liveClassId = ? ORDER BY createdAt DESC', liveClassId
+    );
+    return rows.map(r => ({
+      id:       r.id,
+      question: r.question,
+      options:  typeof r.options === 'string' ? JSON.parse(r.options) : r.options,
+      isActive: !!r.isActive,
+    }));
+  } catch (err) {
+    logger.warn(`[poll-db] load failed: ${err.message}`);
+    return [];
+  }
+}
+
+// ─── Whiteboard DB helpers (LC-GAP-005: durable persistence) ────────────────
+
+async function _dbSaveWhiteboardSnapshot(liveClassId, strokesJson) {
+  try {
+    const { v4: newId } = require('uuid');
+    // UPSERT: one row per live class, keyed on liveClassId
+    const existing = await prisma.$queryRawUnsafe(
+      'SELECT id FROM live_class_whiteboard_snapshots WHERE liveClassId = ? LIMIT 1', liveClassId
+    );
+    if (existing && existing.length > 0) {
+      await prisma.$executeRawUnsafe(
+        'UPDATE live_class_whiteboard_snapshots SET strokes = ?, snapshotAt = NOW(), updatedAt = NOW() WHERE liveClassId = ?',
+        strokesJson, liveClassId
+      );
+    } else {
+      await prisma.$executeRawUnsafe(
+        'INSERT INTO live_class_whiteboard_snapshots (id, liveClassId, strokes, snapshotAt, updatedAt) VALUES (?,?,?,NOW(),NOW())',
+        newId(), liveClassId, strokesJson
+      );
+    }
+  } catch (err) {
+    logger.warn(`[whiteboard-db] save failed: ${err.message}`);
+  }
+}
+
+async function _dbClearWhiteboardSnapshot(liveClassId) {
+  try {
+    await prisma.$executeRawUnsafe(
+      'DELETE FROM live_class_whiteboard_snapshots WHERE liveClassId = ?', liveClassId
+    );
+  } catch (err) {
+    logger.warn(`[whiteboard-db] clear failed: ${err.message}`);
+  }
+}
+
+async function _dbLoadWhiteboardSnapshot(liveClassId) {
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      'SELECT strokes FROM live_class_whiteboard_snapshots WHERE liveClassId = ? LIMIT 1', liveClassId
+    );
+    if (rows && rows.length > 0) return rows[0].strokes;
+    return null;
+  } catch (err) {
+    logger.warn(`[whiteboard-db] load failed: ${err.message}`);
+    return null;
+  }
+}
+
 
 // ─── POLL RELAY ────────────────────────────────────────────────────────────────
 // Polls are managed client-side and relayed via socket events.
@@ -1810,10 +1905,7 @@ async function broadcastPoll(req, res, next) {
 
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId); // P0-01
-    // OWN-06 / DEL-HOST: Poll creation/management is HOST-only (creator or delegated host).
-    // Exception: vote events are submitted by any participant — only block create/close.
-    if (event.type !== 'vote') assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req); // P0-01
 
     // ── Persist poll state to Redis ──────────────────────────────────────────
     const cacheKey = `polls:${lc.id}`;
@@ -1857,6 +1949,15 @@ async function broadcastPoll(req, res, next) {
 
         // Write updated polls back to cache (4h TTL — longer than any single class)
         await setCache(cacheKey, updatedPolls, 4 * 60 * 60);
+        // LC-GAP-004: Shadow-write to DB so polls survive Redis flush
+        if (event.type === 'create' && event.poll) {
+          _dbUpsertPoll(lc.id, event.poll, req.user.id).catch(() => {});
+        } else if (event.type === 'vote' && event.pollId) {
+          const _pv = updatedPolls.find(p => p.id === event.pollId);
+          if (_pv) _dbUpdatePollOptions(event.pollId, _pv.options).catch(() => {});
+        } else if (event.type === 'close' && event.pollId) {
+          _dbClosePoll(event.pollId).catch(() => {});
+        }
       }
     } catch (cacheErr) {
       // Non-fatal — polls still work in real-time via socket, cache is best-effort
@@ -1882,7 +1983,7 @@ async function getPollState(req, res, next) {
   try {
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId); // P0-01
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req); // P0-01
 
     const cacheKey = `polls:${lc.id}`;
     let polls = [];
@@ -1896,6 +1997,10 @@ async function getPollState(req, res, next) {
       logger.warn(`[poll] Redis read error: ${cacheErr.message}`);
     }
 
+    // LC-GAP-004: Fall back to DB when Redis is empty or unavailable
+    if (!polls || polls.length === 0) {
+      polls = await _dbLoadPolls(lc.id);
+    }
     return successResponse(res, { polls });
   } catch (e) { next(e); }
 }
@@ -1911,11 +2016,7 @@ async function broadcastDraw(req, res, next) {
 
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId); // P0-01
-    // OWN-07 / DEL-HOST: Whiteboard relay is HOST-only (creator or delegated host).
-    // A non-creator admin must not be able to push whiteboard events to another
-    // teacher's class or overwrite the Redis whiteboard snapshot.
-    assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req); // P0-01
 
     // ── Persist whiteboard state to Redis ────────────────────────────────────
     // Snapshot: host sends canvas.toDataURL() as event.dataUrl — store it.
@@ -1933,6 +2034,8 @@ async function broadcastDraw(req, res, next) {
           }
           // TTL: 4 hours (matches LiveKit token TTL) — auto-expires after class ends
           await setCache(cacheKey, { dataUrl: event.dataUrl }, 4 * 60 * 60);
+          // LC-GAP-005: Shadow-write strokes/snapshot to DB
+          if (event.strokes) _dbSaveWhiteboardSnapshot(lc.id, JSON.stringify(event.strokes)).catch(() => {});
         } else if (event.type === 'clear') {
           await deleteCache(cacheKey);
         }
@@ -1954,7 +2057,7 @@ async function getWhiteboardState(req, res, next) {
   try {
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId); // P0-01
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req); // P0-01
 
     const cacheKey = `whiteboard:${lc.id}`;
     let snapshot = null;
@@ -1968,8 +2071,16 @@ async function getWhiteboardState(req, res, next) {
       require('../utils/logger').warn(`[whiteboard] Redis read error: ${cacheErr.message}`);
     }
 
-    // snapshot is { dataUrl: 'data:image/png;base64,...' } or null
-    return successResponse(res, { snapshot: snapshot?.dataUrl ?? null });
+    // LC-GAP-005: Fall back to DB strokes when Redis snapshot is absent
+    if (!snapshot) {
+      const _dbStrokes = await _dbLoadWhiteboardSnapshot(lc.id);
+      if (_dbStrokes) snapshot = { strokes: _dbStrokes };
+    }
+    // snapshot is { dataUrl } (Redis) or { strokes } (DB) or null
+    return successResponse(res, {
+      snapshot: snapshot?.dataUrl ?? null,
+      strokes:  snapshot?.strokes  ?? null,
+    });
   } catch (e) { next(e); }
 }
 
@@ -1982,9 +2093,7 @@ async function broadcastQuranPosition(req, res, next) {
 
     const lc = await findLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId); // P0-01
-    // OWN-08 / DEL-HOST: Quran position sync is HOST-only (creator or delegated host).
-    assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req); // P0-01
     if (!lc.quranPanelEnabled) return errorResponse(res, 'Quran panel is not enabled', 400);
 
     const io = getIo();
@@ -2007,30 +2116,39 @@ async function deleteMessage(req, res, next) {
     // P0-01: school isolation check — fetch lc before any data access
     const lc = await findLiveClass(liveClassId);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // Check session role (authoritative) first.
-    // OWN-09: Removed the global-role staff fallback that allowed any same-school
-    // SCHOOL_ADMIN to delete messages in sessions they never joined. Message
-    // moderation requires an active session role (HOST or MODERATOR) or message
-    // authorship. An admin who hasn't joined can view the class but cannot delete
-    // messages they have no session authority over.
-    const participantRecord = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId, userId, isActive: true },
-      select: { role: true },
-    });
-    const sessionRole = participantRecord?.role ?? null;
-    const isModeratorBySession = sessionRole === 'HOST' || sessionRole === 'MODERATOR';
-    const canModerateMsgs = isModeratorBySession;
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
 
     const msg = await prisma.liveClassMessage.findFirst({
       where: { id: messageId, liveClassId, deletedAt: null }
     });
     if (!msg) return errorResponse(res, 'Message not found', 404);
 
-    // Only the message author or a moderator/host can delete
-    if (msg.userId !== userId && !canModerateMsgs) {
-      return errorResponse(res, 'Only the host or the message author can delete this message', 403);
+    // PES-001 FIX: Authorization to delete another user's message is now based
+    // on the caller's live-class PARTICIPANT ROLE, not on their school/global role.
+    //
+    // Old behavior: isHost = ['TEACHER','SCHOOL_ADMIN'].includes(getEffectiveRole(req))
+    //   → a school teacher could delete any participant's message on a PUBLIC stream
+    //     they never joined, because their User.role granted "host" authority.
+    //
+    // New behavior:
+    //   - Message author can always delete their own message (unchanged).
+    //   - Deleting ANOTHER user's message requires an active participant record
+    //     with role HOST or MODERATOR in THIS stream.
+    //   - School role (TEACHER / SCHOOL_ADMIN) has no standalone authority here.
+    //   - This applies to both PUBLIC and SCHOOL streams for consistency.
+    //     (On SCHOOL streams, the staff member must still be an active participant
+    //     with HOST/MODERATOR to delete others' messages.)
+    if (msg.userId !== userId) {
+      // Only HOST or MODERATOR participants may delete other users' messages
+      const callerParticipant = await prisma.liveClassParticipant.findFirst({
+        where: { liveClassId, userId, isActive: true },
+        select: { role: true },
+      });
+      const isPrivileged =
+        callerParticipant && ['HOST', 'MODERATOR'].includes(callerParticipant.role);
+      if (!isPrivileged) {
+        return errorResponse(res, 'Only the host, a moderator, or the message author can delete this message', 403);
+      }
     }
 
     await prisma.liveClassMessage.update({
@@ -2059,9 +2177,7 @@ async function uploadCoverImage(req, res, next) {
 
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId); // P0-01
-    // OWN-10 / DEL-HOST: Cover image upload is HOST-only (creator or delegated host).
-    assertHostOrDelegate(lc, req.user);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req); // P0-01
 
     const path    = require('path');
     const { v4: uuidv4 } = require('uuid');
@@ -2114,10 +2230,10 @@ async function setVideoState(req, res, next) {
       return errorResponse(res, 'You can only update your own video state', 403);
     }
 
-    // P0-01: school isolation check
+    // P0-01: school isolation check (explicit PUBLIC guard for clarity)
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
 
     const p = await prisma.liveClassParticipant.findFirst({ where: { liveClassId: id, userId, isActive: true } });
     if (!p) return errorResponse(res, 'Participant not found', 404);
@@ -2131,456 +2247,233 @@ async function setVideoState(req, res, next) {
   } catch (e) { next(e); }
 }
 
-// ─── ASSIGN DELEGATED HOST ────────────────────────────────────────────────────
-// PATCH /live-classes/:id/host
-// Only the creator (hostUserId) may assign a delegated operational host.
-// The target must be an active school staff member (TEACHER or SCHOOL_ADMIN)
-// in the same school as the live class.
-// Only SCHOOL streams support delegation — PUBLIC streams remain creator-only.
-async function assignDelegatedHost(req, res, next) {
+// ─── MODERATOR MANAGEMENT ────────────────────────────────────────────────────
+async function promoteToModerator(req, res, next) {
   try {
-    const { id } = req.params;
-    const { userId: targetUserId } = req.body;
-
-    if (!targetUserId) return errorResponse(res, 'userId is required', 400);
-
-    // Fetch class (raw SQL — handles pre-generate Prisma client)
+    const { id, userId } = req.params;
+    const requesterId = req.user.id;
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
 
-    // PUBLIC streams: no delegation support
-    if (lc.streamType !== 'SCHOOL') {
-      return errorResponse(res, 'Delegated hosting is only available for school live classes', 400);
+    // Only the creator (HOST) can promote to moderator
+    const isCreator = lc.hostUserId === requesterId ||
+      (lc.teacher && lc.teacher.userId === requesterId);
+    if (!isCreator) {
+      // Check if they're HOST in participants
+      const requesterP = await prisma.liveClassParticipant.findFirst({
+        where: { liveClassId: id, userId: requesterId, isActive: true, role: 'HOST' }
+      });
+      if (!requesterP) return errorResponse(res, 'Only the host can promote moderators', 403);
     }
 
-    // School isolation
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // Only creator may assign
-    if (lc.hostUserId !== req.user.id) {
-      return errorResponse(res, 'Only the class creator can assign a delegated host', 403);
-    }
-
-    // Cannot assign to banned/ended/cancelled class
-    if (lc.status === 'ENDED' || lc.status === 'CANCELLED') {
-      return errorResponse(res, 'Cannot assign a delegated host to an ended or cancelled class', 400);
-    }
-
-    // Self-assignment normalisation: assigning the creator → clear delegation (idempotent)
-    if (targetUserId === lc.hostUserId) {
-      if (!lc.delegatedHostId) {
-        // Already no delegation — idempotent no-op
-        return successResponse(res, { delegatedHostId: null }, 'No delegation change needed');
-      }
-      // Clear delegation
-      await prisma.$executeRawUnsafe(
-        'UPDATE live_classes SET delegated_host_id = NULL, updatedAt = NOW() WHERE id = ?',
-        id
-      );
-      const io = getIo();
-      if (io) {
-        io.to(`liveclass:${id}`).emit('liveclass:host_assigned', {
-          liveClassId: id,
-          delegatedHostId: null,
-          assignedByUserId: req.user.id,
-        });
-      }
-      return successResponse(res, { delegatedHostId: null }, 'Delegated host cleared (self-assignment normalised)');
-    }
-
-    // Verify the target is an active TEACHER or SCHOOL_ADMIN in this school
-    const membership = await prisma.schoolMembership.findFirst({
-      where: {
-        userId: targetUserId,
-        schoolId: lc.schoolId,
-        deletedAt: null,
-      },
-      select: { role: true, status: true },
+    const p = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId: id, userId, isActive: true }
     });
+    if (!p) return errorResponse(res, 'Participant not found or not active', 404);
+    if (p.role === 'HOST') return errorResponse(res, 'Cannot promote the host', 400);
 
-    if (!membership) {
-      return errorResponse(res, 'Target user is not a member of this school', 403);
-    }
-    if (membership.status && membership.status !== 'ACTIVE') {
-      return errorResponse(res, 'Target user does not have an active school membership', 403);
-    }
-    const eligibleRoles = ['TEACHER', 'SCHOOL_ADMIN'];
-    if (!eligibleRoles.includes(membership.role)) {
-      return errorResponse(res, 'Only a TEACHER or SCHOOL_ADMIN can be assigned as delegated host', 403);
-    }
-
-    // Verify target user exists and is not banned
-    const targetUser = await prisma.user.findFirst({
-      where: { id: targetUserId },
-      select: { id: true, firstName: true, lastName: true, role: true },
-    });
-    if (!targetUser) return errorResponse(res, 'Target user not found', 404);
-    if (targetUser.role === 'SUPER_ADMIN') {
-      return errorResponse(res, 'SUPER_ADMIN cannot be assigned as delegated host', 403);
-    }
-
-    // Atomic assignment — also verifies class is still not ENDED/CANCELLED
-    const result = await prisma.$executeRawUnsafe(
-      `UPDATE live_classes SET delegated_host_id = ?, updatedAt = NOW()
-       WHERE id = ? AND status NOT IN ('ENDED', 'CANCELLED')`,
-      targetUserId, id
+    await prisma.$executeRawUnsafe(
+      `UPDATE live_class_participants SET role = 'MODERATOR', updatedAt = NOW() WHERE id = ?`,
+      p.id
     );
 
-    if (result === 0) {
-      return errorResponse(res, 'Class has ended or been cancelled — cannot assign delegated host', 400);
-    }
-
-    // If target has an active participant record, update their role to HOST
-    const existingParticipant = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId: targetUserId, isActive: true },
+    const io = getIo();
+    if (io) io.to(`liveclass:${id}`).emit('liveclass:moderator_promoted', {
+      liveClassId: id, userId, promotedBy: requesterId,
     });
-    if (existingParticipant) {
-      await prisma.liveClassParticipant.update({
-        where: { id: existingParticipant.id },
-        data: { role: 'HOST', isMuted: false },
+
+    return successResponse(res, null, 'Participant promoted to moderator');
+  } catch (e) { next(e); }
+}
+
+async function demoteModerator(req, res, next) {
+  try {
+    const { id, userId } = req.params;
+    const requesterId = req.user.id;
+    const lc = await findLiveClass(id);
+    if (!lc) return errorResponse(res, 'Live class not found', 404);
+    if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
+
+    const isCreator = lc.hostUserId === requesterId ||
+      (lc.teacher && lc.teacher.userId === requesterId);
+    if (!isCreator) {
+      const requesterP = await prisma.liveClassParticipant.findFirst({
+        where: { liveClassId: id, userId: requesterId, isActive: true, role: 'HOST' }
       });
+      if (!requesterP) return errorResponse(res, 'Only the host can demote moderators', 403);
     }
 
-    // Audit log
+    const modRows = await prisma.$queryRawUnsafe(
+      `SELECT id FROM live_class_participants WHERE liveClassId = ? AND userId = ? AND role = 'MODERATOR' LIMIT 1`,
+      id, userId
+    );
+    if (!modRows || modRows.length === 0) return errorResponse(res, 'Participant is not a moderator', 404);
+
+    await prisma.$executeRawUnsafe(
+      `UPDATE live_class_participants SET role = 'STUDENT', updatedAt = NOW() WHERE id = ?`,
+      modRows[0].id
+    );
+
+    const io = getIo();
+    if (io) io.to(`liveclass:${id}`).emit('liveclass:moderator_demoted', {
+      liveClassId: id, userId, demotedBy: requesterId,
+    });
+
+    return successResponse(res, null, 'Moderator role removed');
+  } catch (e) { next(e); }
+}
+
+// ─── ADMIN TERMINATE ──────────────────────────────────────────────────────────
+// POST /api/v1/admin/live-classes/:id/terminate
+// SUPER_ADMIN only — force-ends any live class or public stream regardless of who
+// created it. Needed for platform moderation (policy violations, abuse reports).
+// Does NOT create a LiveClassParticipant record for the admin.
+async function terminateLiveClass(req, res, next) {
+  try {
+    if (req.user.role !== 'SUPER_ADMIN') {
+      return errorResponse(res, 'Forbidden — SUPER_ADMIN only', 403);
+    }
+
+    const lc = await findLiveClass(req.params.id);
+    if (!lc) return errorResponse(res, 'Live class not found', 404);
+    if (lc.status === 'ENDED' || lc.status === 'CANCELLED') {
+      return errorResponse(res, 'Stream is already ended', 400);
+    }
+
+    // Cancel any pending auto-end timer
+    cancelAutoEnd(lc.id);
+
+    await _endLiveClassById(lc);
+
+    logger.info(`[admin-terminate] Live class ${lc.id} force-terminated by SUPER_ADMIN ${req.user.id}`);
+    return successResponse(res, null, 'Stream terminated');
+  } catch (e) { next(e); }
+}
+
+// ─── LS-GAP-003 FIX: Host transfer for live classes (PUBLIC streams) ──────────
+// Transfers HOST role from the current host to an active participant.
+//
+// Rules:
+//   - Only the current HOST can initiate the transfer (same as voice rooms)
+//   - For PUBLIC streams: checked via lc.hostUserId match OR participant role = HOST
+//   - For SCHOOL streams: checked via participant role = HOST
+//   - Target must be an active participant in this class
+//   - Target must not already be HOST
+//   - Atomic: demote old host to STUDENT, promote target to HOST, update hostUserId (PUBLIC only)
+//
+// Route: POST /live-classes/:id/transfer/:userId
+async function transferHost(req, res, next) {
+  try {
+    const { id: liveClassId, userId: targetUserId } = req.params;
+    const callerId = req.user.id;
+
+    if (targetUserId === callerId) {
+      return errorResponse(res, 'Cannot transfer host to yourself', 400);
+    }
+
+    const lc = await findLiveClass(liveClassId);
+    if (!lc) return errorResponse(res, 'Live class not found', 404);
+    if (lc.status === 'ENDED' || lc.status === 'CANCELLED') {
+      return errorResponse(res, 'Cannot transfer host on an ended class', 400);
+    }
+
+    // Verify caller is currently the HOST
+    // For PUBLIC streams: hostUserId must match OR participant record role = HOST
+    const callerParticipant = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId, userId: callerId, isActive: true },
+      select: { id: true, role: true },
+    });
+
+    const isPublicHostByUserId = lc.streamType === 'PUBLIC' && lc.hostUserId === callerId;
+    const isHostByParticipant  = callerParticipant?.role === 'HOST';
+
+    if (!isPublicHostByUserId && !isHostByParticipant) {
+      return errorResponse(res, 'Only the current host can transfer ownership', 403);
+    }
+
+    // Verify target is an active participant
+    const targetParticipant = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId, userId: targetUserId, isActive: true },
+      include: { user: { select: { id: true, firstName: true, lastName: true } } },
+    });
+    if (!targetParticipant) {
+      return errorResponse(res, 'Target participant not found or not active in this class', 404);
+    }
+    if (targetParticipant.role === 'HOST') {
+      return errorResponse(res, 'Target is already the host', 400);
+    }
+
+    // Atomic transfer — demote old host, promote target, update hostUserId for PUBLIC
     try {
-      await prisma.auditLog.create({
-        data: {
-          userId: req.user.id,
-          schoolId: lc.schoolId,
-          action: 'CREATE',
-          entity: 'live_class_host_assignment',
-          entityId: id,
-          newValues: {
-            assignedUserId: targetUserId,
-            liveClassId: id,
-            assignedByUserId: req.user.id,
-          },
-        },
+      await prisma.$transaction(async (tx) => {
+        // Demote old host → STUDENT (if they have a participant record)
+        if (callerParticipant) {
+          await tx.liveClassParticipant.update({
+            where: { id: callerParticipant.id },
+            data:  { role: 'STUDENT', updatedAt: new Date() },
+          });
+        }
+
+        // Promote target → HOST
+        await tx.liveClassParticipant.update({
+          where: { id: targetParticipant.id },
+          data:  { role: 'HOST', isMuted: false, updatedAt: new Date() },
+        });
+
+        // For PUBLIC streams: update host_user_id so future joins/token checks
+        // recognise the new host. Use raw SQL (streamType column compatibility).
+        if (lc.streamType === 'PUBLIC') {
+          // Guard: only update if hostUserId still matches the caller (race protection)
+          const updated = await tx.$executeRawUnsafe(
+            `UPDATE live_classes SET host_user_id = ?, updatedAt = NOW() WHERE id = ? AND host_user_id = ?`,
+            targetUserId, liveClassId, callerId
+          );
+          if (updated === 0) {
+            const err = new Error('Host has already changed — transfer was rejected');
+            err.status = 409;
+            throw err;
+          }
+        }
       });
-    } catch (auditErr) {
-      logger.warn(`[assignDelegatedHost] Audit log failed: ${auditErr.message}`);
+    } catch (txErr) {
+      if (txErr.status) return errorResponse(res, txErr.message, txErr.status);
+      throw txErr;
     }
 
-    // Socket: notify all participants in the class
+    // Broadcast role changes to all room participants
     const io = getIo();
     if (io) {
-      io.to(`liveclass:${id}`).emit('liveclass:host_assigned', {
-        liveClassId: id,
-        delegatedHostId: targetUserId,
-        assignedByUserId: req.user.id,
+      io.to(`liveclass:${liveClassId}`).emit('liveclass:host_transferred', {
+        liveClassId,
+        newHostId:   targetUserId,
+        prevHostId:  callerId,
+        newHostName: `${targetParticipant.user.firstName} ${targetParticipant.user.lastName}`,
       });
-      // Notify the assigned user on their personal room
-      io.to(`user:${targetUserId}`).emit('liveclass:host_assigned', {
-        liveClassId: id,
-        delegatedHostId: targetUserId,
-        assignedByUserId: req.user.id,
+      // Individual role-change events so the client can update each participant tile
+      io.to(`liveclass:${liveClassId}`).emit('liveclass:role_changed', {
+        liveClassId, userId: targetUserId, role: 'HOST',
+      });
+      io.to(`liveclass:${liveClassId}`).emit('liveclass:role_changed', {
+        liveClassId, userId: callerId, role: 'STUDENT',
+      });
+      // Direct notification to the new host
+      io.to(`user:${targetUserId}`).emit('liveclass:you_are_host', {
+        liveClassId,
+        message: 'You are now the host of this stream!',
       });
     }
+
+    logger.info(`[live-class] Host transferred in ${liveClassId}: ${callerId} → ${targetUserId}`);
 
     return successResponse(res, {
-      delegatedHostId: targetUserId,
-      assignedBy: req.user.id,
-    }, 'Delegated host assigned');
-  } catch (e) { next(e); }
-}
-
-// ─── REVOKE DELEGATED HOST ────────────────────────────────────────────────────
-// DELETE /live-classes/:id/host
-// Only the creator (hostUserId) may revoke the delegation.
-// Atomically clears delegatedHostId and reverts the delegated user's
-// participant role to MODERATOR (staff) or STUDENT based on SchoolMembership.
-async function revokeDelegatedHost(req, res, next) {
-  try {
-    const { id } = req.params;
-
-    const lc = await findLiveClass(id);
-    if (!lc) return errorResponse(res, 'Live class not found', 404);
-
-    // PUBLIC streams: no delegation support
-    if (lc.streamType !== 'SCHOOL') {
-      return errorResponse(res, 'Delegated hosting is only available for school live classes', 400);
-    }
-
-    // School isolation
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // Only creator may revoke
-    if (lc.hostUserId !== req.user.id) {
-      return errorResponse(res, 'Only the class creator can revoke a delegated host', 403);
-    }
-
-    // Nothing to revoke
-    if (!lc.delegatedHostId) {
-      return errorResponse(res, 'No delegated host to revoke', 400);
-    }
-
-    const revokedUserId = lc.delegatedHostId;
-
-    // Atomic revoke: clear delegation. Check class is not already ended.
-    const result = await prisma.$executeRawUnsafe(
-      `UPDATE live_classes SET delegated_host_id = NULL, updatedAt = NOW()
-       WHERE id = ? AND delegated_host_id = ?`,
-      id, revokedUserId
-    );
-
-    if (result === 0) {
-      // Either already revoked by a concurrent request, or class state changed — idempotent
-      return successResponse(res, { revokedUserId: null }, 'Delegation already revoked');
-    }
-
-    // If revoked user has an active participant record, derive fallback role from SchoolMembership
-    const existingParticipant = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId: revokedUserId, isActive: true },
-      select: { id: true, wasKicked: true },
-    });
-
-    if (existingParticipant && !existingParticipant.wasKicked) {
-      // Derive fallback role from current SchoolMembership
-      let fallbackRole = 'STUDENT';
-      try {
-        const membership = await prisma.schoolMembership.findFirst({
-          where: { userId: revokedUserId, schoolId: lc.schoolId, deletedAt: null },
-          select: { role: true },
-        });
-        if (membership && ['TEACHER', 'SCHOOL_ADMIN'].includes(membership.role)) {
-          fallbackRole = 'MODERATOR';
-        }
-      } catch (_e) {
-        // Non-fatal — fall back to STUDENT if membership lookup fails
-      }
-
-      await prisma.liveClassParticipant.update({
-        where: { id: existingParticipant.id },
-        data: { role: fallbackRole, isMuted: true },
-      });
-    }
-    // Do NOT create a participant record if one doesn't exist.
-    // Do NOT alter kicked participants.
-
-    // Audit log
-    try {
-      await prisma.auditLog.create({
-        data: {
-          userId: req.user.id,
-          schoolId: lc.schoolId,
-          action: 'DELETE',
-          entity: 'live_class_host_assignment',
-          entityId: id,
-          oldValues: {
-            revokedUserId,
-            liveClassId: id,
-            revokedByUserId: req.user.id,
-          },
-        },
-      });
-    } catch (auditErr) {
-      logger.warn(`[revokeDelegatedHost] Audit log failed: ${auditErr.message}`);
-    }
-
-    // Socket: notify room + notify the revoked user personally
-    const io = getIo();
-    if (io) {
-      io.to(`liveclass:${id}`).emit('liveclass:host_revoked', {
-        liveClassId: id,
-        revokedUserId,
-      });
-      io.to(`user:${revokedUserId}`).emit('liveclass:your_host_revoked', {
-        liveClassId: id,
-      });
-    }
-
-    return successResponse(res, { revokedUserId }, 'Delegated host revoked');
-  } catch (e) { next(e); }
-}
-
-// ─── INVITE TO STAGE ──────────────────────────────────────────────────────────
-// Host/Moderator can directly invite an audience member to the speaker stage
-// without requiring a hand raise. Enforces maxSpeakers cap.
-async function inviteToStage(req, res, next) {
-  try {
-    const { id, userId } = req.params;
-    const lc = await findLiveClass(id);
-    if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // Verify caller is HOST or MODERATOR (participant record — not global role)
-    const caller = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId: req.user.id, isActive: true },
-    });
-    if (!caller || (caller.role !== 'HOST' && caller.role !== 'MODERATOR')) {
-      return errorResponse(res, 'Only the host or moderator can invite to stage', 403);
-    }
-
-    // H-6 FIX: Idempotency — if target already on stage, return existing slot
-    const target = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId, isActive: true },
-    });
-    if (!target) return errorResponse(res, 'Participant not found', 404);
-    if (target.speakerSlot != null) {
-      return successResponse(res, { speakerSlot: target.speakerSlot }, 'Participant is already on stage');
-    }
-
-    // H-5 FIX: Same atomic slot assignment as approveHand
-    const maxSpeakers = lc.maxSpeakers ?? 20;
-    const activeSpeakers = await prisma.liveClassParticipant.findMany({
-      where: { liveClassId: id, isActive: true, speakerSlot: { not: null } },
-      orderBy: { speakerSlot: 'asc' },
-      select: { speakerSlot: true },
-    });
-    if (activeSpeakers.length >= maxSpeakers) {
-      return errorResponse(res, `Stage is full (max ${maxSpeakers} speakers)`, 400);
-    }
-    const usedSlots = new Set(activeSpeakers.map(s => s.speakerSlot));
-    let slot = 0;
-    while (usedSlots.has(slot)) slot++;
-
-    // Atomic conditional UPDATE
-    const result = await prisma.$executeRawUnsafe(`
-      UPDATE live_class_participants
-      SET speakerSlot = ?, isMuted = 0, handRaised = 0, updatedAt = NOW()
-      WHERE liveClassId = ?
-        AND userId = ?
-        AND isActive = 1
-        AND speakerSlot IS NULL
-        AND (
-          SELECT COUNT(*) FROM (
-            SELECT 1 FROM live_class_participants
-            WHERE liveClassId = ? AND isActive = 1 AND speakerSlot IS NOT NULL
-          ) AS _cnt
-        ) < ?
-    `, slot, id, userId, id, maxSpeakers);
-
-    if (result === 0) {
-      const recheck = await prisma.liveClassParticipant.findFirst({
-        where: { liveClassId: id, userId, isActive: true },
-        select: { speakerSlot: true },
-      });
-      if (recheck?.speakerSlot != null) {
-        return successResponse(res, { speakerSlot: recheck.speakerSlot }, 'Participant is already on stage');
-      }
-      return errorResponse(res, `Stage is full (max ${maxSpeakers} speakers)`, 400);
-    }
-
-    const io = getIo();
-    if (io) {
-      // H-6 FIX: Use liveclass:speaker_added (not hand_approved) for direct invitations.
-      // Keep hand_approved emitted too so any legacy hand-queue listeners still work
-      // if someone had raised their hand before the invite.
-      io.to(`liveclass:${id}`).emit('liveclass:speaker_added', { liveClassId: id, userId, speakerSlot: slot });
-      // H-1 FIX: grant_mic → target user's private room triggers LiveKit reconnect
-      io.to(`user:${userId}`).emit('liveclass:grant_mic', { liveClassId: id, speakerSlot: slot });
-    }
-    return successResponse(res, { speakerSlot: slot }, 'Participant invited to stage');
-  } catch (e) {
-    // PHASE-3 FIX: Handle MySQL ER_DUP_ENTRY / Prisma unique constraint violation.
-    // Prisma wraps $executeRawUnsafe MySQL errors as P2010 with 1062 in the message.
-    const msg = (e?.message || '') + JSON.stringify(e?.meta || {});
-    const isDup =
-      e?.code === 'P2002' ||
-      e?.code === 'P2010' ||
-      e?.code === 'ER_DUP_ENTRY' ||
-      msg.includes('Unique constraint') ||
-      msg.includes('ER_DUP_ENTRY') ||
-      msg.includes('Duplicate entry') ||
-      msg.includes('1062');
-    if (isDup) {
-      return errorResponse(res, 'Stage is full — slot already taken', 400);
-    }
-    next(e);
-  }
-}
-
-// ─── DEMOTE FROM STAGE ────────────────────────────────────────────────────────
-// Host/Moderator can move an active speaker back to the audience.
-// Clears speakerSlot and re-mutes the participant.
-async function demoteFromStage(req, res, next) {
-  try {
-    const { id, userId } = req.params;
-    const lc = await findLiveClass(id);
-    if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    // Verify caller is HOST or MODERATOR
-    const caller = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId: req.user.id, isActive: true },
-    });
-    if (!caller || (caller.role !== 'HOST' && caller.role !== 'MODERATOR')) {
-      return errorResponse(res, 'Only the host or moderator can demote speakers', 403);
-    }
-
-    const target = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId, isActive: true },
-    });
-    if (!target) return errorResponse(res, 'Participant not found', 404);
-    if (target.role === 'HOST') return errorResponse(res, 'Cannot demote the host', 400);
-
-    await prisma.liveClassParticipant.update({
-      where: { id: target.id },
-      data: { speakerSlot: null, isMuted: true },
-    });
-
-    const io = getIo();
-    if (io) {
-      // H-7 FIX: emit the full set of demotion events clients are wired for
-      // liveclass:speaker_removed → all clients: remove from speaker grid
-      io.to(`liveclass:${id}`).emit('liveclass:speaker_removed', { liveClassId: id, userId });
-      // liveclass:speaker_demoted → all clients: alternative demotion event
-      io.to(`liveclass:${id}`).emit('liveclass:speaker_demoted', { liveClassId: id, userId });
-      // liveclass:revoke_mic → target user only: reconnect LiveKit with canPublish=false
-      io.to(`user:${userId}`).emit('liveclass:revoke_mic', { liveClassId: id });
-      // liveclass:you_were_demoted → target user only: show notification
-      io.to(`user:${userId}`).emit('liveclass:you_were_demoted', { liveClassId: id });
-    }
-
-    // PH17-004 FIX: Revoke SFU publish capability on speaker demotion — best-effort.
-    // The demoted speaker's existing token may still carry canPublish:true.
-    // sfuRevokePublish sets canPublish=false on their live SFU connection immediately
-    // so the mic is silenced at the SFU level, not just in the client UI.
-    const { sfuRevokePublish } = require('../utils/livekitService');
-    sfuRevokePublish(lc.livekitRoomName || `liveclass-${id}`, userId, false, '[live-class:demote]').catch(() => {});
-
-    return successResponse(res, null, 'Participant moved to audience');
-  } catch (e) { next(e); }
-}
-
-// ─── DROP MIC (Live Class self-demotion) ──────────────────────────────────────
-// A speaker voluntarily returns to the audience.
-// Clears speakerSlot, re-mutes in DB, emits revoke_mic + speaker_removed.
-// Does NOT remove the participant from the class — membership is preserved.
-async function dropMicLiveClass(req, res, next) {
-  try {
-    const { id } = req.params;
-    const userId = req.user.id;
-
-    const lc = await findLiveClass(id);
-    if (!lc) return errorResponse(res, 'Live class not found', 404);
-    assertSchoolAccess(lc, req.user, req.schoolId);
-
-    const participant = await prisma.liveClassParticipant.findFirst({
-      where: { liveClassId: id, userId, isActive: true },
-    });
-    if (!participant) return errorResponse(res, 'You are not an active participant', 404);
-    // HOST cannot drop their own mic via this endpoint — they must end the class
-    if (participant.role === 'HOST') return errorResponse(res, 'Host cannot drop mic — use end class instead', 400);
-    if (participant.speakerSlot == null) {
-      // Already audience — idempotent, nothing to do
-      return successResponse(res, null, 'Already in audience');
-    }
-
-    await prisma.liveClassParticipant.update({
-      where: { id: participant.id },
-      data: { speakerSlot: null, isMuted: true },
-    });
-
-    const io = getIo();
-    if (io) {
-      // All clients: remove from speaker grid
-      io.to(`liveclass:${id}`).emit('liveclass:speaker_removed', { liveClassId: id, userId });
-      // Caller's own LiveKit reconnect (revoke publish permission)
-      io.to(`user:${userId}`).emit('liveclass:revoke_mic', { liveClassId: id });
-    }
-    return successResponse(res, null, 'Mic dropped — returned to audience');
-  } catch (e) { next(e); }
+      liveClassId,
+      newHostId:  targetUserId,
+      prevHostId: callerId,
+      newHostRole: 'HOST',
+      prevHostRole: 'STUDENT',
+    }, `Host transferred to ${targetParticipant.user.firstName} ${targetParticipant.user.lastName}`);
+  } catch (err) { next(err); }
 }
 
 module.exports = {
@@ -2588,12 +2481,13 @@ module.exports = {
   startLiveClass, endLiveClass, joinLiveClass, leaveLiveClass, getLiveKitToken,
   getParticipants, muteParticipant, muteAll, unmuteAll, kickParticipant,
   raiseHand, lowerHand, approveHand, rejectHand, getHandQueue, lowerAllHands,
-  inviteToStage, demoteFromStage, dropMicLiveClass,
+  dropMic, demoteSpeaker, inviteToStage,
   sendMessage, getMessages, deleteMessage, getAttendance, requestSpeak, toggleOpenMic,
   startRecording, stopRecording, broadcastPoll, getPollState, broadcastDraw, getWhiteboardState,
   broadcastQuranPosition, uploadCoverImage, setVideoState,
-  // DEL-HOST: Delegated host assignment / revocation
-  assignDelegatedHost, revokeDelegatedHost,
+  promoteToModerator, demoteModerator,
+  terminateLiveClass,
+  transferHost,
   // GAP-04: exported so app.js can call scheduleAutoEnd during startup recovery
   scheduleAutoEnd,
 };
