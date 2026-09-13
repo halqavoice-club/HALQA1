@@ -35,7 +35,6 @@ export default function CreateLiveClassScreen() {
   const [quranPanel,   setQuranPanel]  = useState(false);
   const [screenShare,  setScreenShare] = useState(true);
   const [isRecorded,   setIsRecorded]  = useState(false);
-  const [maxParticipants, setMaxParticipants] = useState('100');
   const [loading,      setLoading]     = useState(false);
 
   // iOS date picker modal state
@@ -85,19 +84,12 @@ export default function CreateLiveClassScreen() {
   const clearSchedule = () => setScheduledAt(null);
 
   const handleCreate = async () => {
-    if (!title.trim()) { showMessage({ message: 'Title is required', type: 'warning' }); return; }
-    if (!classId)      { showMessage({ message: 'Please select a class', type: 'warning' }); return; }
-
-    const maxP = parseInt(maxParticipants, 10);
-    if (!maxParticipants || isNaN(maxP) || maxP < 1 || maxP > 1000) {
-      showMessage({ message: 'Max participants must be between 1 and 1000', type: 'warning' });
-      return;
-    }
+    if (!classId) { showMessage({ message: 'Please select a class', type: 'warning' }); return; }
 
     setLoading(true);
     try {
       const res = await api.post('/live-classes', {
-        title:             title.trim(),
+        title:             title.trim() || undefined,
         description:       description.trim() || undefined,
         classId,
         scheduledAt:       scheduledAt ? scheduledAt.toISOString() : undefined,
@@ -108,7 +100,6 @@ export default function CreateLiveClassScreen() {
         quranPanelEnabled: quranPanel,
         screenShareEnabled: screenShare,
         isRecorded,
-        maxParticipants:   maxP,
       });
       const lc = res.data.data;
       showMessage({ message: '🎥 Live class created!', type: 'success' });
@@ -139,7 +130,7 @@ export default function CreateLiveClassScreen() {
             keyboardShouldPersistTaps="handled">
 
             {/* Title */}
-            <Text style={st.label}>Title *</Text>
+            <Text style={st.label}>Title <Text style={{ color: '#94a3b8', fontWeight: '400', textTransform: 'none' }}>(optional)</Text></Text>
             <TextInput style={st.input} value={title} onChangeText={setTitle}
               placeholder="e.g. Quran Level 2 — Chapter 5"
               placeholderTextColor="#94a3b8" maxLength={120} />
@@ -204,18 +195,6 @@ export default function CreateLiveClassScreen() {
                   trackColor={{ true: '#6366f1', false: '#e2e8f0' }} thumbColor="#fff" />
               </View>
             ))}
-
-            {/* Max participants */}
-            <Text style={st.label}>Max Participants</Text>
-            <TextInput
-              style={st.input}
-              value={maxParticipants}
-              onChangeText={v => setMaxParticipants(v.replace(/[^0-9]/g, ''))}
-              placeholder="100"
-              placeholderTextColor="#94a3b8"
-              keyboardType="number-pad"
-              maxLength={4}
-            />
 
             {/* Create button */}
             <TouchableOpacity

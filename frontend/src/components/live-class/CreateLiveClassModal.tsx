@@ -34,11 +34,11 @@ const ROOM_TYPES: { id: RoomType; label: string; sub: string; icon: React.ReactN
 const schema = z.object({
   streamType:         z.enum(['SCHOOL', 'PUBLIC']).default('SCHOOL'),
   classId:            z.string().optional(),
-  title:              z.string().min(1, 'Title required').max(120),
+  title:              z.string().max(120).optional(),
   description:        z.string().optional(),
   scheduledAt:        z.string().optional(),
   duration:           z.number().int().min(1).max(480).nullable().optional(),
-  maxParticipants:    z.number().int().min(2).optional(),
+  // maxParticipants removed — streams are unlimited
   chatEnabled:        z.boolean().default(true),
   handRaiseEnabled:   z.boolean().default(true),
   quranPanelEnabled:  z.boolean().default(false),
@@ -83,7 +83,7 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
       duration: undefined,
       chatEnabled: true, handRaiseEnabled: true,
       quranPanelEnabled: false, whiteboardEnabled: true,
-      screenShareEnabled: true, isRecorded: false, maxParticipants: undefined,
+      screenShareEnabled: true, isRecorded: false,
     },
   })
 
@@ -91,7 +91,7 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
     mutationFn: async (data: Form) => {
       const payload: Record<string, any> = {
         streamType:         data.streamType,
-        title:              data.title,
+        title:              data.title?.trim() || undefined,
         description:        data.description || null,
         // FIX: wire actual form values instead of hardcoded nulls
         duration:           roomType === 'limited' && data.duration != null
@@ -101,7 +101,7 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                               // datetime-local gives "2026-08-28T14:00" — convert to full ISO
                               ? new Date(data.scheduledAt).toISOString()
                               : undefined,
-        maxParticipants:    data.maxParticipants != null ? data.maxParticipants : null,
+        // maxParticipants removed — unlimited
         chatEnabled:        data.chatEnabled,
         handRaiseEnabled:   data.handRaiseEnabled,
         quranPanelEnabled:  data.quranPanelEnabled,
@@ -363,7 +363,7 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
 
                 {/* Title */}
                 <div>
-                  <Label>{streamMode === 'PUBLIC' ? 'Stream Title *' : 'Class Title *'}</Label>
+                  <Label>{streamMode === 'PUBLIC' ? 'Stream Title' : 'Class Title'} <span className="font-normal text-gray-400">(optional)</span></Label>
                   <Input
                     className="mt-1"
                     placeholder={streamMode === 'PUBLIC' ? 'e.g., Arabic Conversation Practice' : 'e.g., Quran Recitation — Surah Al-Baqarah'}
@@ -406,18 +406,6 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                     {errors.duration && <p className="text-xs text-red-500 mt-1">{errors.duration.message}</p>}
                   </div>
                 )}
-
-                {/* Max participants cap */}
-                <div>
-                  <Label>Max Viewers <span className="font-normal text-gray-400">(optional — leave blank for unlimited)</span></Label>
-                  <Input
-                    type="number"
-                    className="mt-1"
-                    placeholder="e.g. 500"
-                    min={2}
-                    {...register('maxParticipants', { valueAsNumber: true })}
-                  />
-                </div>
 
                 {/* Cover image */}
                 <div>

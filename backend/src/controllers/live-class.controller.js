@@ -59,7 +59,7 @@ async function rawCreateLiveClass(data) {
     data.quranPanelEnabled   ? 1 : 0,
     data.isOpenMic           ? 1 : 0,
     data.screenShareEnabled  ? 1 : 0,
-    data.maxParticipants     ?? 100,
+    data.maxParticipants     ?? null,
     data.isRecorded          ? 1 : 0,
     now, now
   );
@@ -124,7 +124,7 @@ function shapeLiveClassRow(row) {
     livekitRoomName:  row.livekitRoomName ?? null,
     recordingUrl:     row.recordingUrl    ?? null,
     coverImageUrl:    row.coverImageUrl   ?? null,
-    maxParticipants:  row.maxParticipants ?? 100,
+    maxParticipants:  row.maxParticipants ?? null,
     isRecorded:       !!row.isRecorded,
     recordingStartedAt: row.recordingStartedAt ?? null,
     chatEnabled:      !!row.chatEnabled,
@@ -210,7 +210,7 @@ async function findLiveClass(id) {
         quranPanelEnabled: !!r.quranPanelEnabled,
         isOpenMic: !!r.isOpenMic,
         screenShareEnabled: !!r.screenShareEnabled,
-        maxParticipants: r.maxParticipants ?? 100,
+        maxParticipants: r.maxParticipants ?? null,
         isRecorded: !!r.isRecorded,
         recordingStartedAt: r.recordingStartedAt ?? null,
         startedAt: r.startedAt ?? null,
@@ -521,13 +521,16 @@ async function createLiveClass(req, res, next) {
       streamType = 'SCHOOL',
       isPublic,            // convenience alias
       classId,
-      title, description,
+      title: rawTitle, description,
       scheduledAt, duration = null,
       chatEnabled = true, handRaiseEnabled = true, whiteboardEnabled = true,
-      quranPanelEnabled = false, maxParticipants = 100, isRecorded = false,
+      quranPanelEnabled = false, isRecorded = false,
       teacherId: explicitTeacherId,
       tags,
     } = req.body;
+
+    // title is optional — generate a default if not provided
+    const title = rawTitle?.trim() || null;
 
     // Normalise stream type
     const resolvedStreamType = (streamType === 'PUBLIC' || isPublic === true) ? 'PUBLIC' : 'SCHOOL';
@@ -540,7 +543,7 @@ async function createLiveClass(req, res, next) {
         schoolId:        null,
         classId:         null,
         teacherId:       null,
-        title,
+        title:           title || 'Live Stream',
         description:     description || null,
         scheduledAt,
         duration,
@@ -548,7 +551,7 @@ async function createLiveClass(req, res, next) {
         handRaiseEnabled,
         whiteboardEnabled,
         quranPanelEnabled,
-        maxParticipants,
+        maxParticipants: null,   // unlimited
         isRecorded,
         status: 'SCHEDULED',
         isOpenMic: true,
@@ -621,10 +624,11 @@ async function createLiveClass(req, res, next) {
       schoolId:     (req.schoolId || req.user.schoolId) || cls.schoolId,
       classId,
       teacherId:    resolvedTeacherId,
-      title, description,
+      title:        title || `${cls.name} — Live Class`,
+      description,
       scheduledAt,
       duration, chatEnabled, handRaiseEnabled, whiteboardEnabled,
-      quranPanelEnabled, maxParticipants, isRecorded,
+      quranPanelEnabled, maxParticipants: null, isRecorded,
       status: 'SCHEDULED',
       isOpenMic: false,
       screenShareEnabled: true,
@@ -828,12 +832,13 @@ async function joinLiveClass(req, res, next) {
       const currentCount = await prisma.liveClassParticipant.count({
         where: { liveClassId: lc.id, isActive: true }
       });
-      if (currentCount >= lc.maxParticipants) {
+      // null = unlimited; only enforce when a positive cap is set
+      if (lc.maxParticipants != null && currentCount >= lc.maxParticipants) {
         return errorResponse(res, `Class is full (max ${lc.maxParticipants} participants)`, 403);
       }
     }
 
-    // For PUBLIC streams: anyone can join, still enforce maxParticipants
+    // For PUBLIC streams: anyone can join
     if (streamType === 'PUBLIC' && !isPublicHost) {
       const existingRecord = await prisma.liveClassParticipant.findFirst({
         where: { liveClassId: lc.id, userId },
@@ -842,11 +847,14 @@ async function joinLiveClass(req, res, next) {
       if (existingRecord?.wasKicked) {
         return errorResponse(res, 'You have been removed from this stream by the host', 403);
       }
-      const currentCount = await prisma.liveClassParticipant.count({
-        where: { liveClassId: lc.id, isActive: true }
-      });
-      if (currentCount >= lc.maxParticipants) {
-        return errorResponse(res, `Stream is full (max ${lc.maxParticipants} viewers)`, 403);
+      // null = unlimited; only enforce when a positive cap is set
+      if (lc.maxParticipants != null) {
+        const currentCount = await prisma.liveClassParticipant.count({
+          where: { liveClassId: lc.id, isActive: true }
+        });
+        if (currentCount >= lc.maxParticipants) {
+          return errorResponse(res, `Stream is full (max ${lc.maxParticipants} viewers)`, 403);
+        }
       }
     }
 

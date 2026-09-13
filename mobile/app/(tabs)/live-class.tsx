@@ -290,10 +290,6 @@ function GoLiveModal({ visible, onClose, onCreated }: {
   ];
 
   const handleCreate = async () => {
-    if (!title.trim()) {
-      showMessage({ message: 'Please enter a title', type: 'warning' });
-      return;
-    }
     if (roomType === 'scheduled' && !scheduledAt) {
       showMessage({ message: 'Please set a scheduled date/time', type: 'warning' });
       return;
@@ -303,7 +299,7 @@ function GoLiveModal({ visible, onClose, onCreated }: {
     try {
       const res = await api.post('/live-classes', {
         streamType: 'PUBLIC',
-        title: title.trim(),
+        title: title.trim() || undefined,
         description: description.trim() || undefined,
         chatEnabled,
         handRaiseEnabled: true,
@@ -436,7 +432,7 @@ function GoLiveModal({ visible, onClose, onCreated }: {
               </>
             )}
 
-            <Text style={styles.fieldLabel}>Title *</Text>
+            <Text style={styles.fieldLabel}>Title <Text style={{ color: '#9ca3af', fontWeight: '400' }}>(optional)</Text></Text>
             <TextInput
               style={styles.input}
               placeholder="What are you streaming about?"

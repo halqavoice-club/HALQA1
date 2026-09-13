@@ -157,13 +157,12 @@ router.post('/',
   },
   validateZod(createLiveClassSchema),
   [
-    body('title').trim().notEmpty().withMessage('Title required'),
+    body('title').optional().trim(),
     body('duration').optional({ nullable: true }).custom(v => {
       if (v === null || v === undefined) return true;
       if (!Number.isInteger(Number(v)) || Number(v) < 1) throw new Error('duration must be a positive integer');
       return true;
     }),
-    body('maxParticipants').optional().isInt({ min: 1, max: 1000 }),
     body('scheduledAt').optional().isISO8601(),
     body('teacherId').optional().isUUID().withMessage('teacherId must be a valid UUID'),
   ],
@@ -175,7 +174,7 @@ router.patch('/:id',
   resolveStreamStaffAccess,
   validateZod(updateLiveClassSchema),
   [
-    body('title').optional().trim().notEmpty(),
+    body('title').optional().trim(),
     body('duration').optional({ nullable: true }).custom(v => {
       if (v === null || v === undefined) return true;
       if (!Number.isInteger(Number(v)) || Number(v) < 1) throw new Error('duration must be a positive integer');
@@ -188,7 +187,6 @@ router.patch('/:id',
     body('whiteboardEnabled').optional().isBoolean(),
     body('screenShareEnabled').optional().isBoolean(),
     body('isOpenMic').optional().isBoolean(),
-    body('maxParticipants').optional().isInt({ min: 1, max: 1000 }),
   ],
   validate,
   ctrl.updateLiveClass
