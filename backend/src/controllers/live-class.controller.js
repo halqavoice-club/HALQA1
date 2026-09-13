@@ -1075,12 +1075,19 @@ async function muteParticipant(req, res, next) {
 async function muteAll(req, res, next) {
   try {
     const { id } = req.params;
-    // P0-01: school isolation check
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     assertSchoolAccess(lc, req.user);
-    // GAP-01: defence-in-depth host ownership check
-    assertHostAccess(lc, req.user);
+
+    // Allow HOST or MODERATOR (participant record is authoritative for role)
+    const caller = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId: id, userId: req.user.id, isActive: true },
+    });
+    const isHostOrModerator = caller && (caller.role === 'HOST' || caller.role === 'MODERATOR');
+    if (!isHostOrModerator) {
+      return errorResponse(res, 'Only the host or moderator can mute all', 403);
+    }
+
     await prisma.liveClassParticipant.updateMany({
       where: { liveClassId: id, isActive: true, role: { not: 'HOST' } },
       data: { isMuted: true }
@@ -1095,12 +1102,19 @@ async function muteAll(req, res, next) {
 async function unmuteAll(req, res, next) {
   try {
     const { id } = req.params;
-    // P0-01: school isolation check
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     assertSchoolAccess(lc, req.user);
-    // GAP-01: defence-in-depth host ownership check
-    assertHostAccess(lc, req.user);
+
+    // Allow HOST or MODERATOR (participant record is authoritative for role)
+    const caller = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId: id, userId: req.user.id, isActive: true },
+    });
+    const isHostOrModerator = caller && (caller.role === 'HOST' || caller.role === 'MODERATOR');
+    if (!isHostOrModerator) {
+      return errorResponse(res, 'Only the host or moderator can unmute all', 403);
+    }
+
     await prisma.liveClassParticipant.updateMany({
       where: { liveClassId: id, isActive: true, role: { not: 'HOST' } },
       data: { isMuted: false }

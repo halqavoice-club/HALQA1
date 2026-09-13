@@ -3,14 +3,13 @@
  * Full implementation: join/leave, chat, hand raise, teacher host controls
  * Advanced features: Polls, Quran Panel, Whiteboard, View Mode Switch, Screen Share
  */
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
-  ActivityIndicator, Alert, TextInput, KeyboardAvoidingView,
-  Platform, Image, Modal, ScrollView, BackHandler,
-} from 'react-native';
+  ActivityIndicator, Alert, TextInput, Platform, Image, Modal, ScrollView, BackHandler} from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { showMessage } from 'react-native-flash-message';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -24,11 +23,20 @@ import { useLiveKitAudio } from '@/hooks/useLiveKitAudio';
 import { LiveClassPollPanel, type Poll, type PollEvent } from '@/components/live-class/LiveClassPollPanel';
 import { LiveClassQuranPanel, type QuranPosition } from '@/components/live-class/LiveClassQuranPanel';
 import { LiveClassWhiteboard, type DrawEvent, type WhiteboardHandle } from '@/components/live-class/LiveClassWhiteboard';
+import { LiveClassGiftPanel } from '@/components/live-class/LiveClassGiftPanel';
+import { SpeakerGrid } from '@/components/voice/layout/SpeakerGrid';
+import { useDynamicLayoutStore } from '@/components/voice/layout/useDynamicLayoutStore';
+import type { SpeakerSlot } from '../../../src/lib/layout/layoutTypes';
+import { LiveVideoGrid, type VideoSpeaker } from '@/components/live-class/LiveVideoGrid';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface LiveClass {
   id: string; title: string; description?: string;
   host: { id: string; name: string; avatar?: string };
+  // hostUserId — the userId of the creator (used to detect ownership without joining)
+  hostUserId?: string;
+  // streamType — 'SCHOOL' or 'PUBLIC'
+  streamType?: string;
   participantsCount: number;
   status: 'SCHEDULED' | 'LIVE' | 'ENDED' | 'CANCELLED';
   scheduledAt?: string; startedAt?: string;
@@ -48,7 +56,191 @@ interface HandEntry {
 interface Participant {
   userId: string; firstName: string; lastName: string;
   avatarUrl?: string; role: string; isMuted: boolean; handRaised: boolean;
+  /** 0-based seat index on stage. null/undefined means the participant is in the audience. */
+  speakerSlot?: number | null;
 }
+
+// ─── Edit Stream Modal ────────────────────────────────────────────────────────
+function EditStreamModal({ visible, lc, onClose, onUpdated, onDeleted }: {
+  visible: boolean;
+  lc: { id: string; title: string; description?: string; status: string } | null;
+  onClose: () => void;
+  onUpdated: () => void;
+  onDeleted: () => void;
+}) {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // Sync fields when modal opens
+  useEffect(() => {
+    if (lc && visible) {
+      setTitle(lc.title ?? '');
+      setDescription(lc.description ?? '');
+      setConfirmDelete(false);
+    }
+  }, [lc, visible]);
+
+  if (!lc) return null;
+
+  const handleSave = async () => {
+    if (!title.trim()) {
+      showMessage({ message: 'Title is required', type: 'warning' });
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.patch(`/live-classes/${lc.id}`, {
+        title: title.trim(),
+        description: description.trim() || null,
+      });
+      showMessage({ message: '✅ Stream updated', type: 'success' });
+      onUpdated();
+      onClose();
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed to update', type: 'danger' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (lc.status === 'LIVE') {
+      showMessage({ message: 'End the stream first before deleting', type: 'warning' });
+      return;
+    }
+    setDeleting(true);
+    try {
+      await api.delete(`/live-classes/${lc.id}`);
+      showMessage({ message: 'Stream deleted', type: 'success' });
+      onDeleted();
+      onClose();
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed to delete', type: 'danger' });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="formSheet" onRequestClose={onClose}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          {/* Header */}
+          <View style={editStyles.header}>
+            <Text style={editStyles.headerTitle}>Edit Stream</Text>
+            <TouchableOpacity onPress={onClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Ionicons name="close" size={24} color="#374151" />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView contentContainerStyle={editStyles.body} keyboardShouldPersistTaps="handled">
+            {/* Title */}
+            <Text style={editStyles.label}>Title *</Text>
+            <TextInput
+              style={editStyles.input}
+              value={title}
+              onChangeText={setTitle}
+              placeholder="Stream title"
+              placeholderTextColor="#9ca3af"
+              maxLength={120}
+              returnKeyType="next"
+            />
+
+            {/* Description */}
+            <Text style={editStyles.label}>Description</Text>
+            <TextInput
+              style={[editStyles.input, editStyles.inputMulti]}
+              value={description}
+              onChangeText={setDescription}
+              placeholder="Optional description..."
+              placeholderTextColor="#9ca3af"
+              multiline
+              numberOfLines={3}
+              maxLength={500}
+            />
+
+            {/* Save button */}
+            <TouchableOpacity
+              style={[editStyles.saveBtn, saving && { opacity: 0.6 }]}
+              onPress={handleSave}
+              disabled={saving}
+            >
+              {saving
+                ? <ActivityIndicator color="#fff" size="small" />
+                : <Text style={editStyles.saveBtnText}>Save Changes</Text>
+              }
+            </TouchableOpacity>
+
+            {/* Delete section */}
+            <View style={editStyles.deleteSep} />
+            {lc.status !== 'LIVE' ? (
+              !confirmDelete ? (
+                <TouchableOpacity
+                  style={editStyles.deleteBtn}
+                  onPress={() => setConfirmDelete(true)}
+                >
+                  <Ionicons name="trash-outline" size={16} color="#ef4444" />
+                  <Text style={editStyles.deleteBtnText}>Delete Stream</Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={editStyles.confirmBox}>
+                  <Text style={editStyles.confirmText}>
+                    This will permanently delete the stream. Are you sure?
+                  </Text>
+                  <View style={editStyles.confirmBtns}>
+                    <TouchableOpacity
+                      style={editStyles.confirmCancel}
+                      onPress={() => setConfirmDelete(false)}
+                    >
+                      <Text style={editStyles.confirmCancelText}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[editStyles.confirmDelete, deleting && { opacity: 0.6 }]}
+                      onPress={handleDelete}
+                      disabled={deleting}
+                    >
+                      {deleting
+                        ? <ActivityIndicator color="#fff" size="small" />
+                        : <Text style={editStyles.confirmDeleteText}>Yes, Delete</Text>
+                      }
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )
+            ) : (
+              <Text style={editStyles.liveNote}>End the stream first to delete it.</Text>
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+const editStyles = StyleSheet.create({
+  header:           { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  headerTitle:      { fontSize: 18, fontWeight: '800', color: '#111827' },
+  body:             { padding: 20, gap: 4 },
+  label:            { fontSize: 12, fontWeight: '700', color: '#6b7280', marginBottom: 6, marginTop: 16, textTransform: 'uppercase', letterSpacing: 0.5 },
+  input:            { borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 12, padding: 12, fontSize: 15, color: '#111827', backgroundColor: '#f9fafb' },
+  inputMulti:       { height: 88, textAlignVertical: 'top' },
+  saveBtn:          { backgroundColor: '#4f46e5', borderRadius: 12, padding: 14, alignItems: 'center', marginTop: 20 },
+  saveBtnText:      { color: '#fff', fontWeight: '800', fontSize: 15 },
+  deleteSep:        { height: 1, backgroundColor: '#f3f4f6', marginTop: 24, marginBottom: 16 },
+  deleteBtn:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, borderWidth: 1, borderColor: '#fecaca', borderRadius: 12, padding: 13 },
+  deleteBtnText:    { color: '#ef4444', fontWeight: '600', fontSize: 14 },
+  confirmBox:       { backgroundColor: '#fef2f2', borderWidth: 1, borderColor: '#fecaca', borderRadius: 12, padding: 14, gap: 12 },
+  confirmText:      { color: '#b91c1c', fontSize: 14, lineHeight: 20 },
+  confirmBtns:      { flexDirection: 'row', gap: 10 },
+  confirmCancel:    { flex: 1, backgroundColor: '#f3f4f6', borderRadius: 10, padding: 11, alignItems: 'center' },
+  confirmCancelText:{ color: '#374151', fontWeight: '600', fontSize: 14 },
+  confirmDelete:    { flex: 2, backgroundColor: '#ef4444', borderRadius: 10, padding: 11, alignItems: 'center' },
+  confirmDeleteText:{ color: '#fff', fontWeight: '800', fontSize: 14 },
+  liveNote:         { color: '#9ca3af', fontSize: 13, textAlign: 'center', fontStyle: 'italic' },
+});
 
 // ─── Chat Message Row ─────────────────────────────────────────────────────────
 function ChatRow({ msg, myId, isHost, onDelete }: { msg: ChatMessage; myId: string; isHost: boolean; onDelete: (id: string) => void }) {
@@ -124,9 +316,16 @@ function HandQueueModal({ visible, hands, onClose, onApprove, onReject }: {
 }
 
 // ─── Participants Modal (teacher can mute/kick) ───────────────────────────────
-function ParticipantsModal({ visible, participants, myId, onClose, onMute, onKick }: {
+function ParticipantsModal({ visible, participants, myId, onClose, onMute, onKick, onDemote, onInvite, onPromoteMod, onDemoteMod, onTransferHost, isHost }: {
   visible: boolean; participants: Participant[]; myId: string; onClose: () => void;
-  onMute: (userId: string, muted: boolean) => void; onKick: (userId: string, name: string) => void;
+  isHost: boolean;
+  onMute:          (userId: string, muted: boolean) => void;
+  onKick:          (userId: string, name: string) => void;
+  onDemote:        (userId: string, name: string) => void;
+  onInvite:        (userId: string, name: string) => void;
+  onPromoteMod:    (userId: string, name: string) => void;
+  onDemoteMod:     (userId: string, name: string) => void;
+  onTransferHost?: (userId: string, name: string) => void;
 }) {
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="formSheet" onRequestClose={onClose}>
@@ -141,22 +340,59 @@ function ParticipantsModal({ visible, participants, myId, onClose, onMute, onKic
           contentContainerStyle={{ padding: 16, gap: 8 }}
           renderItem={({ item: p }) => {
             const isMe = p.userId === myId;
+            const name = `${p.firstName} ${p.lastName}`;
+            const isOnStage = p.speakerSlot != null || p.role === 'HOST' || p.role === 'MODERATOR';
+            const isModerator = p.role === 'MODERATOR';
             return (
               <View style={styles.pRow}>
-                <Image source={{ uri: avatarUrl(p.avatarUrl, `${p.firstName} ${p.lastName}`) }} style={styles.pAvatar} />
+                <Image source={{ uri: avatarUrl(p.avatarUrl, name) }} style={styles.pAvatar} />
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.pName}>{p.firstName} {p.lastName}{isMe ? ' (you)' : ''}</Text>
-                  <Text style={styles.pRole}>{p.role}{p.handRaised ? ' · ✋' : ''}</Text>
+                  <Text style={styles.pName}>{name}{isMe ? ' (you)' : ''}</Text>
+                  <Text style={styles.pRole}>
+                    {p.role}{p.handRaised ? ' · ✋' : ''}{isOnStage && p.role !== 'HOST' && p.role !== 'MODERATOR' ? ' · 🎙 On Stage' : ''}
+                  </Text>
                 </View>
-                {!isMe && (
+                {!isMe && isHost && (
                   <View style={{ flexDirection: 'row', gap: 6 }}>
                     <TouchableOpacity style={styles.pBtn} onPress={() => onMute(p.userId, !p.isMuted)}>
                       <Ionicons name={p.isMuted ? 'mic-off' : 'mic'} size={16} color={p.isMuted ? '#ef4444' : '#10b981'} />
                     </TouchableOpacity>
+                    {/* Moderator badge toggle */}
+                    {p.role !== 'HOST' && (
+                      <TouchableOpacity
+                        style={[styles.pBtn, { backgroundColor: isModerator ? '#fff7ed' : '#f0fdf4' }]}
+                        onPress={() => isModerator ? onDemoteMod(p.userId, name) : onPromoteMod(p.userId, name)}
+                      >
+                        <Ionicons name={isModerator ? 'shield' : 'shield-outline'} size={16} color={isModerator ? '#f97316' : '#10b981'} />
+                      </TouchableOpacity>
+                    )}
+                    {/* Move to/from stage button */}
+                    {isOnStage && p.role !== 'HOST' && (
+                      <TouchableOpacity style={[styles.pBtn, { backgroundColor: '#fff7ed' }]}
+                        onPress={() => onDemote(p.userId, name)}>
+                        <Ionicons name="arrow-down-outline" size={16} color="#f97316" />
+                      </TouchableOpacity>
+                    )}
+                    {!isOnStage && (
+                      <TouchableOpacity style={[styles.pBtn, { backgroundColor: '#eef2ff' }]}
+                        onPress={() => onInvite(p.userId, name)}>
+                        <Ionicons name="arrow-up-outline" size={16} color="#4f46e5" />
+                      </TouchableOpacity>
+                    )}
                     <TouchableOpacity style={[styles.pBtn, { backgroundColor: '#fef2f2' }]}
-                      onPress={() => onKick(p.userId, `${p.firstName} ${p.lastName}`)}>
+                      onPress={() => onKick(p.userId, name)}>
                       <Ionicons name="exit-outline" size={16} color="#ef4444" />
                     </TouchableOpacity>
+                    {/* Host transfer — only for non-HOST participants; HOST only */}
+                    {p.role !== 'HOST' && isHost && onTransferHost && (
+                      <TouchableOpacity
+                        style={[styles.pBtn, { backgroundColor: '#fefce8' }]}
+                        onPress={() => onTransferHost(p.userId, name)}
+                        accessibilityLabel={`Make ${name} the host`}
+                      >
+                        <Ionicons name="ribbon-outline" size={16} color="#ca8a04" />
+                      </TouchableOpacity>
+                    )}
                   </View>
                 )}
               </View>
@@ -192,6 +428,7 @@ export default function LiveClassScreen() {
   // New feature state
   const [isOpenMic,     setIsOpenMic]     = useState(false);
   const [isRecording,   setIsRecording]   = useState(false);
+  const [speakingUsers, setSpeakingUsers] = useState<Set<string>>(new Set()); // userId set of active speakers
   const [floatingEmoji, setFloatingEmoji] = useState<{ id: string; emoji: string } | null>(null);
   // Advanced teaching tools
   type ActivePanel = 'whiteboard' | 'quran' | 'polls' | null;
@@ -203,15 +440,12 @@ export default function LiveClassScreen() {
   const whiteboardRef = useRef<WhiteboardHandle>(null);
   const [showReactions, setShowReactions] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showGifts, setShowGifts] = useState(false);
   // DI-01: Attendance state for teachers
   const [attendance, setAttendance] = useState<any[]>([]);
   const [loadingAttendance, setLoadingAttendance] = useState(false);
 
-  // isTeacher determines host-level controls in the live class UI.
-  // SUPER_ADMIN is platform-admin only — they must NOT automatically become host
-  // in any live class. They are treated as regular participants unless they are
-  // the actual class host (checked via liveClass.host.id === user.id below).
-  const isTeacher = ['TEACHER','SCHOOL_ADMIN'].includes(user?.role || '');
   // LiveKit real audio (native builds only — degrades gracefully in Expo Go)
   const lk = useLiveKitAudio();
 
@@ -229,6 +463,9 @@ export default function LiveClassScreen() {
           name: `${teacherUser.firstName ?? ''} ${teacherUser.lastName ?? ''}`.trim() || 'Teacher',
           avatar: teacherUser.avatarUrl ?? null,
         },
+        // Expose hostUserId and streamType for ownership checks
+        hostUserId: lc.hostUserId ?? lc.host_user_id ?? null,
+        streamType: lc.streamType ?? lc.stream_type ?? 'SCHOOL',
         participantsCount: lc._count?.participants ?? 0,
         chatEnabled: lc.chatEnabled ?? true,
         handRaiseEnabled: lc.handRaiseEnabled ?? true,
@@ -238,7 +475,97 @@ export default function LiveClassScreen() {
     refetchInterval: isJoined ? 30000 : 10000,
   });
 
-  const isHost = user?.id === liveClass?.host?.id || isTeacher;
+  // ── Host/role detection ────────────────────────────────────────────────────
+  //
+  // ARCHITECTURE RULE: Live Class role comes from the PARTICIPANT RECORD,
+  // not from global User.role. A SCHOOL_ADMIN in School A viewing a live class
+  // in School B is just a STUDENT there — their global role is irrelevant.
+  //
+  // myParticipantRole: what the SERVER assigned when this user joined.
+  // null = not yet joined / data still loading.
+  const myParticipantRole = participants.find(p => p.userId === user?.id)?.role ?? null;
+
+  // isCreator: we created this live class (hostUserId matches our userId).
+  // Used as a pre-join fallback before participant data is available.
+  // liveClass is now in scope (declared above by useQuery).
+  const isCreator = !!liveClass && !!user && liveClass.hostUserId === user.id;
+
+  // isHost: server assigned HOST role when we joined, OR we are the creator.
+  // NEVER derived from global User.role — that causes cross-school admin leaks.
+  const isHost = myParticipantRole === 'HOST' || isCreator;
+
+  // isTeacher: alias kept for socket event handlers and controls visibility.
+  // true if HOST or MODERATOR (both get management controls).
+  const isTeacher = isHost || myParticipantRole === 'MODERATOR';
+
+  // ── Dynamic Layout Store — shared with SpeakerGrid ───────────────────────
+  // We access the store directly (not via useDynamicLayout hook) because
+  // useDynamicLayout registers socket listeners for voice:seat_changed etc.
+  // which are irrelevant in a live class. We only need the store's setSpeakers
+  // and the layout result that SpeakerGrid reads from the same store instance.
+  const layoutStore = useDynamicLayoutStore();
+
+  // ── Derived active-speaker list ───────────────────────────────────────────
+  //
+  // A participant is ON STAGE if:
+  //   1. speakerSlot is a number (assigned by server), OR
+  //   2. role is 'HOST' (hosts are always on stage by definition)
+  //
+  // MODERATOR + no speakerSlot = still audience (moderators must be explicitly
+  // put on stage, unlike the host who is always presenting).
+  const activeSpeakers = useMemo((): SpeakerSlot[] => {
+    const onStage = participants.filter((p): p is Participant =>
+      typeof p.speakerSlot === 'number' || p.role === 'HOST'
+    );
+
+    // Stable sort: HOST first (slot 0), then by speakerSlot asc
+    return onStage
+      .sort((a, b) => {
+        if (a.role === 'HOST' && b.role !== 'HOST') return -1;
+        if (b.role === 'HOST' && a.role !== 'HOST') return 1;
+        const sa = typeof a.speakerSlot === 'number' ? a.speakerSlot : 999;
+        const sb = typeof b.speakerSlot === 'number' ? b.speakerSlot : 999;
+        return sa - sb;
+      })
+      .map((p, idx): SpeakerSlot => ({
+        userId:      p.userId,
+        // HOST gets slot 0 always; others use their assigned slot or sequential index
+        seatIndex:   p.role === 'HOST' ? 0 : (typeof p.speakerSlot === 'number' ? p.speakerSlot : idx),
+        role:        p.role === 'HOST'      ? 'owner'
+                   : p.role === 'MODERATOR' ? 'moderator'
+                   : 'speaker',
+        displayName: `${p.firstName} ${p.lastName}`.trim() || p.userId,
+        avatarUrl:   p.avatarUrl,
+        isMuted:     p.isMuted,
+        isSpeaking:  speakingUsers.has(p.userId), // Sprint 4: wired to voice:speaking socket
+        isOnline:    true,
+        connectionQuality: 'good',
+      }));
+  }, [participants, speakingUsers]);
+
+  // ── VideoSpeaker list for LiveVideoGrid (TikTok-style 4-column grid) ─────
+  const videoSpeakers = useMemo((): VideoSpeaker[] =>
+    activeSpeakers.map((s): VideoSpeaker => ({
+      userId:      s.userId,
+      seatIndex:   s.seatIndex,
+      displayName: s.displayName,
+      avatarUrl:   s.avatarUrl,
+      role:        s.role as VideoSpeaker['role'],
+      isMuted:     s.isMuted,
+      isSpeaking:  s.isSpeaking,
+      isOnline:    s.isOnline,
+    })),
+  [activeSpeakers]);
+
+  // ── Sync activeSpeakers → Dynamic Layout Store ────────────────────────────
+  useEffect(() => {
+    layoutStore.setSpeakers(activeSpeakers);
+  }, [activeSpeakers]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Clear layout store on unmount ─────────────────────────────────────────
+  useEffect(() => {
+    return () => { layoutStore.setSpeakers([]); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sync isOpenMic from server data
   useEffect(() => {
@@ -252,8 +579,9 @@ export default function LiveClassScreen() {
     try {
       const r = await api.get(`/live-classes/${id}/attendance`);
       setAttendance(r.data.data ?? []);
-    } catch {
-      // non-fatal — tab still renders, just empty
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || 'Failed to load attendance';
+      showMessage({ message: msg, type: 'danger', duration: 3000 });
     } finally {
       setLoadingAttendance(false);
     }
@@ -265,7 +593,10 @@ export default function LiveClassScreen() {
     try {
       const r = await api.get(`/live-classes/${id}/hand/queue`);
       setHands(r.data.data ?? []);
-    } catch {}
+    } catch (err: any) {
+      const msg = err?.response?.data?.message || 'Failed to load hand queue';
+      showMessage({ message: msg, type: 'danger', duration: 3000 });
+    }
   }, [id, isHost, isJoined]);
 
   // ── Socket events ────────────────────────────────────────────────────────────
@@ -315,10 +646,10 @@ export default function LiveClassScreen() {
     const onStarted      = ()       => { qc.invalidateQueries({ queryKey: ['live-class', id] }); showMessage({ message: '🔴 Class is now live', type: 'success' }); };
     const onEnded        = ()       => { qc.invalidateQueries({ queryKey: ['live-class', id] }); showMessage({ message: 'Class has ended', type: 'info' }); if (!isHost) router.back(); };
     const onCanSpeak     = ()       => {
-      setIsMuted(false);
       showMessage({ message: '🎙️ You can now speak!', type: 'success' });
-      // Re-enable LiveKit mic if connected
-      if (lk.connected) lk.enableMic().catch(() => {});
+      // DO NOT setIsMuted(false) here — isMuted state will be updated after
+      // grant_mic triggers a LiveKit reconnect and the new token is applied.
+      // Setting it prematurely causes UI/state desync (mic shows unmuted but SFU is still blocking).
     };
     const onKicked       = ()       => { showMessage({ message: 'You were removed from this class', type: 'danger' }); setIsJoined(false); router.back(); };
 
@@ -333,15 +664,14 @@ export default function LiveClassScreen() {
     const onOpenMicChanged = (d: any) => {
       setIsOpenMic(d.isOpenMic);
       showMessage({
-        message: d.isOpenMic ? '🎤 Open mic enabled — you can speak!' : '🔇 Open mic disabled',
+        message: d.isOpenMic
+          ? '🎤 Open mic — raise your hand to speak instantly!'
+          : '🔇 Open mic disabled',
         type: d.isOpenMic ? 'success' : 'info',
         duration: 2000,
       });
-      // If open mic was enabled and we're a student, unmute in LiveKit
-      if (d.isOpenMic && !isHost && lk.connected) {
-        setIsMuted(false);
-        lk.enableMic().catch(() => {});
-      }
+      // MIC-02: Open mic means raiseHand auto-approves with a speakerSlot.
+      // No bulk canPublish grant — each user goes through the queue individually.
     };
 
     // New: recording started/stopped
@@ -373,10 +703,14 @@ export default function LiveClassScreen() {
       }
     };
 
-    // New: hand approved — if it's me, unmute
+    // New: hand approved — assign speakerSlot so the user appears in the grid
     const onHandApproved = (d: any) => {
       setHands(prev => prev.filter(h => h.userId !== d.userId));
-      setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, handRaised: false, isMuted: false } : p));
+      setParticipants(prev => prev.map(p =>
+        p.userId === d.userId
+          ? { ...p, handRaised: false, isMuted: false, speakerSlot: typeof d.speakerSlot === 'number' ? d.speakerSlot : (p.speakerSlot ?? 0) }
+          : p
+      ));
     };
     const onHandRejected = (d: any) => {
       setHands(prev => prev.filter(h => h.userId !== d.userId));
@@ -464,6 +798,13 @@ export default function LiveClassScreen() {
     // View mode changed by host (audio/video)
     const onViewModeChanged = (d: any) => {
       setViewMode(d.viewMode);
+      if (!isHost) {
+        showMessage({
+          message: d.viewMode === 'audio' ? '🔇 Host switched to audio-only view' : '📹 Host switched to video view',
+          type: 'info',
+          duration: 2500,
+        });
+      }
     };
 
     // Screen share started/stopped
@@ -474,12 +815,94 @@ export default function LiveClassScreen() {
       showMessage({ message: 'Screen share ended', type: 'info', duration: 1500 });
     };
 
+    // MIC-01: Host approved this user to speak (or open mic enabled).
+    // Disconnect LiveKit and reconnect with a fresh token — the new token
+    // will have canPublish:true because isMuted is now false in DB.
+    const onGrantMic = async (d: any) => {
+      if (d.liveClassId !== id) return;
+      if (!isJoined) return;
+      try {
+        lk.disconnect();
+        await new Promise(r => setTimeout(r, 400)); // let disconnect settle
+        const tkRes = await api.post(`/live-classes/${id}/livekit-token`);
+        const { token: lkToken, livekitUrl } = tkRes.data.data;
+        if (lkToken && livekitUrl) {
+          await lk.connect(livekitUrl, lkToken, true);
+          setIsMuted(false);
+        }
+      } catch {
+        showMessage({ message: 'Failed to activate mic — try toggling mic button', type: 'warning', duration: 3000 });
+      }
+    };
+
+    // MIC-02: Host demoted this user or they dropped mic — return to listen-only.
+    // Reconnect with canPublish:false token so SFU enforces subscribe-only.
+    const onRevokeMic = async (d: any) => {
+      if (d.liveClassId !== id) return;
+      if (!isJoined) return;
+      setIsMuted(true);
+      // Clear speakerSlot so the user leaves the speaker grid immediately
+      setParticipants(prev => prev.map(p =>
+        p.userId === d.userId ? { ...p, isMuted: true, speakerSlot: null } : p
+      ));
+      try {
+        if (lk.connected) lk.disableMic();
+        lk.disconnect();
+        await new Promise(r => setTimeout(r, 400));
+        const tkRes = await api.post(`/live-classes/${id}/livekit-token`);
+        const { token: lkToken, livekitUrl } = tkRes.data.data;
+        // startMuted=true → reconnects with mic disabled (listen-only audience state)
+        if (lkToken && livekitUrl) await lk.connect(livekitUrl, lkToken, true);
+      } catch {
+        // non-fatal — token reconnect failed, user stays disconnected until retry
+      }
+      showMessage({ message: '🎙 Mic dropped — returned to audience', type: 'info', duration: 2000 });
+    };
+
+    // MIC-02: A speaker was added to the stage — update participant state with speakerSlot
+    const onSpeakerAdded = (d: any) => {
+      if (d.liveClassId !== id) return;
+      setParticipants(prev => prev.map(p =>
+        p.userId === d.userId
+          ? { ...p, isMuted: false, speakerSlot: typeof d.speakerSlot === 'number' ? d.speakerSlot : (p.speakerSlot ?? 0) }
+          : p
+      ));
+    };
+
+    // MIC-02: A speaker was removed from the stage — clear speakerSlot so they leave the grid
+    const onSpeakerRemoved = (d: any) => {
+      if (d.liveClassId !== id) return;
+      setParticipants(prev => prev.map(p =>
+        p.userId === d.userId ? { ...p, isMuted: true, speakerSlot: null } : p
+      ));
+    };
+
     socket.on('liveclass:poll',                 onPollEvent);
     socket.on('liveclass:quran_position',       onQuranPosition);
     socket.on('liveclass:draw',                 onDraw);
     socket.on('liveclass:viewmode_changed',     onViewModeChanged);
     socket.on('liveclass:screen_share_started', onScreenShareStarted);
     socket.on('liveclass:screen_share_stopped', onScreenShareStopped);
+    socket.on('liveclass:grant_mic',            onGrantMic);
+    socket.on('liveclass:revoke_mic',           onRevokeMic);
+    socket.on('liveclass:speaker_added',        onSpeakerAdded);
+    socket.on('liveclass:speaker_removed',      onSpeakerRemoved);
+    // Sprint 4: wire isSpeaking to real LiveKit audio activity
+    // The useLiveKitAudio hook emits voice:speaking when the local participant's speaking
+    // state changes. We relay this to all room members via Socket.IO so their grids
+    // show the green speaking ring.
+    const onVoiceSpeaking = (d: any) => {
+      if (!d || !d.roomId) return;
+      // Only handle events for this live class room (roomId matches liveClassId)
+      if (d.roomId !== id) return;
+      setSpeakingUsers(prev => {
+        const next = new Set(prev);
+        if (d.speaking && d.userId) next.add(d.userId);
+        else if (d.userId) next.delete(d.userId);
+        return next;
+      });
+    };
+    socket.on('voice:speaking', onVoiceSpeaking);
 
     return () => {
       socket.emit('liveclass:leave_room', id);
@@ -511,6 +934,11 @@ export default function LiveClassScreen() {
       socket.off('liveclass:viewmode_changed',     onViewModeChanged);
       socket.off('liveclass:screen_share_started', onScreenShareStarted);
       socket.off('liveclass:screen_share_stopped', onScreenShareStopped);
+      socket.off('liveclass:grant_mic',            onGrantMic);
+      socket.off('liveclass:revoke_mic',           onRevokeMic);
+      socket.off('liveclass:speaker_added',        onSpeakerAdded);
+      socket.off('liveclass:speaker_removed',      onSpeakerRemoved);
+      socket.off('voice:speaking', onVoiceSpeaking);
     };
   }, [id, user, isHost, qc, router, lk]);
 
@@ -524,19 +952,74 @@ export default function LiveClassScreen() {
 
   // ── Actions ──────────────────────────────────────────────────────────────────
   const handleJoin = useCallback(async () => {
+    // SA-LC-MOBILE-02: SUPER_ADMIN = Platform Administration ONLY.
+    // Platform admins cannot join live classes as participants.
+    if (user?.role === 'SUPER_ADMIN') {
+      showMessage({ message: 'Platform admins cannot join live classes. Use the admin panel.', type: 'warning' });
+      return;
+    }
     if (!liveClass) return;
     if (liveClass.status === 'ENDED')     { showMessage({ message: 'Class has ended', type: 'warning' }); return; }
     if (liveClass.status === 'CANCELLED') { showMessage({ message: 'Class was cancelled', type: 'warning' }); return; }
     if (liveClass.status === 'SCHEDULED' && !isHost) { showMessage({ message: 'Class has not started yet', type: 'warning' }); return; }
     setIsConnecting(true);
+
+    // ── Step 1: JOIN — this is the only step that can block entry ──────────────
+    let joinData: any = null;
     try {
-      await api.post(`/live-classes/${id}/join`);
-      const token = (await import('@/store/auth.store')).useAuthStore.getState().accessToken;
-      if (token && !getSocket()?.connected) initSocket(token);
-      getSocket()?.emit('liveclass:join_room', id);
-      setIsJoined(true);
-      // Load chat history
-      const chatRes = await api.get(`/live-classes/${id}/messages`, { params: { limit: 50 } });
+      const joinRes = await api.post(`/live-classes/${id}/join`);
+      joinData = joinRes.data.data;
+    } catch (err: any) {
+      // Surface the exact server error message — not a generic fallback
+      const msg = err?.response?.data?.message
+        ?? (err?.message?.includes('Network') ? 'Cannot connect to server — check your WiFi' : 'Failed to join');
+      showMessage({ message: msg, type: 'danger', duration: 4000 });
+      setIsConnecting(false);
+      return; // stop here — don't proceed if join failed
+    }
+
+    // ── Step 2: Session setup — all non-fatal after join is confirmed ──────────
+    const token = useAuthStore.getState().accessToken;
+    if (token && !getSocket()?.connected) initSocket(token);
+    getSocket()?.emit('liveclass:join_room', id);
+    setIsJoined(true);
+    setIsConnecting(false);
+    showMessage({ message: 'Joined live class', type: 'success' });
+
+    // Use participants from the join response if available (saves a round-trip
+    // and ensures speakerSlot is populated from the same transaction)
+    const joinParticipants: any[] = joinData?.liveClass?.participants ?? [];
+    if (joinParticipants.length > 0) {
+      setParticipants(joinParticipants.map((p: any) => ({
+        userId:      p.userId,
+        firstName:   p.user?.firstName ?? '',
+        lastName:    p.user?.lastName ?? '',
+        avatarUrl:   p.user?.avatarUrl,
+        role:        p.role,
+        isMuted:     p.isMuted ?? true,
+        handRaised:  p.handRaised ?? false,
+        speakerSlot: typeof p.speakerSlot === 'number' ? p.speakerSlot : null,
+      })));
+    } else {
+      // Fallback: separate participants request if join response had none
+      api.get(`/live-classes/${id}/participants`).then(pRes => {
+        setParticipants((pRes.data.data ?? []).map((p: any) => ({
+          userId:      p.userId,
+          firstName:   p.user?.firstName ?? '',
+          lastName:    p.user?.lastName ?? '',
+          avatarUrl:   p.user?.avatarUrl,
+          role:        p.role,
+          isMuted:     p.isMuted ?? true,
+          handRaised:  p.handRaised ?? false,
+          speakerSlot: typeof p.speakerSlot === 'number' ? p.speakerSlot : null,
+        })));
+      }).catch(() => { /* non-fatal — socket events will fill the list */ });
+    }
+
+    if (isHost) loadHands();
+
+    // ── Step 3: Load chat history (non-fatal) ─────────────────────────────────
+    api.get(`/live-classes/${id}/messages`, { params: { limit: 50 } }).then(chatRes => {
       const msgs: ChatMessage[] = (chatRes.data.data?.messages ?? chatRes.data.data ?? []).map((m: any) => ({
         id: m.id, userId: m.userId,
         userName: m.user ? `${m.user.firstName} ${m.user.lastName}`.trim() : 'User',
@@ -546,38 +1029,46 @@ export default function LiveClassScreen() {
         { id: 'sys-join', userId: 'system', userName: 'System', message: `Welcome to ${liveClass.title}`, timestamp: new Date() },
         ...msgs,
       ]);
-      // Load participants
-      const pRes = await api.get(`/live-classes/${id}/participants`);
-      setParticipants((pRes.data.data ?? []).map((p: any) => ({
-        userId: p.userId, firstName: p.user?.firstName ?? '', lastName: p.user?.lastName ?? '',
-        avatarUrl: p.user?.avatarUrl, role: p.role, isMuted: p.isMuted ?? true, handRaised: p.handRaised ?? false,
-      })));
-      if (isHost) loadHands();
-      showMessage({ message: 'Joined live class', type: 'success' });
+    }).catch(() => {
+      // Non-fatal — socket will deliver new messages going forward
+      setChatMessages([{ id: 'sys-join', userId: 'system', userName: 'System', message: `Welcome to ${liveClass.title}`, timestamp: new Date() }]);
+    });
 
-      // LC-003 FIX: Load cached poll state from Redis so students joining mid-class
-      // see polls that were created before they joined.
-      api.get(`/live-classes/${id}/poll/state`).then(r => {
-        const cachedPolls = r.data.data?.polls ?? [];
-        if (cachedPolls.length > 0) {
-          setPolls(cachedPolls);
-          if (!isTeacher && cachedPolls.some((p: any) => p.isActive)) {
-            setActiveTab('polls' as any);
-            showMessage({ message: '📊 There is an active poll', type: 'info', duration: 2500 });
-          }
+    // ── Step 4: Load cached polls (non-fatal) ─────────────────────────────────
+    api.get(`/live-classes/${id}/poll/state`).then(r => {
+      const cachedPolls = r.data.data?.polls ?? [];
+      if (cachedPolls.length > 0) {
+        setPolls(cachedPolls);
+        if (!isTeacher && cachedPolls.some((p: any) => p.isActive)) {
+          setActiveTab('polls' as any);
+          showMessage({ message: '📊 There is an active poll', type: 'info', duration: 2500 });
         }
-      }).catch(() => { /* non-fatal */ });
+      }
+    }).catch(() => { /* non-fatal */ });
 
-      // Connect LiveKit for real audio (native builds only)
-      try {
-        const tkRes = await api.post(`/live-classes/${id}/livekit-token`);
-        const { token: lkToken, livekitUrl } = tkRes.data.data;
-        if (lkToken && livekitUrl) await lk.connect(livekitUrl, lkToken, true);
-      } catch { /* non-fatal */ }
-    } catch (err: any) {
-      showMessage({ message: err?.response?.data?.message ?? 'Failed to join', type: 'danger' });
-    } finally { setIsConnecting(false); }
-  }, [id, liveClass, isHost, loadHands]);
+    // ── Step 5: Load whiteboard snapshot (non-fatal) ─────────────────────────
+    // The server stores the last snapshot in Redis so late-joining participants
+    // can catch up to the current whiteboard state without replaying all strokes.
+    // Server returns: { snapshot: 'data:image/png;base64,...' } or { snapshot: null }
+    if ((liveClass as any).whiteboardEnabled) {
+      api.get(`/live-classes/${id}/whiteboard/state`).then(wbRes => {
+        const snapshot: string | null = wbRes.data.data?.snapshot ?? null;
+        if (snapshot && whiteboardRef.current) {
+          whiteboardRef.current.loadSnapshot(snapshot);
+          // Auto-switch to whiteboard tab so the student sees the current state
+          setActiveTab('whiteboard' as any);
+        }
+      }).catch(() => { /* non-fatal — whiteboard starts blank on Redis miss */ });
+    }
+
+    // ── Step 6: Connect LiveKit (non-fatal, native build only) ────────────────
+    try {
+      const tkRes = await api.post(`/live-classes/${id}/livekit-token`);
+      const { token: lkToken, livekitUrl } = tkRes.data.data;
+      if (lkToken && livekitUrl) await lk.connect(livekitUrl, lkToken, true);
+    } catch { /* non-fatal — audio degrades gracefully in Expo Go */ }
+
+  }, [id, liveClass, isHost, isTeacher, loadHands]); // eslint-disable-line
 
   const handleLeave = useCallback(() => {
     Alert.alert('Leave Class', 'Are you sure?', [
@@ -685,6 +1176,108 @@ export default function LiveClassScreen() {
     ]);
   }, [id]);
 
+  // Move an active speaker back to audience — clears speakerSlot so they leave the grid
+  const handleDemoteFromStage = useCallback(async (userId: string, name: string) => {
+    Alert.alert('Move to Audience', `Move ${name} from stage to audience?`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Move', onPress: async () => {
+        try {
+          await api.post(`/live-classes/${id}/demote/${userId}`);
+          setParticipants(prev => prev.map(p =>
+            p.userId === userId ? { ...p, isMuted: true, speakerSlot: null } : p
+          ));
+          showMessage({ message: `${name} moved to audience`, type: 'info', duration: 2000 });
+        } catch (e: any) {
+          showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+        }
+      }},
+    ]);
+  }, [id]);
+
+  // Invite an audience member directly onto the stage (no hand raise needed)
+  // Assigns speakerSlot 0 optimistically; the server will broadcast liveclass:speaker_added
+  // with the real slot index which will then correct it via the socket handler.
+  const handleInviteToStage = useCallback(async (userId: string, name: string) => {
+    try {
+      const res = await api.post(`/live-classes/${id}/invite/${userId}`);
+      const assignedSlot: number | null =
+        typeof res?.data?.data?.speakerSlot === 'number' ? res.data.data.speakerSlot : null;
+      setParticipants(prev => prev.map(p =>
+        p.userId === userId
+          ? { ...p, isMuted: false, speakerSlot: assignedSlot }
+          : p
+      ));
+      showMessage({ message: `🎙 ${name} invited to stage`, type: 'success', duration: 2000 });
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+    }
+  }, [id]);
+
+  // Promote a participant to MODERATOR role
+  const handlePromoteModerator = useCallback(async (userId: string, name: string) => {
+    Alert.alert('Promote to Moderator', `Give ${name} moderator privileges?`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Promote', onPress: async () => {
+        try {
+          await api.post(`/live-classes/${id}/moderator/${userId}`);
+          setParticipants(prev => prev.map(p =>
+            p.userId === userId ? { ...p, role: 'MODERATOR' } : p
+          ));
+          showMessage({ message: `🛡 ${name} is now a moderator`, type: 'success', duration: 2000 });
+        } catch (e: any) {
+          showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+        }
+      }},
+    ]);
+  }, [id]);
+
+  // Demote a MODERATOR back to STUDENT
+  const handleDemoteModerator = useCallback(async (userId: string, name: string) => {
+    Alert.alert('Remove Moderator', `Remove moderator role from ${name}?`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Remove', style: 'destructive', onPress: async () => {
+        try {
+          await api.delete(`/live-classes/${id}/moderator/${userId}`);
+          setParticipants(prev => prev.map(p =>
+            p.userId === userId ? { ...p, role: 'STUDENT' } : p
+          ));
+          showMessage({ message: `${name} removed from moderators`, type: 'info', duration: 2000 });
+        } catch (e: any) {
+          showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+        }
+      }},
+    ]);
+  }, [id]);
+
+  // ── Transfer host ownership to another participant (LS-GAP-003) ─────────────
+  // After transfer: caller becomes STUDENT, target becomes HOST, hostUserId updated.
+  const handleTransferHost = useCallback((userId: string, name: string) => {
+    Alert.alert(
+      'Transfer Host',
+      `Make ${name} the new host? You will become a regular participant.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Transfer',
+          onPress: async () => {
+            try {
+              await api.post(`/live-classes/${id}/transfer/${userId}`);
+              // Optimistic update: demote ourselves, promote target
+              setParticipants(prev => prev.map(p => {
+                if (p.userId === user?.id)  return { ...p, role: 'STUDENT' };
+                if (p.userId === userId)    return { ...p, role: 'HOST' };
+                return p;
+              }));
+              showMessage({ message: `👑 ${name} is now the host`, type: 'success', duration: 3000 });
+            } catch (e: any) {
+              showMessage({ message: e?.response?.data?.message ?? 'Transfer failed', type: 'danger' });
+            }
+          },
+        },
+      ]
+    );
+  }, [id, user?.id]);
+
   const sendChat = useCallback(async () => {
     if (!chatText.trim() || !user) return;
     const text = chatText.trim(); setChatText('');
@@ -699,9 +1292,23 @@ export default function LiveClassScreen() {
   const toggleHand = useCallback(async () => {
     if (!isJoined) return;
     try {
-      if (!handRaised) { await api.post(`/live-classes/${id}/hand/raise`); setHandRaised(true); showMessage({ message: '✋ Hand raised', type: 'info', duration: 1500 }); }
-      else { await api.post(`/live-classes/${id}/hand/lower`); setHandRaised(false); }
-    } catch {}
+      if (!handRaised) {
+        const res = await api.post(`/live-classes/${id}/hand/raise`);
+        const autoApproved = res?.data?.data?.autoApproved ?? false;
+        if (autoApproved) {
+          showMessage({ message: '🎙 You joined the stage!', type: 'success', duration: 2000 });
+          // grant_mic socket event will arrive and trigger LiveKit reconnect
+        } else {
+          setHandRaised(true);
+          showMessage({ message: '✋ Hand raised', type: 'info', duration: 1500 });
+        }
+      } else {
+        await api.post(`/live-classes/${id}/hand/lower`);
+        setHandRaised(false);
+      }
+    } catch (err: any) {
+      showMessage({ message: err?.response?.data?.message ?? 'Failed', type: 'danger', duration: 2000 });
+    }
   }, [id, isJoined, handRaised]);
 
   // NEW: send emoji reaction to all participants
@@ -719,6 +1326,24 @@ export default function LiveClassScreen() {
       showMessage({ message: '🙋 Speak request sent to host', type: 'info', duration: 2000 });
     } catch {}
   }, [id, isJoined, isHost]);
+
+  // MIC-02: Drop mic — speaker returns to audience, frees a slot, clears speakerSlot
+  const handleDropMic = useCallback(async () => {
+    if (!isJoined) return;
+    try {
+      await api.post(`/live-classes/${id}/drop-mic`);
+      setIsMuted(true);
+      // Clear own speakerSlot so we leave the grid immediately
+      if (user?.id) {
+        setParticipants(prev => prev.map(p =>
+          p.userId === user.id ? { ...p, isMuted: true, speakerSlot: null } : p
+        ));
+      }
+      showMessage({ message: '🎙 Mic dropped — returned to audience', type: 'info', duration: 2000 });
+    } catch (err: any) {
+      showMessage({ message: err?.response?.data?.message ?? 'Failed to drop mic', type: 'danger', duration: 2000 });
+    }
+  }, [id, isJoined, user?.id]);
 
   // NEW: host toggles open mic
   const handleToggleOpenMic = useCallback(async () => {
@@ -939,9 +1564,68 @@ export default function LiveClassScreen() {
             )}
             <View style={styles.videoPlaceholder}>
               {isJoined ? (
-                viewMode === 'audio' ? (
-                  /* Audio-only mode: show avatar circles */
-                  <View style={styles.audioModeWrap}>
+                activeSpeakers.length > 0 ? (
+                  /* ── SPEAKER GRID — shown when at least one participant is on stage ── */
+                  <View style={styles.speakerGridWrap}>
+                    {/* Live / OpenMic badges */}
+                    <View style={styles.speakerGridBadgeRow}>
+                      <View style={styles.livePill}><View style={styles.liveDot} /><Text style={styles.liveText}>LIVE</Text></View>
+                      {isOpenMic && <Text allowFontScaling={false} style={styles.openMicBadge}>🎤 Open Mic</Text>}
+                      {isRecording && <View style={[styles.livePill, { backgroundColor: '#fef2f2', marginLeft: 4 }]}><View style={[styles.liveDot, { backgroundColor: '#ef4444' }]} /><Text style={[styles.liveText, { color: '#ef4444' }]}>REC</Text></View>}
+                    </View>
+
+                    {/* TikTok-style 4-column video grid */}
+                    <LiveVideoGrid
+                      speakers={videoSpeakers}
+                      currentUserId={user?.id ?? ''}
+                      isHost={isHost}
+                      onLongPressTile={isHost ? (speaker) => {
+                        const name = speaker.displayName;
+                        Alert.alert(name, 'Speaker actions', [
+                          { text: 'Cancel', style: 'cancel' },
+                          { text: '🔇 Mute', onPress: () => handleMuteParticipant(speaker.userId, true) },
+                          { text: '⬇️ Move to audience', onPress: () => handleDemoteFromStage(speaker.userId, name) },
+                          { text: '🚫 Remove from class', style: 'destructive', onPress: () => handleKickParticipant(speaker.userId, name) },
+                        ]);
+                      } : undefined}
+                      style={styles.speakerGrid}
+                    />
+
+                    {/* Participant count + view-all */}
+                    <View style={styles.participantCount}>
+                      <Ionicons name="people-outline" size={14} color="#a5b4fc" />
+                      <Text style={styles.participantCountText}>
+                        {participants.length || liveClass.participantsCount} joined · {activeSpeakers.length} on stage
+                      </Text>
+                      <TouchableOpacity onPress={() => setShowParticipants(true)} style={styles.viewAllBtn}>
+                        <Text style={styles.viewAllText}>View all</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {/* Audience status banner for non-stage participants */}
+                    {!isHost && !myParticipantRole?.includes('MODERATOR') && (() => {
+                      const me = participants.find(p => p.userId === user?.id);
+                      if (typeof me?.speakerSlot === 'number') return null; // already on stage
+                      return (
+                        <View style={styles.audienceBanner}>
+                          <Text style={styles.audienceBannerText}>
+                            {me?.handRaised ? '✋ Waiting for host approval…' : '👥 You are in the audience'}
+                          </Text>
+                          <TouchableOpacity
+                            style={[styles.audienceBannerBtn, me?.handRaised && { backgroundColor: '#374151' }]}
+                            onPress={toggleHand}
+                          >
+                            <Text style={[styles.audienceBannerBtnText, me?.handRaised && { color: '#fbbf24' }]}>
+                              {me?.handRaised ? 'Cancel request' : '✋ Request to speak'}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      );
+                    })()}
+                  </View>
+                ) : viewMode === 'audio' ? (
+                  /* Audio-only mode: show avatar circles (no speakers on stage yet) */
+                  <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
                     <View style={styles.hostAudioCircle}>
                       <Image source={{ uri: avatarUrl(liveClass.host.avatar, liveClass.host.name) }} style={styles.hostAvatarLarge} />
                       <View style={styles.audioWave}><Ionicons name="radio-outline" size={16} color="#4f46e5" /></View>
@@ -962,7 +1646,8 @@ export default function LiveClassScreen() {
                     )}
                   </View>
                 ) : (
-                  <>
+                  /* Video mode — no speakers on stage yet, show host placeholder */
+                  <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
                     <View style={styles.hostVideo}>
                       <Image source={{ uri: avatarUrl(liveClass.host.avatar, liveClass.host.name) }} style={styles.hostAvatar} />
                       <Text style={styles.hostVideoLabel}>{liveClass.host.name}</Text>
@@ -988,12 +1673,47 @@ export default function LiveClassScreen() {
                         <Text style={styles.viewModeToggleText}>Switch to Audio Mode</Text>
                       </TouchableOpacity>
                     )}
-                  </>
+                    {/* Audience status banner — shown to non-host participants not yet on stage */}
+                    {!isHost && !myParticipantRole?.includes('MODERATOR') && (() => {
+                      const me = participants.find(p => p.userId === user?.id);
+                      if (typeof me?.speakerSlot === 'number') return null;
+                      return (
+                        <View style={styles.audienceBanner}>
+                          <Text style={styles.audienceBannerText}>
+                            {me?.handRaised ? '✋ Waiting for host approval…' : '👥 You are in the audience'}
+                          </Text>
+                          <TouchableOpacity
+                            style={[styles.audienceBannerBtn, me?.handRaised && { backgroundColor: '#374151' }]}
+                            onPress={toggleHand}
+                          >
+                            <Text style={[styles.audienceBannerBtnText, me?.handRaised && { color: '#fbbf24' }]}>
+                              {me?.handRaised ? 'Cancel request' : '✋ Request to speak'}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
+                      );
+                    })()}
+                  </View>
                 )
               ) : (
-                <View style={styles.preJoin}>
-                  <Ionicons name="videocam-off-outline" size={48} color="#6b7280" />
+                <View style={[styles.preJoin, { flex: 1, alignItems: 'center', justifyContent: 'center' }]}>
+                  {/* Cover image — shown when available (public streams + school classes) */}
+                  {(liveClass as any).coverImageUrl ? (
+                    <Image
+                      source={{ uri: (liveClass as any).coverImageUrl }}
+                      style={styles.coverImage}
+                      resizeMode="cover"
+                      accessibilityLabel={`Cover image for ${liveClass.title}`}
+                    />
+                  ) : (
+                    <Ionicons name="videocam-off-outline" size={48} color="#6b7280" />
+                  )}
                   <Text style={styles.preJoinTitle}>{liveClass.title}</Text>
+                  {(liveClass as any).streamType === 'PUBLIC' && (
+                    <View style={[styles.publicBadge, { marginBottom: 4 }]}>
+                      <Text style={styles.publicBadgeText}>🌐 Public Live Stream</Text>
+                    </View>
+                  )}
                   <Text style={styles.preJoinHost}>Hosted by {liveClass.host.name}</Text>
                   <View style={styles.statusBadge}>
                     <View style={[styles.statusDot, { backgroundColor: liveClass.status === 'LIVE' ? '#10b981' : liveClass.status === 'SCHEDULED' ? '#f59e0b' : '#6b7280' }]} />
@@ -1018,7 +1738,14 @@ export default function LiveClassScreen() {
               )}
             </View>
             <View style={styles.infoCard}>
-              <Text style={styles.infoTitle}>{liveClass.title}</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <Text style={styles.infoTitle}>{liveClass.title}</Text>
+                {(liveClass as any).streamType === 'PUBLIC' && (
+                  <View style={styles.publicBadge}>
+                    <Text style={styles.publicBadgeText}>🌐 Public</Text>
+                  </View>
+                )}
+              </View>
               {liveClass.description ? <Text style={styles.infoDesc}>{liveClass.description}</Text> : null}
             </View>
           </View>
@@ -1085,6 +1812,17 @@ export default function LiveClassScreen() {
         {activeTab === 'controls' && isHost && (
           <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, gap: 12 }}>
             <Text style={styles.sectionTitle}>Class Controls</Text>
+
+            {/* Edit stream info */}
+            <View style={styles.controlGroup}>
+              <TouchableOpacity
+                style={[styles.controlBtn, { backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#334155' }]}
+                onPress={() => setShowEditModal(true)}
+              >
+                <Ionicons name="pencil-outline" size={18} color="#a5b4fc" />
+                <Text style={[styles.controlBtnText, { color: '#a5b4fc' }]}>Edit Title &amp; Description</Text>
+              </TouchableOpacity>
+            </View>
 
             {/* Class lifecycle */}
             <View style={styles.controlGroup}>
@@ -1292,15 +2030,36 @@ export default function LiveClassScreen() {
                   <Text style={styles.ctrlLabel}>Speak</Text>
                 </TouchableOpacity>
               )}
-              <TouchableOpacity style={[styles.ctrlBtn, !isMuted && styles.ctrlBtnActive]} onPress={async () => {
-                const newMuted = !isMuted;
-                setIsMuted(newMuted);
-                try { await api.patch(`/live-classes/${id}/participants/${user?.id}/mute`, { muted: newMuted }); } catch {}
-                if (lk.connected) { if (newMuted) lk.disableMic(); else lk.enableMic(); }
-              }}>
-                <Ionicons name={isMuted ? 'mic-off' : 'mic'} size={22} color={isMuted ? '#6b7280' : '#4f46e5'} />
-                <Text style={styles.ctrlLabel}>{isMuted ? 'Unmute' : 'Mute'}</Text>
-              </TouchableOpacity>
+              {/* MIC-02: canPublishSfu = true only when SFU token allows publishing.
+                  isOpenMic is excluded — it means hand-raise auto-approves, NOT that
+                  everyone can publish without a speakerSlot. */}
+              {(() => {
+                const canPublishSfu = isHost ||
+                  !!(lk as any).room?.localParticipant?.permissions?.canPublish;
+                if (!canPublishSfu) {
+                  // Listen-only: show raise hand shortcut instead of a useless mic button
+                  return (
+                    <TouchableOpacity
+                      style={[styles.ctrlBtn, handRaised && styles.ctrlBtnActive]}
+                      onPress={toggleHand}
+                    >
+                      <Text style={{ fontSize: 20 }}>✋</Text>
+                      <Text style={styles.ctrlLabel}>{handRaised ? 'Lower' : 'Speak?'}</Text>
+                    </TouchableOpacity>
+                  );
+                }
+                return (
+                  <TouchableOpacity style={[styles.ctrlBtn, !isMuted && styles.ctrlBtnActive]} onPress={async () => {
+                    const newMuted = !isMuted;
+                    setIsMuted(newMuted);
+                    try { await api.patch(`/live-classes/${id}/participants/${user?.id}/mute`, { muted: newMuted }); } catch {}
+                    if (lk.connected) { if (newMuted) lk.disableMic(); else lk.enableMic(); }
+                  }}>
+                    <Ionicons name={isMuted ? 'mic-off' : 'mic'} size={22} color={isMuted ? '#6b7280' : '#4f46e5'} />
+                    <Text style={styles.ctrlLabel}>{isMuted ? 'Unmute' : 'Mute'}</Text>
+                  </TouchableOpacity>
+                );
+              })()}
               {/* Camera toggle */}
               <TouchableOpacity
                 style={[styles.ctrlBtn, isCameraOn && styles.ctrlBtnActive]}
@@ -1309,10 +2068,25 @@ export default function LiveClassScreen() {
                 <Ionicons name={isCameraOn ? 'videocam' : 'videocam-off'} size={22} color={isCameraOn ? '#4f46e5' : '#6b7280'} />
                 <Text style={styles.ctrlLabel}>{isCameraOn ? 'Cam On' : 'Camera'}</Text>
               </TouchableOpacity>
+              {/* MIC-02: Drop Mic — shown for non-host active speakers (canPublish:true) */}
+              {!isHost && !!(lk as any).room?.localParticipant?.permissions?.canPublish && (
+                <TouchableOpacity
+                  style={[styles.ctrlBtn, { backgroundColor: '#f97316' }]}
+                  onPress={handleDropMic}
+                >
+                  <Ionicons name="mic-off-outline" size={22} color="#fff" />
+                  <Text style={[styles.ctrlLabel, { color: '#fff' }]}>Drop Mic</Text>
+                </TouchableOpacity>
+              )}
               {/* Emoji reactions */}
               <TouchableOpacity style={[styles.ctrlBtn, showReactions && styles.ctrlBtnActive]} onPress={() => setShowReactions(r => !r)}>
                 <Text style={{ fontSize: 20 }}>😊</Text>
                 <Text style={styles.ctrlLabel}>React</Text>
+              </TouchableOpacity>
+              {/* Gift button — open gift panel */}
+              <TouchableOpacity style={styles.ctrlBtn} onPress={() => setShowGifts(true)}>
+                <Text style={{ fontSize: 20 }}>🎁</Text>
+                <Text style={styles.ctrlLabel}>Gift</Text>
               </TouchableOpacity>
               {isHost && hands.length > 0 && (
                 <TouchableOpacity style={[styles.ctrlBtn, { position: 'relative' }]} onPress={() => setShowHands(true)}>
@@ -1352,7 +2126,20 @@ export default function LiveClassScreen() {
 
       {/* Modals */}
       <HandQueueModal visible={showHands} hands={hands} onClose={() => setShowHands(false)} onApprove={handleApproveHand} onReject={handleRejectHand} />
-      <ParticipantsModal visible={showParticipants} participants={participants} myId={user?.id ?? ''} onClose={() => setShowParticipants(false)} onMute={handleMuteParticipant} onKick={handleKickParticipant} />
+      <ParticipantsModal visible={showParticipants} participants={participants} myId={user?.id ?? ''} onClose={() => setShowParticipants(false)} onMute={handleMuteParticipant} onKick={handleKickParticipant} onDemote={handleDemoteFromStage} onInvite={handleInviteToStage} isHost={isHost} onPromoteMod={handlePromoteModerator} onDemoteMod={handleDemoteModerator} onTransferHost={isHost ? handleTransferHost : undefined} />
+      <LiveClassGiftPanel
+        liveClassId={id ?? ''}
+        participants={participants.map(p => ({ userId: p.userId, role: p.role, firstName: p.firstName, lastName: p.lastName, avatarUrl: p.avatarUrl }))}
+        visible={showGifts}
+        onClose={() => setShowGifts(false)}
+      />
+      <EditStreamModal
+        visible={showEditModal}
+        lc={liveClass ? { id: (liveClass as any).id ?? id ?? '', title: liveClass.title, description: liveClass.description, status: liveClass.status } : null}
+        onClose={() => setShowEditModal(false)}
+        onUpdated={() => qc.invalidateQueries({ queryKey: ['live-class', id] })}
+        onDeleted={() => router.replace('/(tabs)/live-class' as any)}
+      />
     </>
   );
 }
@@ -1371,7 +2158,11 @@ const styles = StyleSheet.create({
   badgeText:          { color: '#fff', fontSize: 9, fontWeight: '900' },
   // Video area
   videoArea:          { flex: 1, position: 'relative' },
-  videoPlaceholder:   { flex: 1, backgroundColor: '#111827', alignItems: 'center', justifyContent: 'center' },
+  videoPlaceholder:   { flex: 1, backgroundColor: '#111827' },
+  // Speaker grid (active speakers on stage)
+  speakerGridWrap:    { flex: 1, backgroundColor: '#0f0f23' },
+  speakerGridBadgeRow:{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingTop: 8, paddingBottom: 4 },
+  speakerGrid:        { flex: 1 },
   // Recording badge overlay
   recordingBadge:     { position: 'absolute', top: 10, left: 12, flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: 'rgba(239,68,68,0.85)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20, zIndex: 10 },
   recDot:             { width: 7, height: 7, borderRadius: 4, backgroundColor: '#ef4444' },
@@ -1392,6 +2183,11 @@ const styles = StyleSheet.create({
   audioModeLabel:     { color: '#9ca3af', fontSize: 13 },
   viewModeToggle:     { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#1e1e3a', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 7, marginTop: 6 },
   viewModeToggleText: { color: '#a5b4fc', fontSize: 12, fontWeight: '600' },
+  // Audience status banner
+  audienceBanner:     { marginTop: 12, backgroundColor: '#1a1a2e', borderRadius: 12, padding: 12, alignItems: 'center', gap: 8, borderWidth: 1, borderColor: '#374151' },
+  audienceBannerText: { color: '#9ca3af', fontSize: 13, fontWeight: '600', textAlign: 'center' },
+  audienceBannerBtn:  { backgroundColor: '#d97706', borderRadius: 10, paddingHorizontal: 16, paddingVertical: 8 },
+  audienceBannerBtnText: { color: '#fff', fontSize: 13, fontWeight: '700' },
   livePill:           { flexDirection: 'row', alignItems: 'center', backgroundColor: '#ef444422', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, gap: 5 },
   liveDot:            { width: 6, height: 6, borderRadius: 3, backgroundColor: '#ef4444' },
   liveText:           { color: '#ef4444', fontSize: 12, fontWeight: '700' },
@@ -1401,6 +2197,7 @@ const styles = StyleSheet.create({
   viewAllBtn:         { paddingHorizontal: 8, paddingVertical: 2, backgroundColor: '#4f46e522', borderRadius: 8 },
   viewAllText:        { color: '#a5b4fc', fontSize: 11, fontWeight: '600' },
   preJoin:            { alignItems: 'center', gap: 12, paddingHorizontal: 32 },
+  coverImage:         { width: '100%', height: 180, borderRadius: 16, marginBottom: 8, backgroundColor: '#1e1e3a' },
   preJoinTitle:       { color: '#e5e7eb', fontSize: 20, fontWeight: '700', textAlign: 'center' },
   preJoinHost:        { color: '#9ca3af', fontSize: 14 },
   statusBadge:        { flexDirection: 'row', alignItems: 'center', gap: 6 },
@@ -1413,6 +2210,8 @@ const styles = StyleSheet.create({
   infoCard:           { backgroundColor: '#1a1a2e', padding: 14, borderTopWidth: 1, borderColor: '#1e1e3a' },
   infoTitle:          { color: '#e5e7eb', fontSize: 15, fontWeight: '700' },
   infoDesc:           { color: '#9ca3af', fontSize: 13, lineHeight: 20, marginTop: 4 },
+  publicBadge:        { flexDirection: 'row', alignItems: 'center', backgroundColor: '#4c1d95', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, alignSelf: 'flex-start' },
+  publicBadgeText:    { color: '#c4b5fd', fontSize: 11, fontWeight: '700' },
   // Chat
   chatPanel:        { flex: 1, backgroundColor: '#0f0f23' },
   chatList:         { padding: 12, gap: 4, paddingBottom: 8 },
@@ -1460,3 +2259,8 @@ const styles = StyleSheet.create({
   reactionBar:      { flexDirection: 'row', justifyContent: 'space-around', paddingHorizontal: 8, paddingVertical: 8, backgroundColor: '#111827', borderBottomWidth: 1, borderBottomColor: '#1e1e3a' },
   reactionBtn:      { padding: 6 },
 });
+
+
+
+
+

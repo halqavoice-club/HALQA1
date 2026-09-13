@@ -225,8 +225,8 @@ router.patch('/:id/participants/:userId/video',
   ctrl.setVideoState
 );
 
-router.patch('/:id/mute-all',                    resolveStreamStaffAccess, ctrl.muteAll);
-router.patch('/:id/unmute-all',                  resolveStreamStaffAccess, ctrl.unmuteAll);
+router.patch('/:id/mute-all',                    resolveStreamAccess, ctrl.muteAll);
+router.patch('/:id/unmute-all',                  resolveStreamAccess, ctrl.unmuteAll);
 router.delete('/:id/participants/:userId',        resolveStreamStaffAccess, ctrl.kickParticipant);
 
 // ─── HAND RAISE ───────────────────────────────────────────────────────────────

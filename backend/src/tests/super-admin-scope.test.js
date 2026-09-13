@@ -547,11 +547,12 @@ describe('SA-FIX-01: isStaffRole and isTeacher do NOT include SUPER_ADMIN', () =
       path.join(__dirname, '../../../mobile/app/live-class/[id].tsx'),
       'utf8'
     );
-    const match = src.match(/const isTeacher\s*=\s*\[([^\]]+)\]/);
-    expect(match).not.toBeNull();
-    expect(match[1]).not.toMatch(/SUPER_ADMIN/);
-    expect(match[1]).toMatch(/TEACHER/);
-    expect(match[1]).toMatch(/SCHOOL_ADMIN/);
+    // isTeacher is now derived from participant role (isHost || MODERATOR), not a role array.
+    // Verify SUPER_ADMIN is not used as an isTeacher condition, and the correct
+    // participant-record pattern is present.
+    expect(src).not.toMatch(/isTeacher.*SUPER_ADMIN/);
+    expect(src).toMatch(/myParticipantRole.*MODERATOR/);
+    expect(src).toMatch(/isTeacher\s*=\s*isHost/);
   });
 });
 

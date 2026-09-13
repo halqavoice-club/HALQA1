@@ -1,14 +1,13 @@
-/**
+﻿/**
  * HALQA Mobile — Create Live Class Screen
  * Teachers and School Admins only.
  * Supports scheduling with a native date/time picker.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  SafeAreaView, ScrollView, ActivityIndicator, KeyboardAvoidingView,
-  Platform, Switch, Modal,
-} from 'react-native';
+  SafeAreaView, ScrollView, ActivityIndicator, Platform, Switch, Modal} from 'react-native';
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { useQuery } from '@tanstack/react-query';
 import { useRouter, Stack } from 'expo-router';
@@ -30,10 +29,13 @@ export default function CreateLiveClassScreen() {
   const [description,  setDescription] = useState('');
   const [classId,      setClassId]     = useState('');
   const [scheduledAt,  setScheduledAt] = useState<Date | null>(null);
-  const [duration,     setDuration]    = useState('60');
   const [chatEnabled,  setChatEnabled] = useState(true);
   const [handRaise,    setHandRaise]   = useState(true);
   const [whiteboard,   setWhiteboard]  = useState(true);
+  const [quranPanel,   setQuranPanel]  = useState(false);
+  const [screenShare,  setScreenShare] = useState(true);
+  const [isRecorded,   setIsRecorded]  = useState(false);
+  const [maxParticipants, setMaxParticipants] = useState('100');
   const [loading,      setLoading]     = useState(false);
 
   // iOS date picker modal state
@@ -86,6 +88,12 @@ export default function CreateLiveClassScreen() {
     if (!title.trim()) { showMessage({ message: 'Title is required', type: 'warning' }); return; }
     if (!classId)      { showMessage({ message: 'Please select a class', type: 'warning' }); return; }
 
+    const maxP = parseInt(maxParticipants, 10);
+    if (!maxParticipants || isNaN(maxP) || maxP < 1 || maxP > 1000) {
+      showMessage({ message: 'Max participants must be between 1 and 1000', type: 'warning' });
+      return;
+    }
+
     setLoading(true);
     try {
       const res = await api.post('/live-classes', {
@@ -93,10 +101,14 @@ export default function CreateLiveClassScreen() {
         description:       description.trim() || undefined,
         classId,
         scheduledAt:       scheduledAt ? scheduledAt.toISOString() : undefined,
-        duration:          parseInt(duration) || 60,
+        duration:          null,
         chatEnabled,
         handRaiseEnabled:  handRaise,
         whiteboardEnabled: whiteboard,
+        quranPanelEnabled: quranPanel,
+        screenShareEnabled: screenShare,
+        isRecorded,
+        maxParticipants:   maxP,
       });
       const lc = res.data.data;
       showMessage({ message: '🎥 Live class created!', type: 'success' });
@@ -176,17 +188,15 @@ export default function CreateLiveClassScreen() {
               <Text style={st.dateSub}>Leave empty to start immediately when you go live</Text>
             )}
 
-            {/* Duration */}
-            <Text style={st.label}>Duration (minutes)</Text>
-            <TextInput style={st.input} value={duration} onChangeText={setDuration}
-              keyboardType="number-pad" maxLength={3} />
-
             {/* Settings toggles */}
             <Text style={st.label}>Settings</Text>
             {[
-              { label: '💬 Enable Chat',   value: chatEnabled, onChange: setChatEnabled },
-              { label: '✋ Hand Raise',     value: handRaise,   onChange: setHandRaise },
-              { label: '🖊️ Whiteboard',    value: whiteboard,  onChange: setWhiteboard },
+              { label: '💬 Enable Chat',    value: chatEnabled,  onChange: setChatEnabled },
+              { label: '✋ Hand Raise',      value: handRaise,    onChange: setHandRaise },
+              { label: '🖊️ Whiteboard',     value: whiteboard,   onChange: setWhiteboard },
+              { label: '📖 Quran Panel',    value: quranPanel,   onChange: setQuranPanel },
+              { label: '🖥️ Screen Share',   value: screenShare,  onChange: setScreenShare },
+              { label: '⏺️ Record Class',   value: isRecorded,   onChange: setIsRecorded },
             ].map(item => (
               <View key={item.label} style={st.toggle}>
                 <Text style={st.toggleLabel}>{item.label}</Text>
@@ -194,6 +204,18 @@ export default function CreateLiveClassScreen() {
                   trackColor={{ true: '#6366f1', false: '#e2e8f0' }} thumbColor="#fff" />
               </View>
             ))}
+
+            {/* Max participants */}
+            <Text style={st.label}>Max Participants</Text>
+            <TextInput
+              style={st.input}
+              value={maxParticipants}
+              onChangeText={v => setMaxParticipants(v.replace(/[^0-9]/g, ''))}
+              placeholder="100"
+              placeholderTextColor="#94a3b8"
+              keyboardType="number-pad"
+              maxLength={4}
+            />
 
             {/* Create button */}
             <TouchableOpacity
@@ -320,3 +342,8 @@ const st = StyleSheet.create({
   iosConfirmBtn:        { flex: 2, backgroundColor: '#4f46e5', borderRadius: 12, paddingVertical: 13, alignItems: 'center' },
   iosConfirmTxt:        { fontSize: 15, fontWeight: '800', color: '#fff' },
 });
+
+
+
+
+
