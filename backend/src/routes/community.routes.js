@@ -25,6 +25,20 @@ const inviteLimit = rateLimit({
 
 router.use(authenticate);
 
+// ─── SUPER_ADMIN content-action guard ────────────────────────────────────────
+// SUPER_ADMIN = Platform Administration ONLY.
+// Cannot create/join communities as a content participant.
+// SUPER_ADMIN CAN delete communities (platform-level emergency removal — see community.controller.js).
+function denyIfSuperAdmin(req, res, next) {
+  if (req.user?.role === 'SUPER_ADMIN') {
+    return res.status(403).json({
+      success: false,
+      message: 'Platform administrators cannot create or join communities. Use the admin panel to manage content.'
+    });
+  }
+  return next();
+}
+
 // ── Discovery ─────────────────────────────────────────────────────────────────
 router.get('/',      ctrl.listCommunities);
 router.get('/mine',  ctrl.getMyCommunities);
@@ -35,6 +49,7 @@ router.post('/invites/:token/decline', ctrl.declineInvite);
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 router.post('/',
+  denyIfSuperAdmin,   // SA-COMM-01: SUPER_ADMIN cannot create communities
   createLimit,
   [
     body('name').trim().notEmpty().isLength({ max: 120 }),
@@ -63,6 +78,7 @@ router.delete('/:idOrSlug', ctrl.deleteCommunity);
 
 // ── Membership ────────────────────────────────────────────────────────────────
 router.post('/:idOrSlug/join',
+  denyIfSuperAdmin,   // SA-COMM-02: SUPER_ADMIN cannot join communities as participant
   [body('message').optional().isString().isLength({ max: 500 })],
   validate,
   ctrl.joinCommunity

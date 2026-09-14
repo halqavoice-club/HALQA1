@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList, View, Text, StyleSheet, RefreshControl,
-  TouchableOpacity, ActivityIndicator,
+  TouchableOpacity, ActivityIndicator
 } from 'react-native';
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'expo-router';
@@ -147,16 +147,18 @@ export default function FeedScreen() {
       <StoriesBar />
       {/* Live sessions */}
       <LiveSection />
-      {/* Compose tap-target — navigates to dedicated create-post screen */}
-      <TouchableOpacity style={ss.compose} onPress={() => router.push('/create-post' as any)}>
-        <View style={ss.composeAvatar}>
-          <Text allowFontScaling={false} style={ss.composeInitials}>
-            {user?.firstName?.[0]}{user?.lastName?.[0]}
-          </Text>
-        </View>
-        <Text allowFontScaling={false} style={ss.composePlaceholder}>What's on your mind?</Text>
-        <Ionicons name="image-outline" size={20} color="#9ca3af" />
-      </TouchableOpacity>
+      {/* Compose tap-target — hidden for SUPER_ADMIN (platform admin cannot create posts) */}
+      {user?.role !== 'SUPER_ADMIN' && (
+        <TouchableOpacity style={ss.compose} onPress={() => router.push('/create-post' as any)}>
+          <View style={ss.composeAvatar}>
+            <Text allowFontScaling={false} style={ss.composeInitials}>
+              {user?.firstName?.[0]}{user?.lastName?.[0]}
+            </Text>
+          </View>
+          <Text allowFontScaling={false} style={ss.composePlaceholder}>What's on your mind?</Text>
+          <Ionicons name="image-outline" size={20} color="#9ca3af" />
+        </TouchableOpacity>
+      )}
 
       {/* "New posts" banner */}
       {showNewBanner && newPosts.length > 0 && (
@@ -206,6 +208,12 @@ export default function FeedScreen() {
       <View style={ss.header}>
         <Text allowFontScaling={false} style={ss.headerTitle}>HALQA</Text>
         <View style={ss.headerRight}>
+          <TouchableOpacity
+            onPress={() => router.push('/reels' as any)}
+            style={ss.iconBtn}
+          >
+            <Ionicons name="play-circle-outline" size={22} color="#374151" />
+          </TouchableOpacity>
           <TouchableOpacity
             onPress={() => router.push('/(tabs)/notifications' as any)}
             style={ss.iconBtn}
@@ -295,3 +303,4 @@ const ss = StyleSheet.create({
   emptyBtn:        { marginTop: 20, paddingHorizontal: 20, paddingVertical: 10, backgroundColor: '#4f46e5', borderRadius: 12 },
   emptyBtnTxt:     { color: '#fff', fontWeight: '700', fontSize: 14 },
 });
+

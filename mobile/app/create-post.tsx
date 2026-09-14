@@ -1,14 +1,14 @@
-/**
+﻿/**
  * HALQA Mobile — Create Post Screen
  * Supports TEXT, IMAGE, VIDEO posts with media picker,
  * visibility selector, location tag, and character count.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
-  ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform,
-  Image, Alert,
-} from 'react-native';
+  ScrollView, ActivityIndicator, Platform,
+  Image, Alert} from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
@@ -154,7 +154,7 @@ export default function CreatePostScreen() {
 
   return (
     <SafeAreaView style={s.container} edges={['top']}>
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         {/* Header */}
         <View style={s.header}>
           <TouchableOpacity onPress={() => router.back()} style={s.cancelBtn}>
@@ -319,3 +319,9 @@ const s = StyleSheet.create({
   toolBtn:          { padding: 8, borderRadius: 20 },
   charCount:        { marginLeft: 'auto', fontSize: 12, color: '#9ca3af' },
 });
+
+
+
+
+
+

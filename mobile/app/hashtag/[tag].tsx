@@ -5,7 +5,7 @@
  */
 import {
   View, Text, StyleSheet, FlatList, ActivityIndicator,
-  RefreshControl,
+  RefreshControl
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { useInfiniteQuery } from '@tanstack/react-query';
@@ -141,3 +141,4 @@ const s = StyleSheet.create({
   caughtUp:  { textAlign: 'center', color: '#d1d5db', fontSize: 12,
                paddingVertical: 20 },
 });
+
