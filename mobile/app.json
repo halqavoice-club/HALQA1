@@ -4,8 +4,8 @@
     "name": "HALQA",
     "slug": "halqa-mobile",
     "version": "1.0.11",
-    "runtimeVersion": {
-      "policy": "sdkVersion"
+    "updates": {
+      "enabled": false
     },
     "scheme": "halqa",
     "orientation": "portrait",
@@ -36,6 +36,7 @@
       "package": "com.halqa.mobile",
       "versionCode": 11,
       "usesCleartextTraffic": true,
+      "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
