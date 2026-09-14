@@ -133,8 +133,9 @@ async function broadcastLiveStart(opts) {
 
 /**
  * Mark a live session as ended in the feed.
- * Updates the live post to ended state — does NOT delete it so the card
- * remains visible in the feed as a "ended session" record.
+ * Emits the ended socket event immediately so connected clients update their
+ * card UI. Then soft-deletes the post after a 10-minute grace period so
+ * users who load the feed later don't see stale "ended" cards indefinitely.
  *
  * @param {string} refEntityType - 'voice_room' | 'live_class'
  * @param {string} refEntityId
@@ -148,11 +149,29 @@ async function broadcastLiveEnd(refEntityType, refEntityId) {
     });
     if (!post) return;
 
-    // Keep the post alive — just emit ended event so frontend can update the card UI
+    // Emit ended event immediately so connected clients can update card UI
     const io = getIo();
     if (io) {
       io.to('feed:public').emit('feed:live_ended', { refEntityType, refEntityId, postId: post.id });
+      // Also broadcast to school-scoped room if the post had school visibility
+      if (post.schoolId) {
+        io.to(`feed:school:${post.schoolId}`).emit('feed:live_ended', { refEntityType, refEntityId, postId: post.id });
+      }
     }
+
+    // Soft-delete after grace period (10 min) so stale "ended" cards disappear
+    // from the feed for users who load later without a socket connection.
+    setTimeout(async () => {
+      try {
+        await prisma.post.updateMany({
+          where: { id: post.id, deletedAt: null },
+          data: { deletedAt: new Date() },
+        });
+        logger.info(`[feedLive] soft-deleted ${postType} postId=${post.id} refId=${refEntityId}`);
+      } catch (err) {
+        logger.warn(`[feedLive] soft-delete failed (non-fatal): ${err.message}`);
+      }
+    }, LIVE_POST_TTL_MS);
 
     logger.info(`[feedLive] ended ${postType} postId=${post.id} refId=${refEntityId}`);
   } catch (err) {
