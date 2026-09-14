@@ -1,11 +1,11 @@
-/**
+﻿/**
  * HALQA Mobile — Create Community Screen
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  SafeAreaView, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform
-} from 'react-native';
+  SafeAreaView, ScrollView, ActivityIndicator, Platform} from 'react-native';
 import { useRouter, Stack } from 'expo-router';
 import { showMessage } from 'react-native-flash-message';
 import api from '@/lib/api';
@@ -123,3 +123,7 @@ const styles = StyleSheet.create({
   createBtn:        { backgroundColor: '#6366f1', borderRadius: 14, padding: 16, alignItems: 'center', marginTop: 24 },
   createBtnText:    { color: '#fff', fontSize: 16, fontWeight: '800' },
 });
+
+
+
+
