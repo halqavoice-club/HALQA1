@@ -37,7 +37,7 @@ Built with Next.js 14, Node.js/Express, Prisma ORM, MySQL, Socket.IO, and LiveKi
 ### 1. Install dependencies
 
 ```bash
-cd backend && npm install
+cd backend && npm install`
 cd ../frontend && npm install
 ```
 

@@ -46,14 +46,16 @@ Capacity is still enforced (`maxParticipants`). Previously-kicked users cannot r
 ## Role Assignment in Public Streams
 
 ```javascript
+// LCSV-001 FIX: SUPER_ADMIN removed — platform admin is not a live class host.
+const isTeacher = req.user.role === 'TEACHER' || req.user.role === 'SCHOOL_ADMIN';
+const isStaff = ['TEACHER', 'SCHOOL_ADMIN'].includes(effectiveRole);
 const isPublicHost = streamType === 'PUBLIC' && lc.hostUserId === userId;
 const role = (isTeacher || isStaff || isPublicHost) ? 'HOST' : 'STUDENT';
 ```
 
 - Creator (`hostUserId === userId`) → `HOST`
-- Everyone else → `STUDENT`
-
-⚠️ **SCOPE VIOLATION:** `isTeacher`/`isStaff` includes SUPER_ADMIN, meaning a SUPER_ADMIN joining someone else's public stream also receives `HOST` role. See [known-gaps.md](./known-gaps.md) — violation `LCSV-001`.
+- School staff (TEACHER / SCHOOL_ADMIN) → `HOST`
+- Everyone else, including SUPER_ADMIN → `STUDENT`
 
 ---
 
@@ -80,7 +82,7 @@ Only the original creator can: start, end, update, delete, mute participants, ki
 | Join a public stream (as STUDENT) | ✅ Yes | Any authenticated user can join |
 | Create a public stream | ✅ Yes | Any authenticated user can create |
 | Become HOST of their own public stream | ✅ Yes | `isPublicHost` check (hostUserId === user.id) |
-| Receive HOST role in someone else's public stream | ⚠️ YES (violation) | `isStaff` includes SUPER_ADMIN — see known-gaps.md |
+| Receive HOST role in someone else's public stream | ❌ No (fixed) | `SUPER_ADMIN` removed from `isTeacher`/`isStaff` — LCSV-001 fixed |
 | Host controls on someone else's public stream | ❌ No | `resolveStreamStaffAccess` checks `hostUserId` for PUBLIC streams |
 | Send gifts in a public stream | ✅ Yes | `checkLiveClassSchool` passes for PUBLIC streams (any auth user) |
 

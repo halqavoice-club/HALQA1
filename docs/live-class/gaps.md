@@ -13,28 +13,9 @@
 **Severity:** CRITICAL  
 **File:** `backend/src/controllers/live-class.controller.js`  
 **Function:** `joinLiveClass()`  
-**Lines:** ~793–801
+**Status:** ✅ FIXED
 
-**Current code:**
-```javascript
-const isTeacher = req.user.role === 'TEACHER'
-               || req.user.role === 'SCHOOL_ADMIN'
-               || req.user.role === 'SUPER_ADMIN';   // ← VIOLATION
-
-const isStaff = ['TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(effectiveRole); // ← VIOLATION
-
-const role = (isTeacher || isStaff || isPublicHost) ? 'HOST' : 'STUDENT';
-```
-
-**Effect:** SUPER_ADMIN joining any PUBLIC live class (that they did not create) receives `HOST` role, which:
-- Creates a `LiveClassParticipant` record with `role = 'HOST'`
-- Enables LiveKit token issuance
-- Auto-starts any SCHEDULED class when admin joins
-- Grants host-level DB privileges (delete messages, mute/kick participants)
-- Pollutes attendance records and gift leaderboards
-
-**Expected:** SUPER_ADMIN joining a stream they did not create should receive `STUDENT` role.  
-**Do not fix.** Document only.
+SUPER_ADMIN is now blocked at the top of `joinLiveClass()` with HTTP 403 before any role computation, participant record creation, attendance tracking, or auto-start logic. They also cannot call `leaveLiveClass()` or `getLiveKitToken()`.
 
 ---
 
@@ -183,10 +164,10 @@ Unit tests mock Prisma. There is no integration test that verifies the complete 
 
 | ID | Severity | Category | Description | Fixed? |
 |----|---------|---------|-------------|--------|
-| LCSV-001 | CRITICAL | SUPER_ADMIN | SA receives HOST role on join | ❌ |
+| LCSV-001 | CRITICAL | SUPER_ADMIN | SA blocked entirely from join/token/leave | ✅ |
 | LCSV-002 | HIGH | SUPER_ADMIN | SA treated as staff in 3 controller functions | ❌ |
 | LCSV-003 | LOW | SUPER_ADMIN | SA bypasses self-only video state check | ❌ |
-| UILEAK-001 | MEDIUM | SUPER_ADMIN | Backend/frontend HOST role discrepancy | ❌ |
+| UILEAK-001 | MEDIUM | SUPER_ADMIN | Backend/frontend HOST role discrepancy | ✅ (moot — SA now blocked at join) |
 | LC-ADMIN-001 | HIGH | Admin | No dedicated admin termination endpoint | ❌ missing |
 | LC-AUDIT-001 | HIGH | Audit | No audit logging for live class operations | ❌ missing |
 | LC-GAP-001 | LOW | Feature | OBSERVER role unused | ❌ missing |

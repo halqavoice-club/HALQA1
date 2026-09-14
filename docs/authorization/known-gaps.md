@@ -18,43 +18,21 @@ Findings where the SUPER_ADMIN platform role grants content-participation privil
 
 **Severity:** HIGH  
 **Category:** SUPER_ADMIN Scope Violation  
-**Status:** NOT FIXED
+**Status:** ✅ FIXED
 
 **File:** `backend/src/controllers/live-class.controller.js`  
-**Function:** `joinLiveClass()`  
-**Lines:** ~793–801
+**Function:** `joinLiveClass()`
 
-**Current behavior:**
+**Fix applied:**
 
 ```javascript
-const isTeacher = req.user.role === 'TEACHER' || req.user.role === 'SCHOOL_ADMIN' || req.user.role === 'SUPER_ADMIN';
-const isStaff   = ['TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(effectiveRole);
+// LCSV-001 FIX: SUPER_ADMIN removed — platform admin is not a live class teacher/host.
+const isTeacher = req.user.role === 'TEACHER' || req.user.role === 'SCHOOL_ADMIN';
+const isStaff   = ['TEACHER', 'SCHOOL_ADMIN'].includes(effectiveRole);
 const role      = (isTeacher || isStaff || isPublicHost) ? 'HOST' : 'STUDENT';
 ```
 
-When a SUPER_ADMIN joins any live class (school or public), they receive `role: 'HOST'` in the `live_class_participants` table. This grants them:
-- Full host controls (mute all, kick, lower hands, recording, whiteboard, polls, Quran panel)
-- Unmuted microphone on join (`isMuted: false`)
-- Host tab shown in frontend
-- Auto-starts SCHEDULED class if host joins
-
-**Expected behavior:**  
-SUPER_ADMIN should not become HOST simply by virtue of platform role. If a SUPER_ADMIN needs to observe or manage a live class, they should do so through the platform admin dashboard, not by entering the room as HOST.
-
-**Security impact:**  
-A SUPER_ADMIN account — or an attacker who has compromised one — gains HOST-level control over any live class they enter. A school can not prevent a SUPER_ADMIN from taking host control of their session.
-
-**Affected systems:** Live class participant table, LiveKit room, frontend host controls, attendance records, gift leaderboards.
-
-**Recommended fix:**  
-Remove `'SUPER_ADMIN'` from the `isTeacher` and `isStaff` checks in `joinLiveClass()`. SUPER_ADMIN joining a live class should receive `'STUDENT'` role unless they also hold a school staff membership (`req.schoolMembership?.role`).
-
-```javascript
-// PROPOSED (do not apply without review):
-const isTeacher = req.user.role === 'TEACHER' || req.user.role === 'SCHOOL_ADMIN';
-const isStaff   = ['TEACHER', 'SCHOOL_ADMIN'].includes(effectiveRole);
-// SUPER_ADMIN: role comes from schoolMembership if they are a school staff member
-```
+SUPER_ADMIN joining any live stream now receives `STUDENT` role unless they are the actual stream creator (`isPublicHost`) or hold a school staff membership (`TEACHER` / `SCHOOL_ADMIN` via `req.schoolMembership.role`).
 
 ---
 
@@ -303,7 +281,7 @@ The deprecated `requireSchoolAccess` in `auth.middleware.js` checks only `user.s
 
 | ID | Title | Severity | Domain | Status |
 |----|-------|---------|--------|--------|
-| LCSV-001 | SUPER_ADMIN receives HOST role when joining live class | HIGH | Content Participation | NOT FIXED |
+| LCSV-001 | SUPER_ADMIN receives HOST role when joining live class | HIGH | Content Participation | ✅ FIXED |
 | LCSV-002 | SUPER_ADMIN treated as staff in live class controllers | MEDIUM | Content Participation | NOT FIXED |
 | LCSV-003 | SUPER_ADMIN bypasses school isolation in setVideoState | LOW | Content Participation | NOT FIXED |
 | SVSV-001 | SUPER_ADMIN legacy bypass for school feed socket room | MEDIUM | Real-Time / Socket | NOT FIXED |
@@ -322,6 +300,7 @@ The following were identified as violations and have already been addressed in p
 
 | Fix ID | Description | File |
 |--------|------------|------|
+| LCSV-001 | SUPER_ADMIN removed from `isTeacher`/`isStaff` in `joinLiveClass()` — receives STUDENT role instead of HOST | `live-class.controller.js` |
 | ARCH-01 | SUPER_ADMIN global school bypass removed from `requireSchoolMember`, `requireSchoolAccess`, `assertSchoolAccess`, `listLiveClasses` | `schoolAuth.middleware.js`, `live-class.controller.js` |
 | ARCH-02 | SUPER_ADMIN bypass removed from `checkLiveClassSchool` gift endpoint guard | `live-class.routes.js` |
 | ARCH-04 | `isStaffRole` in `LiveClassRoomImpl.tsx` excludes SUPER_ADMIN | `LiveClassRoomImpl.tsx` |

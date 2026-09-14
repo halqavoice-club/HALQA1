@@ -1,6 +1,43 @@
 # HALQA Mobile — React Native App
 
-Expo SDK 52 · Expo Router 4 · TypeScript · TanStack Query · Zustand · Socket.IO · LiveKit
+Expo SDK 54 · Expo Router 6 · React Native 0.76 · TypeScript · TanStack Query · Zustand · Socket.IO · LiveKit
+
+**Last updated:** September 2026 — Full parity pass with web frontend completed.
+
+---
+
+## What's New (Sep 2026 Gap-Fix Pass)
+
+### P0 — Critical Fixes
+- ✅ Downgraded React 19 → **React 18.3.1** (stable with Expo SDK 54)
+- ✅ Fixed `leaderboard.tsx` syntax error (`c/**` → `/**`)
+
+### P1 — Missing Core Flows
+- ✅ **Change Password screen** (`/change-password`) — for admin-created accounts
+- ✅ **`mustChangePassword` flag** handled in auth store + login redirect
+- ✅ **`school.store.ts`** — multi-school context with MMKV persistence
+- ✅ **Join School** (`/schools/join`) — search + role select + request
+- ✅ **Create School** (`/schools/create`) — full form with timezone
+- ✅ **DM Message Edit UI** — long-press own message → edit (CHAT-GAP-002 resolved)
+
+### P2 — Feature Parity
+- ✅ **Reels screen** (`/reels`) — vertical snap scroll TikTok-style
+- ✅ **Camera Test** (`/live-class/camera-test`) — pre-join mic/camera check
+- ✅ **Exams screen** (`/education/exams`) — routes to assignments exams tab
+- ✅ **Announcement Detail** (`/education/announcement/[id]`)
+- ✅ **Security Settings** (`/security-settings`) — password change, 2FA, sessions
+- ✅ **PollCard** in feed — renders polls embedded in posts
+- ✅ **LinkPreviewCard** in feed — shows scraped link metadata
+- ✅ **MediaViewer lightbox** — `react-native-image-viewing` wired into PostCard
+- ✅ **GiftLeaderboard** compact widget in voice room header
+- ✅ **RoomSettingsSheet** for voice hosts — chat, seats, message type, members
+- ✅ **`notifications.store.ts`** — unread badge synced to tab bar
+- ✅ **`pk.store.ts`** — PK match state shared across screens
+- ✅ **Reels button** in Feed header + Explore header
+- ✅ **Security Settings link** in Settings → Account tab
+- ✅ **School join/create links** in Settings → Account tab
+- ✅ **Camera test pre-join** — offered when tapping a LIVE class card
+- ✅ **Notification badge** on Chat tab from `notifications.store`
 
 ---
 
@@ -154,7 +191,17 @@ EXPO_PUBLIC_API_URL=http://192.168.1.x:5000/api/v1
 EXPO_PUBLIC_SOCKET_URL=http://192.168.1.x:5000
 EXPO_PUBLIC_LIVEKIT_URL=wss://halqa-voice-club-f0u88j45.livekit.cloud
 EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_...
+
+# Public web app origin — used for Voice Club share links (NOT the API URL).
+# Dev (emulator):  http://localhost:3000
+# Dev (device):    http://192.168.1.x:3000  (same LAN IP as the frontend server)
+# Production:      https://your-web-domain.com
+EXPO_PUBLIC_WEB_URL=http://localhost:3000
 ```
+
+> **Important:** `EXPO_PUBLIC_WEB_URL` must point to the **web application** (Next.js frontend),
+> not the backend API. Share links take the form `{EXPO_PUBLIC_WEB_URL}/voice-club/{roomId}`.
+> Update `eas.json` build profiles with the correct value for each environment.
 
 ---
 
