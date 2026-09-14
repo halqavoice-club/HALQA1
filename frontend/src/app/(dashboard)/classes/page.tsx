@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SearchInput } from '@/components/ui/search-input'
 import { useDebounce } from '@/hooks/useDebounce'
-import { BookOpen, Users, ChevronRight, Plus } from 'lucide-react'
+import { BookOpen, Users, ChevronRight, Plus, Star } from 'lucide-react'
 import Link from 'next/link'
 import { useAuthStore } from '@/store/auth.store'
 import { useEducationRole } from '@/hooks/useEducationRole'
@@ -85,7 +85,14 @@ export default function ClassesPage() {
                     <div className="bg-halqa-100 p-2 rounded-lg group-hover:bg-halqa-200 transition-colors">
                       <BookOpen className="w-5 h-5 text-halqa-700" />
                     </div>
-                    <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-halqa-500 transition-colors" />
+                    <div className="flex items-center gap-1.5">
+                      {cls.isDefault && (
+                        <Badge className="text-xs bg-amber-100 text-amber-700 border-0 gap-1">
+                          <Star className="w-2.5 h-2.5" /> Default
+                        </Badge>
+                      )}
+                      <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-halqa-500 transition-colors" />
+                    </div>
                   </div>
                   <h3 className="font-semibold text-gray-900 group-hover:text-halqa-700 transition-colors">
                     {cls.name}

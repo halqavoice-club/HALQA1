@@ -47,7 +47,10 @@ export default function SettingsScreen() {
   const qc      = useQueryClient();
   const { user, updateUser, logout } = useAuthStore();
 
-  const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '');
+  // SA-SETTINGS-01: SUPER_ADMIN is a platform role — not a school-scoped admin.
+  // The "School" settings tab is for SCHOOL_ADMIN (school membership role) only.
+  // Platform admins manage schools through the admin panel (/admin/schools).
+  const isAdmin = user?.role === 'SCHOOL_ADMIN';
 
   const [tab,          setTab]          = useState<Tab>('profile');
   const [theme,        setThemeVal]     = useState('system');
@@ -383,6 +386,46 @@ export default function SettingsScreen() {
           {/* ── ACCOUNT TAB ───────────────────────────────────────────────── */}
           {tab === 'account' && (
             <>
+              <Text style={styles.sectionTitle}>Security</Text>
+              <TouchableOpacity style={styles.card} onPress={() => router.push('/security-settings' as any)}>
+                <View style={styles.row}>
+                  <View style={[styles.rowIcon, { backgroundColor: '#eef2ff' }]}>
+                    <Ionicons name="shield-checkmark-outline" size={18} color="#4f46e5" />
+                  </View>
+                  <View style={{ flex: 1, marginLeft: 10 }}>
+                    <Text style={styles.rowLabel}>Security Settings</Text>
+                    <Text style={styles.rowSub}>Password, 2FA, active sessions</Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
+                </View>
+              </TouchableOpacity>
+
+              <Text style={styles.sectionTitle}>School</Text>
+              <View style={styles.card}>
+                <TouchableOpacity style={[styles.row, { borderBottomWidth: 1, borderBottomColor: '#f1f5f9', paddingBottom: 12 }]}
+                  onPress={() => router.push('/schools/join' as any)}>
+                  <View style={[styles.rowIcon, { backgroundColor: '#eff6ff' }]}>
+                    <Ionicons name="enter-outline" size={18} color="#2563eb" />
+                  </View>
+                  <View style={{ flex: 1, marginLeft: 10 }}>
+                    <Text style={styles.rowLabel}>Join a School</Text>
+                    <Text style={styles.rowSub}>Search and request membership</Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.row, { paddingTop: 12 }]}
+                  onPress={() => router.push('/schools/create' as any)}>
+                  <View style={[styles.rowIcon, { backgroundColor: '#f0fdf4' }]}>
+                    <Ionicons name="add-circle-outline" size={18} color="#16a34a" />
+                  </View>
+                  <View style={{ flex: 1, marginLeft: 10 }}>
+                    <Text style={styles.rowLabel}>Create a School</Text>
+                    <Text style={styles.rowSub}>Set up your own school</Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
+                </TouchableOpacity>
+              </View>
+
               <Text style={styles.sectionTitle}>Developer Tools</Text>
               <TouchableOpacity style={styles.card} onPress={() => setShowDevTools(v => !v)}>
                 <View style={styles.row}>
@@ -472,6 +515,7 @@ const styles = StyleSheet.create({
   outlineBtnText:  { color: '#6366f1', fontWeight: '700', fontSize: 14 },
   btnRow:          { flexDirection: 'row', gap: 10, marginTop: 12 },
   row:             { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  rowIcon:         { width: 32, height: 32, borderRadius: 8, justifyContent: 'center', alignItems: 'center', flexShrink: 0 },
   rowLabel:        { fontSize: 15, fontWeight: '600', color: '#1e293b' },
   rowSub:          { fontSize: 12, color: '#94a3b8', marginTop: 2 },
   themeGrid:       { flexDirection: 'row', gap: 10 },

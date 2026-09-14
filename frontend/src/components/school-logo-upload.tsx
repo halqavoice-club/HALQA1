@@ -38,9 +38,7 @@ export function SchoolLogoUpload({ schoolId, currentLogoUrl, schoolName, onUpdat
     try {
       const fd = new FormData()
       fd.append('logo', file)
-      const res = await api.post(`/schools/${schoolId}/logo`, fd, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      })
+      const res = await api.post(`/schools/${schoolId}/logo`, fd)
       const logoUrl = res.data.data?.logoUrl
       onUpdated?.(logoUrl)
       queryClient.invalidateQueries({ queryKey: ['school'] })

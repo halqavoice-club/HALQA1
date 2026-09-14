@@ -149,8 +149,10 @@ router.post('/:id/checkout', async (req, res, next) => {
     if (fee.status === 'PAID') return errorResponse(res, 'This fee has already been paid', 400);
     if (fee.status === 'WAIVED') return errorResponse(res, 'This fee has been waived', 400);
 
-    // Authorization: school admin or the student's guardian
-    const isAdmin    = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(req.user.role);
+    // Authorization: school admin (via SchoolMembership) or the student's guardian.
+    // SA-FEE-01: SUPER_ADMIN platform role does NOT grant school-level fee administration.
+    // Fee payment is a school-scoped action — use SchoolMembership role, not User.role.
+    const isAdmin    = req.schoolMembership?.role === 'SCHOOL_ADMIN' || req.schoolMembership?.role === 'SUPER_ADMIN';
     const isGuardian = fee.student?.guardianLinks?.some(gl => gl.guardian?.userId === req.user.id);
     if (!isAdmin && !isGuardian) {
       return errorResponse(res, 'Not authorized to pay this fee', 403);

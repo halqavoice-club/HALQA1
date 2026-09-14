@@ -1,21 +1,21 @@
-/**
+﻿/**
  * HALQA Mobile — Calendar
  * Month grid view, event type filters, upcoming list,
  * selected-day events. Teachers/Admins can create/delete events.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState, useMemo, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   TextInput, ScrollView, ActivityIndicator, Modal,
-  Alert, KeyboardAvoidingView, Platform,
-} from 'react-native';
+  Alert, Platform} from 'react-native';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   format, startOfMonth, endOfMonth, eachDayOfInterval,
-  isSameDay, isToday, addMonths, subMonths, parseISO,
+  isSameDay, isToday, addMonths, subMonths, parseISO
 } from 'date-fns';
 import { showMessage } from 'react-native-flash-message';
 import api from '@/lib/api';
@@ -41,7 +41,9 @@ export default function CalendarScreen() {
   const insets = useSafeAreaInsets();
   const queryClient = useQueryClient();
   const { user } = useAuthStore();
-  const canCreate = ['SUPER_ADMIN','SCHOOL_ADMIN','TEACHER'].includes(user?.role ?? '');
+  // SA-EDU-05: SUPER_ADMIN is a platform role — not a school-scoped teacher/admin.
+  // Calendar event creation belongs to SCHOOL_ADMIN and TEACHER (school membership roles).
+  const canCreate = ['SCHOOL_ADMIN','TEACHER'].includes(user?.role ?? '');
 
   const [month, setMonth]             = useState(new Date());
   const [selectedDay, setSelectedDay] = useState<Date | null>(null);
@@ -373,3 +375,9 @@ const cal = StyleSheet.create({
   createBtnDisabled:{ backgroundColor: '#c7d2fe' },
   createTxt:        { color: '#fff', fontWeight: '800', fontSize: 14 },
 });
+
+
+
+
+
+

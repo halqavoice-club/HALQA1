@@ -82,7 +82,10 @@ router.put('/:id',
     try {
       const existing = await prisma.announcement.findUnique({ where: { id: req.params.id } });
       if (!existing) return errorResponse(res, 'Announcement not found', 404);
-      // School isolation: ensure announcement belongs to same school
+      // School isolation: ensure announcement belongs to same school.
+      // SA-ANN-01: req.schoolMembership?.role === 'SUPER_ADMIN' refers to the school-scoped
+      // SUPER_ADMIN role in SchoolMembership, NOT the platform User.role.
+      // Platform SUPER_ADMIN (User.role) has no authority to edit school announcements.
       const schoolId = req.schoolId || req.user.schoolId;
       if (existing.schoolId !== schoolId && req.schoolMembership?.role !== 'SUPER_ADMIN') {
         return errorResponse(res, 'Access denied to this announcement', 403);

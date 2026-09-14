@@ -22,7 +22,10 @@ async function importStudents(req, res, next) {
     if (rows.length > 1000) return errorResponse(res, 'Import exceeds the maximum of 1000 rows. Split into batches of 1000 or fewer.', 400);
 
     const results = { created: 0, skipped: 0, errors: [] };
-    const defaultPassword = await bcrypt.hash('Halqa@2024', 12);
+    // L-1 FIX: Random temp password per import run (no hardcoded default).
+    // Each imported user must change their password on first login (mustChangePassword is set below).
+    const { randomBytes } = require('crypto');
+    const defaultPassword = await bcrypt.hash(randomBytes(12).toString('hex'), 12);
 
     for (const row of rows) {
       try {
@@ -64,7 +67,8 @@ async function importStudents(req, res, next) {
               role: 'STUDENT',
               schoolId,
               status: 'ACTIVE',
-              emailVerified: true
+              emailVerified: true,
+              mustChangePassword: true  // force password reset on first login
             }
           });
 
@@ -213,7 +217,10 @@ async function importTeachers(req, res, next) {
     if (rows.length > 1000) return errorResponse(res, 'Import exceeds the maximum of 1000 rows. Split into batches of 1000 or fewer.', 400);
 
     const results = { created: 0, skipped: 0, errors: [] };
-    const defaultPassword = await bcrypt.hash('Halqa@2024', 12);
+    // L-1 FIX: Random temp password per import run (no hardcoded default).
+    // Each imported user must change their password on first login (mustChangePassword is set below).
+    const { randomBytes } = require('crypto');
+    const defaultPassword = await bcrypt.hash(randomBytes(12).toString('hex'), 12);
 
     for (const row of rows) {
       try {
@@ -236,7 +243,8 @@ async function importTeachers(req, res, next) {
               email, firstName, lastName,
               phone: String(row.phone || '').trim() || null,
               passwordHash: defaultPassword,
-              role: 'TEACHER', schoolId, status: 'ACTIVE', emailVerified: true
+              role: 'TEACHER', schoolId, status: 'ACTIVE', emailVerified: true,
+              mustChangePassword: true  // force password reset on first login
             }
           });
           await tx.teacher.create({
@@ -449,7 +457,10 @@ async function importGuardians(req, res, next) {
     if (rows.length > 1000)  return errorResponse(res, 'Import exceeds the maximum of 1000 rows. Split into batches of 1000 or fewer.', 400);
 
     const results = { created: 0, skipped: 0, errors: [] };
-    const defaultPassword = await bcrypt.hash('Halqa@2024', 12);
+    // L-1 FIX: Random temp password per import run (no hardcoded default).
+    // Each imported user must change their password on first login (mustChangePassword is set below).
+    const { randomBytes } = require('crypto');
+    const defaultPassword = await bcrypt.hash(randomBytes(12).toString('hex'), 12);
 
     for (const row of rows) {
       try {
@@ -474,7 +485,9 @@ async function importGuardians(req, res, next) {
         await prisma.$transaction(async (tx) => {
           const user = await tx.user.create({
             data: { email, firstName, lastName, phone, passwordHash: defaultPassword,
-              role: 'GUARDIAN', schoolId, status: 'ACTIVE', emailVerified: true }
+              role: 'GUARDIAN', schoolId, status: 'ACTIVE', emailVerified: true,
+              mustChangePassword: true  // force password reset on first login
+            }
           });
           const guardian = await tx.guardian.create({
             data: { userId: user.id, schoolId, relationship }

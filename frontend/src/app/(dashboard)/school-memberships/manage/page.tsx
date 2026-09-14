@@ -108,6 +108,23 @@ export default function ManageMembersPage() {
 
   useEffect(() => { fetchMembers() }, [fetchMembers])
 
+  // Auto-refresh when a new join request arrives via socket
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      const { getSocket } = require('@/lib/socket')
+      const socket = getSocket()
+      if (!socket) return
+      const handler = (data: any) => {
+        if (data?.schoolId === activeSchoolId) fetchMembers()
+      }
+      socket.on('school:join_request', handler)
+      return () => socket.off('school:join_request', handler)
+    } catch {
+      // socket not available
+    }
+  }, [activeSchoolId, fetchMembers])
+
   // Redirect non-admins
   useEffect(() => {
     if (!loading && hasSchools && !isAdmin) router.replace('/dashboard')

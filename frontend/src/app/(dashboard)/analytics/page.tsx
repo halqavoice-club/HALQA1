@@ -100,7 +100,9 @@ export default function AnalyticsPage() {
   const [showPeriodMenu, setShowPeriodMenu] = useState(false)
 
   const schoolId = user?.schoolId ?? ''
-  const canView = user?.role === 'SUPER_ADMIN' || user?.role === 'SCHOOL_ADMIN' || (effectiveRole === 'TEACHER' || isAdmin)
+  // SA-ANALYTICS-01: SUPER_ADMIN platform role does NOT grant school analytics access.
+  // School analytics is a school-scoped action (SCHOOL_ADMIN or TEACHER membership role).
+  const canView = user?.role === 'SCHOOL_ADMIN' || (effectiveRole === 'TEACHER' || isAdmin)
 
   // ── School analytics ──────────────────────────────────────────────────────
   const { data: schoolData, isLoading } = useQuery<SchoolAnalytics>({

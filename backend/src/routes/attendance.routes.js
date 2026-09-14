@@ -45,6 +45,22 @@ router.post('/qr-checkin',
 
 // Read — any school member can view attendance relevant to them
 router.get('/class/:classId',     ...eduMember, ctrl.getClassAttendance);
+// GET /attendance/student/me — student views their own attendance without knowing student record ID
+// Must be registered BEFORE /student/:studentId to avoid "me" being treated as an ID
+router.get('/student/me', ...eduMember, async (req, res, next) => {
+  try {
+    const schoolId = req.schoolId || req.user.schoolId;
+    const student = await require('../utils/prisma').student.findFirst({
+      where: { userId: req.user.id, deletedAt: null, ...(schoolId && { schoolId }) },
+      select: { id: true }
+    });
+    if (!student) {
+      return require('../utils/response').errorResponse(res, 'No student record found for your account', 404);
+    }
+    req.params = { ...req.params, studentId: student.id };
+    return ctrl.getStudentAttendance(req, res, next);
+  } catch (error) { next(error); }
+});
 router.get('/student/:studentId', ...eduMember, ctrl.getStudentAttendance);
 router.get('/analytics',          ...eduMember, ctrl.getAttendanceAnalytics);
 router.get('/report',             ...eduStaff,  ctrl.getAttendanceReport);

@@ -172,7 +172,19 @@ router.patch('/:id',
     const { id } = req.params;
     const userRole = req.user?.role;
 
-    if (userRole === 'SUPER_ADMIN') return next();
+    // SA-SCHOOL-PATCH-01: SUPER_ADMIN platform role must have an explicit school membership
+    // to edit school settings — same requirement as the PUT /:id handler above.
+    // Previously this was an unconditional bypass (return next()) — now requires membership.
+    if (userRole === 'SUPER_ADMIN') {
+      const membership = await prisma.schoolMembership.findUnique({
+        where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+        select: { role: true, status: true },
+      }).catch(() => null);
+      if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+        return next();
+      }
+      return errorResponse(res, 'Platform admins must have an active school membership to edit school settings', 403);
+    }
 
     if (userRole === 'SCHOOL_ADMIN') {
       const ownSchoolId = req.schoolMembership?.schoolId || req.user.schoolId;

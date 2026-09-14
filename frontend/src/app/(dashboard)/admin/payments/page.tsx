@@ -95,7 +95,7 @@ export default function AdminPaymentsPage() {
   const { data: payoutsData, isLoading: payoutsLoading, refetch: refetchPayouts } = useQuery({
     queryKey: ['admin-payouts', payoutStatus],
     queryFn:  () => api.get('/wallet/payout/admin/list', {
-      params: { status: payoutStatus || undefined }
+      params: { status: payoutStatus === '__all__' ? undefined : payoutStatus || undefined }
     }).then(r => r.data.data as { payouts: any[]; total: number }),
     enabled: isAdmin,
     refetchInterval: 30_000,
@@ -250,7 +250,7 @@ export default function AdminPaymentsPage() {
         {/* Filter */}
         <div className="flex items-center gap-3 mb-4">
           <span className="text-sm text-gray-600">Status:</span>
-          <Select value={payoutStatus} onValueChange={v => setPayoutStatus(v)}>
+          <Select value={payoutStatus} onValueChange={v => setPayoutStatus(v === '__all__' ? '' : v)}>
             <SelectTrigger className="w-44">
               <SelectValue />
             </SelectTrigger>
@@ -260,7 +260,7 @@ export default function AdminPaymentsPage() {
               <SelectItem value="PROCESSING">Processing</SelectItem>
               <SelectItem value="COMPLETED">Completed</SelectItem>
               <SelectItem value="REJECTED">Rejected</SelectItem>
-              <SelectItem value="">All</SelectItem>
+              <SelectItem value="__all__">All</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -272,7 +272,7 @@ export default function AdminPaymentsPage() {
           ) : payouts.length === 0 ? (
             <div className="text-center py-12 text-gray-400">
               <Banknote className="w-8 h-8 mx-auto mb-2 opacity-40"/>
-              <p className="text-sm">No {payoutStatus.toLowerCase()} payout requests</p>
+              <p className="text-sm">No {payoutStatus === '__all__' ? '' : payoutStatus.toLowerCase() + ' '}payout requests</p>
             </div>
           ) : (
             <table className="w-full text-sm">

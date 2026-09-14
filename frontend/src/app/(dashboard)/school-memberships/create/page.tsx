@@ -125,9 +125,7 @@ export default function CreateSchoolPage() {
       if (logoFile && schoolId) {
         const fd = new FormData()
         fd.append('logo', logoFile)
-        await api.post(`/schools/${schoolId}/logo`, fd, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        }).catch(() => {
+        await api.post(`/schools/${schoolId}/logo`, fd).catch(() => {
           // Non-fatal — school is created, logo upload failed silently
           console.warn('Logo upload failed — school was still created')
         })

@@ -176,7 +176,7 @@ export function GuardianDashboard() {
               )}
             </div>
             <div className="p-3 border-t border-gray-100">
-              <Link href="/messages">
+              <Link href="/dm">
                 <button className="w-full text-center text-xs bg-halqa-50 text-halqa-700 hover:bg-halqa-100 py-2 rounded-lg font-medium transition-colors flex items-center justify-center gap-1">
                   <MessageSquare className="w-3 h-3" /> Message Teacher
                 </button>

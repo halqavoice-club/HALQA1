@@ -616,11 +616,18 @@ async function getUserAnalytics(req, res) {
  */
 async function trackEvent(req, res) {
   try {
-    const userId = req.user.id;
+    // Auth is optional — unauthenticated requests are silently accepted (202) and discarded.
+    // This prevents 401 noise when fired before login or after token expiry.
+    const userId = req.user?.id;
     const { event, properties } = req.body;
 
     if (!event || typeof event !== 'string') {
       return res.status(400).json({ success: false, message: 'event is required' });
+    }
+
+    // Only record stats for authenticated users — skip silently for anonymous
+    if (!userId) {
+      return res.status(202).json({ success: true });
     }
 
     // Map known frontend event names to DailyUserStats fields

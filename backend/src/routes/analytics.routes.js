@@ -13,7 +13,17 @@ const analyticsController = require('../controllers/analytics.controller');
 // Restrict to IP allowlist before any other checks (Requirements: 10.1, 10.2)
 router.use(ipAllowlist);
 
-// All routes require authentication
+/**
+ * @route   POST /api/v1/analytics/events
+ * @desc    Track a client-side analytics event (fire-and-forget, always 202)
+ * @access  Public — auth is optional. Authenticated users get stat tracking;
+ *          unauthenticated requests are silently accepted and discarded.
+ *          This route must be declared BEFORE router.use(authenticate) so it
+ *          doesn't produce 401 noise when fired before login or after token expiry.
+ */
+router.post('/events', analyticsController.trackEvent);
+
+// All remaining routes require authentication
 router.use(authenticate);
 
 /**
@@ -78,12 +88,5 @@ router.get('/schools/:schoolId/analytics', analyticsController.getSchoolAnalytic
  * @access  Private
  */
 router.get('/users/:userId/analytics', analyticsController.getUserAnalytics);
-
-/**
- * @route   POST /api/v1/analytics/events
- * @desc    Track a client-side analytics event (fire-and-forget, always 202)
- * @access  Private (any authenticated user)
- */
-router.post('/events', analyticsController.trackEvent);
 
 module.exports = router;

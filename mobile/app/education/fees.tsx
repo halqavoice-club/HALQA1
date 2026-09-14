@@ -34,7 +34,9 @@ const STATUS_CONFIG = {
 export default function FeesScreen() {
   const { user }        = useAuthStore();
   const queryClient     = useQueryClient();
-  const isAdmin         = user?.role === 'SCHOOL_ADMIN' || user?.role === 'SUPER_ADMIN';
+  // SA-EDU-02: SUPER_ADMIN is a platform role — not a school-scoped admin.
+  // Fee administration belongs to SCHOOL_ADMIN (school membership role).
+  const isAdmin = user?.role === 'SCHOOL_ADMIN';
 
   const { data, isLoading, refetch, isRefetching } = useQuery({
     queryKey: ['fees', user?.id],
