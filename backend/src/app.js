@@ -344,15 +344,43 @@ io.on('connection', (socket) => {
   });
 
   // ── DM typing indicators (relay to recipient) ────────────────────────────
-  socket.on('dm:typing_start', ({ convId, receiverId }) => {
+  socket.on('dm:typing_start', async ({ convId, receiverId }) => {
     if (!receiverId || !userId) return;
     if (!socketAllow('dm:typing_start')) return; // rate limit
+    // Security: verify the sender is actually in this conversation with the receiver
+    try {
+      const conv = await prisma.dmConversation.findFirst({
+        where: {
+          id: convId,
+          OR: [
+            { userAId: userId, userBId: receiverId },
+            { userAId: receiverId, userBId: userId },
+          ]
+        },
+        select: { id: true }
+      });
+      if (!conv) return; // Not a valid conversation — silently drop
+    } catch { return; }
     io.to(`user:${receiverId}`).emit('dm:typing_start', { convId, userId });
   });
 
-  socket.on('dm:typing_stop', ({ convId, receiverId }) => {
+  socket.on('dm:typing_stop', async ({ convId, receiverId }) => {
     if (!receiverId || !userId) return;
     if (!socketAllow('dm:typing_stop')) return; // rate limit
+    // Security: same membership check as typing_start
+    try {
+      const conv = await prisma.dmConversation.findFirst({
+        where: {
+          id: convId,
+          OR: [
+            { userAId: userId, userBId: receiverId },
+            { userAId: receiverId, userBId: userId },
+          ]
+        },
+        select: { id: true }
+      });
+      if (!conv) return;
+    } catch { return; }
     io.to(`user:${receiverId}`).emit('dm:typing_stop', { convId, userId });
   });
 
@@ -387,6 +415,8 @@ io.on('connection', (socket) => {
   // Server reads role from DB — never trusts client-supplied role/isHost fields.
   socket.on('liveclass:viewmode_changed', async ({ liveClassId, viewMode }) => {
     if (!liveClassId || !viewMode || !userId) return;
+    // Validate viewMode value — reject anything that isn't a known mode
+    if (!['video', 'audio'].includes(viewMode)) return;
     try {
       const host = await prisma.liveClassParticipant.findFirst({
         where: { liveClassId, userId, isActive: true, role: 'HOST' },
@@ -508,8 +538,9 @@ io.on('connection', (socket) => {
   socket.on('group:join', async (convId) => {
     if (!convId || !userId) return;
     try {
+      // BUG-1 FIX: GroupMember has no `isActive` field — use `leftAt: null` instead.
       const member = await prisma.groupMember.findFirst({
-        where: { conversationId: convId, userId, isActive: true },
+        where: { conversationId: convId, userId, leftAt: null },
         select: { id: true },
       });
       if (!member) return; // silently reject — not a member of this conversation
@@ -527,15 +558,19 @@ io.on('connection', (socket) => {
   // Group typing indicators
   // M-5 FIX: Always use socket.userId (JWT-verified) — never relay client-supplied userId.
   // Previously `tid || userId` allowed any user to spoof another user's typing indicator.
-  socket.on('group:typing_start', ({ convId, name }) => {
+  // BUG-5 FIX: emit `userName` not `name` — mobile client destructures `userName`.
+  // Accept both `name` (web) and `userName` (mobile) from client payload.
+  socket.on('group:typing_start', ({ convId, name, userName }) => {
     if (!convId) return;
+    const displayName = userName || name || '';
     // userId is captured from socket.userId at connection time (JWT-verified)
-    socket.to(`conversation:${convId}`).emit('group:typing_start', { convId, userId, name });
+    socket.to(`conversation:${convId}`).emit('group:typing_start', { convId, userId, userName: displayName });
   });
 
   socket.on('group:typing_stop', ({ convId }) => {
     if (!convId) return;
     // userId is captured from socket.userId at connection time (JWT-verified)
+    // Emit userId so clients can look up the member name from their local state
     socket.to(`conversation:${convId}`).emit('group:typing_stop', { convId, userId });
   });
 
@@ -696,7 +731,7 @@ io.on('connection', (socket) => {
     // could be used for timing attacks or cheating during voting.
     try {
       const isParticipant = await prisma.pKParticipant.findFirst({
-        where: { matchId: pkMatchId, userId },
+        where: { pkMatchId, userId },
         select: { id: true },
       }).catch(() => null);
 
@@ -1109,6 +1144,14 @@ async function startServer() {
         const { startWorkers, scheduleCleanup } = require('./services/queue.service');
         startWorkers();
         await scheduleCleanup();
+        // Sprint 3: Rehydrate BullMQ auto-end jobs for any LIVE classes that were
+        // running when the server last stopped. Non-fatal — falls back to in-process timers.
+        try {
+          const { rehydrateLiveClassAutoEndJobs } = require('./services/queue.service');
+          await rehydrateLiveClassAutoEndJobs();
+        } catch (_rehydrateErr) {
+          logger.warn('[startup] Failed to rehydrate live class auto-end jobs: ' + _rehydrateErr.message);
+        }
         logger.info('✅ BullMQ workers started and cleanup scheduled');
 
         // ── 4. Initialize advanced job scheduler ────────────────────────────────
@@ -1579,3 +1622,4 @@ const { cleanupStaleOnline } = require('./controllers/room-member.controller');
 setInterval(() => { cleanupStaleOnline(); }, 2 * 60 * 1000);
 
 module.exports = app;
+
