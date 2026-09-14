@@ -628,14 +628,19 @@ async function sendGiftToAll(req, res) {
             }
           });
           txns.push(txn);
-
-          // Update leaderboard
-          await tx.roomGiftLeaderboard.upsert({
-            where:  { roomId_userId: { roomId, userId: senderId } },
-            create: { roomId, roomType, userId: senderId, totalCoins: coinsPerReceiver, giftCount: effectiveCount, updatedAt: new Date() },
-            update: { totalCoins: { increment: coinsPerReceiver }, giftCount: { increment: effectiveCount }, updatedAt: new Date() }
-          });
         }
+
+        // PERF-FIX: leaderboard upsert moved OUTSIDE the per-receiver loop.
+        // Previously this ran N times (once per receiver) with cumulative increments,
+        // wasting N-1 round-trips. A single upsert with the total amount is correct
+        // and reduces DB ops from O(N) to O(1) for the leaderboard update.
+        const totalCoinsForLeaderboard = coinsPerReceiver * receiverParticipants.length;
+        const totalGiftCountForLeaderboard = effectiveCount * receiverParticipants.length;
+        await tx.roomGiftLeaderboard.upsert({
+          where:  { roomId_userId: { roomId, userId: senderId } },
+          create: { roomId, roomType, userId: senderId, totalCoins: totalCoinsForLeaderboard, giftCount: totalGiftCountForLeaderboard, updatedAt: new Date() },
+          update: { totalCoins: { increment: totalCoinsForLeaderboard }, giftCount: { increment: totalGiftCountForLeaderboard }, updatedAt: new Date() }
+        });
 
         return { updatedSender, txns };
       }, {

@@ -6,7 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, FlatList,
+  ActivityIndicator, FlatList
 } from 'react-native';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
@@ -324,3 +324,4 @@ const w = StyleSheet.create({
   emptyTxt:         { fontSize: 15, color: '#94a3b8', marginTop: 8 },
   emptySub:         { fontSize: 12, color: '#cbd5e1', textAlign: 'center' },
 });
+

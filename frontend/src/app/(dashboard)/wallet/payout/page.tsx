@@ -167,11 +167,12 @@ export default function PayoutPage() {
 
             <div>
               <Label htmlFor="method">Payout method</Label>
-              <Select value={method} onValueChange={setMethod}>
+              <Select value={method || '__none__'} onValueChange={v => setMethod(v === '__none__' ? '' : v)}>
                 <SelectTrigger id="method" className="mt-1">
                   <SelectValue placeholder="Select method" />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="__none__">Select a method…</SelectItem>
                   <SelectItem value="paypal">PayPal</SelectItem>
                   <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
                   <SelectItem value="stripe">Stripe (coming soon)</SelectItem>

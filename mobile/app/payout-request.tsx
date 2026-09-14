@@ -1,12 +1,12 @@
-/**
+﻿/**
  * HALQA Mobile — Payout Request Screen
  * Creators request to withdraw their diamond earnings.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  SafeAreaView, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform
-} from 'react-native';
+  SafeAreaView, ScrollView, ActivityIndicator, Platform} from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
 import { showMessage } from 'react-native-flash-message';
@@ -157,3 +157,7 @@ const styles = StyleSheet.create({
   submitBtnText:  { color: '#fff', fontSize: 16, fontWeight: '800' },
   note:           { textAlign: 'center', color: '#94a3b8', fontSize: 12, marginTop: 12 },
 });
+
+
+
+
