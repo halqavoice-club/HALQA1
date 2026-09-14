@@ -21,18 +21,76 @@ const { assertSafeMembershipRole } = require('../utils/roleGuard');
 const prisma = require('../utils/prisma');
 const { successResponse, errorResponse, paginatedResponse, getPagination, buildPaginationMeta } = require('../utils/response');
 const logger = require('../utils/logger');
+const { v4: uuidv4 } = require('uuid');
 
-// L-9 FIX: Rate limit school creation — max 10 new schools per user per 24 hours.
+// ─── Helper: auto-enroll a student in the school's default class ──────────────
+// Called when a STUDENT membership is approved (status → ACTIVE).
+// 1. Finds or creates the Student profile record (with QR code).
+// 2. Finds the school's isDefault=true class.
+// 3. Enrolls the student in that class (idempotent — skips if already enrolled).
+// If the school has no default class (e.g. existing schools before this feature),
+// the function still creates/updates the Student record — just no class enrollment.
+async function autoEnrollStudentInDefaultClass(userId, schoolId) {
+  // Find the default class for this school
+  const defaultClass = await prisma.class.findFirst({
+    where: { schoolId, isDefault: true, isActive: true, deletedAt: null },
+    select: { id: true }
+  });
+
+  // Find or create the Student profile record
+  let student = await prisma.student.findFirst({
+    where: { userId, schoolId, deletedAt: null },
+    select: { id: true, qrCode: true }
+  });
+
+  if (!student) {
+    // Generate a unique sequential studentId and a QR code
+    const count = await prisma.student.count({ where: { schoolId } });
+    const studentId = `S${String(count + 1).padStart(4, '0')}`;
+    // QR code: same format as admin-created students (STU-XXXXXXXX)
+    const qrCode = `STU-${uuidv4().split('-')[0].toUpperCase()}`;
+
+    student = await prisma.student.create({
+      data: { userId, schoolId, studentId, qrCode },
+      select: { id: true, qrCode: true }
+    });
+    logger.info(`[autoEnroll] Created Student profile ${student.id} for user ${userId} in school ${schoolId} with QR ${student.qrCode}`);
+  } else if (!student.qrCode) {
+    // Student record exists but has no QR code (e.g. created before this fix)
+    // Generate one now so they can use attendance QR scanning
+    const qrCode = `STU-${uuidv4().split('-')[0].toUpperCase()}`;
+    await prisma.student.update({
+      where: { id: student.id },
+      data: { qrCode }
+    });
+    logger.info(`[autoEnroll] Backfilled QR code for existing Student ${student.id}`);
+  }
+
+  if (!defaultClass) {
+    logger.info(`[autoEnroll] School ${schoolId} has no default class — student record created but not enrolled in any class`);
+    return;
+  }
+
+  // Enroll in the default class (idempotent)
+  await prisma.enrollment.upsert({
+    where: { studentId_classId: { studentId: student.id, classId: defaultClass.id } },
+    create: { studentId: student.id, classId: defaultClass.id, isActive: true },
+    update: { isActive: true, droppedAt: null },  // re-activate if previously dropped
+  });
+
+  logger.info(`[autoEnroll] Enrolled student ${student.id} in default class ${defaultClass.id} of school ${schoolId}`);
+}
+
+// L-9 FIX: Rate limit school creation — max 2 new schools per user per 24 hours.
 // Prevents spam school creation that would pollute the school database.
-// SUPER_ADMIN users bypass this via the keyGenerator returning a fixed key
-// with a much higher limit, since they legitimately manage multiple schools.
+// SA-SCHOOL-CREATE-01: SUPER_ADMIN is a platform role — they do NOT create schools
+// via /school-memberships/create-school. They use POST /schools (admin endpoint).
 const createSchoolLimit = rateLimit({
   windowMs: 24 * 60 * 60 * 1000, // 24 hours
   max: (req) => {
-    // SUPER_ADMIN and SCHOOL_ADMIN can create more schools (they administer them)
+    // SCHOOL_ADMIN (school-scoped role) can create more schools (they administer them)
     // Regular users (MEMBER, TEACHER, STUDENT, GUARDIAN) are limited to 2
-    const adminRoles = ['SUPER_ADMIN', 'SCHOOL_ADMIN'];
-    return adminRoles.includes(req.user?.role) ? 20 : 2;
+    return req.user?.role === 'SCHOOL_ADMIN' ? 20 : 2;
   },
   keyGenerator: req => req.user?.id || req.ip,
   message: { success: false, message: 'Too many school creation requests. Please try again later.' }
@@ -150,7 +208,57 @@ router.post('/join',
       // Invalidate getMe cache so the sidebar reflects the new membership immediately
       await deleteGetMeCache(req.user.id);
 
-      const roleLabel = requestedRole === 'STUDENT' ? 'Student' : requestedRole === 'TEACHER' ? 'Teacher' : 'Guardian';
+      // NOTIFY ADMINS: Send a real-time socket notification + in-app notification to
+      // all active SCHOOL_ADMIN members of this school so they can approve promptly.
+      try {
+        const { getIo } = require('../sockets');
+        const io = getIo();
+
+        // Find all active admins of this school
+        const admins = await prisma.schoolMembership.findMany({
+          where: { schoolId, role: { in: ['SCHOOL_ADMIN', 'SUPER_ADMIN'] }, status: 'ACTIVE', deletedAt: null },
+          select: { userId: true }
+        });
+
+        const joiner = req.user;
+        const payload = {
+          type: 'school:join_request',
+          schoolId,
+          schoolName: school.name,
+          userId: joiner.id,
+          userName: `${joiner.firstName} ${joiner.lastName}`,
+          role: requestedRole,
+          membershipId: membership.id,
+        };
+
+        if (io) {
+          for (const admin of admins) {
+            io.to(`user:${admin.userId}`).emit('school:join_request', payload);
+          }
+        }
+
+        // Create in-app notifications for each admin
+        if (admins.length > 0) {
+          await prisma.notification.createMany({
+            data: admins.map(admin => ({
+              userId: admin.userId,
+              type: 'SCHOOL_JOIN_REQUEST',
+              title: `New join request — ${school.name}`,
+              body: `${joiner.firstName} ${joiner.lastName} wants to join as ${requestedRole.replace(/_/g, ' ').toLowerCase()}`,
+              data: JSON.stringify(payload),
+              isRead: false,
+            })),
+            skipDuplicates: true,
+          }).catch(() => {}); // non-fatal if notification table differs
+        }
+
+        logger.info(`[schoolMembership:join] Notified ${admins.length} admin(s) of join request in school ${schoolId}`);
+      } catch (notifyErr) {
+        // Non-fatal — membership was created, notification failed
+        logger.warn(`[schoolMembership:join] Admin notification failed: ${notifyErr.message}`);
+      }
+
+      const roleLabel = requestedRole.replace(/_/g, ' ').toLowerCase();
       return successResponse(res, membership, `Join request sent to ${school.name} as ${roleLabel}. Awaiting admin approval.`, 201);
     } catch (error) { next(error); }
   }
@@ -213,6 +321,16 @@ router.post('/invite',
       await invalidateMembershipCache(invitee.id, schoolId);
       // Invalidate invitee's getMe cache so their sidebar updates immediately
       await deleteGetMeCache(invitee.id);
+
+      // AUTO-ENROLL: Invited STUDENTs go straight to ACTIVE, so enroll them
+      // in the default class immediately (same as when an admin approves a join request).
+      if (role === 'STUDENT') {
+        try {
+          await autoEnrollStudentInDefaultClass(invitee.id, schoolId);
+        } catch (autoEnrollErr) {
+          logger.warn(`[schoolMembership:invite] Auto-enroll failed for user ${invitee.id} in school ${schoolId}: ${autoEnrollErr.message}`);
+        }
+      }
 
       // PRIVILEGE-ESCALATION LOCK:
       // Only update User.schoolId for legacy backward-compat (so the school appears in
@@ -294,6 +412,20 @@ router.put('/:id/status',
         where: { id: req.params.id },
         data: { status: req.body.status }
       });
+
+      // AUTO-ENROLL: When a STUDENT membership is approved (→ ACTIVE),
+      // automatically create their Student profile (if missing) and enroll
+      // them in the school's default class. This means students start learning
+      // immediately — no extra admin steps needed. Teachers/admins can
+      // reassign to a specific class later via the Classes page.
+      if (req.body.status === 'ACTIVE' && membership.role === 'STUDENT') {
+        try {
+          await autoEnrollStudentInDefaultClass(membership.userId, membership.schoolId);
+        } catch (autoEnrollErr) {
+          // Non-fatal — membership is already activated, log and continue
+          logger.warn(`[schoolMembership:status] Auto-enroll failed for user ${membership.userId} in school ${membership.schoolId}: ${autoEnrollErr.message}`);
+        }
+      }
 
       await invalidateMembershipCache(membership.userId, membership.schoolId);
       // Invalidate target user's getMe cache
@@ -465,12 +597,21 @@ router.get('/school/:schoolId',
 );
 
 // ─── POST /school-memberships/create-school ──────────────────────────────────
-// Any authenticated user can create a school and become its SCHOOL_ADMIN.
+// Any authenticated user (except SUPER_ADMIN) can create a school and become its SCHOOL_ADMIN.
 // PRIVILEGE-ESCALATION FIX: Creating a school does NOT grant SUPER_ADMIN (platform admin).
 // The creator receives SchoolMembership.role = SCHOOL_ADMIN for that school only.
 // User.role remains unchanged (MEMBER for new users).
 // SUPER_ADMIN is reserved for HALQA internal platform administrators only.
+// SA-SCHOOL-CREATE-02: SUPER_ADMIN must use POST /schools (admin endpoint) instead.
 router.post('/create-school',
+  // Block SUPER_ADMIN from this end-user school creation flow
+  (req, res, next) => {
+    if (req.user?.role === 'SUPER_ADMIN') {
+      const { errorResponse } = require('../utils/response');
+      return errorResponse(res, 'Platform administrators must use the admin panel to create schools.', 403);
+    }
+    return next();
+  },
   createSchoolLimit,     // L-9 FIX: rate limit — 2 schools per user per 24h
   [
     body('name').trim().notEmpty().withMessage('School name is required'),
@@ -486,7 +627,7 @@ router.post('/create-school',
       const existing = await prisma.school.findUnique({ where: { slug } });
       if (existing) return errorResponse(res, 'School slug already in use', 409);
 
-      // Create school + membership in a transaction
+      // Create school + membership + default class in a transaction
       const result = await prisma.$transaction(async (tx) => {
         const school = await tx.school.create({
           data: {
@@ -520,6 +661,21 @@ router.post('/create-school',
           }
         });
 
+        // AUTO-CLASS: Create the school's default "General" class.
+        // Every new school gets one default class so students who join have
+        // somewhere to land immediately — no admin setup required.
+        // Admins/teachers can create more classes and reassign students later.
+        const defaultClass = await tx.class.create({
+          data: {
+            schoolId: school.id,
+            name: 'General',
+            description: 'Default class — all new members are enrolled here automatically. Rename or replace this class as needed.',
+            capacity: 500,
+            isActive: true,
+            isDefault: true,
+          }
+        });
+
         // PRIVILEGE-ESCALATION FIX:
         // Do NOT promote User.role to SUPER_ADMIN on school creation.
         // The creator's global role stays unchanged (MEMBER for new users).
@@ -537,7 +693,7 @@ router.post('/create-school',
           });
         }
 
-        return { school, membership };
+        return { school, membership, defaultClass };
       });
 
       // Save description via raw SQL — Prisma client was compiled before this column
@@ -556,7 +712,7 @@ router.post('/create-school',
       // Invalidate getMe cache so the new school appears in the sidebar immediately
       await deleteGetMeCache(req.user.id);
 
-      logger.info(`[schoolMembership] User ${req.user.id} created school ${result.school.id} (${name})`);
+      logger.info(`[schoolMembership] User ${req.user.id} created school ${result.school.id} (${name}) with default class ${result.defaultClass.id}`);
 
       return successResponse(res, result, `School "${name}" created. You are now the School Admin.`, 201);
     } catch (error) { next(error); }

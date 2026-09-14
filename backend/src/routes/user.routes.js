@@ -239,8 +239,11 @@ router.get('/:id', async (req, res, next) => {
     const targetId = req.params.id;
     const isOwnProfile = targetId === req.user.id;
     const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
-    // SCHOOL_ADMIN can see full profiles of users in their school
-    const isSchoolAdmin = req.user.role === 'SCHOOL_ADMIN';
+    // SCHOOL_ADMIN can see full profiles of users in their school.
+    // Check BOTH legacy User.role and new-arch SchoolMembership.role.
+    const isSchoolAdmin = req.user.role === 'SCHOOL_ADMIN' ||
+                          req.schoolMembership?.role === 'SCHOOL_ADMIN' ||
+                          req.schoolMembership?.role === 'SUPER_ADMIN';
 
     // Choose select fields based on requester relationship to target
     let selectFields;
@@ -319,6 +322,27 @@ router.put('/:id/status',
           `Invalid status. Must be one of: ${VALID_USER_STATUSES.join(', ')}`,
           400
         );
+      }
+
+      // SOCIAL-STATUS-01: Verify the target user belongs to the admin's school.
+      // requireSchoolMember (eduAdmin[0]) sets req.schoolId from the membership context.
+      // But the handler itself must independently verify the target user is actually
+      // in that school — otherwise a school admin could change the status of any
+      // user on the platform by guessing their UUID.
+      const schoolId = req.schoolId || req.user.schoolId;
+      if (schoolId) {
+        const targetUser = await prisma.user.findUnique({
+          where:  { id: req.params.id },
+          select: { id: true, schoolId: true }
+        });
+        if (!targetUser) return errorResponse(res, 'User not found', 404);
+        if (targetUser.schoolId !== schoolId) {
+          return errorResponse(
+            res,
+            'You can only manage users in your own school.',
+            403
+          );
+        }
       }
 
       const user = await prisma.user.update({

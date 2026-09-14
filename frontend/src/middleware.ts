@@ -94,9 +94,9 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl)
   }
 
-  // Redirect root to dashboard
+  // Redirect root to feed
   if (pathname === '/') {
-    const response = NextResponse.redirect(new URL('/dashboard', request.url))
+    const response = NextResponse.redirect(new URL('/feed', request.url))
     applySecurityHeaders(response)
     return response
   }

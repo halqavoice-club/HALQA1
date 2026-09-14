@@ -82,6 +82,25 @@ function resolveSchoolId(req) {
   );
 }
 
+// ─── Resolve schoolId, falling back to first active membership ───────────────
+// Used when schoolId is not present in request params/headers and user.schoolId
+// is null (newer users who joined via membership only, not the legacy school flow).
+async function resolveSchoolIdWithMembershipFallback(req) {
+  const fromRequest = resolveSchoolId(req);
+  if (fromRequest) return fromRequest;
+
+  // Last resort: pick the user's first active school membership
+  if (req.user?.id) {
+    const firstMembership = await prisma.schoolMembership.findFirst({
+      where: { userId: req.user.id, status: 'ACTIVE', deletedAt: null },
+      select: { schoolId: true },
+      orderBy: { joinedAt: 'asc' }
+    });
+    return firstMembership?.schoolId || null;
+  }
+  return null;
+}
+
 // ─── Load membership record ───────────────────────────────────────────────────
 async function loadMembership(userId, schoolId) {
   // Try cache first
@@ -119,9 +138,15 @@ function requireSchoolMember(schoolIdParam) {
     try {
       if (!req.user) return errorResponse(res, 'Authentication required', 401);
 
-      const schoolId = schoolIdParam
-        ? (req.params[schoolIdParam] || req.headers['x-school-id'] || req.body?.[schoolIdParam] || req.query?.[schoolIdParam] || req.user?.schoolId)
-        : resolveSchoolId(req);
+      let schoolId;
+      if (schoolIdParam) {
+        schoolId = req.params[schoolIdParam] || req.headers['x-school-id'] || req.body?.[schoolIdParam] || req.query?.[schoolIdParam] || req.user?.schoolId;
+      } else {
+        // Use the membership-aware fallback so users whose User.schoolId is null
+        // (joined via school membership without the legacy schoolId field being set)
+        // still get a valid school context resolved from their active membership.
+        schoolId = await resolveSchoolIdWithMembershipFallback(req);
+      }
 
       if (!schoolId) {
         return errorResponse(res, 'School context required', 400);
@@ -282,5 +307,6 @@ module.exports = {
   getSchoolMemberships,
   invalidateMembershipCache,
   resolveSchoolId,
+  resolveSchoolIdWithMembershipFallback,
   loadMembership
 };
