@@ -1789,6 +1789,7 @@ model LiveClassAttendance {
   @@index([liveClassId])
   @@index([studentId])
   @@map("live_class_attendance")
+}
 
 // ─── LIVE CLASS POLLS (LC-GAP-004) ─────────────────────────────────────────
 // Durable fallback for poll state when Redis is unavailable or restarted.
