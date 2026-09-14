@@ -264,6 +264,44 @@ async function createMatch(opts) {
   // Record analytics
   recordAnalyticsEvent('PK_CREATED', match.id, opts.sideAUserId, { type: opts.type });
 
+  // Auto-start: if both room IDs are set (room-linked PK), begin countdown immediately.
+  // This removes the manual "Start Battle" tap — the banner appears the moment
+  // the invitation is accepted.
+  if (opts.roomIdA || opts.roomIdB) {
+    const io = getIo();
+    if (io) {
+      const bannerPayload = {
+        pkMatchId: match.id,
+        durationSeconds: match.durationSeconds,
+        participants: match.participants.map(p => ({
+          userId: p.userId,
+          side:   p.side,
+          user:   { firstName: '', lastName: '', avatarUrl: null } // enriched below
+        }))
+      };
+      // Enrich participants with user data
+      prisma.pKParticipant.findMany({
+        where:   { pkMatchId: match.id },
+        include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } } }
+      }).then(parts => {
+        const enrichedPayload = {
+          ...bannerPayload,
+          participants: parts.map(p => ({
+            userId: p.userId,
+            side:   p.side,
+            user:   { firstName: p.user.firstName, lastName: p.user.lastName, avatarUrl: p.user.avatarUrl }
+          }))
+        };
+        if (opts.roomIdA) io.to(`voice:${opts.roomIdA}`).emit('pk:room:started', enrichedPayload);
+        if (opts.roomIdB && opts.roomIdB !== opts.roomIdA) {
+          io.to(`voice:${opts.roomIdB}`).emit('pk:room:started', enrichedPayload);
+        }
+      }).catch(() => {});
+    }
+    // Auto-start countdown after a short delay to allow both clients to connect
+    setTimeout(() => startCountdown(match.id, opts.sideAUserId).catch(() => {}), 2000);
+  }
+
   return { match, duplicate: false };
 }
 
@@ -342,6 +380,32 @@ async function startLive(pkMatchId, requesterId) {
     });
 
     recordAnalyticsEvent('PK_STARTED', pkMatchId, requesterId);
+
+    // Broadcast pk:room:started to each linked Voice Club room so the
+    // VoiceRoomPKBanner appears automatically for all room participants.
+    if (match.roomIdA || match.roomIdB) {
+      const io = getIo();
+      if (io) {
+        // Fetch participants to include in the banner payload
+        const participants = await prisma.pKParticipant.findMany({
+          where:   { pkMatchId },
+          include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } } }
+        });
+        const bannerPayload = {
+          pkMatchId,
+          durationSeconds: match.durationSeconds,
+          participants: participants.map(p => ({
+            userId: p.userId,
+            side:   p.side,
+            user:   { firstName: p.user.firstName, lastName: p.user.lastName, avatarUrl: p.user.avatarUrl }
+          }))
+        };
+        if (match.roomIdA) io.to(`voice:${match.roomIdA}`).emit('pk:room:started', bannerPayload);
+        if (match.roomIdB && match.roomIdB !== match.roomIdA) {
+          io.to(`voice:${match.roomIdB}`).emit('pk:room:started', bannerPayload);
+        }
+      }
+    }
 
     // Schedule automatic end
     const durationMs = match.durationSeconds * 1000;
@@ -549,6 +613,16 @@ async function finishPK(pkMatchId, options = {}) {
 
     recordAnalyticsEvent('PK_ENDED', pkMatchId, null, { winnerSide, scoreA: finalScoreA, scoreB: finalScoreB });
 
+    // Broadcast pk:room:ended to linked Voice Club rooms so the banner can dismiss
+    const io = getIo();
+    if (io && (updated.roomIdA || updated.roomIdB)) {
+      const endedPayload = { pkMatchId, winnerId, winnerSide };
+      if (updated.roomIdA) io.to(`voice:${updated.roomIdA}`).emit('pk:room:ended', endedPayload);
+      if (updated.roomIdB && updated.roomIdB !== updated.roomIdA) {
+        io.to(`voice:${updated.roomIdB}`).emit('pk:room:ended', endedPayload);
+      }
+    }
+
     // Check achievements (non-fatal)
     if (sideA) checkAchievements(sideA.userId, pkMatchId).catch(() => {});
     if (sideB) checkAchievements(sideB.userId, pkMatchId).catch(() => {});
@@ -579,6 +653,20 @@ async function abortPK(pkMatchId, adminId, reason) {
 
   emitPK(pkMatchId, 'pk:ended', { pkMatchId, state: 'ABORTED', reason });
   recordAnalyticsEvent('PK_ENDED', pkMatchId, adminId, { state: 'ABORTED', reason });
+
+  // Broadcast to linked Voice Club rooms
+  const abortedMatch = await prisma.pKMatch.findUnique({
+    where:  { id: pkMatchId },
+    select: { roomIdA: true, roomIdB: true }
+  }).catch(() => null);
+  const io = getIo();
+  if (io && abortedMatch) {
+    const endedPayload = { pkMatchId, winnerId: null, winnerSide: null };
+    if (abortedMatch.roomIdA) io.to(`voice:${abortedMatch.roomIdA}`).emit('pk:room:ended', endedPayload);
+    if (abortedMatch.roomIdB && abortedMatch.roomIdB !== abortedMatch.roomIdA) {
+      io.to(`voice:${abortedMatch.roomIdB}`).emit('pk:room:ended', endedPayload);
+    }
+  }
 }
 
 // ─── PROCESS GIFT EVENT ───────────────────────────────────────────────────────

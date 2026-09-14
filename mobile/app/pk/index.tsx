@@ -6,12 +6,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
-  ActivityIndicator, ScrollView, Alert,
+  ActivityIndicator, ScrollView, Alert
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import api from '@/lib/api';
 import { getSocket } from '@/lib/socket';
 import { useAuthStore } from '@/store/auth.store';
+import { usePKStore } from '@/store/pk.store';
 
 const RANK_COLORS: Record<string, string> = {
   BRONZE: '#CD7F32', SILVER: '#C0C0C0', GOLD: '#FFD700',
@@ -29,15 +30,16 @@ const DURATIONS = [
 export default function PKHubScreen() {
   const router   = useRouter();
   const { user } = useAuthStore();
+  const { setInQueue, setPreferredDuration, preferredDuration } = usePKStore();
 
   const [tab,         setTab]         = useState<'leaderboard' | 'history'>('leaderboard');
   const [leaderboard, setLeaderboard] = useState<any[]>([]);
   const [history,     setHistory]     = useState<any[]>([]);
   const [myStats,     setMyStats]     = useState<any>(null);
   const [loading,     setLoading]     = useState(true);
-  const [inQueue,     setInQueue]     = useState(false);
+  const [inQueue,     setInQueueLocal] = useState(false);
   const [queueTime,   setQueueTime]   = useState(0);
-  const [duration,    setDuration]    = useState(300);
+  const [duration,    setDurationLocal] = useState(preferredDuration);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -72,6 +74,7 @@ export default function PKHubScreen() {
   const joinMatchmaking = async () => {
     try {
       await api.post('/pk/matchmaking/join', { type: 'ONE_V_ONE', durationSeconds: duration });
+      setInQueueLocal(true);
       setInQueue(true);
       timerRef.current = setInterval(() => setQueueTime(t => t + 1), 1000);
     } catch (e: any) {
@@ -84,6 +87,7 @@ export default function PKHubScreen() {
       await api.post('/pk/matchmaking/leave');
     } catch {}
     clearQueueTimer();
+    setInQueueLocal(false);
     setInQueue(false);
   };
 
@@ -100,6 +104,14 @@ export default function PKHubScreen() {
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.title}>⚔️ PK Battle</Text>
+        {/* Pending challenges badge */}
+        <TouchableOpacity
+          onPress={() => router.push('/pk/invitations' as any)}
+          style={styles.invBadgeBtn}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.invBadgeTxt}>📩 Challenges</Text>
+        </TouchableOpacity>
       </View>
 
       {/* My Stats */}
@@ -130,7 +142,7 @@ export default function PKHubScreen() {
             {DURATIONS.map(d => (
               <TouchableOpacity
                 key={d.value}
-                onPress={() => setDuration(d.value)}
+              onPress={() => setDurationLocal(d.value)}
                 style={[styles.durationBtn, duration === d.value && styles.durationBtnActive]}
               >
                 <Text style={[styles.durationText, duration === d.value && { color: '#fff' }]}>{d.label}</Text>
@@ -243,4 +255,7 @@ const styles = StyleSheet.create({
   ratingChip:    { color: '#6366f1', fontWeight: '700' },
   resultIcon:    { fontSize: 22, width: 32, textAlign: 'center' },
   scoreText:     { color: '#94a3b8', fontSize: 12, fontVariant: ['tabular-nums'] },
+  invBadgeBtn:   { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1e293b', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: '#334155' },
+  invBadgeTxt:   { color: '#94a3b8', fontSize: 12, fontWeight: '600' },
 });
+

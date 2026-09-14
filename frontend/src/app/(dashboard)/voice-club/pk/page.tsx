@@ -10,7 +10,6 @@ import api from '@/lib/api'
 import { useAuthStore } from '@/store/auth.store'
 import { getSocket } from '@/lib/socket'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-
 /**
  * PK Hub page — /voice-club/pk
  * Shows matchmaking, leaderboard, history, stats tabs.
@@ -24,6 +23,7 @@ export default function PKHubPage() {
   const [myStats, setMyStats]                 = useState<any>(null)
   const [loadingLb, setLoadingLb]             = useState(true)
   const [loadingHistory, setLoadingHistory]   = useState(true)
+  const [pendingCount, setPendingCount]       = useState(0)
 
   const store = usePKStore()
 
@@ -41,6 +41,15 @@ export default function PKHubPage() {
       api.get(`/pk/stats/${user.id}`)
         .then(r => setMyStats(r.data.data || null))
     }
+
+    // Load pending invitation count for the badge
+    api.get('/pk/invitations?status=PENDING')
+      .then(r => {
+        const items = Array.isArray(r.data) ? r.data
+          : Array.isArray(r.data?.data) ? r.data.data : []
+        setPendingCount(items.length)
+      })
+      .catch(() => {})
   }, [user?.id])
 
   // Listen for match found via socket
@@ -53,7 +62,15 @@ export default function PKHubPage() {
       router.push(`/voice-club/pk/${data.pkMatchId}`)
     }
     socket.on('pk:matched', handler)
-    return () => { socket.off('pk:matched', handler) }
+
+    // Increment badge when a new invitation arrives
+    const invHandler = () => setPendingCount(c => c + 1)
+    socket.on('pk:invitation', invHandler)
+
+    return () => {
+      socket.off('pk:matched', handler)
+      socket.off('pk:invitation', invHandler)
+    }
   }, []) // eslint-disable-line
 
   const handleJoinQueue = async (opts: { type: string; durationSeconds: number }) => {
@@ -81,12 +98,27 @@ export default function PKHubPage() {
     <div className="min-h-screen bg-slate-950 text-white p-4 max-w-2xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-extrabold">⚔️ PK Battle</h1>
-        <Button
-          onClick={() => setShowMatchmaking(true)}
-          className="bg-indigo-600 hover:bg-indigo-500 font-bold"
-        >
-          {store.inQueue ? '🔍 Searching...' : '⚔️ Find Match'}
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* Pending invitations badge — always visible so opponents can find challenges */}
+          <button
+            onClick={() => router.push('/voice-club/pk/invitations')}
+            className="relative flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-white/10 text-sm font-semibold text-white/70 hover:text-white transition-all"
+          >
+            <span>📩</span>
+            <span>Challenges</span>
+            {pendingCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full bg-red-500 text-white text-[10px] font-black flex items-center justify-center px-1 animate-pulse">
+                {pendingCount > 9 ? '9+' : pendingCount}
+              </span>
+            )}
+          </button>
+          <Button
+            onClick={() => setShowMatchmaking(true)}
+            className="bg-indigo-600 hover:bg-indigo-500 font-bold"
+          >
+            {store.inQueue ? '🔍 Searching...' : '⚔️ Find Match'}
+          </Button>
+        </div>
       </div>
 
       {/* My Stats card */}

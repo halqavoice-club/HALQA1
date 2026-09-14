@@ -36,6 +36,7 @@ router.post('/matchmaking/leave',   ctrl.leaveMatchmaking);
 router.get('/matchmaking/status',   ctrl.matchmakingStatus);
 
 // ─── INVITATIONS ──────────────────────────────────────────────────────────────
+router.get('/invitations',   ctrl.getInvitations);   // list pending invitations for me
 router.post('/invitations',
   pkWriteLimiter,
   [
@@ -58,6 +59,11 @@ router.post('/invitations/:id/reject',
   validate,
   ctrl.rejectInvitation
 );
+router.post('/invitations/:id/cancel',
+  [param('id').notEmpty()],
+  validate,
+  ctrl.cancelInvitation
+);
 
 // ─── LEADERBOARDS / SEASONS / TOURNAMENTS ─────────────────────────────────────
 router.get('/leaderboards',  ctrl.getLeaderboards);
@@ -69,6 +75,7 @@ router.get('/history',           ctrl.getHistory);
 router.get('/stats/:userId',     ctrl.getUserStats);
 router.get('/achievements',      ctrl.getAchievements);
 router.get('/missions',          ctrl.getMissions);
+router.get('/active-by-room',    ctrl.getActiveByRoom);   // GET /pk/active-by-room?roomId=xxx
 
 // ─── MATCH CREATION ───────────────────────────────────────────────────────────
 router.post('/',

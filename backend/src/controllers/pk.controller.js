@@ -64,6 +64,16 @@ async function getPK(req, res) {
       }
     });
     if (!match) return errorResponse(res, 'PK not found', 404);
+
+    // BUG-005 FIX: Only participants may fetch PREPARING/COUNTDOWN matches.
+    // LIVE, PAUSED, and terminal matches are publicly viewable (spectators need state).
+    const RESTRICTED_STATES = ['PREPARING', 'INVITED', 'PENDING_ACCEPTANCE', 'ACCEPTED'];
+    if (RESTRICTED_STATES.includes(match.state)) {
+      const isParticipant = match.participants.some(p => p.userId === req.user.id);
+      const isAdmin       = req.user.role === 'SUPER_ADMIN';
+      if (!isParticipant && !isAdmin) return errorResponse(res, 'Not authorized', 403);
+    }
+
     return successResponse(res, match);
   } catch (err) {
     return errorResponse(res, err.message, 500);
@@ -89,6 +99,14 @@ async function endPK(req, res) {
     const isAdmin = req.user.role === 'SUPER_ADMIN';
     const match   = await prisma.pKMatch.findUnique({ where: { id: req.params.id } });
     if (!match) return errorResponse(res, 'PK not found', 404);
+
+    // BUG-003 FIX: return a clear 409 for already-terminal states rather than
+    // letting the service throw a generic 400. This prevents confusing error
+    // messages when a participant double-submits end after a network retry.
+    const TERMINAL = ['COMPLETED', 'ABORTED', 'CANCELLED'];
+    if (TERMINAL.includes(match.state)) {
+      return errorResponse(res, `PK already ${match.state.toLowerCase()}`, 409);
+    }
 
     const isParticipant = await prisma.pKParticipant.findUnique({
       where: { pkMatchId_userId: { pkMatchId: req.params.id, userId: req.user.id } }
@@ -185,9 +203,71 @@ async function rematch(req, res) {
 }
 
 // ─── INVITATIONS ─────────────────────────────────────────────────────────────
-/** POST /api/v1/pk/invitations */
-async function sendInvitation(req, res) {
+
+/** GET /api/v1/pk/active-by-room?roomId=xxx — find active PK for a voice room */
+async function getActiveByRoom(req, res) {
   try {
+    const { roomId } = req.query;
+    if (!roomId) return successResponse(res, []);
+
+    const matches = await prisma.pKMatch.findMany({
+      where: {
+        state:  { in: ['LIVE', 'COUNTDOWN', 'PREPARING'] },
+        OR: [{ roomIdA: roomId }, { roomIdB: roomId }],
+      },
+      include: {
+        participants: {
+          include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } } }
+        }
+      },
+      take: 1,
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return successResponse(res, matches);
+  } catch (err) {
+    return errorResponse(res, err.message, 500);
+  }
+}
+
+/** GET /api/v1/pk/invitations — list pending invitations for the current user */
+async function getInvitations(req, res) {
+  try {
+    const { status = 'PENDING' } = req.query;
+    const validStatuses = ['PENDING', 'ACCEPTED', 'REJECTED', 'EXPIRED', 'CANCELLED'];
+    const statusFilter = validStatuses.includes(status) ? status : 'PENDING';
+
+    const invitations = await prisma.pKInvitation.findMany({
+      where: {
+        receiverId: req.user.id,
+        status: statusFilter,
+        // For PENDING, also filter out expired ones
+        ...(statusFilter === 'PENDING' && { expiresAt: { gt: new Date() } }),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+
+    // Enrich with sender user data
+    const senderIds = [...new Set(invitations.map(i => i.senderId))];
+    const senders   = await prisma.user.findMany({
+      where:  { id: { in: senderIds } },
+      select: { id: true, firstName: true, lastName: true, avatarUrl: true, username: true },
+    });
+    const senderMap = new Map(senders.map(s => [s.id, s]));
+    const enriched  = invitations.map(inv => ({
+      ...inv,
+      sender: senderMap.get(inv.senderId) || null,
+    }));
+
+    return successResponse(res, enriched);
+  } catch (err) {
+    return errorResponse(res, err.message, 500);
+  }
+}
+
+/** POST /api/v1/pk/invitations */
+async function sendInvitation(req, res) {  try {
     const { receiverId, type, durationSeconds, message, teamSize } = req.body;
     const senderId = req.user.id;
 
@@ -201,11 +281,33 @@ async function sendInvitation(req, res) {
     const receiver = await prisma.user.findUnique({ where: { id: receiverId }, select: { id: true, status: true } });
     if (!receiver || receiver.status !== 'ACTIVE') return errorResponse(res, 'Receiver not found', 404);
 
-    // Prevent duplicate pending invitations
+    // Prevent duplicate pending invitations — only block if there is a PENDING
+    // invitation that has NOT yet expired. Expired invitations that were never
+    // explicitly rejected stay PENDING in the DB until the receiver tries to
+    // accept them; we must not let them block a fresh re-invitation.
     const existing = await prisma.pKInvitation.findFirst({
-      where: { senderId, receiverId, status: 'PENDING' }
+      where: {
+        senderId,
+        receiverId,
+        status:    'PENDING',
+        expiresAt: { gt: new Date() },   // only block if still within the 5-min window
+      }
     });
-    if (existing) return errorResponse(res, 'Invitation already sent', 409);
+    if (existing) {
+      return errorResponse(res, 'You already have a pending challenge to this player', 409);
+    }
+
+    // Auto-expire any stale PENDING invitations between these two users
+    // so the DB stays clean (fire-and-forget, non-fatal)
+    prisma.pKInvitation.updateMany({
+      where: {
+        senderId,
+        receiverId,
+        status:    'PENDING',
+        expiresAt: { lte: new Date() },
+      },
+      data: { status: 'EXPIRED' }
+    }).catch(() => {});
 
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
 
@@ -255,12 +357,44 @@ async function acceptInvitation(req, res) {
       return errorResponse(res, 'Invitation expired', 400);
     }
 
+    // BUG-004 FIX: Prevent accepting while already in an active PK.
+    // Without this check, a user could accept two simultaneous invitations
+    // and appear as a participant in two concurrent matches.
+    const activePK = await prisma.pKParticipant.findFirst({
+      where: {
+        userId: req.user.id,
+        isActive: true,
+        match: { state: { in: ['LIVE', 'COUNTDOWN', 'PREPARING', 'MATCHMAKING'] } }
+      }
+    });
+    if (activePK) return errorResponse(res, 'You are already in an active PK', 409);
+
     const config = await pkService.getConfig();
+
+    // FIX: Detect which voice room each participant is currently in.
+    // This is how roomIdA/roomIdB gets populated so the PK banner appears
+    // in the correct voice rooms. We look up each user's active VoiceParticipant.
+    const [senderRoom, receiverRoom] = await Promise.all([
+      prisma.voiceParticipant.findFirst({
+        where: { userId: invitation.senderId, isActive: true },
+        select: { roomId: true },
+        orderBy: { joinedAt: 'desc' },
+      }),
+      prisma.voiceParticipant.findFirst({
+        where: { userId: req.user.id, isActive: true },
+        select: { roomId: true },
+        orderBy: { joinedAt: 'desc' },
+      }),
+    ]);
+
     const { match } = await pkService.createMatch({
       type:           invitation.type,
       sideAUserId:    invitation.senderId,
       sideBUserId:    req.user.id,
       durationSeconds: invitation.durationSeconds,
+      // Pass the voice room IDs so pk:room:started is emitted and the banner appears
+      roomIdA:        senderRoom?.roomId   || null,
+      roomIdB:        receiverRoom?.roomId || null,
       idempotencyKey: `inv:${invitation.id}`,
     });
 
@@ -299,6 +433,30 @@ async function rejectInvitation(req, res) {
     pkService.emitPKUser(invitation.senderId, 'pk:rejected', { invitationId: invitation.id });
 
     return successResponse(res, null, 'Invitation rejected');
+  } catch (err) {
+    return errorResponse(res, err.message, 400);
+  }
+}
+
+/** POST /api/v1/pk/invitations/:id/cancel — sender cancels their own pending invitation */
+async function cancelInvitation(req, res) {
+  try {
+    const invitation = await prisma.pKInvitation.findUnique({ where: { id: req.params.id } });
+    if (!invitation) return errorResponse(res, 'Invitation not found', 404);
+
+    // Only the sender can cancel
+    if (invitation.senderId !== req.user.id) return errorResponse(res, 'Not authorized', 403);
+    if (invitation.status !== 'PENDING') return errorResponse(res, 'Invitation is no longer pending', 400);
+
+    await prisma.pKInvitation.update({
+      where: { id: invitation.id },
+      data:  { status: 'CANCELLED', cancelledAt: new Date() }
+    });
+
+    // Notify receiver that the challenge was withdrawn
+    pkService.emitPKUser(invitation.receiverId, 'pk:cancelled', { invitationId: invitation.id });
+
+    return successResponse(res, null, 'Invitation cancelled');
   } catch (err) {
     return errorResponse(res, err.message, 400);
   }
@@ -536,7 +694,8 @@ function startOfDay(d) {
 
 module.exports = {
   createPK, getPK, startPK, endPK, abortPK, pausePK, resumePK, rematch,
-  sendInvitation, acceptInvitation, rejectInvitation,
+  getActiveByRoom,
+  getInvitations, sendInvitation, acceptInvitation, rejectInvitation, cancelInvitation,
   joinMatchmaking, leaveMatchmaking, matchmakingStatus,
   vote,
   getHistory, getUserStats,

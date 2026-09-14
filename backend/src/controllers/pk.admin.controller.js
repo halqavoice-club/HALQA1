@@ -308,18 +308,27 @@ async function createTournament(req, res) {
     const { name, registrationStart, registrationEnd, startDate, endDate } = req.body;
     if (!name || !startDate || !endDate) return errorResponse(res, 'name, startDate, endDate required', 400);
 
-    const tournament = await prisma.pKTournament.create({
-      data: {
-        id:                uuidv4(),
-        name,
-        registrationStart: new Date(registrationStart || startDate),
-        registrationEnd:   new Date(registrationEnd   || startDate),
-        startDate:         new Date(startDate),
-        endDate:           new Date(endDate),
-        createdBy:         req.user.id,
-        ...req.body,
-      }
-    });
+    // BUG-006 FIX: Do not spread req.body — whitelist only known safe tournament fields.
+    // The previous ...req.body spread could inject arbitrary fields (e.g. createdBy,
+    // id, status) directly into the Prisma create call.
+    const allowedData = {
+      id:                uuidv4(),
+      name,
+      registrationStart: new Date(registrationStart || startDate),
+      registrationEnd:   new Date(registrationEnd   || startDate),
+      startDate:         new Date(startDate),
+      endDate:           new Date(endDate),
+      createdBy:         req.user.id,
+      ...(req.body.description   !== undefined && { description:   String(req.body.description).slice(0, 2000) }),
+      ...(req.body.bracketType   !== undefined && { bracketType:   ['SINGLE_ELIMINATION','ROUND_ROBIN'].includes(req.body.bracketType) ? req.body.bracketType : 'SINGLE_ELIMINATION' }),
+      ...(req.body.maxParticipants !== undefined && { maxParticipants: Math.min(Math.max(parseInt(req.body.maxParticipants) || 16, 2), 256) }),
+      ...(req.body.teamSize      !== undefined && { teamSize:      Math.min(Math.max(parseInt(req.body.teamSize) || 1, 1), 5) }),
+      ...(req.body.prizeDescription !== undefined && { prizeDescription: String(req.body.prizeDescription).slice(0, 2000) }),
+      ...(req.body.rules         !== undefined && { rules:         req.body.rules }),
+      ...(req.body.type          !== undefined && { type:          ['ONE_V_ONE','TEAM_V_TEAM'].includes(req.body.type) ? req.body.type : 'ONE_V_ONE' }),
+    };
+
+    const tournament = await prisma.pKTournament.create({ data: allowedData });
     return successResponse(res, tournament, 'Tournament created', 201);
   } catch (err) {
     return errorResponse(res, err.message, 400);
