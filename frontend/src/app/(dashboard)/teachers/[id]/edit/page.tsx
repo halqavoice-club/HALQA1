@@ -1,5 +1,17 @@
 'use client'
 
+/**
+ * Teacher Edit Page
+ *
+ * A School Admin may ONLY edit school-specific teacher fields:
+ *   - Department
+ *   - Specialization
+ *
+ * Personal information (name, email, phone) is NOT shown here.
+ * It belongs to the teacher and can only be changed by the teacher
+ * via their own profile/settings page.
+ */
+
 import { useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useForm } from 'react-hook-form'
@@ -15,39 +27,34 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useToast } from '@/components/ui/use-toast'
 import { ArrowLeft, Save, Loader2 } from 'lucide-react'
 import Link from 'next/link'
+import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 
 const schema = z.object({
-  firstName: z.string().min(1, 'Required'),
-  lastName: z.string().min(1, 'Required'),
-  phone: z.string().optional(),
-  department: z.string().optional(),
+  department:     z.string().optional(),
   specialization: z.string().optional(),
 })
 type Form = z.infer<typeof schema>
 
 export default function EditTeacherPage() {
   const { id } = useParams<{ id: string }>()
-  const router = useRouter()
+  const router   = useRouter()
   const { toast } = useToast()
   const queryClient = useQueryClient()
 
   const { data: teacher, isLoading } = useQuery({
     queryKey: ['teacher', id],
-    queryFn: () => api.get(`/teachers/${id}`).then(r => r.data.data)
+    queryFn:  () => api.get(`/teachers/${id}`).then(r => r.data.data),
   })
 
-  const { register, reset, formState: { errors }, handleSubmit } = useForm<Form>({
-    resolver: zodResolver(schema)
+  const { register, reset, handleSubmit, formState: { errors, isDirty } } = useForm<Form>({
+    resolver: zodResolver(schema),
   })
 
   useEffect(() => {
     if (teacher) {
       reset({
-        firstName: teacher.user?.firstName || '',
-        lastName: teacher.user?.lastName || '',
-        phone: teacher.user?.phone || '',
-        department: teacher.department || '',
-        specialization: teacher.specialization || ''
+        department:     teacher.department     || '',
+        specialization: teacher.specialization || '',
       })
     }
   }, [teacher, reset])
@@ -59,64 +66,84 @@ export default function EditTeacherPage() {
       queryClient.invalidateQueries({ queryKey: ['teacher', id] })
       router.push(`/teachers/${id}`)
     },
-    onError: (err: any) => toast({ title: err.response?.data?.message || 'Update failed', variant: 'destructive' })
+    onError: (err: any) =>
+      toast({ title: err.response?.data?.message || 'Update failed', variant: 'destructive' }),
   })
 
-  if (isLoading) return (
-    <div className="space-y-4 max-w-2xl">
-      <Skeleton className="h-8 w-48" />
-      <Skeleton className="h-48 rounded-xl" />
-    </div>
-  )
+  useUnsavedChanges(isDirty && !mutation.isSuccess)
+
+  if (isLoading) {
+    return (
+      <div className="space-y-4 max-w-md">
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-40 rounded-xl" />
+      </div>
+    )
+  }
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="max-w-md space-y-6">
+      {/* Back + title */}
       <div className="flex items-center gap-3">
         <Link href={`/teachers/${id}`} className="text-gray-500 hover:text-gray-700">
           <ArrowLeft className="w-5 h-5" />
         </Link>
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Edit Teacher</h1>
-          <p className="text-gray-500 text-sm">{teacher?.user?.firstName} {teacher?.user?.lastName}</p>
+          <p className="text-gray-500 text-sm">
+            {teacher?.user?.firstName} {teacher?.user?.lastName}
+          </p>
         </div>
       </div>
 
       <form onSubmit={handleSubmit(d => mutation.mutate(d))} className="space-y-4">
         <Card className="border-0 shadow-sm">
           <CardHeader className="pb-3">
-            <CardTitle className="text-base font-semibold">Personal Information</CardTitle>
+            <CardTitle className="text-base font-semibold">School Details</CardTitle>
+            <p className="text-xs text-gray-400 mt-0.5">
+              Only school-specific fields can be edited here. Personal information is managed by the teacher.
+            </p>
           </CardHeader>
-          <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <Label>First Name *</Label>
-              <Input className="mt-1" {...register('firstName')} />
-              {errors.firstName && <p className="text-xs text-red-500 mt-1">{errors.firstName.message}</p>}
-            </div>
-            <div>
-              <Label>Last Name *</Label>
-              <Input className="mt-1" {...register('lastName')} />
-              {errors.lastName && <p className="text-xs text-red-500 mt-1">{errors.lastName.message}</p>}
-            </div>
-            <div>
-              <Label>Phone</Label>
-              <Input className="mt-1" {...register('phone')} />
-            </div>
+          <CardContent className="space-y-4">
             <div>
               <Label>Department</Label>
-              <Input className="mt-1" placeholder="e.g., Quran Studies" {...register('department')} />
+              <Input
+                className="mt-1"
+                placeholder="e.g., Quran Studies, Arabic, Islamic Studies"
+                {...register('department')}
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                The subject area or faculty this teacher belongs to
+              </p>
             </div>
-            <div className="md:col-span-2">
+            <div>
               <Label>Specialization</Label>
-              <Input className="mt-1" placeholder="e.g., Tajweed & Memorization" {...register('specialization')} />
+              <Input
+                className="mt-1"
+                placeholder="e.g., Tajweed & Memorization, Fiqh"
+                {...register('specialization')}
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                The teacher&apos;s specific area of expertise
+              </p>
             </div>
           </CardContent>
         </Card>
 
         <div className="flex gap-3">
-          <Button type="submit" className="bg-halqa-700 hover:bg-halqa-800 gap-2" disabled={mutation.isPending}>
-            {mutation.isPending ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : <><Save className="w-4 h-4" /> Save Changes</>}
+          <Button
+            type="submit"
+            className="bg-halqa-700 hover:bg-halqa-800 gap-2"
+            disabled={mutation.isPending}
+          >
+            {mutation.isPending
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</>
+              : <><Save className="w-4 h-4" /> Save Changes</>
+            }
           </Button>
-          <Link href={`/teachers/${id}`}><Button type="button" variant="outline">Cancel</Button></Link>
+          <Link href={`/teachers/${id}`}>
+            <Button type="button" variant="outline">Cancel</Button>
+          </Link>
         </div>
       </form>
     </div>

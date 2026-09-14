@@ -11,6 +11,7 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useSchoolAccess } from '@/hooks/useSchoolAccess'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { Breadcrumb } from '@/components/ui/breadcrumb'
@@ -25,6 +26,7 @@ export default function GuardianDetailPage() {
   const { id } = useParams<{ id: string }>()
   const router = useRouter()
   const { user } = useAuthStore()
+  const { activeRole } = useSchoolAccess()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
@@ -44,7 +46,10 @@ export default function GuardianDetailPage() {
     onError: () => toast({ title: 'Delete failed', variant: 'destructive' })
   })
 
-  const canEdit = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
+  // SA-GUARDIAN-01: SUPER_ADMIN is a platform role — not a school-scoped admin.
+  // Editing guardian profiles is a school-scoped action (SCHOOL_ADMIN membership role).
+  // Support both new-arch (activeRole from SchoolMembership) and legacy (user.role directly)
+  const canEdit = activeRole === 'SCHOOL_ADMIN' || user?.role === 'SCHOOL_ADMIN'
 
   if (isLoading) {
     return (
@@ -129,7 +134,7 @@ export default function GuardianDetailPage() {
               </div>
 
               <div className="flex gap-2 mt-4">
-                <Link href={`/messages?compose=${guardian.user?.id}`}>
+                <Link href={`/dm?userId=${guardian.user?.id}`}>
                   <Button variant="outline" size="sm" className="gap-2">
                     <MessageSquare className="w-4 h-4" /> Send Message
                   </Button>

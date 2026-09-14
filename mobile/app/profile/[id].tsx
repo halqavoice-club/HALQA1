@@ -5,7 +5,7 @@
 import React, { useCallback } from 'react';
 import {
   View, Text, Image, StyleSheet, ScrollView,
-  TouchableOpacity, ActivityIndicator, FlatList, RefreshControl,
+  TouchableOpacity, ActivityIndicator, FlatList, RefreshControl
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -301,3 +301,4 @@ const styles = StyleSheet.create({
   textPost: { alignItems: 'center', justifyContent: 'center', backgroundColor: '#ede9fe', padding: 8 },
   textPostContent: { fontSize: 11, color: '#374151', textAlign: 'center' },
 });
+

@@ -33,22 +33,39 @@ const multipleUploadLimit = rateLimit({
 });
 
 // ─── Allowed MIME types ───────────────────────────────────────────────────────
-const ALLOWED_MIME_TYPES = [
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-  'video/mp4', 'video/webm', 'video/quicktime', 'video/3gpp',
+// Note: file-type magic byte detection may return slightly different strings
+// than browser-declared mimetypes. Both sets are included here.
+const ALLOWED_MIME_TYPES = new Set([
+  // Images
+  'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
+  'image/heic', 'image/heif', 'image/avif', 'image/svg+xml', 'image/bmp',
+  'image/tiff', 'image/x-icon',
+  // Videos
+  'video/mp4', 'video/webm', 'video/quicktime', 'video/3gpp', 'video/3gpp2',
+  'video/x-m4v', 'video/x-msvideo', 'video/x-matroska', 'video/ogg',
+  // Audio
+  'audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/wav', 'audio/x-wav',
+  'audio/ogg', 'audio/aac', 'audio/m4a', 'audio/x-m4a', 'audio/flac',
+  'audio/webm', 'audio/x-flac',
+  // Documents
   'application/pdf',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.ms-excel',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'audio/mpeg', 'audio/wav', 'audio/ogg',
-];
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  // Archives (safe for DM file sharing)
+  'application/zip', 'application/x-zip-compressed',
+  // Text
+  'text/plain', 'text/csv',
+]);
 
 // ─── Use memory storage — saveFile() decides local vs S3 ─────────────────────
 const fileFilter = (req, file, cb) => {
-  ALLOWED_MIME_TYPES.includes(file.mimetype)
+  ALLOWED_MIME_TYPES.has(file.mimetype)
     ? cb(null, true)
-    : cb(new Error('File type not allowed'), false);
+    : cb(new Error(`File type not allowed: ${file.mimetype}`), false);
 };
 
 const upload = multer({
@@ -66,24 +83,27 @@ async function validateFileBuffer(buffer) {
   const detected = await fileTypeFromBuffer(buffer);
   const detectedMime = detected ? detected.mime : null;
 
-  if (!detectedMime || !ALLOWED_MIME_TYPES.includes(detectedMime)) {
-    return `File type not allowed (detected: ${detectedMime || 'unknown'})`;
+  // Some valid files (plain text, CSV, SVG, certain audio) have no magic bytes.
+  // If file-type can't detect, fall back to allowing it (multer already filtered
+  // by declared MIME, which is checked above in fileFilter).
+  if (detectedMime && !ALLOWED_MIME_TYPES.has(detectedMime)) {
+    // Allow common aliases (file-type returns 'image/jpg' but we store 'image/jpeg' etc.)
+    const normalized = detectedMime
+      .replace('image/jpg', 'image/jpeg')
+      .replace('audio/mp3', 'audio/mpeg')
+      .replace('audio/x-wav', 'audio/wav')
+    if (!ALLOWED_MIME_TYPES.has(normalized)) {
+      return `File type not allowed (detected: ${detectedMime})`;
+    }
   }
 
   // ClamAV scan — only when the daemon has been confirmed reachable.
-  // initialize() sets enabled=false if the daemon can't be reached.
-  // We also guard against the case where initialize() was never called
-  // (enabled still true) by treating any connection error as fail-open.
   if (clamav.isEnabled()) {
     try {
       const scanResult = await clamav.scanBuffer(buffer);
-      // Only block when:
-      //   - clean is explicitly false   (virus found)
-      //   - error is absent/empty       (not a connection failure)
-      //   - viruses array is non-empty  (at least one virus name)
       const hasVirus = scanResult &&
         scanResult.clean === false &&
-        !scanResult.error &&          // empty string or undefined → no comms error
+        !scanResult.error &&
         Array.isArray(scanResult.viruses) &&
         scanResult.viruses.length > 0;
       if (hasVirus) {
