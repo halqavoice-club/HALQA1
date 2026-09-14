@@ -34,7 +34,7 @@ async function rawCreateLiveClass(data) {
       title, description, scheduledAt, duration, status,
       chatEnabled, handRaiseEnabled, whiteboardEnabled,
       quranPanelEnabled, isOpenMic, screenShareEnabled,
-      maxParticipants, isRecorded,
+      maxParticipants, maxSpeakers, isRecorded,
       createdAt, updatedAt
     ) VALUES (
       ?, ?, ?,
@@ -42,7 +42,7 @@ async function rawCreateLiveClass(data) {
       ?, ?, ?, ?, ?,
       ?, ?, ?,
       ?, ?, ?,
-      ?, ?,
+      ?, ?, ?,
       ?, ?
     )
   `,
@@ -60,6 +60,7 @@ async function rawCreateLiveClass(data) {
     data.isOpenMic           ? 1 : 0,
     data.screenShareEnabled  ? 1 : 0,
     data.maxParticipants     ?? null,
+    data.maxSpeakers         ?? 20,
     data.isRecorded          ? 1 : 0,
     now, now
   );
@@ -125,6 +126,7 @@ function shapeLiveClassRow(row) {
     recordingUrl:     row.recordingUrl    ?? null,
     coverImageUrl:    row.coverImageUrl   ?? null,
     maxParticipants:  row.maxParticipants ?? null,
+    maxSpeakers:      row.maxSpeakers != null ? Number(row.maxSpeakers) : 20,
     isRecorded:       !!row.isRecorded,
     recordingStartedAt: row.recordingStartedAt ?? null,
     chatEnabled:      !!row.chatEnabled,
@@ -182,7 +184,7 @@ async function findLiveClass(id) {
              host_user_id as hostUserId, title, description, status,
              livekitRoomName, duration, chatEnabled, handRaiseEnabled,
              whiteboardEnabled, quranPanelEnabled, isOpenMic, screenShareEnabled,
-             maxParticipants, isRecorded, recordingStartedAt,
+             maxParticipants, maxSpeakers, isRecorded, recordingStartedAt,
              startedAt, endedAt, deletedAt, createdAt, updatedAt
       FROM live_classes
       WHERE id = ? AND deletedAt IS NULL
@@ -211,6 +213,7 @@ async function findLiveClass(id) {
         isOpenMic: !!r.isOpenMic,
         screenShareEnabled: !!r.screenShareEnabled,
         maxParticipants: r.maxParticipants ?? null,
+        maxSpeakers: r.maxSpeakers != null ? Number(r.maxSpeakers) : 20,
         isRecorded: !!r.isRecorded,
         recordingStartedAt: r.recordingStartedAt ?? null,
         startedAt: r.startedAt ?? null,
@@ -285,6 +288,18 @@ function assertHostAccess(lc, user) {
   // re-apply school membership as defence-in-depth
   if (user.role !== 'SCHOOL_ADMIN' && lc.schoolId !== user.schoolId) {
     const err = new Error('Access denied to this school\'s resource');
+    err.status = 403;
+    throw err;
+  }
+}
+
+// ─── Ownership guard for mutating operations (update / delete / start / end) ──
+// Only the original creator (hostUserId) may host, edit, delete, start, or end
+// a live class or live stream — for BOTH SCHOOL and PUBLIC stream types.
+// No admin override. No school-staff bypass. Creator only.
+function assertOwner(lc, user) {
+  if (lc.hostUserId !== user.id) {
+    const err = new Error('Only the creator can perform this action on this live class');
     err.status = 403;
     throw err;
   }
@@ -647,11 +662,13 @@ async function updateLiveClass(req, res, next) {
     const lc = await rawFindLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user);
+    // OWN-01: only the creator can edit the class
+    assertOwner(lc, req.user);
     if (lc.status === 'ENDED' || lc.status === 'CANCELLED') return errorResponse(res, 'Cannot edit ended/cancelled class', 400);
 
     const allowed = ['title','description','scheduledAt','duration','chatEnabled',
       'handRaiseEnabled','whiteboardEnabled','quranPanelEnabled','maxParticipants',
-      'isRecorded','isOpenMic','screenShareEnabled'];
+      'maxSpeakers','isRecorded','isOpenMic','screenShareEnabled'];
     // P3-002 VERIFIED: column names in the raw SQL UPDATE come exclusively from the
     // `allowed` array above — never from req.body keys directly. User-supplied field
     // names are filtered through `allowed.forEach`, so only known-safe column names
@@ -674,6 +691,8 @@ async function deleteLiveClass(req, res, next) {
     const lc = await rawFindLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user);
+    // OWN-01: only the creator can delete the class
+    assertOwner(lc, req.user);
     if (lc.status === 'LIVE') return errorResponse(res, 'End the class before deleting', 400);
     await rawUpdateLiveClassStatus(lc.id, { deletedAt: new Date(), status: 'CANCELLED' });
     return successResponse(res, null, 'Live class deleted');
@@ -686,6 +705,8 @@ async function startLiveClass(req, res, next) {
     const lc = await rawFindLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user);
+    // OWN-01: only the creator can start the class
+    assertOwner(lc, req.user);
     if (lc.status === 'LIVE') return errorResponse(res, 'Class already live', 400);
     if (lc.status === 'ENDED') return errorResponse(res, 'Class already ended', 400);
 
@@ -725,6 +746,8 @@ async function endLiveClass(req, res, next) {
     const lc = await rawFindLiveClass(req.params.id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user);
+    // OWN-01: only the creator can end the class
+    assertOwner(lc, req.user);
     if (lc.status !== 'LIVE') return errorResponse(res, 'Class is not live', 400);
 
     // BUG-05 FIX: Cancel any pending auto-end timer before manually ending.
@@ -796,24 +819,44 @@ async function joinLiveClass(req, res, next) {
 
     const userId = req.user.id;
     const effectiveRole = getEffectiveRole(req);
-    // LCSV-001 FIX: SUPER_ADMIN is a platform administrator, NOT a live class teacher/host.
-    // Removed 'SUPER_ADMIN' from both checks so a platform admin joining a live class
-    // receives STUDENT role (same as any other viewer) unless they are the actual
-    // stream creator (isPublicHost check below covers that case).
+
+    // LCSV-001 / FINAL-AUTH-01: Staff flags are used ONLY for enrollment bypass.
+    // They MUST NOT determine the session role (HOST/MODERATOR/STUDENT).
+    // A TEACHER or SCHOOL_ADMIN who is NOT the creator joins as MODERATOR on SCHOOL
+    // streams and STUDENT on PUBLIC streams. Only hostUserId === userId → HOST.
     const isTeacher = req.user.role === 'TEACHER' || req.user.role === 'SCHOOL_ADMIN';
     const isStaff = ['TEACHER', 'SCHOOL_ADMIN'].includes(effectiveRole);
 
     // Normalise streamType — old rows and mocks may not have it set
     const streamType = lc.streamType || 'SCHOOL';
 
-    // For PUBLIC streams: the original host gets HOST role, everyone else is STUDENT/AUDIENCE
-    const isPublicHost = streamType === 'PUBLIC' && lc.hostUserId === userId;
-    const role = (isTeacher || isStaff || isPublicHost) ? 'HOST' : 'STUDENT';
+    // ── FINAL ROLE ASSIGNMENT ─────────────────────────────────────────────
+    // HOST  = creator only (hostUserId === userId)
+    // MODERATOR = non-creator staff on SCHOOL streams (teacher/admin classroom management)
+    // STUDENT   = everyone else (enrolled students, public audience)
+    // This applies to BOTH SCHOOL and PUBLIC streams.
+    const isCreator = lc.hostUserId === userId;
+
+    let role;
+    if (isCreator) {
+      // Creator always gets HOST regardless of stream type
+      role = 'HOST';
+    } else if (streamType === 'SCHOOL' && (isTeacher || isStaff)) {
+      // Non-creator staff on SCHOOL streams get MODERATOR (classroom moderation rights)
+      // but NOT HOST (owner rights: edit/delete/start/end blocked by assertOwner)
+      role = 'MODERATOR';
+    } else {
+      role = 'STUDENT';
+    }
+
+    // isEffectivelyStaff: used ONLY for enrollment bypass and attendance tracking.
+    // Does NOT determine session role.
+    const isEffectivelyStaff = streamType === 'SCHOOL' && (isTeacher || isStaff);
 
     let student = null;
 
-    // Enrollment check — only applies to SCHOOL streams for non-staff
-    if (streamType === 'SCHOOL' && !isTeacher && !isStaff) {
+    // Enrollment check — only applies to SCHOOL streams for non-staff non-creator
+    if (streamType === 'SCHOOL' && !isCreator && !isEffectivelyStaff) {
       student = await prisma.student.findFirst({ where: { userId } });
       if (!student) return errorResponse(res, 'Student profile not found', 403);
       const enrolled = await prisma.enrollment.findFirst({
@@ -838,8 +881,9 @@ async function joinLiveClass(req, res, next) {
       }
     }
 
-    // For PUBLIC streams: anyone can join
-    if (streamType === 'PUBLIC' && !isPublicHost) {
+    // For PUBLIC streams: anyone (non-creator) can join as STUDENT
+    // Kick protection applies to everyone except the creator
+    if (streamType === 'PUBLIC' && !isCreator) {
       const existingRecord = await prisma.liveClassParticipant.findFirst({
         where: { liveClassId: lc.id, userId },
         select: { wasKicked: true },
@@ -860,15 +904,19 @@ async function joinLiveClass(req, res, next) {
 
     const participant = await prisma.liveClassParticipant.upsert({
       where: { liveClassId_userId: { liveClassId: lc.id, userId } },
-      create: { liveClassId: lc.id, userId, role, isMuted: !(isTeacher || isStaff || isPublicHost || lc.isOpenMic), isActive: true },
-      update: { isActive: true, joinedAt: new Date(), leftAt: null, isMuted: !(isTeacher || isStaff || isPublicHost || lc.isOpenMic) },
+      create: { liveClassId: lc.id, userId, role, isMuted: !(isCreator || lc.isOpenMic), isActive: true },
+      // H-7 FIX: On rejoin, reset speakerSlot to null so a previously-promoted
+      // participant does not ghost-occupy a stage slot. They must be re-approved.
+      // Also reset handRaised so stale hand state from a previous session is cleared.
+      update: { isActive: true, joinedAt: new Date(), leftAt: null, isMuted: !(isCreator || lc.isOpenMic), speakerSlot: null, handRaised: false },
       include: { user: { select: userSelect } }
     });
 
     const io = getIo();
 
-    // Auto-start if host joins a SCHEDULED stream
-    const isHost = isTeacher || isStaff || isPublicHost;
+    // Auto-start if CREATOR joins a SCHEDULED stream
+    // FINAL-AUTH-01: Only the creator triggers auto-start, not any teacher/staff
+    const isHost = isCreator;
     if (isHost && lc.status === 'SCHEDULED') {
       const autoStartedAt = new Date();
       await rawUpdateLiveClassStatus(lc.id, {
@@ -891,7 +939,8 @@ async function joinLiveClass(req, res, next) {
     }
 
     // Attendance tracking — only for SCHOOL streams with a student record
-    if (streamType === 'SCHOOL' && !isTeacher && !isStaff && student) {
+    // Staff (teachers/admins) don't get attendance records; only enrolled students do
+    if (streamType === 'SCHOOL' && !isCreator && !isEffectivelyStaff && student) {
       await prisma.liveClassAttendance.upsert({
         where: { liveClassId_studentId: { liveClassId: lc.id, studentId: student.id } },
         create: { liveClassId: lc.id, studentId: student.id, status: 'PRESENT' },
@@ -1237,14 +1286,98 @@ async function approveHand(req, res, next) {
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     assertSchoolAccess(lc, req.user);
-    await prisma.liveClassHandQueue.updateMany({ where: { liveClassId: id, userId, status: 'WAITING' }, data: { status: 'APPROVED' } });
-    await prisma.liveClassParticipant.updateMany({ where: { liveClassId: id, userId }, data: { handRaised: false, isMuted: false } });
+
+    // H-8 FIX: Verify caller is HOST or MODERATOR via participant record,
+    // not just the global school role. Matches inviteToStage authorization.
+    const caller = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId: id, userId: req.user.id, isActive: true },
+    });
+    if (!caller || (caller.role !== 'HOST' && caller.role !== 'MODERATOR')) {
+      return errorResponse(res, 'Only the host or moderator can approve hands', 403);
+    }
+
+    // H-5 FIX: Concurrency-safe promotion using a raw UPDATE with an embedded
+    // subquery count. The UPDATE atomically:
+    //   1. Verifies the target participant exists, is active, and has no slot yet
+    //   2. Verifies active speaker count < maxSpeakers
+    //   3. Assigns the slot only if both conditions hold
+    // After the UPDATE we check rows-affected to detect races.
+    const maxSpeakers = lc.maxSpeakers ?? 20;
+
+    // First check idempotency (H-6) — if already on stage, return existing slot
+    const existing = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId: id, userId, isActive: true },
+      select: { id: true, speakerSlot: true },
+    });
+    if (!existing) return errorResponse(res, 'Participant not found', 404);
+    if (existing.speakerSlot != null) {
+      // Already on stage — idempotent response
+      return successResponse(res, { speakerSlot: existing.speakerSlot }, 'Participant is already on stage');
+    }
+
+    // Find lowest free slot from current snapshot — then do atomic assign
+    const activeSpeakers = await prisma.liveClassParticipant.findMany({
+      where: { liveClassId: id, isActive: true, speakerSlot: { not: null } },
+      orderBy: { speakerSlot: 'asc' },
+      select: { speakerSlot: true },
+    });
+    if (activeSpeakers.length >= maxSpeakers) {
+      return errorResponse(res, `Stage is full (max ${maxSpeakers} speakers)`, 400);
+    }
+    const usedSlots = new Set(activeSpeakers.map(s => s.speakerSlot));
+    let slot = 0;
+    while (usedSlots.has(slot)) slot++;
+
+    // Atomic conditional UPDATE:
+    // Only succeeds if:
+    //   a) this participant is still active + audience (speakerSlot IS NULL)
+    //   b) live speaker count is still < maxSpeakers
+    // If a concurrent request already promoted someone, one of these will be 0 rows.
+    const result = await prisma.$executeRawUnsafe(`
+      UPDATE live_class_participants
+      SET speakerSlot = ?, isMuted = 0, handRaised = 0, updatedAt = NOW()
+      WHERE liveClassId = ?
+        AND userId = ?
+        AND isActive = 1
+        AND speakerSlot IS NULL
+        AND (
+          SELECT COUNT(*) FROM (
+            SELECT 1 FROM live_class_participants
+            WHERE liveClassId = ? AND isActive = 1 AND speakerSlot IS NOT NULL
+          ) AS _cnt
+        ) < ?
+    `, slot, id, userId, id, maxSpeakers);
+
+    if (result === 0) {
+      // Either stage just filled up (race) or participant was already promoted
+      const recheck = await prisma.liveClassParticipant.findFirst({
+        where: { liveClassId: id, userId, isActive: true },
+        select: { speakerSlot: true },
+      });
+      if (recheck?.speakerSlot != null) {
+        // Another request got there first and assigned the same user — idempotent
+        return successResponse(res, { speakerSlot: recheck.speakerSlot }, 'Participant is already on stage');
+      }
+      // Stage became full between our check and the update
+      return errorResponse(res, `Stage is full (max ${maxSpeakers} speakers)`, 400);
+    }
+
+    // Update hand queue status
+    await prisma.liveClassHandQueue.updateMany({
+      where: { liveClassId: id, userId, status: 'WAITING' },
+      data: { status: 'APPROVED' },
+    });
+
     const io = getIo();
     if (io) {
-      io.to(`liveclass:${id}`).emit('liveclass:hand_approved', { liveClassId: id, userId });
-      io.to(`user:${userId}`).emit('liveclass:you_can_speak', { liveClassId: id });
+      // Keep liveclass:hand_approved for compatibility (lowers hand in all client UIs)
+      io.to(`liveclass:${id}`).emit('liveclass:hand_approved', { liveClassId: id, userId, speakerSlot: slot });
+      // H-1 FIX: emit dedicated stage events the clients are wired for
+      io.to(`liveclass:${id}`).emit('liveclass:speaker_added', { liveClassId: id, userId, speakerSlot: slot });
+      // H-1 FIX: grant_mic → target user's private room triggers LiveKit reconnect
+      io.to(`user:${userId}`).emit('liveclass:grant_mic', { liveClassId: id, speakerSlot: slot });
     }
-    return successResponse(res, null, 'Hand approved  mic unmuted');
+    return successResponse(res, { speakerSlot: slot }, 'Hand approved — mic unmuted');
   } catch (e) { next(e); }
 }
 
@@ -1292,11 +1425,12 @@ async function sendMessage(req, res, next) {
     assertSchoolAccess(lc, req.user); // P0-01
     if (!lc.chatEnabled) return errorResponse(res, 'Chat is disabled', 403);
 
-    // Verify the sender is an active participant or the teacher/admin of this class
-    // LCSV-002 FIX: Removed 'SUPER_ADMIN' — sending messages requires school staff
-    // membership or active participant status, not a platform admin role.
-    const isTeacherOrAdmin = ['TEACHER', 'SCHOOL_ADMIN'].includes(getEffectiveRole(req));
-    if (!isTeacherOrAdmin) {
+    // Verify the sender is an active participant OR school staff
+    // Staff (TEACHER/SCHOOL_ADMIN) can send messages even before formally joining
+    // FINAL-AUTH-01: Uses global staff role for message sending (moderation right),
+    // not for ownership determination. This is intentional — chat is moderation, not ownership.
+    const isStaffSender = ['TEACHER', 'SCHOOL_ADMIN'].includes(getEffectiveRole(req));
+    if (!isStaffSender) {
       const participant = await prisma.liveClassParticipant.findFirst({
         where: { liveClassId: id, userId: req.user.id, isActive: true },
       });
@@ -1632,27 +1766,39 @@ async function broadcastQuranPosition(req, res, next) {
   } catch (e) { next(e); }
 }
 
-// ─── DELETE CHAT MESSAGE ───────────────────────────────────────────────────────
+//  DELETE CHAT MESSAGE ───────────────────────────────────────────────────────
 async function deleteMessage(req, res, next) {
   try {
     const { id: liveClassId, messageId } = req.params;
     const userId = req.user.id;
-    const isHost = ['TEACHER','SCHOOL_ADMIN'].includes(getEffectiveRole(req));
-    // LCSV-002 FIX: Removed 'SUPER_ADMIN' — deleting chat messages as host requires
-    // school staff membership or being the message author, not a platform admin role.
 
+    // FINAL-AUTH-01: deleteMessage host check uses participant record role,
+    // not global school role. HOST or MODERATOR in the session can delete any message.
+    // The global-role check is used only as a fallback for non-joined staff.
     // P0-01: school isolation check — fetch lc before any data access
     const lc = await findLiveClass(liveClassId);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     assertSchoolAccess(lc, req.user);
+
+    // Check session role (authoritative) first, then fall back to global role for staff
+    // who haven't joined yet (e.g. admin viewing messages via API)
+    const participantRecord = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId, userId, isActive: true },
+      select: { role: true },
+    });
+    const sessionRole = participantRecord?.role ?? null;
+    const isModeratorBySession = sessionRole === 'HOST' || sessionRole === 'MODERATOR';
+    // Staff fallback: a teacher/admin who hasn't formally joined can still moderate
+    const isStaffModerator = ['TEACHER', 'SCHOOL_ADMIN'].includes(getEffectiveRole(req));
+    const canModerateMsgs = isModeratorBySession || isStaffModerator;
 
     const msg = await prisma.liveClassMessage.findFirst({
       where: { id: messageId, liveClassId, deletedAt: null }
     });
     if (!msg) return errorResponse(res, 'Message not found', 404);
 
-    // Only the message author or a host can delete
-    if (msg.userId !== userId && !isHost) {
+    // Only the message author or a moderator/host can delete
+    if (msg.userId !== userId && !canModerateMsgs) {
       return errorResponse(res, 'Only the host or the message author can delete this message', 403);
     }
 
@@ -1752,11 +1898,178 @@ async function setVideoState(req, res, next) {
   } catch (e) { next(e); }
 }
 
+// ─── INVITE TO STAGE ──────────────────────────────────────────────────────────
+// Host/Moderator can directly invite an audience member to the speaker stage
+// without requiring a hand raise. Enforces maxSpeakers cap.
+async function inviteToStage(req, res, next) {
+  try {
+    const { id, userId } = req.params;
+    const lc = await findLiveClass(id);
+    if (!lc) return errorResponse(res, 'Live class not found', 404);
+    assertSchoolAccess(lc, req.user);
+
+    // Verify caller is HOST or MODERATOR (participant record — not global role)
+    const caller = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId: id, userId: req.user.id, isActive: true },
+    });
+    if (!caller || (caller.role !== 'HOST' && caller.role !== 'MODERATOR')) {
+      return errorResponse(res, 'Only the host or moderator can invite to stage', 403);
+    }
+
+    // H-6 FIX: Idempotency — if target already on stage, return existing slot
+    const target = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId: id, userId, isActive: true },
+    });
+    if (!target) return errorResponse(res, 'Participant not found', 404);
+    if (target.speakerSlot != null) {
+      return successResponse(res, { speakerSlot: target.speakerSlot }, 'Participant is already on stage');
+    }
+
+    // H-5 FIX: Same atomic slot assignment as approveHand
+    const maxSpeakers = lc.maxSpeakers ?? 20;
+    const activeSpeakers = await prisma.liveClassParticipant.findMany({
+      where: { liveClassId: id, isActive: true, speakerSlot: { not: null } },
+      orderBy: { speakerSlot: 'asc' },
+      select: { speakerSlot: true },
+    });
+    if (activeSpeakers.length >= maxSpeakers) {
+      return errorResponse(res, `Stage is full (max ${maxSpeakers} speakers)`, 400);
+    }
+    const usedSlots = new Set(activeSpeakers.map(s => s.speakerSlot));
+    let slot = 0;
+    while (usedSlots.has(slot)) slot++;
+
+    // Atomic conditional UPDATE
+    const result = await prisma.$executeRawUnsafe(`
+      UPDATE live_class_participants
+      SET speakerSlot = ?, isMuted = 0, handRaised = 0, updatedAt = NOW()
+      WHERE liveClassId = ?
+        AND userId = ?
+        AND isActive = 1
+        AND speakerSlot IS NULL
+        AND (
+          SELECT COUNT(*) FROM (
+            SELECT 1 FROM live_class_participants
+            WHERE liveClassId = ? AND isActive = 1 AND speakerSlot IS NOT NULL
+          ) AS _cnt
+        ) < ?
+    `, slot, id, userId, id, maxSpeakers);
+
+    if (result === 0) {
+      const recheck = await prisma.liveClassParticipant.findFirst({
+        where: { liveClassId: id, userId, isActive: true },
+        select: { speakerSlot: true },
+      });
+      if (recheck?.speakerSlot != null) {
+        return successResponse(res, { speakerSlot: recheck.speakerSlot }, 'Participant is already on stage');
+      }
+      return errorResponse(res, `Stage is full (max ${maxSpeakers} speakers)`, 400);
+    }
+
+    const io = getIo();
+    if (io) {
+      // H-6 FIX: Use liveclass:speaker_added (not hand_approved) for direct invitations.
+      // Keep hand_approved emitted too so any legacy hand-queue listeners still work
+      // if someone had raised their hand before the invite.
+      io.to(`liveclass:${id}`).emit('liveclass:speaker_added', { liveClassId: id, userId, speakerSlot: slot });
+      // H-1 FIX: grant_mic → target user's private room triggers LiveKit reconnect
+      io.to(`user:${userId}`).emit('liveclass:grant_mic', { liveClassId: id, speakerSlot: slot });
+    }
+    return successResponse(res, { speakerSlot: slot }, 'Participant invited to stage');
+  } catch (e) { next(e); }
+}
+
+// ─── DEMOTE FROM STAGE ────────────────────────────────────────────────────────
+// Host/Moderator can move an active speaker back to the audience.
+// Clears speakerSlot and re-mutes the participant.
+async function demoteFromStage(req, res, next) {
+  try {
+    const { id, userId } = req.params;
+    const lc = await findLiveClass(id);
+    if (!lc) return errorResponse(res, 'Live class not found', 404);
+    assertSchoolAccess(lc, req.user);
+
+    // Verify caller is HOST or MODERATOR
+    const caller = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId: id, userId: req.user.id, isActive: true },
+    });
+    if (!caller || (caller.role !== 'HOST' && caller.role !== 'MODERATOR')) {
+      return errorResponse(res, 'Only the host or moderator can demote speakers', 403);
+    }
+
+    const target = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId: id, userId, isActive: true },
+    });
+    if (!target) return errorResponse(res, 'Participant not found', 404);
+    if (target.role === 'HOST') return errorResponse(res, 'Cannot demote the host', 400);
+
+    await prisma.liveClassParticipant.update({
+      where: { id: target.id },
+      data: { speakerSlot: null, isMuted: true },
+    });
+
+    const io = getIo();
+    if (io) {
+      // H-7 FIX: emit the full set of demotion events clients are wired for
+      // liveclass:speaker_removed → all clients: remove from speaker grid
+      io.to(`liveclass:${id}`).emit('liveclass:speaker_removed', { liveClassId: id, userId });
+      // liveclass:speaker_demoted → all clients: alternative demotion event
+      io.to(`liveclass:${id}`).emit('liveclass:speaker_demoted', { liveClassId: id, userId });
+      // liveclass:revoke_mic → target user only: reconnect LiveKit with canPublish=false
+      io.to(`user:${userId}`).emit('liveclass:revoke_mic', { liveClassId: id });
+      // liveclass:you_were_demoted → target user only: show notification
+      io.to(`user:${userId}`).emit('liveclass:you_were_demoted', { liveClassId: id });
+    }
+    return successResponse(res, null, 'Participant moved to audience');
+  } catch (e) { next(e); }
+}
+
+// ─── DROP MIC (Live Class self-demotion) ──────────────────────────────────────
+// A speaker voluntarily returns to the audience.
+// Clears speakerSlot, re-mutes in DB, emits revoke_mic + speaker_removed.
+// Does NOT remove the participant from the class — membership is preserved.
+async function dropMicLiveClass(req, res, next) {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    const lc = await findLiveClass(id);
+    if (!lc) return errorResponse(res, 'Live class not found', 404);
+    assertSchoolAccess(lc, req.user);
+
+    const participant = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId: id, userId, isActive: true },
+    });
+    if (!participant) return errorResponse(res, 'You are not an active participant', 404);
+    // HOST cannot drop their own mic via this endpoint — they must end the class
+    if (participant.role === 'HOST') return errorResponse(res, 'Host cannot drop mic — use end class instead', 400);
+    if (participant.speakerSlot == null) {
+      // Already audience — idempotent, nothing to do
+      return successResponse(res, null, 'Already in audience');
+    }
+
+    await prisma.liveClassParticipant.update({
+      where: { id: participant.id },
+      data: { speakerSlot: null, isMuted: true },
+    });
+
+    const io = getIo();
+    if (io) {
+      // All clients: remove from speaker grid
+      io.to(`liveclass:${id}`).emit('liveclass:speaker_removed', { liveClassId: id, userId });
+      // Caller's own LiveKit reconnect (revoke publish permission)
+      io.to(`user:${userId}`).emit('liveclass:revoke_mic', { liveClassId: id });
+    }
+    return successResponse(res, null, 'Mic dropped — returned to audience');
+  } catch (e) { next(e); }
+}
+
 module.exports = {
   listLiveClasses, getLiveClass, createLiveClass, updateLiveClass, deleteLiveClass,
   startLiveClass, endLiveClass, joinLiveClass, leaveLiveClass, getLiveKitToken,
   getParticipants, muteParticipant, muteAll, unmuteAll, kickParticipant,
   raiseHand, lowerHand, approveHand, rejectHand, getHandQueue, lowerAllHands,
+  inviteToStage, demoteFromStage, dropMicLiveClass,
   sendMessage, getMessages, deleteMessage, getAttendance, requestSpeak, toggleOpenMic,
   startRecording, stopRecording, broadcastPoll, getPollState, broadcastDraw, getWhiteboardState,
   broadcastQuranPosition, uploadCoverImage, setVideoState,

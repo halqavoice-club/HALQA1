@@ -187,6 +187,8 @@ model School {
   schoolBuses SchoolBus[] @relation("SchoolBuses")
   busRoutes BusRoute[] @relation("BusRoutes")
   drivers Driver[] @relation("Drivers")
+  // Practice Quiz back-relation — uncomment when Quiz model is added
+  // quizzes Quiz[]
 
   @@index([slug])
   @@map("schools")
@@ -295,6 +297,7 @@ model User {
   dmConvsAsB         DmConversation[]   @relation("DmConvB")
   dmSent             DirectMessage[]    @relation("DmSender")
   dmReceived         DirectMessage[]    @relation("DmReceiver")
+  dmReactions        DmReaction[]       @relation("DmReactions")
   // Live Classes
   liveClassParticipations LiveClassParticipant[] @relation("LiveClassParticipant")
   liveClassMessages       LiveClassMessage[]     @relation("LiveClassMessage")
@@ -500,6 +503,7 @@ model Class {
   capacity    Int      @default(30)
   schedule    Json?    // weekly schedule
   isActive    Boolean  @default(true)
+  isDefault   Boolean  @default(false) // auto-created when school is founded; new students auto-enroll here
   deletedAt   DateTime?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -520,10 +524,13 @@ model Class {
   assignmentSubmissions AssignmentSubmission[] @relation("AssignmentSubmissions")
   // Phase C-3: Exam Submissions
   examSubmissions ExamSubmission[] @relation("ExamSubmissions")
+  // Practice Quiz back-relation — uncomment when Quiz model is added
+  // quizzes Quiz[]
 
   @@index([schoolId])
   @@index([termId])
   @@index([schoolId, isActive]) // active classes filter
+  @@index([schoolId, isDefault]) // find default class of a school
   @@map("classes")
 }
 
@@ -563,6 +570,8 @@ model Student {
   examSubmissions ExamSubmission[]
   // Phase C-5: Transport
   busAssignments BusAssignment[]
+  // Practice Quiz back-relation — uncomment when QuizAttempt model is added
+  // quizAttempts QuizAttempt[]
 
   @@unique([schoolId, studentId])
   @@index([schoolId])
@@ -596,6 +605,8 @@ model Teacher {
   audioCourses    AudioCourse[]
   audioLessons    AudioLesson[]
   liveClasses     LiveClass[]
+  // Practice Quiz back-relation — uncomment when Quiz model is added
+  // quizzes         Quiz[]
 
   @@index([schoolId])
   @@index([schoolId, deletedAt]) // active teachers filter
@@ -1217,7 +1228,7 @@ model VoiceRoom {
   description  String?           @db.Text
   privacy      VoiceRoomPrivacy  @default(PUBLIC)
   status          VoiceRoomStatus   @default(IDLE)
-  maxSpeakers     Int               @default(10)
+  maxSpeakers     Int               @default(12)
   isOpenMic       Boolean           @default(false)  // when true, audience can grab mic directly
   micLocked       Boolean           @default(false)  // when true, nobody can grab or use mic
   roomLevel       Int               @default(1)      // 1-10: controls max permanent members
@@ -1267,6 +1278,7 @@ model VoiceParticipant {
   handRaised   Boolean              @default(false)
   handRaisedAt DateTime?
   isPinned     Boolean              @default(false)   // pinned to top of stage grid by host/mod
+  seatNumber   Int?                                   // 1–12 when on stage; null when in audience
   joinedAt     DateTime             @default(now())
   leftAt       DateTime?
   isActive     Boolean              @default(true)
@@ -1274,6 +1286,7 @@ model VoiceParticipant {
   updatedAt    DateTime             @updatedAt
 
   @@unique([roomId, userId])
+  @@unique([roomId, seatNumber])    // no two active participants can share the same seat
   @@index([roomId])
   @@index([userId])
   @@index([isActive])
@@ -1605,6 +1618,7 @@ enum LiveClassStatus {
 
 enum LiveClassParticipantRole {
   HOST
+  MODERATOR  // Promoted by creator — same management rights except end/delete
   STUDENT
   OBSERVER
 }
@@ -1654,7 +1668,8 @@ model LiveClass {
   livekitRoomName    String?
   recordingUrl       String?
   coverImageUrl      String?
-  maxParticipants    Int             @default(100)
+  maxParticipants    Int?                            // null means unlimited viewers (public streams)
+  maxSpeakers        Int             @default(20)    // max simultaneous active speakers (audience queue applies above this)
   isRecorded            Boolean         @default(false)
   recordingStartedAt    DateTime?
   chatEnabled           Boolean         @default(true)
@@ -1673,6 +1688,8 @@ model LiveClass {
   messages      LiveClassMessage[]
   handQueue     LiveClassHandQueue[]
   attendance    LiveClassAttendance[]
+  polls             LiveClassPoll[]
+  whiteboardSnapshot LiveClassWhiteboardSnapshot?
 
   @@index([streamType])
   @@index([schoolId])
@@ -1695,6 +1712,10 @@ model LiveClassParticipant {
   isVideoOn     Boolean                  @default(false)
   handRaised    Boolean                  @default(false)
   handRaisedAt  DateTime?
+  // speakerSlot: non-null when this participant is an active speaker on stage.
+  // Null = audience (subscribe-only). Non-null = speaker slot index (0-based).
+  // Used to enforce maxSpeakers cap and track who is on stage.
+  speakerSlot   Int?
   joinedAt      DateTime                 @default(now())
   leftAt        DateTime?
   totalDuration Int                      @default(0)  // seconds
@@ -1713,6 +1734,10 @@ model LiveClassParticipant {
   @@index([liveClassId])
   @@index([userId])
   @@index([isActive])
+  // DB-level safety net: prevents two participants from sharing the same stage slot.
+  // MySQL allows multiple NULLs in a UNIQUE constraint, so audience participants
+  // (speakerSlot=NULL) remain valid. Only non-null slot values are deduplicated.
+  @@unique([liveClassId, speakerSlot], name: "unique_liveclass_speaker_slot")
   @@map("live_class_participants")
 }
 
@@ -1764,6 +1789,38 @@ model LiveClassAttendance {
   @@index([liveClassId])
   @@index([studentId])
   @@map("live_class_attendance")
+
+// ─── LIVE CLASS POLLS (LC-GAP-004) ─────────────────────────────────────────
+// Durable fallback for poll state when Redis is unavailable or restarted.
+// Redis remains the hot path; this table is the source of truth on cold load.
+model LiveClassPoll {
+  id          String    @id @default(uuid())
+  liveClassId String
+  liveClass   LiveClass @relation(fields: [liveClassId], references: [id], onDelete: Cascade)
+  question    String    @db.VarChar(500)
+  options     Json      // [{ id, text, votes: userId[] }]
+  isActive    Boolean   @default(true)
+  createdBy   String    // userId of the teacher (JWT-verified)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([liveClassId])
+  @@index([isActive])
+  @@map("live_class_polls")
+}
+
+// ─── LIVE CLASS WHITEBOARD SNAPSHOTS (LC-GAP-005) ───────────────────────────
+// One row per live class — upserted on every snapshot event.
+// Allows whiteboard state to survive Redis flush or server restart.
+model LiveClassWhiteboardSnapshot {
+  id          String    @id @default(uuid())
+  liveClassId String    @unique
+  liveClass   LiveClass @relation(fields: [liveClassId], references: [id], onDelete: Cascade)
+  strokes     String    @db.LongText // JSON array of stroke objects
+  snapshotAt  DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("live_class_whiteboard_snapshots")
 }
 
 // ─── DIRECT MESSAGES ─────────────────────────────────────────────────────────
@@ -1803,18 +1860,40 @@ model DirectMessage {
   sender         User           @relation("DmSender",   fields: [senderId],   references: [id], onDelete: Cascade)
   receiverId     String
   receiver       User           @relation("DmReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
-  body           String         @db.Text
+  body           String?        @db.Text            // text content (null for media-only messages)
+  // ── Media fields (mirrors GroupMessage pattern) ───────────────────────────
+  msgType        String         @default("TEXT")     // TEXT | IMAGE | VIDEO | GIF | VOICE | AUDIO | FILE
+  mediaUrl       String?        @db.VarChar(2048)    // storage URL
+  mimeType       String?        @db.VarChar(128)     // e.g. image/jpeg, audio/mpeg
+  fileSize       Int?                                // bytes
+  fileName       String?        @db.VarChar(255)     // original filename for download
+  duration       Int?                                // seconds (audio/video/voice)
+  width          Int?                                // px (image/video)
+  height         Int?                                // px (image/video)
+  thumbnail      String?        @db.VarChar(2048)    // video/voice waveform thumbnail URL
+  // ─────────────────────────────────────────────────────────────────────────
   status         DmStatus       @default(SENT)
   deliveredAt    DateTime?
   readAt         DateTime?
-  isEdited       Boolean        @default(false)   // CHAT-GAP-002: true when sender has edited the message
-  editedAt       DateTime?                        // CHAT-GAP-002: timestamp of last edit
+  isEdited       Boolean        @default(false)
+  editedAt       DateTime?
   deletedBySender   Boolean     @default(false)
   deletedByReceiver Boolean     @default(false)
-  // Story reply context — L8 fix: allows replying to a story via DM.
-  // When set, the message is a story reply; the client shows a story preview above the message.
-  storyId        String?        // optional FK → stories.id
+  // Reply-to: quote a previous message in this conversation
+  replyToId      String?
+  replyTo        DirectMessage? @relation("DmReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies        DirectMessage[] @relation("DmReplies")
+  // Story reply context
+  storyId        String?
   story          Story?         @relation("StoryReplies", fields: [storyId], references: [id], onDelete: SetNull)
+  // Reactions
+  reactions      DmReaction[]
+  // ── Structured entity reference (e.g. VOICE_ROOM_SHARE) ──────────────────
+  // Phase 5: null for all existing message types; populated only for share cards.
+  // VoiceRoom enrichment is applied at read time — never from client data.
+  refEntityType  String?        @db.VarChar(50)   // e.g. "VoiceRoom"
+  refEntityId    String?        @db.VarChar(36)   // UUID of the referenced entity
+  // ─────────────────────────────────────────────────────────────────────────
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
@@ -1824,8 +1903,25 @@ model DirectMessage {
   @@index([createdAt])
   @@index([conversationId, createdAt])
   @@index([receiverId, status, createdAt])
-  @@index([storyId])   // fetch all replies to a specific story
+  @@index([storyId])
+  @@index([msgType])  // filter by media type
+  @@index([refEntityType, refEntityId])  // entity share lookup
   @@map("direct_messages")
+}
+
+model DmReaction {
+  id        String        @id @default(uuid())
+  messageId String
+  message   DirectMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User          @relation("DmReactions", fields: [userId], references: [id], onDelete: Cascade)
+  emoji     String        @db.VarChar(10)
+  createdAt DateTime      @default(now())
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+  @@index([userId])
+  @@map("dm_reactions")
 }
 
 enum DmStatus {
@@ -2344,10 +2440,14 @@ enum GroupMessageType {
   TEXT
   IMAGE
   VIDEO
+  GIF
   AUDIO
+  VOICE
+  FILE
   DOCUMENT
   POLL
   SYSTEM
+  VOICE_ROOM_SHARE  // Phase 5: structured Voice Club share card
 }
 
 model GroupConversation {
@@ -2363,6 +2463,8 @@ model GroupConversation {
   maxMembers  Int              @default(100)
   isMuted     Boolean          @default(false)  // when true, only admins can send
   slowMode    Boolean          @default(false)  // 1 message per 5s per user
+  onlyAdminsCanSendMessages Boolean @default(false)  // explicit permission flag
+  onlyAdminsCanSendMedia    Boolean @default(false)  // media restricted to admins only
   memberCount Int              @default(1)
   messageCount Int             @default(0)
   lastMessage  String?          @db.Text
@@ -2414,8 +2516,10 @@ model GroupMessage {
   type           GroupMessageType @default(TEXT)
   body           String?          @db.Text
   mediaUrl       String?          @db.VarChar(2048)
-  mimeType       String?
+  mimeType       String?          @db.VarChar(128)
   fileSize       Int?
+  fileName       String?          @db.VarChar(255)    // original filename for download
+  duration       Int?                                 // seconds (audio/video/voice)
   replyToId      String?          // reply to another message in same group
   replyTo        GroupMessage?    @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
   replies        GroupMessage[]   @relation("MessageReplies")
@@ -2424,6 +2528,12 @@ model GroupMessage {
   pinnedBy       String?          // userId who pinned it
   deletedBy      Json?            // array of userIds who deleted this message
   deletedAt      DateTime?
+  // ── Structured entity reference (e.g. VOICE_ROOM_SHARE) ──────────────────
+  // Phase 5: null for all existing message types; populated only for share cards.
+  // VoiceRoom enrichment is applied at read time — never from client data.
+  refEntityType  String?          @db.VarChar(50)   // e.g. "VoiceRoom"
+  refEntityId    String?          @db.VarChar(36)   // UUID of the referenced entity
+  // ─────────────────────────────────────────────────────────────────────────
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 
@@ -2435,6 +2545,7 @@ model GroupMessage {
   @@index([createdAt])
   @@index([conversationId, createdAt])
   @@index([conversationId, isPinned])
+  @@index([refEntityType, refEntityId])  // entity share lookup
   @@map("group_messages")
 }
 

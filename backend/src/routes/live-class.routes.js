@@ -187,6 +187,7 @@ router.patch('/:id',
     body('whiteboardEnabled').optional().isBoolean(),
     body('screenShareEnabled').optional().isBoolean(),
     body('isOpenMic').optional().isBoolean(),
+    body('maxSpeakers').optional().isInt({ min: 1, max: 50 }).withMessage('maxSpeakers must be between 1 and 50'),
   ],
   validate,
   ctrl.updateLiveClass
@@ -226,6 +227,13 @@ router.patch('/:id/participants/:userId/video',
 router.patch('/:id/mute-all',                    resolveStreamAccess, ctrl.muteAll);
 router.patch('/:id/unmute-all',                  resolveStreamAccess, ctrl.unmuteAll);
 router.delete('/:id/participants/:userId',        resolveStreamStaffAccess, ctrl.kickParticipant);
+
+// ─── STAGE MANAGEMENT (invite to stage / demote from stage) ──────────────────
+router.post('/:id/invite/:userId',  resolveStreamStaffAccess, ctrl.inviteToStage);
+router.post('/:id/demote/:userId',  resolveStreamStaffAccess, ctrl.demoteFromStage);
+// H-2 FIX: Self-demotion — authenticated speaker returns themselves to audience
+// resolveStreamAccess (not staff) — any joined participant can drop their own mic
+router.post('/:id/drop-mic',        resolveStreamAccess, ctrl.dropMicLiveClass);
 
 // ─── HAND RAISE ───────────────────────────────────────────────────────────────
 router.post('/:id/hand/raise',          resolveStreamAccess, ctrl.raiseHand);

@@ -712,12 +712,14 @@ describe('LCSV-002 FIX: createLiveClass/deleteMessage/sendMessage do NOT include
     const fnMatch = src.match(/async function deleteMessage[\s\S]*?async function setVideoState/);
     expect(fnMatch).not.toBeNull();
     const fnBody = fnMatch[0];
-    const isHostLine = fnBody.match(/const isHost\s*=.+/);
-    expect(isHostLine).not.toBeNull();
-    expect(isHostLine[0]).not.toMatch(/SUPER_ADMIN/);
+    // FINAL-AUTH-01: deleteMessage now uses participant record role check (isModeratorBySession)
+    // and a staff fallback (isStaffModerator) — neither contains SUPER_ADMIN
+    expect(fnBody).not.toMatch(/SUPER_ADMIN/);
+    // Must use participant-record based check
+    expect(fnBody).toMatch(/sessionRole|isModeratorBySession|isStaffModerator/);
   });
 
-  test('LCSV-002c: sendMessage isTeacherOrAdmin does not include SUPER_ADMIN', () => {
+  test('LCSV-002c: sendMessage staff check does not include SUPER_ADMIN', () => {
     const src = fs.readFileSync(
       path.join(__dirname, '../controllers/live-class.controller.js'),
       'utf8'
@@ -725,9 +727,10 @@ describe('LCSV-002 FIX: createLiveClass/deleteMessage/sendMessage do NOT include
     const fnMatch = src.match(/async function sendMessage[\s\S]*?async function getMessages/);
     expect(fnMatch).not.toBeNull();
     const fnBody = fnMatch[0];
-    const line = fnBody.match(/const isTeacherOrAdmin\s*=.+/);
-    expect(line).not.toBeNull();
-    expect(line[0]).not.toMatch(/SUPER_ADMIN/);
+    // FINAL-AUTH-01: renamed from isTeacherOrAdmin to isStaffSender; still excludes SUPER_ADMIN
+    expect(fnBody).not.toMatch(/SUPER_ADMIN/);
+    // Must have the staff check (renamed variable)
+    expect(fnBody).toMatch(/isStaffSender|TEACHER.*SCHOOL_ADMIN|SCHOOL_ADMIN.*TEACHER/);
   });
 });
 
