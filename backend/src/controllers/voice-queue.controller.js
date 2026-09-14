@@ -27,7 +27,7 @@ const { VOICE_ROLES, MODERATOR_ROLES } = require('../middleware/voiceRole.middle
 const logger = require('../utils/logger');
 const { notify } = require('../services/notification.service');
 
-const MAX_SPEAKERS = 10;
+const MAX_SPEAKERS = 12;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -62,12 +62,17 @@ async function broadcastQueue(roomId) {
 }
 
 /**
- * Count active speakers (HOST + MODERATOR + SPEAKER) in a room.
+ * Count participants actually occupying a stage seat.
+ * Authoritative: seatNumber IS NOT NULL (set atomically on seat assignment).
+ * This is the single source of truth — role-based counting is unreliable
+ * because a role update and seatNumber assignment happen separately.
  */
 async function countSpeakers(roomId) {
-  return prisma.voiceParticipant.count({
-    where: { roomId, isActive: true, role: { in: ['HOST', 'MODERATOR', 'SPEAKER'] } }
-  });
+  const [{ cnt }] = await prisma.$queryRaw`
+    SELECT COUNT(*) as cnt FROM voice_participants
+    WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
+  `;
+  return Number(cnt ?? 0);
 }
 
 // ─── RAISE HAND → enqueue ─────────────────────────────────────────────────────
@@ -105,7 +110,22 @@ async function raiseHand(req, res, next) {
     if (!participant || !participant.isActive) {
       return errorResponse(res, 'You are not in this room', 400);
     }
-    if (participant.role !== 'AUDIENCE') {
+    // QUEUE FIFO FIX: Allow MODERATOR (when muted/audience state) to join the queue.
+    // MODERATOR is eligible to join queue just like normal AUDIENCE users.
+    // Role controls permission to speak; queue position controls promotion priority.
+    // Only HOST is exempt (they use grabMic directly to return to their own room).
+    const isEligibleForQueue = participant.role === 'AUDIENCE' ||
+      (participant.role === 'MODERATOR' && participant.isMuted);
+    if (!isEligibleForQueue) {
+      if (participant.role === 'HOST') {
+        return errorResponse(res, 'Hosts use the mic button to return to stage', 400);
+      }
+      if (participant.role === 'SPEAKER') {
+        return errorResponse(res, 'You are already a speaker', 400);
+      }
+      if (participant.role === 'MODERATOR' && !participant.isMuted) {
+        return errorResponse(res, 'You are already on stage', 400);
+      }
       return errorResponse(res, 'Only audience members can raise hand', 400);
     }
     if (participant.handRaised) {
@@ -242,9 +262,12 @@ async function approveNext(req, res, next) {
     }
 
     const speakerCount = await countSpeakers(roomId);
+    // PHASE 4 FIX: Use room.maxSpeakers as the authoritative capacity limit.
+    // All 12 stage slots are in the shared pool; Seat 1 eligibility is enforced
+    // by the layout engine (HOST/MOD always at index 0), NOT by reducing capacity.
     const limit = room.maxSpeakers || MAX_SPEAKERS;
     if (speakerCount >= limit) {
-      return errorResponse(res, `Speaker limit reached (max ${limit})`, 400);
+      return errorResponse(res, `All ${limit} stage seats are occupied — wait for a slot to open`, 400);
     }
 
     // ── Pop next from queue (Redis-safe: fall back to DB handRaised) ──────
@@ -256,8 +279,17 @@ async function approveNext(req, res, next) {
     }
     if (!nextUser) {
       // Redis unavailable or queue empty — find first waiting user in DB
+      // QUEUE FIFO FIX: Include muted MODERATORs who joined the queue voluntarily
       const waiting = await prisma.voiceParticipant.findFirst({
-        where: { roomId, isActive: true, role: 'AUDIENCE', handRaised: true },
+        where: {
+          roomId,
+          isActive: true,
+          handRaised: true,
+          OR: [
+            { role: 'AUDIENCE' },
+            { role: 'MODERATOR', isMuted: true },
+          ]
+        },
         orderBy: { handRaisedAt: 'asc' },
         include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } } }
       });
@@ -320,9 +352,10 @@ async function approveUser(req, res, next) {
     }
 
     const speakerCount = await countSpeakers(roomId);
+    // PHASE 4 FIX: Use room.maxSpeakers directly — consistent with all other paths.
     const limit = room.maxSpeakers || MAX_SPEAKERS;
     if (speakerCount >= limit) {
-      return errorResponse(res, `Speaker limit reached (max ${limit})`, 400);
+      return errorResponse(res, `All ${limit} stage seats are occupied`, 400);
     }
 
     // ── Remove from queue (Redis-safe) — approveUser ──────────────────────
@@ -351,18 +384,56 @@ async function approveUser(req, res, next) {
 }
 
 // ─── Shared promotion logic ───────────────────────────────────────────────────
-// P1-2 FIX: Wrap the DB update in a transaction that first re-checks the
-// participant's current role. Two concurrent moderator approvals used to both
-// succeed; now the second will find role != 'AUDIENCE' and return a clear error.
+// Promotes a queued AUDIENCE user to SPEAKER (Seats 2–12).
+// SEAT 1 RULE: Promoted users always get role=SPEAKER.
+// The layout engine places SPEAKER participants in Seats 2–12.
+// Seat 1 is only occupied by HOST/MOD and stays empty otherwise.
 async function _promoteUser(req, res, userMeta, roomId, room) {
   const { userId } = userMeta;
 
+  // Full stage check: use seatNumber IS NOT NULL as authoritative count
+  const [{ cnt: seatedCnt }] = await prisma.$queryRaw`
+    SELECT COUNT(*) as cnt FROM voice_participants
+    WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
+  `;
+  const fullLimit = room.maxSpeakers || 12;
+  if (Number(seatedCnt) >= fullLimit) {
+    return errorResponse(res, `All ${fullLimit} stage seats are occupied — wait for a slot to open`, 400);
+  }
+
+  // Find the lowest available seat before the transaction (early-exit)
+  const occupiedPre = await prisma.$queryRaw`
+    SELECT seatNumber FROM voice_participants
+    WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
+  `;
+  const occupiedSetPre = new Set(occupiedPre.map(r => Number(r.seatNumber)));
+
+  // Determine if this user is a MODERATOR (can take Seat 1)
+  const userRow = await prisma.voiceParticipant.findUnique({
+    where: { roomId_userId: { roomId, userId } },
+    select: { role: true, isMuted: true, isActive: true }
+  });
+  if (!userRow?.isActive) return errorResponse(res, 'Participant not found', 404);
+
+  const isMod = userRow.role === 'MODERATOR';
+  let preSeat = null;
+  for (let s = 1; s <= fullLimit; s++) {
+    if (occupiedSetPre.has(s)) continue;
+    if (s === 1 && !isMod) continue; // SPEAKER cannot take Seat 1
+    preSeat = s; break;
+  }
+  if (preSeat === null) {
+    return errorResponse(res, `All ${fullLimit} stage seats are occupied — wait for a slot to open`, 400);
+  }
+
+  let assignedSeat = preSeat;
+
   try {
     await prisma.$transaction(async (tx) => {
-      // Re-read inside transaction — prevents race condition between two simultaneous approvals
+      // Re-read inside transaction — race condition protection
       const current = await tx.voiceParticipant.findUnique({
         where: { roomId_userId: { roomId, userId } },
-        select: { role: true, isActive: true }
+        select: { role: true, isActive: true, isMuted: true }
       });
 
       if (!current?.isActive) {
@@ -370,42 +441,147 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
         err.statusCode = 400;
         throw err;
       }
-      if (current.role !== 'AUDIENCE') {
-        const err = new Error(`User is already ${current.role.toLowerCase()} — cannot promote again`);
+      // QUEUE FIFO FIX: Accept AUDIENCE or muted MODERATOR from the queue.
+      // Also accept SPEAKER with seatNumber=null (ghost state from crash/disconnect).
+      // Check seatNumber directly — it's the authoritative "on stage" indicator.
+      const [seatRow] = await tx.$queryRaw`
+        SELECT seatNumber FROM voice_participants
+        WHERE roomId = ${roomId} AND userId = ${userId} LIMIT 1
+      `;
+      const alreadySeated = seatRow?.seatNumber != null;
+      if (alreadySeated) {
+        // User is genuinely on stage — no need to promote.
+        // Signal the caller to clean up queue state and return success.
+        const err = new Error('ALREADY_ON_STAGE');
+        err.statusCode = 409;
+        throw err;
+      }
+      const isQueueEligible = current.role === 'AUDIENCE' ||
+        (current.role === 'MODERATOR' && current.isMuted) ||
+        (current.role === 'SPEAKER' && seatRow?.seatNumber == null); // ghost SPEAKER
+      if (!isQueueEligible) {
+        const err = new Error(`User is already ${current.role.toLowerCase()} on stage — cannot promote again`);
         err.statusCode = 409;
         throw err;
       }
 
-      await tx.voiceParticipant.update({
-        where: { roomId_userId: { roomId, userId } },
-        data: {
-          role:        'SPEAKER',
-          isMuted:     false,
-          handRaised:  false,
-          handRaisedAt: null,
-          updatedAt:   new Date()
-        }
-      });
+      // Re-check seat availability inside tx (TOCTOU)
+      const occupiedTx = await tx.$queryRaw`
+        SELECT seatNumber FROM voice_participants
+        WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
+      `;
+      const occupiedSetTx = new Set(occupiedTx.map(r => Number(r.seatNumber)));
+      const txIsMod = current.role === 'MODERATOR';
+      let seat = null;
+      for (let s = 1; s <= fullLimit; s++) {
+        if (occupiedSetTx.has(s)) continue;
+        if (s === 1 && !txIsMod) continue;
+        seat = s; break;
+      }
+      if (seat === null) {
+        const err = new Error('All seats just filled — please wait'); err.statusCode = 400; throw err;
+      }
+      assignedSeat = seat;
+
+      // Assign seat using raw SQL (Prisma client not regenerated with seatNumber yet)
+      if (txIsMod) {
+        await tx.$executeRaw`
+          UPDATE voice_participants
+          SET seatNumber = ${seat}, isMuted = 0,
+              handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
+          WHERE roomId = ${roomId} AND userId = ${userId}
+        `;
+      } else {
+        await tx.$executeRaw`
+          UPDATE voice_participants
+          SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = 0,
+              handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
+          WHERE roomId = ${roomId} AND userId = ${userId}
+        `;
+      }
     });
   } catch (txErr) {
+    if (txErr.statusCode === 409 && txErr.message === 'ALREADY_ON_STAGE') {
+      // User is already on stage (auto-promoted before host could approve).
+      // Clean up stale queue entry so the host's queue display refreshes.
+      try {
+        await prisma.voiceParticipant.update({
+          where: { roomId_userId: { roomId, userId } },
+          data: { handRaised: false, handRaisedAt: null, updatedAt: new Date() }
+        });
+      } catch { /* non-fatal */ }
+      await safeDeleteCache(roomCacheKey(roomId));
+      const ioClean = getIo();
+      if (ioClean) {
+        ioClean.to(`voice:${roomId}`).emit('voice:hand_raised', { roomId, userId, raised: false });
+        await broadcastQueue(roomId);
+      }
+      // Return success — the user IS on stage, which is the desired outcome.
+      return successResponse(res, {
+        userId,
+        role: 'SPEAKER',
+        firstName: userMeta.firstName,
+        lastName: userMeta.lastName,
+        alreadyOnStage: true,
+      }, `${userMeta.firstName} is already on stage`);
+    }
     if (txErr.statusCode) {
       return errorResponse(res, txErr.message, txErr.statusCode);
     }
-    throw txErr; // re-throw unexpected errors to the outer next()
+    // SEAT RACE PROTECTION: DB unique constraint on (roomId, seatNumber) prevented a duplicate.
+    // Two concurrent promotions targeted the same seat. Treat as "seat taken" → 409.
+    const isDupSeat = txErr.code === 'P2002' ||
+      (txErr.message && (txErr.message.includes('Duplicate entry') || txErr.message.includes('voice_participants_roomId_seatNumber_key')));
+    if (isDupSeat) {
+      logger.warn(`[_promoteUser] Seat race for userId=${userId} room=${roomId} — concurrent seat assignment. Returning 409.`);
+      return errorResponse(res, 'Seat was just taken by another user — please try again', 409);
+    }
+    throw txErr;
   }
 
   await safeDeleteCache(roomCacheKey(roomId));
 
-  // ── Broadcast ─────────────────────────────────────────────────────────
+  // ── Broadcast with seatNumber ─────────────────────────────────────────
   const io = getIo();
   if (io) {
-    io.to(`voice:${roomId}`).emit('voice:role_changed', {
-      roomId, userId, role: 'SPEAKER'
-    });
+    if (isMod) {
+      io.to(`voice:${roomId}`).emit('voice:mute_changed', {
+        roomId, userId, isMuted: false, seatNumber: assignedSeat
+      });
+    } else {
+      io.to(`voice:${roomId}`).emit('voice:role_changed', {
+        roomId, userId, role: 'SPEAKER', seatNumber: assignedSeat
+      });
+    }
     io.to(`user:${userId}`).emit('voice:promoted_to_speaker', {
       roomId,
-      message: "You've been approved as a speaker!"
+      seatNumber: assignedSeat,
+      message: `You've been approved as a speaker at Seat ${assignedSeat}!`
     });
+
+    // Authoritative stage snapshot — ensures all clients (including the promoted user)
+    // reconcile their seat grid correctly even if voice:role_changed arrives out of order.
+    try {
+      const stageRows = await prisma.$queryRaw`
+        SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
+               vp.handRaised, vp.mutedByModerator, vp.joinedAt
+        FROM voice_participants vp
+        WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
+        ORDER BY vp.seatNumber ASC
+      `;
+      io.to(`voice:${roomId}`).emit('voice:stage_state', {
+        roomId,
+        stageParticipants: stageRows.map(r => ({
+          ...r,
+          seatNumber: Number(r.seatNumber),
+          isMuted: Boolean(r.isMuted),
+          isPinned: Boolean(r.isPinned),
+          handRaised: Boolean(r.handRaised),
+          mutedByModerator: Boolean(r.mutedByModerator),
+        })),
+        stageCount: stageRows.length,
+      });
+    } catch { /* non-fatal */ }
   }
 
   await broadcastQueue(roomId);

@@ -14,7 +14,7 @@ import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, Modal, TouchableOpacity,
   FlatList, Image, TextInput, ActivityIndicator,
-  Alert, ScrollView,
+  Alert, ScrollView
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -486,3 +486,4 @@ const ms = StyleSheet.create({
   lastActive:   { fontSize: 10, color: '#6b7280', marginTop: 1 },
   actionBtn:    { width: 30, height: 30, borderRadius: 8, backgroundColor: '#374151', alignItems: 'center', justifyContent: 'center' },
 });
+

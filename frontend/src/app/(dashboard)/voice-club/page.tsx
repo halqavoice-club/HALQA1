@@ -82,6 +82,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 export default function VoiceClubPage() {
   const { user } = useAuthStore()
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN'
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const { activeRoom, setActiveRoom } = useVoiceStore()
@@ -210,6 +211,11 @@ export default function VoiceClubPage() {
 
   // ── Handlers ────────────────────────────────────────────────────────────────
   const handleJoin = async (room: VoiceRoom) => {
+    // SA-VOICE-UI-02: SUPER_ADMIN cannot join voice rooms as participants
+    if (isSuperAdmin) {
+      toast({ title: 'Platform admins cannot join voice rooms. Use the admin panel.', variant: 'destructive' })
+      return
+    }
     setJoiningId(room.id)
     try {
       const res = await api.post(`/voice/${room.id}/join`)
@@ -301,13 +307,16 @@ export default function VoiceClubPage() {
               <span className="hidden sm:inline">Stats</span>
             </button>
           </Link>
-          <button
-            onClick={() => setShowCreate(true)}
-            className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-xl font-semibold text-sm hover:opacity-90 transition-opacity shadow-md"
-          >
-            <Plus className="w-4 h-4" />
-            Start Room
-          </button>
+          {/* SA-VOICE-UI-01: SUPER_ADMIN cannot create voice rooms — platform admin only */}
+          {!isSuperAdmin && (
+            <button
+              onClick={() => setShowCreate(true)}
+              className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-xl font-semibold text-sm hover:opacity-90 transition-opacity shadow-md"
+            >
+              <Plus className="w-4 h-4" />
+              Start Room
+            </button>
+          )}
         </div>
       </div>
 

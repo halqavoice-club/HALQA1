@@ -51,6 +51,8 @@ export default function VoiceRoomPage() {
   useEffect(() => {
     if (activeRoom?.id === id) return
     if (autoJoinedRef.current) return
+    // SA-VOICE-AUTOJOIN-01: SUPER_ADMIN cannot join voice rooms as participants
+    if (user?.role === 'SUPER_ADMIN') return
     // If user is already an active participant, auto-join
     if (room && user) {
       const existing = room.participants?.find(p => p.userId === user.id && p.isActive)
@@ -76,6 +78,9 @@ export default function VoiceRoomPage() {
   // Show room view when active
   if (activeRoom?.id === id) {
     return (
+      // -m-4/-m-6 removes dashboard page padding so the voice room fills the viewport.
+      // MobileNav hides itself when activeRoom is set (via useVoiceStore check in mobile-nav.tsx).
+      // Layout removes mobile-content-bottom padding when voice room is active.
       <div className="-m-4 md:-m-6 min-h-screen bg-[#f0f4ff]">
         <VoiceRoomWithBoundary onLeave={() => {
           setActiveRoom(null)
@@ -236,13 +241,23 @@ export default function VoiceRoomPage() {
             </span>
           </div>
 
-          {/* Join button */}
+          {/* Join button — hidden for SUPER_ADMIN (platform admins cannot join voice rooms as participants) */}
           {isEnded ? (
             <div className="text-center py-3">
               <p className="text-sm text-gray-400 font-medium">This room has ended</p>
               <Link href="/voice-club">
                 <button className="mt-3 text-sm text-purple-600 hover:text-purple-700 font-medium">
                   Browse other rooms →
+                </button>
+              </Link>
+            </div>
+          ) : user?.role === 'SUPER_ADMIN' ? (
+            <div className="text-center py-3 bg-amber-50 rounded-2xl border border-amber-200">
+              <p className="text-sm text-amber-700 font-semibold">Platform admins cannot join voice rooms</p>
+              <p className="text-xs text-amber-600 mt-1">Use the admin panel to manage rooms</p>
+              <Link href="/admin/live-voice">
+                <button className="mt-3 text-sm text-amber-700 hover:text-amber-800 font-semibold underline">
+                  Go to Admin Panel →
                 </button>
               </Link>
             </div>

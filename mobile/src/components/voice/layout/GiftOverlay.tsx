@@ -15,7 +15,7 @@ import Animated, {
   withTiming,
   withSpring,
   FadeIn,
-  FadeOut,
+  FadeOut
 } from 'react-native-reanimated';
 
 export interface GiftEvent {
@@ -92,3 +92,4 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 });
+

@@ -24,6 +24,7 @@ export interface VoiceParticipant {
   joinedAt: string
   isActive: boolean
   isPinned: boolean
+  seatNumber: number | null   // 1–12 when on stage; null when in audience (authoritative)
   user: VoiceUser
 }
 
@@ -292,7 +293,16 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         }
       })
     } else {
-      set({ activeRoom: { ...room, participants: [...room.participants, participant] } })
+      // SEAT SYNC FIX: Insert in deterministic sorted position (role asc, joinedAt asc)
+      // instead of appending to end, so all clients see the same seat layout
+      // immediately without waiting for a full room state resync.
+      const ROLE_ORDER: Record<string, number> = { HOST: 0, MODERATOR: 1, SPEAKER: 2, AUDIENCE: 3 }
+      const newList = [...room.participants, participant].sort((a, b) => {
+        const roleDiff = (ROLE_ORDER[a.role] ?? 9) - (ROLE_ORDER[b.role] ?? 9)
+        if (roleDiff !== 0) return roleDiff
+        return (a.joinedAt ?? '').localeCompare(b.joinedAt ?? '')
+      })
+      set({ activeRoom: { ...room, participants: newList } })
     }
   },
 

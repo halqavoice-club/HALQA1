@@ -292,7 +292,7 @@ async function muteAll(req, res, next) {
     if (io) {
       targets.forEach(t => {
         io.to(`voice:${roomId}`).emit('voice:mute_changed', {
-          roomId, userId: t.userId, isMuted: true
+          roomId, userId: t.userId, isMuted: true, mutedByModerator: true
         });
       });
     }
@@ -344,7 +344,7 @@ async function unmuteAll(req, res, next) {
     if (io) {
       targets.forEach(t => {
         io.to(`voice:${roomId}`).emit('voice:mute_changed', {
-          roomId, userId: t.userId, isMuted: false
+          roomId, userId: t.userId, isMuted: false, mutedByModerator: false
         });
       });
     }

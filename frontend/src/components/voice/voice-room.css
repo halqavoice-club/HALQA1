@@ -12,8 +12,8 @@
   max-width: 480px;
   margin: 0 auto;
   min-height: calc(100vh - 64px);
-  background: #f0f4ff;
-  padding-bottom: 80px; /* space for bottom bar */
+  background: #eef0f8;   /* light blue-grey matching the target */
+  padding-bottom: 80px;
   overflow-x: hidden;
 }
 
@@ -22,7 +22,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px 10px;
+  padding: 12px 14px 12px;
   background: #fff;
   border-bottom: 1px solid #e8eaf0;
   gap: 8px;
@@ -34,12 +34,12 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  flex: 1;          /* take remaining space, shrinks title */
+  flex: 1;
   overflow: hidden;
 }
 
 .vc-header-emoji {
-  font-size: 26px;
+  font-size: 28px;
   flex-shrink: 0;
 }
 
@@ -48,14 +48,34 @@
 }
 
 .vc-title {
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 800;
   color: #1a1a2e;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   margin: 0;
   line-height: 1.3;
+}
+
+/* Live Room subtitle under title */
+.vc-live-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #22c55e;
+  margin-top: 1px;
+}
+
+.vc-live-subtitle-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #22c55e;
+  flex-shrink: 0;
+  animation: pulse-green 2s infinite;
 }
 
 .vc-topic {
@@ -137,35 +157,83 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 16px 6px;
+  padding: 12px 16px 8px;
 }
 
 .vc-stage-label {
-  font-size: 12px;
-  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 800;
   color: #6366f1;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
+}
+
+/* Speaker count pill next to ON STAGE label */
+.vc-stage-label-count {
+  background: #ede9fe;
+  color: #6366f1;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 1px 8px;
+  border-radius: 20px;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .vc-stage-count {
   font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
+  font-weight: 700;
+  padding: 3px 10px 3px 8px;
   border-radius: 20px;
-  background: #e0e7ff;
-  color: #4338ca;
+  background: #f3f4f6;
+  color: #374151;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .vc-stage-count.full {
   background: #fee2e2;
   color: #dc2626;
 }
 
-/* Stage bar right side (count + open mic toggle) */
+/* Stage bar right side */
 .vc-stage-bar-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+}
+
+/* Level · members pill (with crown icon) */
+.vc-level-members-pill {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: #f5f3ff;
+  color: #5b21b6;
+  border: 1px solid #ddd6fe;
+  white-space: nowrap;
+}
+
+/* Participants pill */
+.vc-participants-pill {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: #f3f4f6;
+  color: #374151;
+  border: 1px solid #e5e7eb;
+  white-space: nowrap;
 }
 /* Open Mic toggle button */
 .vc-open-mic-btn {
@@ -187,15 +255,16 @@
   color: #15803d;
 }
 
-/* ── Speakers grid — 5 × 2 ──────────────────────────────────────────────── */
+/* ── Speakers grid — 4 × N (matches target design) ─────────────────────── */
 .vc-speakers-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 8px 4px;
-  padding: 8px 12px 14px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px 8px;
+  padding: 12px 16px 18px;
   background: #fff;
-  border-radius: 0 0 16px 16px;
-  margin: 0 0 2px;
+  border-radius: 0 0 20px 20px;
+  margin: 0 0 4px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.06);
 }
 
 /* ── Avatar wrapper (shared by speakers + audience) ─────────────────────── */
@@ -205,12 +274,12 @@
   flex-direction: column;
   align-items: center;
   cursor: pointer;
-  width: var(--sz, 64px);
+  width: var(--sz, 72px);
 }
 
 .vc-avatar-img {
-  width: var(--sz, 64px);
-  height: var(--sz, 64px);
+  width: var(--sz, 72px);
+  height: var(--sz, 72px);
   border-radius: 50%;
   overflow: hidden;
   background: linear-gradient(135deg, #6366f1, #8b5cf6);
@@ -236,10 +305,41 @@
 
 /* Open / available mic seat */
 .vc-avatar-img.open {
-  background: #f0fdf4;
-  border-color: #86efac;
+  background: #f8faff;
+  border-color: #22c55e;
   border-style: dashed;
+  border-width: 2px;
   cursor: pointer;
+}
+
+/* "● Open" status label inside empty slot */
+.vc-open-label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #22c55e;
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.vc-open-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #22c55e;
+  flex-shrink: 0;
+  animation: open-dot-pulse 2s ease-in-out infinite;
+}
+
+@keyframes open-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
 }
 
 .vc-lock-icon {
@@ -381,9 +481,13 @@
 }
 
 .vc-audience-label {
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 800;
   color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
 }
 
 .vc-hand-badge {
@@ -505,7 +609,7 @@
   gap: 2px;
   background: #fff;
   border-top: 1px solid #e5e7eb;
-  z-index: 50;
+  z-index: 55; /* FIX: raised above MobileNav (z-50) so it's never covered */
   box-shadow: 0 -4px 16px rgba(0,0,0,.06);
 }
 .vc-bottom-bar::-webkit-scrollbar { display: none; }
@@ -1099,8 +1203,8 @@
   }
 
   .vc-speakers-grid {
-    gap: 12px 8px;
-    padding: 12px 16px 18px;
+    gap: 16px 10px;
+    padding: 14px 20px 20px;
   }
 
   .vc-audience-grid {
@@ -4569,11 +4673,11 @@
     width: auto;
   }
 
-  /* ── Speakers grid — 4 per row on small screens ── */
+  /* ── Speakers grid — stays 4 columns, just tighter on small screens ── */
   .vc-speakers-grid {
     grid-template-columns: repeat(4, 1fr);
-    gap: 6px 2px;
-    padding: 6px 8px 10px;
+    gap: 8px 4px;
+    padding: 8px 10px 12px;
   }
 
   /* ── Audience grid — 4 per row ── */

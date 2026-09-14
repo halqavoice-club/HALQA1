@@ -276,6 +276,11 @@ export function useLiveKitAudio(): LiveKitAudioState {
   // ─── Mic controls ─────────────────────────────────────────────────────────
   const enableMic = useCallback(async () => {
     if (!roomRef.current) return;
+    // MIC-02: Guard against publishing when the SFU token has canPublish:false.
+    // Without this, a student without a speakerSlot could call enableMic() and
+    // silently fail at the SFU, or succeed if the token was not yet restricted.
+    const perms = roomRef.current.localParticipant?.permissions;
+    if (perms && perms.canPublish === false) return;
     try {
       const pubOpts = buildPublishOptions(quality);
       await roomRef.current.localParticipant.setMicrophoneEnabled(true, pubOpts);

@@ -6,7 +6,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  TextInput, ActivityIndicator, Image, RefreshControl, Alert,
+  TextInput, ActivityIndicator, Image, RefreshControl, Alert
 } from 'react-native';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'expo-router';
@@ -455,3 +455,4 @@ const s = StyleSheet.create({
   activeRoomDot:    { width: 7, height: 7, borderRadius: 4, backgroundColor: '#fff' },
   activeRoomTxt:    { flex: 1, color: '#fff', fontSize: 12, fontWeight: '700' },
 });
+
