@@ -33,6 +33,7 @@ import * as Linking from 'expo-linking';
 import { useAppLifecycle } from '@/lib/appLifecycle';
 import { useNetworkStatus } from '@/hooks/useNetworkStatus';
 import NetworkStatusBanner from '@/components/NetworkStatusBanner';
+import { PKInvitationModal } from '@/components/pk/PKInvitationModal';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -65,12 +66,15 @@ export default function RootLayout() {
   }, [fontsLoaded]);
 
   // Listen for auth errors (401 after refresh fails → force logout)
+  // Use getState() to avoid stale closure / re-registration loops
   useEffect(() => {
     const unsub = authEventEmitter.on((event) => {
-      if (event === 'logout') logout();
+      if (event === 'logout') {
+        useAuthStore.getState().logout();
+      }
     });
     return unsub;
-  }, [logout]);
+  }, []); // empty deps — authEventEmitter is module-level stable
 
   // Listen for deep links while app is foregrounded
   useEffect(() => {
@@ -95,6 +99,8 @@ export default function RootLayout() {
           </Stack>
           <StatusBar style="auto" />
           <FlashMessage position="top" />
+          {/* Global PK invitation modal — active on every screen */}
+          <PKInvitationModal />
         </QueryClientProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

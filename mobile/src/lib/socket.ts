@@ -14,7 +14,9 @@ export function initSocket(token: string): Socket {
   // Always read the current socket URL (supports runtime override)
   socket = io(getSocketURL(), {
     auth: { token },
-    transports: ['websocket'],
+    // Must start with polling so Socket.IO can upgrade to websocket.
+    // Starting with websocket-only fails behind most reverse proxies.
+    transports: ['polling', 'websocket'],
     reconnection: true,
     reconnectionAttempts: 5,
     reconnectionDelay: 1500,

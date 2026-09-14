@@ -21,12 +21,15 @@ export function FloatingActionButton() {
 
   const actions: FABAction[] = []
 
-  if (['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(role)) {
+  // SA-FAB-01: SUPER_ADMIN is a platform role — not a school-scoped teacher/admin.
+  // Floating action buttons for school content (attendance, classes, etc.)
+  // require a school membership role, not the platform admin role.
+  if (['SCHOOL_ADMIN', 'TEACHER'].includes(role)) {
     actions.push(
       { label: 'Mark Attendance', href: '/attendance',   icon: ClipboardCheck, color: 'bg-green-500' },
       { label: 'Add Grade',       href: '/grades',       icon: BookMarked,     color: 'bg-blue-500' },
       { label: 'Log Behavior',    href: '/behavior',     icon: Star,           color: 'bg-yellow-500' },
-      { label: 'New Message',     href: '/messages',     icon: MessageSquare,  color: 'bg-purple-500' },
+      { label: 'New Message',     href: '/dm',           icon: MessageSquare,  color: 'bg-purple-500' },
     )
   }
 
@@ -34,13 +37,13 @@ export function FloatingActionButton() {
     actions.push(
       { label: 'QR Check-in',  href: '/attendance/qr-checkin', icon: QrCode,        color: 'bg-halqa-700' },
       { label: 'My Grades',    href: '/grades',                icon: BookMarked,    color: 'bg-blue-500' },
-      { label: 'Messages',     href: '/messages',              icon: MessageSquare, color: 'bg-purple-500' },
+      { label: 'Messages',     href: '/dm',                    icon: MessageSquare, color: 'bg-purple-500' },
     )
   }
 
   if (role === 'GUARDIAN') {
     actions.push(
-      { label: 'Messages',     href: '/messages',     icon: MessageSquare, color: 'bg-purple-500' },
+      { label: 'Messages',     href: '/dm',           icon: MessageSquare,  color: 'bg-purple-500' },
       { label: 'Attendance',   href: '/attendance',   icon: ClipboardCheck, color: 'bg-green-500' },
     )
   }

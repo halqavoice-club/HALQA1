@@ -238,11 +238,12 @@ export default function SchedulePage() {
           <div className="space-y-4 py-2">
             <div>
               <Label>Class *</Label>
-              <Select value={form.classId} onValueChange={v => setForm(f => ({ ...f, classId: v }))}>
+              <Select value={form.classId || '__none__'} onValueChange={v => setForm(f => ({ ...f, classId: v === '__none__' ? '' : v }))}>
                 <SelectTrigger className="mt-1">
                   <SelectValue placeholder="Select class" />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="__none__">Select a class…</SelectItem>
                   {(classes || []).map((c: any) => (
                     <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
                   ))}

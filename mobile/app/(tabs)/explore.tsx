@@ -8,7 +8,7 @@
 import { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TextInput, ScrollView, FlatList,
-  TouchableOpacity, ActivityIndicator, RefreshControl,
+  TouchableOpacity, ActivityIndicator, RefreshControl
 } from 'react-native';
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from '@tanstack/react-query';
 import { useRouter } from 'expo-router';
@@ -101,6 +101,10 @@ export default function ExploreScreen() {
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <View style={s.header}>
         <Text allowFontScaling={false} style={s.title}>Explore</Text>
+        <TouchableOpacity onPress={() => router.push('/reels' as any)} style={s.reelsBtn}>
+          <Ionicons name="play-circle-outline" size={20} color="#4f46e5" />
+          <Text allowFontScaling={false} style={s.reelsBtnTxt}>Reels</Text>
+        </TouchableOpacity>
       </View>
 
       {/* ── Search bar ─────────────────────────────────────────────────────── */}
@@ -378,9 +382,13 @@ export default function ExploreScreen() {
 
 const s = StyleSheet.create({
   container:    { flex: 1, backgroundColor: '#f9fafb' },
-  header:       { paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#fff',
+  header:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+                  paddingHorizontal: 16, paddingVertical: 12, backgroundColor: '#fff',
                   borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
   title:        { fontSize: 22, fontWeight: '900', color: '#111827' },
+  reelsBtn:     { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#eef2ff',
+                  paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 },
+  reelsBtnTxt:  { fontSize: 13, fontWeight: '700', color: '#4f46e5' },
   searchWrap:   { flexDirection: 'row', alignItems: 'center', margin: 12, marginBottom: 0,
                   backgroundColor: '#fff', borderRadius: 14, borderWidth: 1,
                   borderColor: '#e5e7eb', paddingHorizontal: 12, paddingVertical: 10 },
@@ -410,3 +418,4 @@ const s = StyleSheet.create({
   cardsRow:     { paddingHorizontal: 16, gap: 10, paddingBottom: 4 },
   cardWrapper:  { width: 270 },
 });
+

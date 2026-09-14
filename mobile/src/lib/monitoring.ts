@@ -1,5 +1,4 @@
 import * as Application from 'expo-application';
-import * as Updates from 'expo-updates';
 import api from './api';
 import { isOnline } from './offline';
 import { logEvent } from './analytics';
@@ -10,8 +9,8 @@ export async function captureException(error: Error, context?: Record<string, an
     stack: error.stack,
     name: error.name,
     context: context ?? {},
-    appVersion: Application.nativeApplicationVersion || Updates.manifest?.version || 'unknown',
-    runtimeVersion: Updates.runtimeVersion || 'unknown',
+    appVersion: Application.nativeApplicationVersion || 'unknown',
+    runtimeVersion: 'unknown',
     platform: Application.nativeApplicationVersion || 'unknown',
     timestamp: new Date().toISOString(),
   };

@@ -81,17 +81,17 @@ class Analytics {
     }
 
     // Send to backend — non-blocking, fire-and-forget
-    // Route: POST /api/v1/analytics/events (always returns 202)
+    // Route: POST /api/v1/analytics/events (always returns 202, public endpoint)
+    // Use the api instance so the Authorization: Bearer token is included automatically.
+    // Falls back gracefully when unauthenticated — server returns 202 for anonymous requests.
     const apiUrl = process.env.NEXT_PUBLIC_API_URL
     if (apiUrl) {
-      fetch(`${apiUrl}/analytics/events`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(event),
-      }).catch(() => {
-        // Silently discard — analytics must never break the UI
-      })
+      // Lazy-import api to avoid circular dependency issues at module init time
+      import('@/lib/api').then(({ default: api }) => {
+        api.post('/analytics/events', event).catch(() => {
+          // Silently discard — analytics must never break the UI
+        })
+      }).catch(() => {})
     }
   }
 

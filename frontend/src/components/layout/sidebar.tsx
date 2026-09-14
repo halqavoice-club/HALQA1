@@ -250,9 +250,9 @@ export function Sidebar() {
     // Each item's visibility is controlled by canEducation() to respect the
     // school-scoped role (not the global user.role).
     const educationItems: NavItem[] = hasSchools ? [
-      // My School — all members can see their school (using VIEW_SCHOOL permission)
+      // My School — opens the school switcher so the user can pick which school context to enter
       ...(canEducation('VIEW_SCHOOL') ? [
-        { label: 'My School', href: '/schools', icon: School }
+        { label: 'My Schools', href: '/school-memberships', icon: School }
       ] : []),
       // School management — admin only (uses MANAGE_SCHOOL)
       ...(canEducation('VIEW_STUDENTS') ? [
@@ -275,6 +275,10 @@ export function Sidebar() {
       ] : []),
       ...(canEducation('VIEW_ATTENDANCE') && activeRole !== 'GUARDIAN' ? [
         { label: 'QR Check-in', href: '/attendance/qr-checkin', icon: QrCode }
+      ] : []),
+      // My ID Card — students can view and print their own card
+      ...(activeRole === 'STUDENT' ? [
+        { label: 'My ID Card', href: '/my-id-card', icon: QrCode }
       ] : []),
       ...(canEducation('VIEW_ATTENDANCE') && (activeRole === 'TEACHER' || activeRole === 'SCHOOL_ADMIN') ? [
         { label: t.attendanceReport, href: '/attendance/report', icon: BarChart3 }
@@ -360,9 +364,8 @@ export function Sidebar() {
           { label: 'Communities', href: '/communities', icon: UsersRound },
           { label: t.voiceClub, href: '/voice-club', icon: Radio },
           { label: 'Live Rooms', href: '/live-class', icon: Video },
-          { label: 'Chat', href: '/dm', icon: MessagesSquare, badge: 'dm' as const },
+          { label: 'Messages', href: '/dm', icon: MessagesSquare, badge: 'dm' as const },
           { label: 'Groups', href: '/group-chat', icon: Users, badge: 'group' as const },
-          { label: t.messages, href: '/messages', icon: MessageSquare },
           { label: 'Friends', href: '/social', icon: UserPlus, badge: 'social' as const },
           { label: 'Creator', href: '/creator', icon: Sparkles },
           { label: 'Wallet', href: '/wallet', icon: Wallet },
@@ -516,7 +519,11 @@ export function Sidebar() {
           <p className="text-[9px] font-bold uppercase tracking-wider text-halqa-500 mb-1">Education Context</p>
           <select
             value={activeSchool?.id || ''}
-            onChange={(e) => switchSchool(e.target.value)}
+            onChange={(e) => {
+              switchSchool(e.target.value)
+              // Navigate to the education hub so the new context takes effect immediately
+              if (typeof window !== 'undefined') window.location.href = '/education'
+            }}
             className="w-full bg-halqa-800 text-white text-xs rounded px-2 py-1 border border-halqa-600 focus:outline-none focus:border-indigo-500"
             aria-label="Switch active school"
           >

@@ -142,3 +142,12 @@
 /* PWA safe area */
 .safe-top { padding-top: env(safe-area-inset-top); }
 .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+
+/* Mobile layout offsets — account for fixed header (56px) + safe-area inset */
+.mobile-content-top {
+  padding-top: calc(3.5rem + env(safe-area-inset-top));
+}
+/* Mobile bottom nav clearance (64px) + safe-area inset */
+.mobile-content-bottom {
+  padding-bottom: calc(4rem + env(safe-area-inset-bottom));
+}
