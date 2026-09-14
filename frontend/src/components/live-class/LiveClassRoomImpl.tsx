@@ -26,7 +26,7 @@ import { LiveKitRoom } from '@livekit/components-react'
 import { LiveClassQuranPanel, type QuranPosition } from './LiveClassQuranPanel'
 import { LiveClassWhiteboard, type DrawEvent, type WhiteboardHandle } from './LiveClassWhiteboard'
 import { LiveClassPollPanel, type Poll, type PollEvent } from './LiveClassPoll'
-import { LiveClassHostControls, type ClassSettings } from './LiveClassHostControls'
+import { LiveClassHostControls, type ClassSettings, type LCParticipant } from './LiveClassHostControls'
 import { SpeakerGrid } from './layout/SpeakerGrid'
 import { useDynamicLayoutStore } from './layout/useDynamicLayoutStore'
 import { GiftPanel } from '../voice/GiftPanel'
@@ -35,32 +35,31 @@ import { useVoiceStore } from '@/store/voice.store'
 import { useGiftEngine, useIsLowEndDevice } from '@/hooks/useGiftEngine'
 import { createLiveClassAdapter } from '@/lib/giftAdapter'
 import { AnimatePresence } from 'framer-motion'
+import { EditLiveClassModal } from './EditLiveClassModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface LCParticipant {
-  id: string; userId: string; role: 'HOST' | 'STUDENT' | 'OBSERVER'
-  isMuted: boolean; isVideoOn: boolean; handRaised: boolean
-  user: { id: string; firstName: string; lastName: string; avatarUrl: string | null }
-}
+// LCParticipant is imported from LiveClassHostControls to keep a single source of truth.
 interface LCMessage {
   id: string; userId: string; body: string; type: string; createdAt: string
   user: { id: string; firstName: string; lastName: string; avatarUrl: string | null }
 }
 interface LiveClass {
   id: string; title: string; description: string | null
+  streamType: 'SCHOOL' | 'PUBLIC'
   status: 'SCHEDULED' | 'LIVE' | 'ENDED' | 'CANCELLED'
   chatEnabled: boolean; handRaiseEnabled: boolean; quranPanelEnabled: boolean
   whiteboardEnabled: boolean
   isOpenMic: boolean
   screenShareEnabled: boolean
-  maxParticipants: number
-  duration: number; scheduledAt: string | null
+  maxParticipants: number | null  // null = unlimited (public streams default)
+  duration: number | null; scheduledAt: string | null
   recordingUrl: string | null
   // hostUserId — set for PUBLIC streams; the creator's userId
   // used to grant host controls to normal users (MEMBER role) who own the stream
   hostUserId: string | null
-  class: { id: string; name: string }
-  teacher: { id: string; user: { id: string; firstName: string; lastName: string } }
+  class?: { id: string; name: string } | null
+  teacher?: { id: string; user: { id: string; firstName: string; lastName: string; avatarUrl?: string | null } } | null
+  hostUser?: { id: string; firstName: string; lastName: string; avatarUrl?: string | null } | null
   participants: LCParticipant[]
   _count?: { participants: number; messages: number }  // from list endpoint
 }
@@ -168,6 +167,7 @@ function RemoteVideoTile({ p, isSpeaking, track, onClick }: {
         <span className="text-xs text-white font-medium truncate">
           {p.user.firstName}
           {p.role === 'HOST' && <span className="ml-1 text-yellow-400 text-[10px]">HOST</span>}
+          {p.role === 'MODERATOR' && <span className="ml-1 text-blue-400 text-[10px]">MOD</span>}
         </span>
         <div className="flex items-center gap-1">
           {p.handRaised && <span className="text-xs animate-bounce">✋</span>}
@@ -291,6 +291,7 @@ function LocalVideoTile({ p, isSpeaking, videoRef, videoOn, room }: {
         <span className="text-xs text-white font-medium">
           You
           {p.role === 'HOST' && <span className="ml-1 text-yellow-400 text-[10px]">HOST</span>}
+          {p.role === 'MODERATOR' && <span className="ml-1 text-blue-400 text-[10px]">MOD</span>}
         </span>
         <div className="flex items-center gap-1">
           {p.isMuted ? <MicOff className="w-3 h-3 text-red-400" /> : <Mic className="w-3 h-3 text-green-400" />}
@@ -339,6 +340,7 @@ function AudioTile({ p, isMe, isSpeaking, onClick }: {
       <div className="text-center">
         <p className="text-xs font-medium text-gray-200 truncate max-w-[80px]">{name}</p>
         {p.role === 'HOST' && <span className="text-[9px] text-yellow-400 font-bold">HOST</span>}
+        {p.role === 'MODERATOR' && <span className="text-[9px] text-blue-400 font-bold">MOD</span>}
         {p.handRaised && <span className="text-xs block animate-bounce">✋</span>}
       </div>
     </div>
@@ -397,6 +399,8 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   // ── New feature state ─────────────────────────────────────────────────────
   // Sidebar tab (extended)
   const [isRecording,      setIsRecording]      = useState(false)
+  // Edit modal
+  const [showEditModal,    setShowEditModal]     = useState(false)
   // Quran sync
   const [quranPosition,    setQuranPosition]    = useState<QuranPosition | null>(null)
   // Whiteboard remote events
@@ -411,10 +415,41 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   const [showSidebar,      setShowSidebar]      = useState(false)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
-  // isStaffRole is pure — only depends on user.role, safe to compute here.
-  // SUPER_ADMIN is platform-admin only and must NOT automatically become host
-  // in any live class. They join as a regular participant (student view) and
-  // can only access host controls if they are the actual creator (hostUserId check below).
+
+  // ── Host/role detection ────────────────────────────────────────────────────
+  //
+  // ARCHITECTURE RULE: Live Class role comes from the PARTICIPANT RECORD,
+  // not from global User.role.
+  //
+  // A SCHOOL_ADMIN in School A viewing a live class in School B is just a
+  // STUDENT viewer there. Their global role is irrelevant to this class.
+  //
+  // The authoritative source is:
+  //   1. myParticipantRole  — what the SERVER assigned when this user joined
+  //      (HOST / MODERATOR / STUDENT — stored in live_class_participants.role)
+  //   2. lc.hostUserId === user.id — creator of a PUBLIC stream gets HOST
+  //      (before participant record is loaded, we can check this directly)
+  //
+  // isStaffRole is ONLY used as a pre-join hint (before participant data loads)
+  // to decide the initial UI state. Once participant data is available,
+  // myParticipantRole is the single source of truth.
+  //
+  // DO NOT use isStaffRole to grant host controls. It causes cross-school leaks:
+  //   SCHOOL_ADMIN in School A sees HOST controls in School B's class.
+
+  // myParticipantRole: what the server assigned us when we joined this class.
+  // null = not yet joined or data still loading.
+  const myParticipantRole = participants.find(p => p.userId === user?.id)?.role ?? null
+
+  // isCreator and isHost are computed AFTER lc is declared (see below the useQuery call).
+  // They are declared here as forward references — TypeScript hoists const to block scope
+  // but we need lc which comes from useQuery. We use a getter pattern via useMemo instead.
+
+  // isModerator: promoted to moderator by the creator.
+  const isModerator = myParticipantRole === 'MODERATOR'
+
+  // isStaffRole kept only for joinMutation.onSuccess pre-join tab routing
+  // (before participant data loads). NOT used for any access control decisions.
   const isStaffRole = ['TEACHER', 'SCHOOL_ADMIN'].includes(user?.role || '')
 
   // ── Universal Gift Engine ───────────────────────────────────────────────────
@@ -434,13 +469,17 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     refetchInterval: joined ? 30000 : 10000,
   })
 
-  // isHost: true for school staff roles OR for the creator of a PUBLIC stream.
-  // A normal user (MEMBER role) who created a PUBLIC stream must also see host
-  // controls — previously they were locked out because the role check never
-  // included MEMBER. We also check lc.hostUserId === user.id so any
-  // authenticated user who owns the stream gets full host UI.
-  // lc may be undefined on first render — isStaffRole carries it until lc loads.
-  const isHost = isStaffRole || (!!lc && !!user && lc.hostUserId === user.id)
+  // ── isCreator / isHost / canManage — MUST come after lc is declared ─────────
+  // isCreator: we created this live class (hostUserId matches our userId).
+  const isCreator = !!lc && !!user && lc.hostUserId === user.id
+
+  // isHost: server assigned us HOST role (authoritative), OR we are the creator
+  // (needed pre-join and for PUBLIC streams before participant data loads).
+  // NEVER derived from global User.role — that leaks cross-school admin access.
+  const isHost = myParticipantRole === 'HOST' || isCreator
+
+  // canManage: HOST or MODERATOR — can mute/kick/approve hands/run polls.
+  const canManage = isHost || isModerator
 
   // Sync isOpenMic from server data
   useEffect(() => {
@@ -454,19 +493,18 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   }, [participants.length])
 
   // ── Sync live class participants → useDynamicLayoutStore (for SpeakerGrid in audio mode) ──
-  // useDynamicLayout subscribes to LiveKit events, but when SpeakerGrid is used in the
-  // live class audio view the participant source of truth is the liveclass socket events
-  // (liveclass:user_joined / liveclass:user_left / liveclass:mute_changed) that feed the
-  // `participants` state array above. We bridge the two here: whenever `participants`
-  // changes, map them to SpeakerSlot format and push into the store so SpeakerGrid
-  // renders the correct seats without needing a separate socket subscription.
+  // MIC-02: Only sync on-stage participants (HOST, MODERATOR, or speakerSlot assigned).
+  // Audience members must NOT appear in SpeakerGrid — they are not on stage.
   const dynamicLayoutStore = useDynamicLayoutStore()
   useEffect(() => {
     if (!joined) return  // only sync when inside the room
+    const onStage = participants.filter(p =>
+      p.role === 'HOST' || p.role === 'MODERATOR' || (p as any).speakerSlot != null
+    )
     dynamicLayoutStore.setSpeakers(
-      participants.map((p, i) => ({
+      onStage.map((p, i) => ({
         userId:            p.userId,
-        seatIndex:         i,
+        seatIndex:         (p as any).speakerSlot ?? i,
         role:              p.role === 'HOST' ? 'owner' : 'speaker',
         displayName:       `${p.user.firstName} ${p.user.lastName}`,
         avatarUrl:         p.user.avatarUrl ?? undefined,
@@ -487,7 +525,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     const socket = getSocket()
     if (!socket) return
     socket.emit('class:join', lc.class.id)
-    return () => { socket.emit('class:leave', lc.class.id) }
+    return () => { socket.emit('class:leave', lc.class?.id) }
   }, [lc?.class?.id])
 
   // ── Floating emoji spawner ──────────────────────────────────────────────────
@@ -514,8 +552,8 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     const onMuteAll  = ()       => setParticipants(prev => prev.map(p => p.role !== 'HOST' ? { ...p, isMuted: true } : p))
     const onHand     = (d: any) => {
       setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, handRaised: true  } : p))
-      // Use isStaffRole OR hostUserId check — isHost may be stale before lc loads
-      if (isStaffRole || lc?.hostUserId === user?.id) setTab('host')
+      // Switch to controls tab when a hand is raised — only if we have management rights
+      if (canManage) setTab('host')
     }
     const onHandLow  = (d: any) => setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, handRaised: false } : p))
     const onMsg      = (msg: LCMessage) => setMessages(prev => [...prev, msg])
@@ -527,27 +565,19 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     const onReaction = (d: any) => spawnEmoji(d.emoji, d.firstName || '')
     const onCanSpeak = () => {
       toast({ title: '🎙 You can speak now!' })
-      // FIX: just enable the mic — no reconnect needed since canPublish is always true.
-      // The old approach triggered a full LiveKit reconnect (1–2s lag).
-      const room = roomRef.current
-      if (room && room.state === ConnectionState.Connected) {
-        room.localParticipant.setMicrophoneEnabled(true).catch(() => {})
-        setMicOn(true)
-      } else {
-        // Not connected yet — connect and start with mic enabled
-        connectLiveKitRef.current?.()
-      }
+      // DO NOT call setMicrophoneEnabled here.
+      // grant_mic triggers a full LiveKit reconnect with a canPublish:true token.
+      // setMicrophoneEnabled on the old canPublish:false token is silently rejected
+      // by the SFU anyway, but calling it causes confusing mic state flips.
+      // After reconnect, the host auto-enables mic in connectLiveKit (line ~985).
     }
     const onOpenMicChanged = (d: any) => {
       setIsOpenMic(d.isOpenMic)
       if (d.isOpenMic) {
-        toast({ title: '🎙 Open mic enabled — everyone can speak!' })
-        // Just enable mic — no reconnect needed
-        const room = roomRef.current
-        if (room && room.state === ConnectionState.Connected) {
-          room.localParticipant.setMicrophoneEnabled(true).catch(() => {})
-          setMicOn(true)
-        }
+        toast({ title: '🎙 Open mic — raise your hand to speak instantly!' })
+        // MIC-02: Open mic means raise-hand auto-approves (no host click needed).
+        // It does NOT grant canPublish to everyone — each user still gets a speakerSlot
+        // via the raiseHand auto-approve path. No mic reconnect here.
       } else {
         toast({ title: '🔇 Open mic disabled' })
       }
@@ -631,7 +661,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     })
     // Speak request: host sees a toast prompt so they know a student wants to speak
     socket.on('liveclass:speak_request',   (d: any) => {
-      if (isHost) toast({ title: `🎙 ${d.firstName || 'A student'} wants to speak` })
+      if (canManage) toast({ title: `🎙 ${d.firstName || 'A student'} wants to speak` })
     })
     // New: all hands lowered
     socket.on('liveclass:all_hands_lowered', () => setParticipants(prev => prev.map(p => ({ ...p, handRaised: false }))))
@@ -655,6 +685,89 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     socket.on('liveclass:quran_position',    onQuranPosition)
     socket.on('liveclass:draw',              onDraw)
     socket.on('liveclass:poll',              onPoll)
+
+    // Moderator promotion/demotion events
+    socket.on('liveclass:moderator_promoted', (d: any) => {
+      setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, role: 'MODERATOR' as const } : p))
+      if (d.userId === user?.id) toast({ title: '⭐ You have been made a moderator' })
+    })
+    socket.on('liveclass:moderator_demoted', (d: any) => {
+      setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, role: 'STUDENT' as const } : p))
+      if (d.userId === user?.id) toast({ title: 'Your moderator role has been removed' })
+    })
+
+    // MIC-02: Host approved this user to speak (or open mic was enabled).
+    // The backend has set isMuted=false in DB, so the NEW token will have
+    // canPublish: true. Reconnect LiveKit to get the upgraded token.
+    const onGrantMic = (d: any) => {
+      if (d.liveClassId !== id) return
+      const room = roomRef.current
+      if (room) {
+        room.disconnect()
+        roomRef.current = null
+      }
+      // Short delay so disconnect completes before reconnect
+      setTimeout(() => { connectLiveKitRef.current?.() }, 400)
+    }
+    socket.on('liveclass:grant_mic', onGrantMic)
+
+    // MIC-02: Host demoted this user or they dropped mic — revoke publish permission.
+    // Reconnect with a canPublish:false token so SFU enforces listen-only.
+    const onRevokeMic = (d: any) => {
+      if (d.liveClassId !== id) return
+      setMicOn(false)
+      const room = roomRef.current
+      if (room) {
+        room.localParticipant.setMicrophoneEnabled(false).catch(() => {})
+        room.disconnect()
+        roomRef.current = null
+      }
+      setTimeout(() => { connectLiveKitRef.current?.() }, 400)
+    }
+    socket.on('liveclass:revoke_mic', onRevokeMic)
+
+    // MIC-02: Speaker slot updates — update activeSpeakerCount badge and participant state
+    const onSpeakerAdded = (d: any) => {
+      if (d.liveClassId !== id) return
+      setParticipants(prev => prev.map(p =>
+        p.userId === d.userId ? { ...p, isMuted: false, speakerSlot: d.speakerSlot } : p
+      ))
+    }
+    const onSpeakerRemoved = (d: any) => {
+      if (d.liveClassId !== id) return
+      setParticipants(prev => prev.map(p =>
+        p.userId === d.userId ? { ...p, isMuted: true, speakerSlot: null } : p
+      ))
+    }
+    socket.on('liveclass:speaker_added',   onSpeakerAdded)
+    socket.on('liveclass:speaker_removed', onSpeakerRemoved)
+
+    // LS-GAP-003 FIX: Host transfer events
+    const onHostTransferred = (d: any) => {
+      if (d.liveClassId !== id) return
+      // Update participant roles immediately in local state
+      setParticipants(prev => prev.map(p => {
+        if (p.userId === d.newHostId)  return { ...p, role: 'HOST'    as const }
+        if (p.userId === d.prevHostId) return { ...p, role: 'STUDENT' as const }
+        return p
+      }))
+      toast({
+        title: d.newHostId === user?.id
+          ? '👑 You are now the host!'
+          : `👑 ${d.newHostName || 'A participant'} is now the host`,
+      })
+    }
+    const onRoleChanged = (d: any) => {
+      if (d.liveClassId !== id) return
+      setParticipants(prev => prev.map(p =>
+        p.userId === d.userId ? { ...p, role: d.role as LCParticipant['role'] } : p
+      ))
+    }
+    socket.on('liveclass:host_transferred', onHostTransferred)
+    socket.on('liveclass:role_changed',     onRoleChanged)
+    socket.on('liveclass:you_are_host',     () => {
+      toast({ title: '👑 You are now the host of this stream!' })
+    })
 
     return () => {
       socket.emit('liveclass:leave_room', id)
@@ -685,6 +798,15 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       socket.off('liveclass:quran_position',    onQuranPosition)
       socket.off('liveclass:draw',              onDraw)
       socket.off('liveclass:poll',              onPoll)
+      socket.off('liveclass:moderator_promoted')
+      socket.off('liveclass:moderator_demoted')
+      socket.off('liveclass:grant_mic',         onGrantMic)
+      socket.off('liveclass:revoke_mic',        onRevokeMic)
+      socket.off('liveclass:speaker_added',     onSpeakerAdded)
+      socket.off('liveclass:speaker_removed',   onSpeakerRemoved)
+      socket.off('liveclass:host_transferred',  onHostTransferred)
+      socket.off('liveclass:role_changed',      onRoleChanged)
+      socket.off('liveclass:you_are_host')
     }
   }, [id, queryClient, router, toast, spawnEmoji])
 
@@ -902,9 +1024,13 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       // Re-derive host status from the join response so we don't depend on
       // the stale lc query value (which may not have loaded yet at join time).
       const joinedLc = res.data.data?.liveClass
-      const amHost = isStaffRole || (joinedLc?.hostUserId === user?.id)
-      if (amHost) setTab('host')  // hosts land on the controls tab
       const joinedParticipants = res.data.data?.liveClass?.participants
+      const myJoinRole = joinedParticipants?.find((p: any) => p.userId === user?.id)?.role
+      // Set controls tab if server assigned HOST or MODERATOR — do NOT use isStaffRole
+      // (global role) because it leaks cross-school admin privileges to the controls tab.
+      // isCreator check: creator of a PUBLIC stream may not yet be in participant list.
+      const amCreator = joinedLc?.hostUserId === user?.id
+      if (myJoinRole === 'HOST' || myJoinRole === 'MODERATOR' || amCreator) setTab('host')
       if (joinedParticipants?.length > 0) {
         setParticipants(joinedParticipants)
       } else {
@@ -920,7 +1046,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
         const cachedPolls: Poll[] = r.data.data?.polls ?? []
         if (cachedPolls.length > 0) {
           setPolls(cachedPolls)
-          // If there's an active poll, switch students to the polls tab automatically
+          // If there's an active poll, switch non-managers to the polls tab automatically
           if (!isHost && cachedPolls.some((p: Poll) => p.isActive)) {
             setTab('polls')
             toast({ title: '📊 There is an active poll' })
@@ -928,7 +1054,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
         }
       }).catch(() => { /* non-fatal — polls still work via socket events */ })
 
-      // Eagerly seed the lc query cache from the join response so isHost is
+      // Eagerly seed the lc query cache from the join response so isCreator is
       // correctly computed before connectLiveKit() runs. Without this, a MEMBER
       // user who owns a PUBLIC stream would connect with isHost=false (lc=undefined)
       // and not get their mic auto-enabled.
@@ -984,6 +1110,18 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   // ── Controls ────────────────────────────────────────────────────────────────
   const toggleMic = async () => {
     const room = roomRef.current; if (!room || !user?.id) return
+
+    // MIC-01: If this participant has canPublish:false (muted student token),
+    // the SFU will reject the publish attempt. Guard it here and prompt them
+    // to raise their hand instead.
+    if (!room.localParticipant.permissions?.canPublish && !isHost) {
+      toast({
+        title: '🎙 Mic not available',
+        description: 'Raise your hand to request permission to speak.',
+      })
+      return
+    }
+
     const next = !room.localParticipant.isMicrophoneEnabled
     await room.localParticipant.setMicrophoneEnabled(next)
     setMicOn(next)
@@ -1021,18 +1159,12 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       // runs while the track publication is still in progress → getTrackPublication
       // returns null → attach is skipped → video never shows.
 
-      // Persist to DB + notify participants via server-side relay (fire-and-forget, non-fatal)
-      // NOTE: setVideoState controller emits liveclass:video_changed to the room.
-      // The socket emit below is kept for low-latency optimistic relay before the
-      // API round-trip completes — this results in two events reaching other clients.
-      // MOB-DUP FIX applied on mobile; on web we keep the socket emit for perceived
-      // responsiveness but the API call's controller emit is the authoritative one.
-      // TODO: remove socket emit here once the API latency is confirmed acceptable.
+      // Persist to DB + notify participants via server-side relay (fire-and-forget, non-fatal).
+      // The PATCH /video controller emits liveclass:video_changed to the room — that is
+      // the single authoritative event. The old redundant socket emit was removed (MOB-DUP FIX).
       if (user?.id) {
         api.patch('/live-classes/' + id + '/participants/' + user.id + '/video', { isVideoOn: next }).catch(() => {})
       }
-      // DO NOT also emit liveclass:video_changed via socket — the PATCH controller handles it
-      // (keeping the socket emit below removed to match the mobile fix)
 
     } catch (e: any) {
       const name = (e?.name  || '').toLowerCase()
@@ -1125,14 +1257,65 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     setChatInput('')
   }
 
-  const raiseHand = async () => { await api.post('/live-classes/' + id + '/hand/raise'); toast({ title: 'Hand raised ✋' }) }
+  const raiseHand = async () => {
+    try {
+      const res = await api.post('/live-classes/' + id + '/hand/raise')
+      const { autoApproved } = res?.data?.data ?? {}
+      if (autoApproved) {
+        // Open mic + slot available — we're already approved, reconnect with canPublish:true
+        toast({ title: '🎙 You joined the stage!' })
+        // grant_mic socket event will arrive from the server and trigger reconnect
+      } else {
+        toast({ title: 'Hand raised ✋' })
+      }
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to raise hand', variant: 'destructive' })
+    }
+  }
   const lowerHand = async () => {
     await api.post('/live-classes/' + id + '/hand/lower')
     setParticipants(prev => prev.map(p => p.userId === user?.id ? { ...p, handRaised: false } : p))
   }
+
+  // MIC-02: Drop mic — returns to audience, frees a speaker slot
+  const dropMic = async () => {
+    try {
+      await api.post('/live-classes/' + id + '/drop-mic')
+      setMicOn(false)
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to drop mic', variant: 'destructive' })
+    }
+  }
+
+  // MIC-02: Demote a speaker back to audience (host/mod action)
+  const demoteSpeaker = async (uid: string) => {
+    await api.post('/live-classes/' + id + '/demote/' + uid).catch(() => {})
+    setParticipants(prev => prev.map(p => p.userId === uid ? { ...p, isMuted: true, speakerSlot: null } : p))
+  }
+
+  // Invite an audience member directly to the stage (no hand raise needed)
+  const inviteToStage = async (uid: string) => {
+    try {
+      const res = await api.post('/live-classes/' + id + '/invite/' + uid)
+      const speakerSlot = res?.data?.data?.speakerSlot ?? null
+      setParticipants(prev => prev.map(p =>
+        p.userId === uid ? { ...p, isMuted: false, handRaised: false, speakerSlot } : p
+      ))
+      toast({ title: '🎙 Participant invited to stage' })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to invite to stage', variant: 'destructive' })
+    }
+  }
   const approveHand = async (uid: string) => {
-    await api.post('/live-classes/' + id + '/hand/approve/' + uid)
-    setParticipants(prev => prev.map(p => p.userId === uid ? { ...p, handRaised: false } : p))
+    try {
+      const res = await api.post('/live-classes/' + id + '/hand/approve/' + uid)
+      const speakerSlot = res?.data?.data?.speakerSlot ?? null
+      setParticipants(prev => prev.map(p =>
+        p.userId === uid ? { ...p, handRaised: false, isMuted: false, speakerSlot } : p
+      ))
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to approve hand', variant: 'destructive' })
+    }
   }
 
   const rejectHand = async (uid: string) => {
@@ -1148,6 +1331,27 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   const kickParticipant = async (uid: string) => {
     await api.delete('/live-classes/' + id + '/participants/' + uid).catch(() => {})
     setParticipants(prev => prev.filter(p => p.userId !== uid))
+  }
+
+  // ── Moderator promotion — only the creator can do this ───────────────────
+  const promoteToModerator = async (uid: string) => {
+    try {
+      await api.post('/live-classes/' + id + '/moderator/' + uid)
+      setParticipants(prev => prev.map(p => p.userId === uid ? { ...p, role: 'MODERATOR' as const } : p))
+      toast({ title: '⭐ Participant promoted to moderator' })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to promote', variant: 'destructive' })
+    }
+  }
+
+  const demoteModerator = async (uid: string) => {
+    try {
+      await api.delete('/live-classes/' + id + '/moderator/' + uid)
+      setParticipants(prev => prev.map(p => p.userId === uid ? { ...p, role: 'STUDENT' as const } : p))
+      toast({ title: 'Moderator role removed' })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to demote', variant: 'destructive' })
+    }
   }
 
   // ── Toggle class settings live (PATCH) — optimistic update ───────────────
@@ -1178,11 +1382,22 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   }
 
   // ── Recording ───────────────────────────────────────────────────────────────
+  // NOTE: Recording sets a DB flag and emits a socket event. Actual file capture
+  // requires LiveKit Egress to be configured. Without Egress, the host's browser
+  // can use built-in screen-recording as a workaround.
   const toggleRecording = async () => {
-    if (isRecording) {
-      await api.post('/live-classes/' + id + '/recording/stop').catch(() => {})
-    } else {
-      await api.post('/live-classes/' + id + '/recording/start').catch(() => {})
+    try {
+      if (isRecording) {
+        await api.post('/live-classes/' + id + '/recording/stop')
+      } else {
+        await api.post('/live-classes/' + id + '/recording/start')
+      }
+    } catch (e: any) {
+      toast({
+        title: isRecording ? '⏹ Failed to stop recording' : '🔴 Failed to start recording',
+        description: e?.response?.data?.message || 'Please try again.',
+        variant: 'destructive',
+      })
     }
   }
 
@@ -1301,13 +1516,22 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   // 17+      → paginated 4×4 (16 per page)
   const PAGE_SIZE = 16
 
-  const totalVideoPages = Math.ceil(Math.max(participants.length, 1) / PAGE_SIZE)
-  const pagedParticipants = participants.slice(
+  // MIC-02: Stage view — only show on-stage participants (HOST, MODERATOR, or speakerSlot assigned).
+  // Audience members (speakerSlot=null, role=STUDENT) are NOT shown on stage.
+  const stageParticipants = participants.filter(p =>
+    p.role === 'HOST' || p.role === 'MODERATOR' || (p as any).speakerSlot != null
+  )
+  const audienceParticipants = participants.filter(p =>
+    p.role !== 'HOST' && p.role !== 'MODERATOR' && (p as any).speakerSlot == null
+  )
+
+  const totalVideoPages = Math.ceil(Math.max(stageParticipants.length, 1) / PAGE_SIZE)
+  const pagedParticipants = stageParticipants.slice(
     videoPage * PAGE_SIZE,
     videoPage * PAGE_SIZE + PAGE_SIZE,
   )
 
-  const n = participants.length
+  const n = stageParticipants.length
   // Desktop uses the full AUTO_GRID breakpoints; mobile caps at 2 columns
   const videoCols =
     n <= 1  ? 'grid-cols-1 max-w-sm mx-auto' :
@@ -1332,6 +1556,17 @@ export function LiveClassRoomPage({ id }: { id: string }) {
             onClose={toggleGiftPanel}
             onSendGift={sendGift}
             onSendGiftAll={sendGiftToAll}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* ── Edit stream modal (host only) ─────────────────────────────────── */}
+      <AnimatePresence>
+        {showEditModal && lc && (
+          <EditLiveClassModal
+            lc={{ id: lc.id, title: lc.title, description: lc.description ?? null, coverImageUrl: (lc as any).coverImageUrl ?? null, status: lc.status }}
+            onClose={() => setShowEditModal(false)}
+            onUpdated={() => queryClient.invalidateQueries({ queryKey: ['live-class', id] })}
           />
         )}
       </AnimatePresence>
@@ -1403,7 +1638,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               >
                 <MessageSquare className="w-3.5 h-3.5" /> Send private message
               </button>
-              {isHost && participantPopup.participant.role !== 'HOST' && (
+              {canManage && participantPopup.participant.role !== 'HOST' && (
                 <>
                   {/* Mute/Unmute toggle based on current state */}
                   <button
@@ -1435,6 +1670,53 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                       className="w-full text-left text-xs text-gray-400 hover:text-gray-300 hover:bg-gray-700 px-3 py-2 rounded-lg transition-colors flex items-center gap-2"
                     >
                       <HandMetal className="w-3.5 h-3.5" /> Lower hand
+                    </button>
+                  )}
+                  {/* Move to audience — shown when participant is an active speaker on stage */}
+                  {participantPopup.participant.speakerSlot != null && (
+                    <button
+                      onClick={async () => {
+                        await demoteSpeaker(participantPopup.participant.userId)
+                        setParticipantPopup(null)
+                      }}
+                      className="w-full text-left text-xs text-orange-400 hover:text-orange-300 hover:bg-gray-700 px-3 py-2 rounded-lg transition-colors flex items-center gap-2"
+                    >
+                      <MicOff className="w-3.5 h-3.5" /> Move to audience
+                    </button>
+                  )}
+                  {/* Invite to stage — shown when participant is audience and no hand raised */}
+                  {participantPopup.participant.speakerSlot == null && !participantPopup.participant.handRaised && (
+                    <button
+                      onClick={async () => {
+                        await inviteToStage(participantPopup.participant.userId)
+                        setParticipantPopup(null)
+                      }}
+                      className="w-full text-left text-xs text-indigo-400 hover:text-indigo-300 hover:bg-gray-700 px-3 py-2 rounded-lg transition-colors flex items-center gap-2"
+                    >
+                      <Mic className="w-3.5 h-3.5" /> Invite to stage
+                    </button>
+                  )}
+                  {/* Promote/demote moderator — only the creator can do this */}
+                  {isCreator && participantPopup.participant.role === 'STUDENT' && (
+                    <button
+                      onClick={async () => {
+                        await promoteToModerator(participantPopup.participant.userId)
+                        setParticipantPopup(null)
+                      }}
+                      className="w-full text-left text-xs text-blue-400 hover:text-blue-300 hover:bg-gray-700 px-3 py-2 rounded-lg transition-colors flex items-center gap-2"
+                    >
+                      <span className="text-[13px]">⭐</span> Make moderator
+                    </button>
+                  )}
+                  {isCreator && participantPopup.participant.role === 'MODERATOR' && (
+                    <button
+                      onClick={async () => {
+                        await demoteModerator(participantPopup.participant.userId)
+                        setParticipantPopup(null)
+                      }}
+                      className="w-full text-left text-xs text-gray-400 hover:text-gray-300 hover:bg-gray-700 px-3 py-2 rounded-lg transition-colors flex items-center gap-2"
+                    >
+                      <span className="text-[13px]">✕</span> Remove moderator
                     </button>
                   )}
                   <button
@@ -1476,7 +1758,31 @@ export function LiveClassRoomPage({ id }: { id: string }) {
           </button>
           <div>
             <h1 className="font-semibold text-sm">{lc.title}</h1>
-            <p className="text-xs text-gray-400">{lc.class?.name ?? lc.title}</p>
+            {(() => {
+              const hostUser = lc.teacher?.user ?? (lc as any).hostUser
+              if (!hostUser) return <p className="text-xs text-gray-400">{lc.class?.name ?? lc.title}</p>
+              const hostId   = hostUser.id
+              const hostName = `${hostUser.firstName} ${hostUser.lastName}`.trim()
+              const avatar   = hostUser.avatarUrl ?? null
+              const initials = hostName.split(' ').map((n: string) => n[0]).slice(0,2).join('').toUpperCase()
+              return (
+                <a
+                  href={`/profile/${hostId}`}
+                  className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-indigo-300 transition-colors mt-0.5"
+                  onClick={e => e.stopPropagation()}
+                >
+                  {avatar ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={avatar} alt={hostName} className="w-3.5 h-3.5 rounded-full object-cover" />
+                  ) : (
+                    <div className="w-3.5 h-3.5 rounded-full bg-indigo-700 flex items-center justify-center text-[7px] font-bold text-white">
+                      {initials}
+                    </div>
+                  )}
+                  <span className="truncate max-w-[120px]">{hostName}</span>
+                </a>
+              )
+            })()}
           </div>
           {lc.status === 'LIVE' && (
             <span className="flex items-center gap-1 text-xs font-bold text-red-400 bg-red-900/30 px-2 py-0.5 rounded-full">
@@ -1485,11 +1791,16 @@ export function LiveClassRoomPage({ id }: { id: string }) {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {/* View mode toggle — only visible when joined */}
-          {joined && (
+          {/* View mode toggle — HOST only. Participants follow the mode set by the host. */}
+          {joined && isHost && (
             <div className="flex items-center bg-gray-800 rounded-lg p-0.5 gap-0.5">
               <button
-                onClick={() => setViewMode('video')}
+                onClick={() => {
+                  setViewMode('video')
+                  const socket = getSocket()
+                  if (socket) socket.emit('liveclass:viewmode_changed', { liveClassId: id, viewMode: 'video' })
+                  toast({ title: '📹 Switched to video view' })
+                }}
                 title="Video view"
                 className={cn(
                   'flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-semibold transition-colors',
@@ -1502,7 +1813,12 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                 <span className="hidden sm:inline">Video</span>
               </button>
               <button
-                onClick={() => setViewMode('audio')}
+                onClick={() => {
+                  setViewMode('audio')
+                  const socket = getSocket()
+                  if (socket) socket.emit('liveclass:viewmode_changed', { liveClassId: id, viewMode: 'audio' })
+                  toast({ title: '🔇 Switched to audio-only view' })
+                }}
                 title="Audio view"
                 className={cn(
                   'flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-semibold transition-colors',
@@ -1581,10 +1897,31 @@ export function LiveClassRoomPage({ id }: { id: string }) {
             <>
               <span className="text-gray-700 shrink-0">|</span>
               <span className="text-green-400 flex items-center gap-1 shrink-0 font-bold">
-                🎙 Open Mic — everyone can speak
+                🎙 Open Mic — raise hand to join stage
               </span>
             </>
           )}
+          {/* Audience status — shown to participants who are not on stage */}
+          {joined && !isHost && !isModerator && (() => {
+            const me = participants.find(p => p.userId === user?.id)
+            if (me?.speakerSlot != null) return null // on stage
+            if (me?.handRaised) return (
+              <>
+                <span className="text-gray-700 shrink-0">|</span>
+                <span className="text-yellow-400 flex items-center gap-1 shrink-0 animate-pulse">
+                  ✋ Waiting for host approval…
+                </span>
+              </>
+            )
+            return (
+              <>
+                <span className="text-gray-700 shrink-0">|</span>
+                <span className="text-gray-500 flex items-center gap-1 shrink-0 text-xs">
+                  👥 Audience — ✋ raise hand to speak
+                </span>
+              </>
+            )
+          })()}
         </div>
       )}
 
@@ -1595,23 +1932,69 @@ export function LiveClassRoomPage({ id }: { id: string }) {
           {/* Pre-join lobby */}
           {!joined ? (
             <div className="flex-1 flex flex-col items-center justify-center gap-6 p-8">
-              <div className="w-20 h-20 bg-indigo-900/50 rounded-full flex items-center justify-center">
-                <Video className="w-10 h-10 text-indigo-400" />
-              </div>
-              <div className="text-center">
+              {/* Cover image if present */}
+              {(lc as any).coverImageUrl && (
+                <div className="w-full max-w-xs rounded-2xl overflow-hidden aspect-video bg-gray-800">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={(lc as any).coverImageUrl} alt={lc.title} className="w-full h-full object-cover" />
+                </div>
+              )}
+              {!(lc as any).coverImageUrl && (
+                <div className="w-20 h-20 bg-indigo-900/50 rounded-full flex items-center justify-center">
+                  <Video className="w-10 h-10 text-indigo-400" />
+                </div>
+              )}
+              <div className="text-center space-y-1">
                 <h2 className="text-xl font-bold">{lc.title}</h2>
-                <p className="text-gray-400 text-sm mt-1">{lc.class?.name ? `${lc.class.name} — ` : ''}{lc.duration ? `${lc.duration} min` : 'Open stream'}</p>
-                {lc.status === 'SCHEDULED' && <p className="text-yellow-400 text-sm mt-2">Class not started yet</p>}
-                {lc.status === 'ENDED'     && <p className="text-gray-500 text-sm mt-2">This class has ended</p>}
-                {/* Show capacity warning when class is live and near/at limit */}
-                {lc.status === 'LIVE' && !isHost && (() => {
-                  // Use _count.participants (active) from API, fall back to local state length
+                <p className="text-gray-400 text-sm">
+                  {lc.streamType === 'SCHOOL' && lc.class?.name ? `${lc.class.name} — ` : ''}
+                  {lc.duration ? `${lc.duration} min` : lc.streamType === 'PUBLIC' ? 'Live stream' : 'Open stream'}
+                </p>
+                {/* Host profile link */}
+                {(() => {
+                  const hostUser = lc.teacher?.user ?? lc.hostUser
+                  if (!hostUser) return null
+                  const hostId   = hostUser.id
+                  const hostName = `${hostUser.firstName} ${hostUser.lastName}`.trim()
+                  const avatar   = hostUser.avatarUrl ?? null
+                  const initials = hostName.split(' ').map((n: string) => n[0]).slice(0,2).join('').toUpperCase()
+                  return (
+                    <a
+                      href={`/profile/${hostId}`}
+                      className="inline-flex items-center gap-2 mt-2 px-3 py-1.5 rounded-full bg-gray-800 hover:bg-gray-700 transition-colors text-sm text-gray-300 hover:text-white"
+                      onClick={e => e.stopPropagation()}
+                    >
+                      {avatar ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={avatar} alt={hostName} className="w-5 h-5 rounded-full object-cover" />
+                      ) : (
+                        <div className="w-5 h-5 rounded-full bg-indigo-600 flex items-center justify-center text-[9px] font-bold text-white">
+                          {initials}
+                        </div>
+                      )}
+                      <span>{hostName}</span>
+                    </a>
+                  )
+                })()}
+                {lc.status === 'SCHEDULED' && (
+                  <p className="text-yellow-400 text-sm mt-2">
+                    {lc.streamType === 'PUBLIC' ? 'Stream not started yet' : 'Class not started yet'}
+                  </p>
+                )}
+                {lc.status === 'ENDED' && (
+                  <p className="text-gray-500 text-sm mt-2">
+                    {lc.streamType === 'PUBLIC' ? 'This stream has ended' : 'This class has ended'}
+                  </p>
+                )}
+                {/* Capacity warning — only shown when a positive cap is set */}
+                {lc.status === 'LIVE' && !isHost && lc.maxParticipants != null && lc.maxParticipants > 0 && (() => {
                   const active = lc._count?.participants ?? participants.length
-                  const max    = lc.maxParticipants ?? 100
-                  const pct    = max > 0 ? active / max : 0
+                  const max    = lc.maxParticipants
+                  const pct    = active / max
+                  const label  = lc.streamType === 'PUBLIC' ? 'viewers' : 'participants'
                   if (pct >= 1) return (
                     <p className="text-red-400 text-sm mt-2 font-semibold">
-                      🚫 Class is full ({active}/{max} participants)
+                      🚫 {lc.streamType === 'PUBLIC' ? 'Stream' : 'Class'} is full ({active}/{max} {label})
                     </p>
                   )
                   if (pct >= 0.9) return (
@@ -1625,7 +2008,10 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               {lc.status !== 'ENDED' && lc.status !== 'CANCELLED' && (
                 <Button className="bg-indigo-600 hover:bg-indigo-700 gap-2 px-8"
                   onClick={() => joinMutation.mutate()} disabled={joinMutation.isPending}>
-                  {joinMutation.isPending ? 'Joining…' : 'Join Class'}
+                  {joinMutation.isPending
+                    ? 'Joining…'
+                    : lc.streamType === 'PUBLIC' ? 'Watch Stream' : 'Join Class'
+                  }
                 </Button>
               )}
               {lc.status === 'ENDED' && lc.recordingUrl && (
@@ -1643,6 +2029,40 @@ export function LiveClassRoomPage({ id }: { id: string }) {
           ) : viewMode === 'video' ? (
             /* ── VIDEO VIEW ─────────────────────────────────────────────────── */
             <div className="flex-1 overflow-y-auto p-3 space-y-3">
+
+              {/* Audience status banner — shown when current user is in audience (not on stage) */}
+              {joined && !isHost && !isModerator && (() => {
+                const me = participants.find(p => p.userId === user?.id)
+                if (me && (me as any).speakerSlot != null) return null // already on stage
+                return (
+                  <div className="flex items-center justify-between gap-3 px-4 py-3 bg-gray-900/70 border border-gray-800 rounded-xl">
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">👥</span>
+                      <div>
+                        <p className="text-xs font-semibold text-gray-300">You are in the audience</p>
+                        <p className="text-[10px] text-gray-500">
+                          {me?.handRaised ? 'Waiting for host to approve…' : 'Raise your hand to request mic access'}
+                        </p>
+                      </div>
+                    </div>
+                    {!me?.handRaised ? (
+                      <button
+                        onClick={raiseHand}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-yellow-600 hover:bg-yellow-700 text-white text-xs font-bold rounded-lg transition-colors"
+                      >
+                        ✋ Request to speak
+                      </button>
+                    ) : (
+                      <button
+                        onClick={lowerHand}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-yellow-400 text-xs font-bold rounded-lg transition-colors animate-pulse"
+                      >
+                        ✋ Cancel request
+                      </button>
+                    )}
+                  </div>
+                )
+              })()}
 
               {/* Always-mounted fallback video element — kept in DOM so
                   localVideoFallbackRef.current is never null. Not used for
@@ -1690,15 +2110,16 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                 </div>
               </div>
 
-              {/* Participant video grid */}
+              {/* Participant video grid — on-stage speakers only */}
               <div className={'grid gap-2 ' + videoCols}>
-                {/* Always show the current user's own tile first, even if participants
-                    list hasn't loaded yet — ensures localVideoRef is always in DOM */}
+                {/* Always show the current user's own tile first IF they are on stage.
+                    Audience members do not appear in the stage grid. */}
                 {(() => {
                   const meInGrid = pagedParticipants.find(p => p.userId === user?.id)
-                  if (!meInGrid) {
-                    // Synthetic "me" tile while participant list loads
-                    const meSynth = participants.find(p => p.userId === user?.id) || {
+                  const meOnStage = stageParticipants.find(p => p.userId === user?.id)
+                  if (!meInGrid && meOnStage) {
+                    // On stage but not in current page — still show in synthetic tile
+                    const meSynth = meOnStage || {
                       id: user?.id ?? '',
                       userId: user?.id ?? '',
                       role: 'HOST' as const,
@@ -1724,6 +2145,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                       </div>
                     )
                   }
+                  // Not on stage — no tile for me in stage grid (audience view)
                   return null
                 })()}
                 {pagedParticipants.map(p => {
@@ -1751,7 +2173,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                         track={remoteTrack}
                         onClick={(e) => handleParticipantClick(p, e)}
                       />
-                      {isHost && p.userId !== user?.id && p.handRaised && (
+                      {canManage && p.userId !== user?.id && p.handRaised && (
                         <button onClick={() => approveHand(p.userId)}
                           className="absolute top-1 right-1 bg-green-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">
                           Allow
@@ -1801,7 +2223,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               )}
 
               {/* Raised hands panel */}
-              {isHost && participants.some(p => p.handRaised) && (
+              {canManage && participants.some(p => p.handRaised) && (
                 <div className="p-3 bg-yellow-900/30 border border-yellow-700/50 rounded-xl">
                   <p className="text-xs font-bold text-yellow-400 mb-2">✋ Raised hands</p>
                   <div className="flex flex-wrap gap-2">
@@ -1811,6 +2233,28 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                         <button onClick={() => approveHand(p.userId)} className="text-xs text-green-400 font-bold">Allow</button>
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Audience count — participants watching but not on stage */}
+              {audienceParticipants.length > 0 && (
+                <div className="p-3 bg-gray-900/50 border border-gray-800 rounded-xl">
+                  <p className="text-xs font-bold text-gray-400 mb-1.5">
+                    👥 Audience ({audienceParticipants.length})
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {audienceParticipants.slice(0, 20).map(p => (
+                      <div key={p.userId} className="flex items-center gap-1 bg-gray-800 rounded-full px-2 py-0.5">
+                        <span className="text-[10px] text-gray-400">
+                          {p.user.firstName} {p.user.lastName}
+                          {p.handRaised ? ' ✋' : ''}
+                        </span>
+                      </div>
+                    ))}
+                    {audienceParticipants.length > 20 && (
+                      <span className="text-[10px] text-gray-600 px-2 py-0.5">+{audienceParticipants.length - 20} more</span>
+                    )}
                   </div>
                 </div>
               )}
@@ -1839,6 +2283,41 @@ export function LiveClassRoomPage({ id }: { id: string }) {
           ) : (
             /* ── AUDIO VIEW ─────────────────────────────────────────────────── */
             <div className="flex-1 overflow-y-auto p-4">
+
+              {/* Audience status banner in audio mode */}
+              {joined && !isHost && !isModerator && (() => {
+                const me = participants.find(p => p.userId === user?.id)
+                if (me && (me as any).speakerSlot != null) return null
+                return (
+                  <div className="flex items-center justify-between gap-3 px-4 py-3 mb-3 bg-gray-900/70 border border-gray-800 rounded-xl">
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">👥</span>
+                      <div>
+                        <p className="text-xs font-semibold text-gray-300">You are in the audience</p>
+                        <p className="text-[10px] text-gray-500">
+                          {me?.handRaised ? 'Waiting for host to approve…' : 'Raise your hand to request mic access'}
+                        </p>
+                      </div>
+                    </div>
+                    {!me?.handRaised ? (
+                      <button
+                        onClick={raiseHand}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-yellow-600 hover:bg-yellow-700 text-white text-xs font-bold rounded-lg transition-colors"
+                      >
+                        ✋ Request to speak
+                      </button>
+                    ) : (
+                      <button
+                        onClick={lowerHand}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-yellow-400 text-xs font-bold rounded-lg transition-colors animate-pulse"
+                      >
+                        ✋ Cancel request
+                      </button>
+                    )}
+                  </div>
+                )
+              })()}
+
               {/* Screen share still visible in audio mode if active */}
               {screenOn && (
                 <div className="w-full rounded-xl overflow-hidden bg-gray-900 relative aspect-video mb-4">
@@ -1871,15 +2350,15 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   />
                 </LiveKitRoom>
               ) : (
-                /* Fallback: show AudioTiles before LiveKit connects */
+                /* Fallback: show AudioTiles before LiveKit connects — speakers only */
                 <div className="flex flex-wrap justify-center gap-2">
-                  {participants.map(p => {
+                  {stageParticipants.map(p => {
                     const isMe = p.userId === user?.id
                     return (
                       <div key={p.userId} className="relative">
                         <AudioTile p={p} isMe={isMe} isSpeaking={activeSpeakers.has(p.userId)}
                           onClick={(e) => handleParticipantClick(p, e)} />
-                        {isHost && p.userId !== user?.id && p.handRaised && (
+                        {canManage && p.userId !== user?.id && p.handRaised && (
                           <button onClick={() => approveHand(p.userId)}
                             className="absolute -top-1 -right-1 bg-green-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full shadow">
                             Allow
@@ -1892,7 +2371,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               )}
 
               {/* Raised hands panel */}
-              {isHost && participants.some(p => p.handRaised) && (
+              {canManage && participants.some(p => p.handRaised) && (
                 <div className="mt-4 p-3 bg-yellow-900/30 border border-yellow-700/50 rounded-xl">
                   <p className="text-xs font-bold text-yellow-400 mb-2">✋ Raised hands</p>
                   <div className="flex flex-wrap gap-2">
@@ -1902,6 +2381,25 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                         <button onClick={() => approveHand(p.userId)} className="text-xs text-green-400 font-bold">Allow</button>
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Audience count in audio mode */}
+              {audienceParticipants.length > 0 && (
+                <div className="mt-3 p-3 bg-gray-900/50 border border-gray-800 rounded-xl">
+                  <p className="text-xs font-bold text-gray-400 mb-1.5">
+                    👥 Audience ({audienceParticipants.length})
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {audienceParticipants.slice(0, 20).map(p => (
+                      <span key={p.userId} className="text-[10px] text-gray-500 bg-gray-800 rounded-full px-2 py-0.5">
+                        {p.user.firstName} {p.user.lastName}{p.handRaised ? ' ✋' : ''}
+                      </span>
+                    ))}
+                    {audienceParticipants.length > 20 && (
+                      <span className="text-[10px] text-gray-600 px-2 py-0.5">+{audienceParticipants.length - 20} more</span>
+                    )}
                   </div>
                 </div>
               )}
@@ -1972,18 +2470,36 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
                 {/* ── Primary controls (always visible) ───────────────────── */}
 
-                {/* Mic */}
-                <button
-                  onClick={toggleMic}
-                  title={micOn ? 'Mute' : 'Unmute'}
-                  aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}
-                  className={cn(
-                    'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
-                    micOn ? 'bg-gray-700 hover:bg-gray-600' : 'bg-red-600 hover:bg-red-700',
-                  )}
-                >
-                  {micOn ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
-                </button>
+                {/* Mic — shows raise-hand prompt for students awaiting permission */}
+                {(() => {
+                  const canPublish = isHost || !!roomRef.current?.localParticipant?.permissions?.canPublish
+                  if (!canPublish && !isHost) {
+                    // Student has a listen-only token — show raise hand button instead
+                    return (
+                      <button
+                        onClick={raiseHand}
+                        title="Raise hand to speak"
+                        aria-label="Raise hand to request microphone"
+                        className="w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors bg-yellow-600 hover:bg-yellow-700 text-xl"
+                      >
+                        ✋
+                      </button>
+                    )
+                  }
+                  return (
+                    <button
+                      onClick={toggleMic}
+                      title={micOn ? 'Mute' : 'Unmute'}
+                      aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}
+                      className={cn(
+                        'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
+                        micOn ? 'bg-gray-700 hover:bg-gray-600' : 'bg-red-600 hover:bg-red-700',
+                      )}
+                    >
+                      {micOn ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
+                    </button>
+                  )
+                })()}
 
                 {/* Camera — video mode only */}
                 {viewMode === 'video' && (
@@ -2002,18 +2518,42 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   </button>
                 )}
 
-                {/* View mode toggle — all users can switch audio/video */}
-                <button
-                  onClick={() => setViewMode(v => v === 'video' ? 'audio' : 'video')}
-                  title={viewMode === 'video' ? 'Switch to audio only' : 'Switch to video'}
-                  aria-label={viewMode === 'video' ? 'Switch to audio only' : 'Switch to video'}
-                  className={cn(
-                    'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
-                    viewMode === 'audio' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-700 hover:bg-gray-600',
-                  )}
-                >
-                  {viewMode === 'audio' ? <Radio className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
-                </button>
+                {/* MIC-02: Drop Mic — shown for active speakers (non-host with speakerSlot) */}
+                {!isHost && (() => {
+                  const me = participants.find(p => p.userId === user?.id)
+                  if (me?.speakerSlot == null) return null
+                  return (
+                    <button
+                      onClick={dropMic}
+                      title="Drop mic — return to audience"
+                      aria-label="Drop mic — return to audience"
+                      className="w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors bg-orange-600 hover:bg-orange-700 text-sm font-bold"
+                    >
+                      📴
+                    </button>
+                  )
+                })()}
+
+                {/* View mode toggle — HOST only. Participants follow the host-broadcast viewMode. */}
+                {isHost && (
+                  <button
+                    onClick={() => {
+                      const next: ViewMode = viewMode === 'video' ? 'audio' : 'video'
+                      setViewMode(next)
+                      const socket = getSocket()
+                      if (socket) socket.emit('liveclass:viewmode_changed', { liveClassId: id, viewMode: next })
+                      toast({ title: next === 'audio' ? '🔇 Switched to audio-only view' : '📹 Switched to video view' })
+                    }}
+                    title={viewMode === 'video' ? 'Switch to audio only' : 'Switch to video'}
+                    aria-label={viewMode === 'video' ? 'Switch to audio only' : 'Switch to video'}
+                    className={cn(
+                      'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
+                      viewMode === 'audio' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-700 hover:bg-gray-600',
+                    )}
+                  >
+                    {viewMode === 'audio' ? <Radio className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
+                  </button>
+                )}
 
                 {/* Screen share — video mode, host always + students when enabled.
                     PLAT-02 FIX: Only render when navigator.mediaDevices?.getDisplayMedia
@@ -2022,7 +2562,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                     The check is evaluated at render time — SSR-safe because `typeof window`
                     guard ensures it runs only in the browser. */}
                 {viewMode === 'video' &&
-                  (isHost || lc.screenShareEnabled !== false) &&
+                  (canManage || lc.screenShareEnabled !== false) &&
                   typeof window !== 'undefined' &&
                   typeof navigator !== 'undefined' &&
                   !!(navigator.mediaDevices?.getDisplayMedia) && (
@@ -2041,8 +2581,8 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
                 {/* ── Secondary controls (role/feature gated) ──────────────── */}
 
-                {/* Hand raise — students, hand-raise enabled, not open mic */}
-                {!isHost && lc.handRaiseEnabled && !isOpenMic && (
+                {/* Hand raise — students only (not host or moderator), hand-raise enabled, not open mic */}
+                {!canManage && lc.handRaiseEnabled && !isOpenMic && (
                   <button
                     onClick={myParticipant?.handRaised ? lowerHand : raiseHand}
                     title={myParticipant?.handRaised ? 'Lower hand' : 'Raise hand'}
@@ -2102,7 +2642,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   <Users className="w-5 h-5" />
                 </button>
 
-                {/* Whiteboard — students, when enabled */}
+                {/* Whiteboard — students and moderators can view, when enabled */}
                 {!isHost && lc.whiteboardEnabled && (
                   <button
                     onClick={() => openWhiteboard()}
@@ -2152,7 +2692,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               >
                 <X className="w-4 h-4" />
               </button>
-              {(isHost
+              {(canManage
                 ? ['host', 'participants', 'chat', 'polls'] as const
                 // Students only see polls tab when there's at least one poll active
                 : (['participants', 'chat', ...(polls.length > 0 ? ['polls'] : [])] as const)
@@ -2179,8 +2719,10 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               ))}
             </div>
 
-            {/* Host controls tab */}
-            {tab === 'host' && isHost && lc && (
+            {/* Host controls tab — visible to creator AND moderators.
+                Destructive actions (Start/End class) are hidden from moderators
+                via the isHost prop passed to LiveClassHostControls. */}
+            {tab === 'host' && canManage && lc && (
               <div className="flex-1 overflow-y-auto">
                 <LiveClassHostControls
                 liveClassId={id}
@@ -2193,15 +2735,14 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   whiteboardEnabled:  lc.whiteboardEnabled,
                   isOpenMic,
                   isRecording,
-                  // screenShareEnabled: real DB field (true = participants can share)
                   screenShareEnabled: lc.screenShareEnabled !== false,
                   viewMode,
                 }}
                 activeSpeakers={activeSpeakers}
                 currentUserId={user?.id}
                 activePanel={activePanel}
-                onStart={handleStart}
-                onEnd={handleEnd}
+                onStart={isHost ? handleStart : undefined}
+                onEnd={isHost ? handleEnd : undefined}
                 onMuteAll={async () => {
                   await api.patch('/live-classes/' + id + '/mute-all').catch(() => {})
                   setParticipants(prev => prev.map(p => p.role !== 'HOST' ? { ...p, isMuted: true } : p))
@@ -2216,6 +2757,8 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                 }}
                 onMute={muteParticipant}
                 onKick={kickParticipant}
+                onDemote={demoteSpeaker}
+                onInviteToStage={inviteToStage}
                 onApproveHand={approveHand}
                 onRejectHand={rejectHand}
                 onToggleOpenMic={toggleOpenMic}
@@ -2224,11 +2767,22 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                 onToggleSetting={toggleSetting}
                 onSetViewMode={(mode) => {
                   setViewMode(mode)
-                  // Broadcast view mode change to all participants via socket
                   const socket = getSocket()
                   if (socket) socket.emit('liveclass:viewmode_changed', { liveClassId: id, viewMode: mode })
                   toast({ title: mode === 'audio' ? '🔇 Switched to audio-only view' : '📹 Switched to video view' })
                 }}
+                onEdit={isHost ? () => setShowEditModal(true) : undefined}
+                onPromoteModerator={isHost ? promoteToModerator : undefined}
+                onDemoteModerator={isHost ? demoteModerator : undefined}
+                onTransferHost={isHost ? async (userId: string) => {
+                  if (!confirm('Transfer host to this participant? You will become a regular participant.')) return
+                  try {
+                    await api.post(`/live-classes/${id}/transfer/${userId}`)
+                    toast({ title: 'Host transferred successfully' })
+                  } catch (e: any) {
+                    toast({ title: e?.response?.data?.message || 'Failed to transfer host', variant: 'destructive' })
+                  }
+                } : undefined}
               />
               </div>
             )}
@@ -2278,7 +2832,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                           <p>{msg.body}</p>
                         </div>
                         {/* Delete button — shown on hover for host or own message */}
-                        {(isHost || msg.userId === user?.id) && (
+                        {(canManage || msg.userId === user?.id) && (
                           <button
                             onClick={async () => {
                               await api.delete(`/live-classes/${id}/messages/${msg.id}`).catch(() => {})

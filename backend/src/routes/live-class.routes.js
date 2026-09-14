@@ -157,13 +157,12 @@ router.post('/',
   },
   validateZod(createLiveClassSchema),
   [
-    body('title').trim().notEmpty().withMessage('Title required'),
+    body('title').optional().trim(),
     body('duration').optional({ nullable: true }).custom(v => {
       if (v === null || v === undefined) return true;
       if (!Number.isInteger(Number(v)) || Number(v) < 1) throw new Error('duration must be a positive integer');
       return true;
     }),
-    body('maxParticipants').optional().isInt({ min: 1, max: 1000 }),
     body('scheduledAt').optional().isISO8601(),
     body('teacherId').optional().isUUID().withMessage('teacherId must be a valid UUID'),
   ],
@@ -175,7 +174,7 @@ router.patch('/:id',
   resolveStreamStaffAccess,
   validateZod(updateLiveClassSchema),
   [
-    body('title').optional().trim().notEmpty(),
+    body('title').optional().trim(),
     body('duration').optional({ nullable: true }).custom(v => {
       if (v === null || v === undefined) return true;
       if (!Number.isInteger(Number(v)) || Number(v) < 1) throw new Error('duration must be a positive integer');
@@ -188,7 +187,7 @@ router.patch('/:id',
     body('whiteboardEnabled').optional().isBoolean(),
     body('screenShareEnabled').optional().isBoolean(),
     body('isOpenMic').optional().isBoolean(),
-    body('maxParticipants').optional().isInt({ min: 1, max: 1000 }),
+    body('maxSpeakers').optional().isInt({ min: 1, max: 50 }).withMessage('maxSpeakers must be between 1 and 50'),
   ],
   validate,
   ctrl.updateLiveClass
@@ -225,9 +224,16 @@ router.patch('/:id/participants/:userId/video',
   ctrl.setVideoState
 );
 
-router.patch('/:id/mute-all',                    resolveStreamStaffAccess, ctrl.muteAll);
-router.patch('/:id/unmute-all',                  resolveStreamStaffAccess, ctrl.unmuteAll);
+router.patch('/:id/mute-all',                    resolveStreamAccess, ctrl.muteAll);
+router.patch('/:id/unmute-all',                  resolveStreamAccess, ctrl.unmuteAll);
 router.delete('/:id/participants/:userId',        resolveStreamStaffAccess, ctrl.kickParticipant);
+
+// ─── STAGE MANAGEMENT (invite to stage / demote from stage) ──────────────────
+router.post('/:id/invite/:userId',  resolveStreamStaffAccess, ctrl.inviteToStage);
+router.post('/:id/demote/:userId',  resolveStreamStaffAccess, ctrl.demoteFromStage);
+// H-2 FIX: Self-demotion — authenticated speaker returns themselves to audience
+// resolveStreamAccess (not staff) — any joined participant can drop their own mic
+router.post('/:id/drop-mic',        resolveStreamAccess, ctrl.dropMicLiveClass);
 
 // ─── HAND RAISE ───────────────────────────────────────────────────────────────
 router.post('/:id/hand/raise',          resolveStreamAccess, ctrl.raiseHand);

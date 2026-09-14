@@ -1,14 +1,13 @@
-/**
+﻿/**
  * HALQA Mobile — Create Live Class Screen
  * Teachers and School Admins only.
  * Supports scheduling with a native date/time picker.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  SafeAreaView, ScrollView, ActivityIndicator, KeyboardAvoidingView,
-  Platform, Switch, Modal,
-} from 'react-native';
+  SafeAreaView, ScrollView, ActivityIndicator, Platform, Switch, Modal} from 'react-native';
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { useQuery } from '@tanstack/react-query';
 import { useRouter, Stack } from 'expo-router';
@@ -30,10 +29,12 @@ export default function CreateLiveClassScreen() {
   const [description,  setDescription] = useState('');
   const [classId,      setClassId]     = useState('');
   const [scheduledAt,  setScheduledAt] = useState<Date | null>(null);
-  const [duration,     setDuration]    = useState('60');
   const [chatEnabled,  setChatEnabled] = useState(true);
   const [handRaise,    setHandRaise]   = useState(true);
   const [whiteboard,   setWhiteboard]  = useState(true);
+  const [quranPanel,   setQuranPanel]  = useState(false);
+  const [screenShare,  setScreenShare] = useState(true);
+  const [isRecorded,   setIsRecorded]  = useState(false);
   const [loading,      setLoading]     = useState(false);
 
   // iOS date picker modal state
@@ -83,20 +84,22 @@ export default function CreateLiveClassScreen() {
   const clearSchedule = () => setScheduledAt(null);
 
   const handleCreate = async () => {
-    if (!title.trim()) { showMessage({ message: 'Title is required', type: 'warning' }); return; }
-    if (!classId)      { showMessage({ message: 'Please select a class', type: 'warning' }); return; }
+    if (!classId) { showMessage({ message: 'Please select a class', type: 'warning' }); return; }
 
     setLoading(true);
     try {
       const res = await api.post('/live-classes', {
-        title:             title.trim(),
+        title:             title.trim() || undefined,
         description:       description.trim() || undefined,
         classId,
         scheduledAt:       scheduledAt ? scheduledAt.toISOString() : undefined,
-        duration:          parseInt(duration) || 60,
+        duration:          null,
         chatEnabled,
         handRaiseEnabled:  handRaise,
         whiteboardEnabled: whiteboard,
+        quranPanelEnabled: quranPanel,
+        screenShareEnabled: screenShare,
+        isRecorded,
       });
       const lc = res.data.data;
       showMessage({ message: '🎥 Live class created!', type: 'success' });
@@ -127,7 +130,7 @@ export default function CreateLiveClassScreen() {
             keyboardShouldPersistTaps="handled">
 
             {/* Title */}
-            <Text style={st.label}>Title *</Text>
+            <Text style={st.label}>Title <Text style={{ color: '#94a3b8', fontWeight: '400', textTransform: 'none' }}>(optional)</Text></Text>
             <TextInput style={st.input} value={title} onChangeText={setTitle}
               placeholder="e.g. Quran Level 2 — Chapter 5"
               placeholderTextColor="#94a3b8" maxLength={120} />
@@ -176,17 +179,15 @@ export default function CreateLiveClassScreen() {
               <Text style={st.dateSub}>Leave empty to start immediately when you go live</Text>
             )}
 
-            {/* Duration */}
-            <Text style={st.label}>Duration (minutes)</Text>
-            <TextInput style={st.input} value={duration} onChangeText={setDuration}
-              keyboardType="number-pad" maxLength={3} />
-
             {/* Settings toggles */}
             <Text style={st.label}>Settings</Text>
             {[
-              { label: '💬 Enable Chat',   value: chatEnabled, onChange: setChatEnabled },
-              { label: '✋ Hand Raise',     value: handRaise,   onChange: setHandRaise },
-              { label: '🖊️ Whiteboard',    value: whiteboard,  onChange: setWhiteboard },
+              { label: '💬 Enable Chat',    value: chatEnabled,  onChange: setChatEnabled },
+              { label: '✋ Hand Raise',      value: handRaise,    onChange: setHandRaise },
+              { label: '🖊️ Whiteboard',     value: whiteboard,   onChange: setWhiteboard },
+              { label: '📖 Quran Panel',    value: quranPanel,   onChange: setQuranPanel },
+              { label: '🖥️ Screen Share',   value: screenShare,  onChange: setScreenShare },
+              { label: '⏺️ Record Class',   value: isRecorded,   onChange: setIsRecorded },
             ].map(item => (
               <View key={item.label} style={st.toggle}>
                 <Text style={st.toggleLabel}>{item.label}</Text>
@@ -320,3 +321,8 @@ const st = StyleSheet.create({
   iosConfirmBtn:        { flex: 2, backgroundColor: '#4f46e5', borderRadius: 12, paddingVertical: 13, alignItems: 'center' },
   iosConfirmTxt:        { fontSize: 15, fontWeight: '800', color: '#fff' },
 });
+
+
+
+
+

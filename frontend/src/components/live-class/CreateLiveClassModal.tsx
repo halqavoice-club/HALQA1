@@ -1,6 +1,7 @@
 'use client'
 
 import { useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -13,7 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { X, Loader2, Video, ImagePlus, Clock, Calendar, Infinity, Timer, Globe, GraduationCap } from 'lucide-react'
+import { X, Loader2, Video, ImagePlus, Calendar, Infinity, Timer, Globe, GraduationCap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 // ─── Stream mode ──────────────────────────────────────────────────────────────
@@ -33,12 +34,11 @@ const ROOM_TYPES: { id: RoomType; label: string; sub: string; icon: React.ReactN
 const schema = z.object({
   streamType:         z.enum(['SCHOOL', 'PUBLIC']).default('SCHOOL'),
   classId:            z.string().optional(),
-  title:              z.string().min(1, 'Title required').max(120),
+  title:              z.string().max(120).optional(),
   description:        z.string().optional(),
   scheduledAt:        z.string().optional(),
-  duration:           z.number().int().min(1).max(480).nullable().optional().default(60),
-  privacy:            z.enum(['PUBLIC', 'PRIVATE']).default('PUBLIC'),
-  maxParticipants:    z.number().int().min(1).max(1000).default(100),
+  duration:           z.number().int().min(1).max(480).nullable().optional(),
+  // maxParticipants removed — streams are unlimited
   chatEnabled:        z.boolean().default(true),
   handRaiseEnabled:   z.boolean().default(true),
   quranPanelEnabled:  z.boolean().default(false),
@@ -57,6 +57,7 @@ interface Props {
 // ─── Component ────────────────────────────────────────────────────────────────
 export function CreateLiveClassModal({ onClose, onCreated }: Props) {
   const { toast } = useToast()
+  const router = useRouter()
   const { isTeacher, isAdmin } = useEducationRole()
   const coverInputRef = useRef<HTMLInputElement>(null)
 
@@ -79,10 +80,10 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
     resolver: zodResolver(schema),
     defaultValues: {
       streamType: 'PUBLIC',
-      duration: 60, privacy: 'PUBLIC',
+      duration: undefined,
       chatEnabled: true, handRaiseEnabled: true,
       quranPanelEnabled: false, whiteboardEnabled: true,
-      screenShareEnabled: true, isRecorded: false, maxParticipants: 100,
+      screenShareEnabled: true, isRecorded: false,
     },
   })
 
@@ -90,12 +91,17 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
     mutationFn: async (data: Form) => {
       const payload: Record<string, any> = {
         streamType:         data.streamType,
-        title:              data.title,
-        description:        data.description,
-        duration:           roomType === 'permanent' ? null : data.duration,
-        scheduledAt:        roomType === 'scheduled' ? data.scheduledAt : undefined,
-        privacy:            data.privacy,
-        maxParticipants:    data.maxParticipants,
+        title:              data.title?.trim() || undefined,
+        description:        data.description || null,
+        // FIX: wire actual form values instead of hardcoded nulls
+        duration:           roomType === 'limited' && data.duration != null
+                              ? data.duration
+                              : null,
+        scheduledAt:        roomType === 'scheduled' && data.scheduledAt
+                              // datetime-local gives "2026-08-28T14:00" — convert to full ISO
+                              ? new Date(data.scheduledAt).toISOString()
+                              : undefined,
+        // maxParticipants removed — unlimited
         chatEnabled:        data.chatEnabled,
         handRaiseEnabled:   data.handRaiseEnabled,
         quranPanelEnabled:  data.quranPanelEnabled,
@@ -114,15 +120,27 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
       if (coverFile && lc?.id) {
         const fd = new FormData()
         fd.append('cover', coverFile)
-        await api.post(`/live-classes/${lc.id}/cover`, fd, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        }).catch(() => {})
+        await api.post(`/live-classes/${lc.id}/cover`, fd).catch(() => {})
       }
-      return res
+
+      // For immediate and permanent room types: auto-start the stream right away
+      // so the user goes live instantly instead of landing on a SCHEDULED room.
+      if ((roomType === 'immediate' || roomType === 'permanent') && lc?.id) {
+        await api.post(`/live-classes/${lc.id}/start`)
+      }
+
+      return { res, lc, autoStarted: roomType === 'immediate' || roomType === 'permanent' }
     },
-    onSuccess: () => {
-      toast({ title: '✅ Live stream created' })
-      onCreated()
+    onSuccess: ({ lc, autoStarted }) => {
+      if (autoStarted && lc?.id) {
+        // Navigate directly into the live room — skip the list
+        toast({ title: '🔴 You\'re live! Opening your stream...' })
+        onCreated()
+        router.push(`/live-class/${lc.id}`)
+      } else {
+        toast({ title: '✅ Live stream created' })
+        onCreated()
+      }
     },
     onError: (e: any) => {
       toast({ title: e?.response?.data?.message || 'Failed to create', variant: 'destructive' })
@@ -145,7 +163,6 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
   }
 
   const selectedClassId = watch('classId')
-  const selectedClass = classes.find((c: any) => c.id === selectedClassId)
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center p-4">
@@ -346,7 +363,7 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
 
                 {/* Title */}
                 <div>
-                  <Label>{streamMode === 'PUBLIC' ? 'Stream Title *' : 'Class Title *'}</Label>
+                  <Label>{streamMode === 'PUBLIC' ? 'Stream Title' : 'Class Title'} <span className="font-normal text-gray-400">(optional)</span></Label>
                   <Input
                     className="mt-1"
                     placeholder={streamMode === 'PUBLIC' ? 'e.g., Arabic Conversation Practice' : 'e.g., Quran Recitation — Surah Al-Baqarah'}
@@ -366,18 +383,6 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                   />
                 </div>
 
-                {/* Visibility */}
-                <div>
-                  <Label>Visibility</Label>
-                  <Select defaultValue="PUBLIC" onValueChange={v => setValue('privacy', v as 'PUBLIC' | 'PRIVATE')}>
-                    <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="PUBLIC">🌐 Public — anyone can join</SelectItem>
-                      <SelectItem value="PRIVATE">🔒 Private — invite only</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
                 {/* Scheduled date/time */}
                 {roomType === 'scheduled' && (
                   <div>
@@ -386,19 +391,21 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                   </div>
                 )}
 
-                {/* Duration */}
-                {roomType !== 'permanent' && (
+                {/* Duration — only for limited room type */}
+                {roomType === 'limited' && (
                   <div>
-                    <Label>{roomType === 'limited' ? 'Auto-end after (min)' : 'Duration (min)'}</Label>
-                    <Input type="number" min={1} max={480} className="mt-1" {...register('duration', { valueAsNumber: true })} />
+                    <Label>Duration (minutes)</Label>
+                    <Input
+                      type="number"
+                      className="mt-1"
+                      placeholder="e.g. 60"
+                      min={1}
+                      max={480}
+                      {...register('duration', { valueAsNumber: true })}
+                    />
+                    {errors.duration && <p className="text-xs text-red-500 mt-1">{errors.duration.message}</p>}
                   </div>
                 )}
-
-                {/* Max participants */}
-                <div>
-                  <Label>Max Viewers</Label>
-                  <Input type="number" min={1} max={1000} className="mt-1" placeholder="100" {...register('maxParticipants', { valueAsNumber: true })} />
-                </div>
 
                 {/* Cover image */}
                 <div>
@@ -459,7 +466,9 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                   >
                     {mutation.isPending
                       ? <><Loader2 className="w-4 h-4 animate-spin" /> Creating...</>
-                      : <><Video className="w-4 h-4" /> Go Live</>
+                      : roomType === 'immediate' || roomType === 'permanent'
+                        ? <><Video className="w-4 h-4" /> Go Live Now</>
+                        : <><Video className="w-4 h-4" /> Go Live</>
                     }
                   </Button>
                 </div>
