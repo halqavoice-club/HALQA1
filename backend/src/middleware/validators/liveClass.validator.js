@@ -31,7 +31,8 @@ const createLiveClassSchema = z.object({
   title: z.string().max(120, 'Title must be at most 120 characters').trim().optional(),
   description: optionalText(500),
   duration: z.union([z.number().int(), z.null()]).optional(),
-  // maxParticipants removed — all streams are unlimited viewers
+  // maxSpeakers: how many participants can be on stage simultaneously (default 20)
+  maxSpeakers: z.number().int().min(1).max(50).optional(),
   scheduledAt: dateString,
   teacherId: z.string().uuid('teacherId must be a valid UUID').optional(),
   // Public stream options
@@ -55,7 +56,8 @@ const updateLiveClassSchema = z.object({
   whiteboardEnabled: z.boolean().optional(),
   screenShareEnabled: z.boolean().optional(),
   isOpenMic: z.boolean().optional(),
-  // maxParticipants removed
+  // maxSpeakers: host can update stage capacity during or before a session
+  maxSpeakers: z.number().int().min(1).max(50).optional(),
 }).passthrough();
 
 module.exports = {

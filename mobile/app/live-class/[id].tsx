@@ -446,6 +446,46 @@ export default function LiveClassScreen() {
   const [attendance, setAttendance] = useState<any[]>([]);
   const [loadingAttendance, setLoadingAttendance] = useState(false);
 
+  // ── Full Screen presentation mode ─────────────────────────────────────────
+  // LAYOUT-ONLY STATE — purely visual, never mutates stage/LiveKit/socket state.
+  // Local to this viewer; not broadcast to other participants (§34).
+  const [isFullscreen,   setIsFullscreen]   = useState(false);
+  // showFsOverlay: tap-to-show overlay controls in fullscreen; auto-hides after 4s
+  const [showFsOverlay,  setShowFsOverlay]  = useState(true);
+  const fsOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleToggleFullscreen = useCallback(() => {
+    setIsFullscreen(prev => {
+      const next = !prev;
+      if (next) {
+        // Entering fullscreen: show overlay, start auto-hide timer
+        setShowFsOverlay(true);
+        if (fsOverlayTimerRef.current) clearTimeout(fsOverlayTimerRef.current);
+        fsOverlayTimerRef.current = setTimeout(() => setShowFsOverlay(false), 4000);
+      } else {
+        // Exiting fullscreen: always show controls
+        if (fsOverlayTimerRef.current) { clearTimeout(fsOverlayTimerRef.current); fsOverlayTimerRef.current = null; }
+        setShowFsOverlay(true);
+      }
+      return next;
+    });
+  }, []);
+
+  // Tap fullscreen area to reveal overlay controls temporarily
+  const handleFsTap = useCallback(() => {
+    if (!isFullscreen) return;
+    setShowFsOverlay(true);
+    if (fsOverlayTimerRef.current) clearTimeout(fsOverlayTimerRef.current);
+    fsOverlayTimerRef.current = setTimeout(() => setShowFsOverlay(false), 4000);
+  }, [isFullscreen]);
+
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (fsOverlayTimerRef.current) clearTimeout(fsOverlayTimerRef.current);
+    };
+  }, []);
+
   // LiveKit real audio (native builds only — degrades gracefully in Expo Go)
   const lk = useLiveKitAudio();
 
@@ -887,6 +927,25 @@ export default function LiveClassScreen() {
     socket.on('liveclass:revoke_mic',           onRevokeMic);
     socket.on('liveclass:speaker_added',        onSpeakerAdded);
     socket.on('liveclass:speaker_removed',      onSpeakerRemoved);
+
+    // H-4 FIX: Demotion events — host demoted a speaker (broadcast to room)
+    const onSpeakerDemoted = (d: any) => {
+      if (d.liveClassId !== id) return;
+      setParticipants(prev => prev.map(p =>
+        p.userId === d.userId ? { ...p, isMuted: true, speakerSlot: null } : p
+      ));
+    };
+    socket.on('liveclass:speaker_demoted', onSpeakerDemoted);
+
+    // H-4 FIX: You were demoted — private event to the demoted user
+    const onYouWereDemoted = (d: any) => {
+      if (d.liveClassId !== id) return;
+      setParticipants(prev => prev.map(p =>
+        p.userId === user?.id ? { ...p, isMuted: true, speakerSlot: null } : p
+      ));
+      showMessage({ message: '⬇️ You have been moved to the audience', type: 'info', duration: 2000 });
+    };
+    socket.on('liveclass:you_were_demoted', onYouWereDemoted);
     // Sprint 4: wire isSpeaking to real LiveKit audio activity
     // The useLiveKitAudio hook emits voice:speaking when the local participant's speaking
     // state changes. We relay this to all room members via Socket.IO so their grids
@@ -938,6 +997,8 @@ export default function LiveClassScreen() {
       socket.off('liveclass:revoke_mic',           onRevokeMic);
       socket.off('liveclass:speaker_added',        onSpeakerAdded);
       socket.off('liveclass:speaker_removed',      onSpeakerRemoved);
+      socket.off('liveclass:speaker_demoted',      onSpeakerDemoted);
+      socket.off('liveclass:you_were_demoted',     onYouWereDemoted);
       socket.off('voice:speaking', onVoiceSpeaking);
     };
   }, [id, user, isHost, qc, router, lk]);
@@ -1538,29 +1599,73 @@ export default function LiveClassScreen() {
 
   return (
     <>
-      <Stack.Screen options={{ headerShown: true, title: liveClass.title, headerTintColor: '#4f46e5', headerStyle: { backgroundColor: '#0f0f23' }, headerTitleStyle: { color: '#fff' } }} />
+      <Stack.Screen options={{
+        headerShown: !isFullscreen,
+        title: liveClass.title,
+        headerTintColor: '#4f46e5',
+        headerStyle: { backgroundColor: '#0f0f23' },
+        headerTitleStyle: { color: '#fff' },
+      }} />
       <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
 
-        {/* Tab bar */}
-        <View style={styles.tabs}>
-          {tabs.map(t => (
-            <TouchableOpacity key={t.key} style={[styles.tab, activeTab === t.key && styles.tabActive]}
-              onPress={() => setActiveTab(t.key as any)}>
-              <Ionicons name={t.icon as any} size={16} color={activeTab === t.key ? '#a5b4fc' : '#6b7280'} />
-              <Text style={[styles.tabText, activeTab === t.key && styles.tabTextActive]}>{t.label}</Text>
-              {t.key === 'controls' && hands.length > 0 && (
-                <View style={styles.badge}><Text style={styles.badgeText}>{hands.length}</Text></View>
-              )}
-              {t.key === 'polls' && polls.filter(p => p.isActive).length > 0 && (
-                <View style={styles.badge}><Text style={styles.badgeText}>{polls.filter(p => p.isActive).length}</Text></View>
-              )}
-            </TouchableOpacity>
-          ))}
-        </View>
+        {/* Tab bar — hidden in fullscreen */}
+        {!isFullscreen && (
+          <View style={styles.tabs}>
+            {tabs.map(t => (
+              <TouchableOpacity key={t.key} style={[styles.tab, activeTab === t.key && styles.tabActive]}
+                onPress={() => setActiveTab(t.key as any)}>
+                <Ionicons name={t.icon as any} size={16} color={activeTab === t.key ? '#a5b4fc' : '#6b7280'} />
+                <Text style={[styles.tabText, activeTab === t.key && styles.tabTextActive]}>{t.label}</Text>
+                {t.key === 'controls' && hands.length > 0 && (
+                  <View style={styles.badge}><Text style={styles.badgeText}>{hands.length}</Text></View>
+                )}
+                {t.key === 'polls' && polls.filter(p => p.isActive).length > 0 && (
+                  <View style={styles.badge}><Text style={styles.badgeText}>{polls.filter(p => p.isActive).length}</Text></View>
+                )}
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
 
         {/* ── STREAM TAB ──────────────────────────────────────────────── */}
         {activeTab === 'video' && (
-          <View style={styles.videoArea}>
+          <TouchableOpacity
+            activeOpacity={1}
+            onPress={handleFsTap}
+            style={[
+              styles.videoArea,
+              // Fullscreen: expand to fill the whole screen (behind tabs, over header)
+              isFullscreen && StyleSheet.absoluteFillObject,
+              isFullscreen && { zIndex: 100, backgroundColor: '#000' },
+            ]}
+          >
+            {/* Fullscreen: top overlay — back button + title + LIVE + exit fullscreen */}
+            {isFullscreen && (
+              <View style={[
+                fsSt.topBar,
+                { opacity: showFsOverlay ? 1 : 0 },
+                { paddingTop: insets.top + 4 },
+              ]} pointerEvents={showFsOverlay ? 'auto' : 'none'}>
+                <TouchableOpacity onPress={handleToggleFullscreen} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                  <Ionicons name="contract-outline" size={22} color="#fff" />
+                </TouchableOpacity>
+                <Text style={fsSt.topTitle} numberOfLines={1}>{liveClass.title}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  {liveClass.status === 'LIVE' && (
+                    <View style={styles.livePill}>
+                      <View style={styles.liveDot} />
+                      <Text style={styles.liveText}>LIVE</Text>
+                    </View>
+                  )}
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                    <Ionicons name="people-outline" size={14} color="#a5b4fc" />
+                    <Text style={{ color: '#a5b4fc', fontSize: 12, fontWeight: '600' }}>
+                      {participants.length}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            )}
             {/* Recording indicator */}
             {isRecording && (
               <View style={styles.recordingBadge}>
@@ -1584,6 +1689,21 @@ export default function LiveClassScreen() {
                       <View style={styles.livePill}><View style={styles.liveDot} /><Text style={styles.liveText}>LIVE</Text></View>
                       {isOpenMic && <Text allowFontScaling={false} style={styles.openMicBadge}>🎤 Open Mic</Text>}
                       {isRecording && <View style={[styles.livePill, { backgroundColor: '#fef2f2', marginLeft: 4 }]}><View style={[styles.liveDot, { backgroundColor: '#ef4444' }]} /><Text style={[styles.liveText, { color: '#ef4444' }]}>REC</Text></View>}
+                      {/* Full screen toggle — expands video to fill entire screen */}
+                      {isJoined && (
+                        <TouchableOpacity
+                          onPress={handleToggleFullscreen}
+                          style={fsSt.fsBtn}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          accessibilityLabel={isFullscreen ? 'Exit full screen' : 'Enter full screen'}
+                        >
+                          <Ionicons
+                            name={isFullscreen ? 'contract-outline' : 'expand-outline'}
+                            size={16}
+                            color="#e5e7eb"
+                          />
+                        </TouchableOpacity>
+                      )}
                     </View>
 
                     {/* TikTok-style 4-column video grid */}
@@ -1749,18 +1869,110 @@ export default function LiveClassScreen() {
                 </View>
               )}
             </View>
-            <View style={styles.infoCard}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                <Text style={styles.infoTitle}>{liveClass.title}</Text>
-                {(liveClass as any).streamType === 'PUBLIC' && (
-                  <View style={styles.publicBadge}>
-                    <Text style={styles.publicBadgeText}>🌐 Public</Text>
-                  </View>
-                )}
+            {/* Info card — hidden in fullscreen (overlay handles it) */}
+            {!isFullscreen && (
+              <View style={styles.infoCard}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <Text style={styles.infoTitle}>{liveClass.title}</Text>
+                  {(liveClass as any).streamType === 'PUBLIC' && (
+                    <View style={styles.publicBadge}>
+                      <Text style={styles.publicBadgeText}>🌐 Public</Text>
+                    </View>
+                  )}
+                </View>
+                {liveClass.description ? <Text style={styles.infoDesc}>{liveClass.description}</Text> : null}
               </View>
-              {liveClass.description ? <Text style={styles.infoDesc}>{liveClass.description}</Text> : null}
-            </View>
-          </View>
+            )}
+
+            {/* ── Full Screen bottom-left info overlay (TikTok style) ── */}
+            {isFullscreen && (
+              <View
+                style={[fsSt.bottomInfo, { bottom: insets.bottom + 80, opacity: showFsOverlay ? 1 : 0 }]}
+                pointerEvents="none"
+              >
+                <Text style={fsSt.bottomTitle} numberOfLines={1}>{liveClass.title}</Text>
+                {liveClass.description ? (
+                  <Text style={fsSt.bottomDesc} numberOfLines={2}>{liveClass.description}</Text>
+                ) : null}
+                <Text style={fsSt.bottomMeta}>
+                  👥 {participants.length} {(liveClass as any).streamType === 'PUBLIC' ? 'viewers' : 'participants'}
+                  {activeSpeakers.length > 0 ? ` · 🗣 ${activeSpeakers.length} on stage` : ''}
+                </Text>
+              </View>
+            )}
+
+            {/* ── Full Screen right-side action strip (TikTok style) ── */}
+            {isFullscreen && (
+              <View
+                style={[fsSt.rightStrip, { bottom: insets.bottom + 80, opacity: showFsOverlay ? 1 : 0 }]}
+                pointerEvents={showFsOverlay ? 'auto' : 'none'}
+              >
+                {/* Gift */}
+                <TouchableOpacity style={fsSt.actionBtn} onPress={() => setShowGifts(true)}>
+                  <Text style={{ fontSize: 22 }}>🎁</Text>
+                  <Text style={fsSt.actionLabel}>Gift</Text>
+                </TouchableOpacity>
+                {/* Chat */}
+                <TouchableOpacity style={fsSt.actionBtn} onPress={() => {
+                  handleToggleFullscreen();
+                  setActiveTab('chat' as any);
+                }}>
+                  <Ionicons name="chatbubbles-outline" size={22} color="#fff" />
+                  <Text style={fsSt.actionLabel}>Chat</Text>
+                </TouchableOpacity>
+                {/* Reactions */}
+                <TouchableOpacity style={fsSt.actionBtn} onPress={() => setShowReactions(r => !r)}>
+                  <Text style={{ fontSize: 22 }}>😊</Text>
+                  <Text style={fsSt.actionLabel}>React</Text>
+                </TouchableOpacity>
+                {/* Exit fullscreen */}
+                <TouchableOpacity style={fsSt.actionBtn} onPress={handleToggleFullscreen}>
+                  <Ionicons name="contract-outline" size={22} color="#fff" />
+                  <Text style={fsSt.actionLabel}>Exit</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* ── Full Screen bottom controls (mic / camera / leave) ─── */}
+            {isFullscreen && isJoined && (
+              <View
+                style={[fsSt.bottomControls, { paddingBottom: insets.bottom + 8, opacity: showFsOverlay ? 1 : 0 }]}
+                pointerEvents={showFsOverlay ? 'auto' : 'none'}
+              >
+                {/* Mic toggle */}
+                {(() => {
+                  const canPublishSfu = isHost || !!(lk as any).room?.localParticipant?.permissions?.canPublish;
+                  if (!canPublishSfu) {
+                    return (
+                      <TouchableOpacity style={[styles.ctrlBtn, handRaised && styles.ctrlBtnActive]} onPress={toggleHand}>
+                        <Text style={{ fontSize: 18 }}>✋</Text>
+                        <Text style={styles.ctrlLabel}>{handRaised ? 'Lower' : 'Speak?'}</Text>
+                      </TouchableOpacity>
+                    );
+                  }
+                  return (
+                    <TouchableOpacity
+                      style={[styles.ctrlBtn, !isMuted && styles.ctrlBtnActive]}
+                      onPress={async () => {
+                        const newMuted = !isMuted;
+                        setIsMuted(newMuted);
+                        try { await api.patch(`/live-classes/${id}/participants/${user?.id}/mute`, { muted: newMuted }); } catch {}
+                        if (lk.connected) { if (newMuted) lk.disableMic(); else lk.enableMic(); }
+                      }}
+                    >
+                      <Ionicons name={isMuted ? 'mic-off' : 'mic'} size={20} color={isMuted ? '#6b7280' : '#4f46e5'} />
+                      <Text style={styles.ctrlLabel}>{isMuted ? 'Unmute' : 'Mute'}</Text>
+                    </TouchableOpacity>
+                  );
+                })()}
+                {/* Leave / End */}
+                <TouchableOpacity style={[styles.ctrlBtn, styles.ctrlBtnDanger]} onPress={isHost ? handleEndClass : handleLeave}>
+                  <Ionicons name={isHost ? 'stop' : 'call'} size={20} color="#fff" />
+                  <Text style={[styles.ctrlLabel, { color: '#fff' }]}>{isHost ? 'End' : 'Leave'}</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </TouchableOpacity>
         )}
 
         {/* ── WHITEBOARD TAB ────────────────────────────────────────────── */}
@@ -1933,6 +2145,43 @@ export default function LiveClassScreen() {
               </TouchableOpacity>
             </View>
 
+            {/* Max speakers on stage */}
+            <View style={styles.controlGroup}>
+              <Text style={styles.sectionTitle}>🎙 Max Speakers on Stage</Text>
+              <Text style={{ color: '#94a3b8', fontSize: 12, marginBottom: 10 }}>
+                Currently: {(liveClass as any).maxSpeakers ?? 20} · tap to change
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                {[2, 4, 6, 8, 10, 20].map(n => {
+                  const current = (liveClass as any).maxSpeakers ?? 20;
+                  const isActive = current === n;
+                  return (
+                    <TouchableOpacity
+                      key={n}
+                      style={{
+                        flex: 1, minWidth: 44, alignItems: 'center', paddingVertical: 12,
+                        backgroundColor: isActive ? '#4f46e5' : '#1e293b',
+                        borderRadius: 12, borderWidth: 1.5,
+                        borderColor: isActive ? '#6366f1' : '#334155',
+                      }}
+                      onPress={async () => {
+                        if (isActive) return;
+                        try {
+                          await api.patch(`/live-classes/${id}`, { maxSpeakers: n });
+                          qc.invalidateQueries({ queryKey: ['live-class', id] });
+                          showMessage({ message: `🎙 Max speakers set to ${n}`, type: 'success', duration: 1500 });
+                        } catch (e: any) {
+                          showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+                        }
+                      }}
+                    >
+                      <Text style={{ fontSize: 16, fontWeight: '700', color: isActive ? '#fff' : '#94a3b8' }}>{n}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+
             {/* Hand queue */}
             <Text style={styles.sectionTitle}>✋ Raised Hands ({hands.length})</Text>
             {hands.length === 0 ? (
@@ -2016,7 +2265,7 @@ export default function LiveClassScreen() {
         )}
 
         {/* Bottom controls */}
-        {isJoined && (
+        {isJoined && !isFullscreen && (
           <View style={{ backgroundColor: '#1a1a2e', borderTopWidth: 1, borderColor: '#1e1e3a' }}>
             {/* Emoji reaction picker (shown when reactions button tapped) */}
             {showReactions && (
@@ -2270,6 +2519,106 @@ const styles = StyleSheet.create({
   // Emoji reaction bar
   reactionBar:      { flexDirection: 'row', justifyContent: 'space-around', paddingHorizontal: 8, paddingVertical: 8, backgroundColor: '#111827', borderBottomWidth: 1, borderBottomColor: '#1e1e3a' },
   reactionBtn:      { padding: 6 },
+});
+
+// ─── Full Screen overlay styles ────────────────────────────────────────────────
+// Separate StyleSheet so these don't pollute the main styles object.
+// These are LAYOUT-ONLY — they never touch LiveKit, stage, or socket state.
+const fsSt = StyleSheet.create({
+  // Top overlay bar (back + title + live badge + viewer count)
+  topBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    gap: 12,
+    // Gradient-like darkening so text is readable over video
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    zIndex: 101,
+  },
+  topTitle: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+    textShadowColor: 'rgba(0,0,0,0.8)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  // Bottom-left info: host name, title, description, viewer count
+  bottomInfo: {
+    position: 'absolute',
+    left: 16,
+    right: 80,   // leave room for right-side action strip
+    zIndex: 101,
+  },
+  bottomTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '800',
+    textShadowColor: 'rgba(0,0,0,0.9)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+    marginBottom: 2,
+  },
+  bottomDesc: {
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 12,
+    lineHeight: 17,
+    textShadowColor: 'rgba(0,0,0,0.7)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+    marginBottom: 3,
+  },
+  bottomMeta: {
+    color: 'rgba(255,255,255,0.55)',
+    fontSize: 11,
+  },
+  // Right-side action strip: gift, chat, react, exit
+  rightStrip: {
+    position: 'absolute',
+    right: 12,
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 16,
+    zIndex: 101,
+  },
+  actionBtn: {
+    alignItems: 'center',
+    gap: 4,
+  },
+  actionLabel: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  // Minimal bottom controls bar in fullscreen (mic + leave)
+  bottomControls: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 12,
+    paddingTop: 10,
+    paddingHorizontal: 20,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    zIndex: 101,
+  },
+  // Full screen toggle button (small, shown in badge row)
+  fsBtn: {
+    marginLeft: 'auto' as any,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    borderRadius: 8,
+    padding: 5,
+  },
 });
 
 

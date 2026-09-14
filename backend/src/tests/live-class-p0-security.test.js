@@ -262,7 +262,10 @@ describe('P0-05 BUG-01: LiveKit SFU eviction on kick', () => {
 
   test('kickParticipant: calls RoomServiceClient.removeParticipant with correct args', async () => {
     prisma.liveClass.findFirst.mockResolvedValue(LC_SAME_SCHOOL);
-    prisma.liveClassParticipant.findFirst.mockResolvedValue({ id: 'p-1', isActive: true });
+    // assertOwnerOrModerator queries first (caller), then kickParticipant queries target
+    prisma.liveClassParticipant.findFirst
+      .mockResolvedValueOnce({ id: 'p-caller', role: 'HOST', isActive: true })  // assertOwnerOrModerator
+      .mockResolvedValueOnce({ id: 'p-1', isActive: true });                    // target participant
     prisma.liveClassParticipant.update.mockResolvedValue({});
 
     const mockRemove = jest.fn().mockResolvedValue({});
@@ -280,7 +283,9 @@ describe('P0-05 BUG-01: LiveKit SFU eviction on kick', () => {
 
   test('kickParticipant: LiveKit failure does not corrupt DB state (best-effort)', async () => {
     prisma.liveClass.findFirst.mockResolvedValue(LC_SAME_SCHOOL);
-    prisma.liveClassParticipant.findFirst.mockResolvedValue({ id: 'p-1', isActive: true });
+    prisma.liveClassParticipant.findFirst
+      .mockResolvedValueOnce({ id: 'p-caller', role: 'HOST', isActive: true })  // assertOwnerOrModerator
+      .mockResolvedValueOnce({ id: 'p-1', isActive: true });                    // target participant
     prisma.liveClassParticipant.update.mockResolvedValue({});
 
     // LiveKit throws — must not propagate to the response
@@ -303,7 +308,9 @@ describe('P0-05 BUG-01: LiveKit SFU eviction on kick', () => {
   test('kickParticipant: no LiveKit call when livekitRoomName is null', async () => {
     const lcNoRoom = { ...LC_SAME_SCHOOL, livekitRoomName: null };
     prisma.liveClass.findFirst.mockResolvedValue(lcNoRoom);
-    prisma.liveClassParticipant.findFirst.mockResolvedValue({ id: 'p-1', isActive: true });
+    prisma.liveClassParticipant.findFirst
+      .mockResolvedValueOnce({ id: 'p-caller', role: 'HOST', isActive: true })  // assertOwnerOrModerator
+      .mockResolvedValueOnce({ id: 'p-1', isActive: true });                    // target participant
     prisma.liveClassParticipant.update.mockResolvedValue({});
 
     const mockRemove = jest.fn().mockResolvedValue({});

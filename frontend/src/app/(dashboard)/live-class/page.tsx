@@ -13,9 +13,10 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SearchInput } from '@/components/ui/search-input'
 import { useDebounce } from '@/hooks/useDebounce'
-import { Plus, Video, Users, Clock, Calendar, CheckCircle, Trash2, Globe, GraduationCap } from 'lucide-react'
+import { Plus, Video, Users, Clock, Calendar, CheckCircle, Trash2, Pencil, Globe, GraduationCap } from 'lucide-react'
 import Link from 'next/link'
 import { CreateLiveClassModal } from '@/components/live-class/CreateLiveClassModal'
+import { EditLiveClassModal } from '@/components/live-class/EditLiveClassModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface LiveClass {
@@ -67,9 +68,9 @@ function StreamTypePill({ streamType }: { streamType: 'SCHOOL' | 'PUBLIC' }) {
 
 // ─── Live Class Card ──────────────────────────────────────────────────────────
 function LiveClassCard({
-  lc, canManage, onDelete,
+  lc, canManage, onDelete, onEdit,
 }: {
-  lc: LiveClass; canManage: boolean; onDelete: (id: string) => void
+  lc: LiveClass; canManage: boolean; onDelete: (id: string) => void; onEdit: (lc: LiveClass) => void
 }) {
   const scheduled = lc.scheduledAt ? new Date(lc.scheduledAt) : null
   const canDelete  = canManage && (lc.status === 'SCHEDULED' || lc.status === 'CANCELLED')
@@ -146,9 +147,36 @@ function LiveClassCard({
           </div>
 
           <div className="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between">
-            {hostName && (
-              <span className="text-xs text-gray-400 truncate">{hostName}</span>
-            )}
+            {hostName && (() => {
+              const hostId = lc.teacher?.user?.id ?? lc.hostUser?.id ?? null
+              const avatarUrl = lc.teacher?.user?.avatarUrl ?? lc.hostUser?.avatarUrl ?? null
+              const initials = hostName.split(' ').map((n: string) => n[0]).slice(0, 2).join('').toUpperCase()
+              const inner = (
+                <div className="flex items-center gap-1.5 min-w-0">
+                  {avatarUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={avatarUrl} alt={hostName} className="w-5 h-5 rounded-full object-cover flex-shrink-0" />
+                  ) : (
+                    <div className="w-5 h-5 rounded-full bg-indigo-100 flex items-center justify-center flex-shrink-0">
+                      <span className="text-[8px] font-bold text-indigo-600">{initials}</span>
+                    </div>
+                  )}
+                  <span className="text-xs text-gray-400 truncate hover:text-indigo-600 transition-colors">{hostName}</span>
+                </div>
+              )
+              if (hostId) {
+                return (
+                  <Link
+                    href={`/profile/${hostId}`}
+                    onClick={e => e.stopPropagation()}
+                    className="min-w-0 max-w-[55%]"
+                  >
+                    {inner}
+                  </Link>
+                )
+              }
+              return <div className="min-w-0 max-w-[55%]">{inner}</div>
+            })()}
             {lc.status === 'LIVE' && (
               <span className="text-xs font-bold text-red-600 flex items-center gap-1 ml-auto">
                 <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
@@ -167,17 +195,29 @@ function LiveClassCard({
         </motion.div>
       </Link>
 
-      {/* Delete — shown on hover for host/managers */}
-      {canManage && canDelete && (
+      {/* Edit / Delete — shown on hover for host/managers */}
+      {canManage && (
         <div className="absolute top-3 right-3 hidden group-hover:flex items-center gap-1 z-10">
-          <button
-            onClick={e => { e.preventDefault(); onDelete(lc.id) }}
-            className="p-1.5 bg-white border border-gray-200 rounded-lg shadow-sm hover:bg-red-50 hover:border-red-200 transition-colors"
-            title="Delete"
-            aria-label="Delete live class"
-          >
-            <Trash2 className="w-3.5 h-3.5 text-red-500" />
-          </button>
+          {lc.status !== 'ENDED' && lc.status !== 'CANCELLED' && (
+            <button
+              onClick={e => { e.preventDefault(); onEdit(lc) }}
+              className="p-1.5 bg-white border border-gray-200 rounded-lg shadow-sm hover:bg-indigo-50 hover:border-indigo-300 transition-colors"
+              title="Edit"
+              aria-label="Edit live class"
+            >
+              <Pencil className="w-3.5 h-3.5 text-indigo-500" />
+            </button>
+          )}
+          {canDelete && (
+            <button
+              onClick={e => { e.preventDefault(); onDelete(lc.id) }}
+              className="p-1.5 bg-white border border-gray-200 rounded-lg shadow-sm hover:bg-red-50 hover:border-red-200 transition-colors"
+              title="Delete"
+              aria-label="Delete live class"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-red-500" />
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -193,19 +233,22 @@ export default function LiveClassPage() {
   const [search, setSearch]           = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [showCreate, setShowCreate]   = useState(false)
+  const [editingLc, setEditingLc]     = useState<LiveClass | null>(null)
   const debouncedSearch = useDebounce(search, 300)
 
-  // Any authenticated user can go live (public stream).
+  // Any authenticated user (except SUPER_ADMIN) can go live (public stream).
   // School teachers/admins can also create school class streams.
-  const canCreate = true
+  // SA-LC-UI-01: SUPER_ADMIN = Platform Administration ONLY — cannot create live classes.
+  const canCreate = user?.role !== 'SUPER_ADMIN'
   // canManage: controls delete button visibility.
   // A user manages a stream if they're school staff OR the owner of a PUBLIC stream.
   // The actual enforcement is on the backend — this only affects UI visibility.
-  // We check per-card in LiveClassCard using lc.hostUser?.id === user?.id for PUBLIC streams.
+  // SA-LC-01: SUPER_ADMIN platform role does NOT grant school-scoped live class management.
+  // Management rights come from isTeacher/isAdmin (school membership roles).
   const canManageByRole = isTeacher || isAdmin ||
-    ['TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(user?.role || '')
+    ['TEACHER', 'SCHOOL_ADMIN'].includes(user?.role || '')
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['live-classes', statusFilter],
     queryFn: () => api.get('/live-classes', {
       params: {
@@ -340,6 +383,19 @@ export default function LiveClassPage() {
         <div className="space-y-3">
           {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-28 rounded-2xl" />)}
         </div>
+      ) : isError ? (
+        <div className="text-center py-16">
+          <Video className="w-12 h-12 text-gray-200 mx-auto mb-3" />
+          <p className="text-gray-500 font-medium">Failed to load streams</p>
+          <p className="text-gray-400 text-sm mt-1">Check your connection and try again.</p>
+          <Button
+            variant="outline"
+            className="mt-4"
+            onClick={() => refetch()}
+          >
+            Retry
+          </Button>
+        </div>
       ) : filtered.length === 0 ? (
         <div className="text-center py-16">
           <Video className="w-12 h-12 text-gray-200 mx-auto mb-3" />
@@ -369,7 +425,7 @@ export default function LiveClassPage() {
               </h2>
               <div className="space-y-3">
                 {livePublic.map(lc => (
-                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} />
+                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} onEdit={setEditingLc} />
                 ))}
               </div>
             </section>
@@ -384,7 +440,7 @@ export default function LiveClassPage() {
               </h2>
               <div className="space-y-3">
                 {liveSchool.map(lc => (
-                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} />
+                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} onEdit={setEditingLc} />
                 ))}
               </div>
             </section>
@@ -396,7 +452,7 @@ export default function LiveClassPage() {
               <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wide mb-3">Upcoming</h2>
               <div className="space-y-3">
                 {scheduled.map(lc => (
-                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} />
+                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} onEdit={setEditingLc} />
                 ))}
               </div>
             </section>
@@ -408,7 +464,7 @@ export default function LiveClassPage() {
               <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wide mb-3">Past</h2>
               <div className="space-y-3">
                 {past.map(lc => (
-                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} />
+                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} onEdit={setEditingLc} />
                 ))}
               </div>
             </section>
@@ -424,6 +480,14 @@ export default function LiveClassPage() {
               setShowCreate(false)
               queryClient.invalidateQueries({ queryKey: ['live-classes'] })
             }}
+          />
+        )}
+        {editingLc && (
+          <EditLiveClassModal
+            lc={{ ...editingLc, coverImageUrl: (editingLc as any).coverImageUrl ?? null }}
+            onClose={() => setEditingLc(null)}
+            onUpdated={() => queryClient.invalidateQueries({ queryKey: ['live-classes'] })}
+            onDeleted={() => queryClient.invalidateQueries({ queryKey: ['live-classes'] })}
           />
         )}
       </AnimatePresence>

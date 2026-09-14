@@ -35,6 +35,7 @@ export default function CreateLiveClassScreen() {
   const [quranPanel,   setQuranPanel]  = useState(false);
   const [screenShare,  setScreenShare] = useState(true);
   const [isRecorded,   setIsRecorded]  = useState(false);
+  const [maxSpeakers,  setMaxSpeakers] = useState(20);
   const [loading,      setLoading]     = useState(false);
 
   // iOS date picker modal state
@@ -100,6 +101,7 @@ export default function CreateLiveClassScreen() {
         quranPanelEnabled: quranPanel,
         screenShareEnabled: screenShare,
         isRecorded,
+        maxSpeakers,
       });
       const lc = res.data.data;
       showMessage({ message: '🎥 Live class created!', type: 'success' });
@@ -195,6 +197,21 @@ export default function CreateLiveClassScreen() {
                   trackColor={{ true: '#6366f1', false: '#e2e8f0' }} thumbColor="#fff" />
               </View>
             ))}
+
+            {/* Max speakers on stage */}
+            <Text style={st.label}>Max Speakers on Stage</Text>
+            <Text style={st.dateSub}>How many students can speak at the same time (default: 20)</Text>
+            <View style={st.seatRow}>
+              {[2, 4, 6, 8, 10, 20].map(n => (
+                <TouchableOpacity
+                  key={n}
+                  style={[st.seatOpt, maxSpeakers === n && st.seatOptActive]}
+                  onPress={() => setMaxSpeakers(n)}
+                >
+                  <Text style={[st.seatOptText, maxSpeakers === n && { color: '#4f46e5', fontWeight: '800' }]}>{n}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
 
             {/* Create button */}
             <TouchableOpacity
@@ -305,6 +322,12 @@ const st = StyleSheet.create({
   createBtn:            { backgroundColor: '#4f46e5', borderRadius: 14, padding: 16, alignItems: 'center', marginTop: 24 },
   createBtnDisabled:    { opacity: 0.6 },
   createBtnTxt:         { color: '#fff', fontSize: 16, fontWeight: '800' },
+
+  // Seat picker (maxSpeakers)
+  seatRow:              { flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginTop: 10, marginBottom: 4 },
+  seatOpt:              { flex: 1, minWidth: 44, alignItems: 'center', paddingVertical: 11, backgroundColor: '#fff', borderRadius: 12, borderWidth: 1.5, borderColor: '#e2e8f0' },
+  seatOptActive:        { borderColor: '#6366f1', backgroundColor: '#e0e7ff' },
+  seatOptText:          { fontSize: 16, fontWeight: '700', color: '#94a3b8' },
 
   // iOS picker modal
   iosPickerBackdrop:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)' },
