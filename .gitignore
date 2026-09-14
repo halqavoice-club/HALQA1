@@ -129,3 +129,9 @@ frontend/public/sw\ (*).js
 # Temporary Google Drive upload cache
 .tmp.driveupload/
 .tmp.drivedownload/
+
+# Local dev artifacts — never commit
+frontend/.expo/
+mobile/mobile-tsc-output.txt
+mobile/_*.js
+backend/test-join.js
