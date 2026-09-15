@@ -17,13 +17,21 @@ const {
 
 // ─── SUPER_ADMIN content-action guard ────────────────────────────────────────
 // SUPER_ADMIN = Platform Administration ONLY.
-// They must NOT create posts, comments, reactions, stories, or bookmarks.
-// They CAN read feed (for moderation oversight) and delete posts (platform admin).
+// Final architecture: SUPER_ADMIN must NOT access public social content.
+// This applies to both mutations AND reads — the SA role is platform-scoped,
+// not a social user role.
+//
+// Platform moderation exceptions preserved:
+//   DELETE /:id       — SA may delete posts for content moderation
+//   DELETE /:id/comments/:commentId — SA may delete comments for moderation
+//   GET /social/reports, PATCH /social/reports/:id/review — platform moderation
+//
+// All other social operations are blocked for SUPER_ADMIN.
 function denyIfSuperAdmin(req, res, next) {
   if (req.user?.role === 'SUPER_ADMIN') {
     return res.status(403).json({
       success: false,
-      message: 'Platform administrators cannot create social content. Use the admin panel for moderation.'
+      message: 'Platform administrators cannot access social content. Use the admin panel for moderation.'
     });
   }
   return next();
@@ -44,14 +52,15 @@ const commentLimit = rateLimit({
 router.use(authenticate);
 
 // ─── Feed ─────────────────────────────────────────────────────────────────────
-router.get('/feed',     ctrl.getFeed);
-router.get('/live',     ctrl.getLiveSessions);  // currently active live rooms/classes
-router.get('/trending', ctrl.getTrendingHashtags);
-router.get('/search',   ctrl.searchPosts);
-router.get('/reels',    ctrl.getReels);          // TikTok-style video feed
+// SA-FEED-READ: SUPER_ADMIN cannot access public social content (reads or writes).
+router.get('/feed',     denyIfSuperAdmin, ctrl.getFeed);
+router.get('/live',     denyIfSuperAdmin, ctrl.getLiveSessions);
+router.get('/trending', denyIfSuperAdmin, ctrl.getTrendingHashtags);
+router.get('/search',   denyIfSuperAdmin, ctrl.searchPosts);
+router.get('/reels',    denyIfSuperAdmin, ctrl.getReels);
 
 // ─── User posts ───────────────────────────────────────────────────────────────
-router.get('/user/:userId', ctrl.getUserPosts);
+router.get('/user/:userId', denyIfSuperAdmin, ctrl.getUserPosts);
 
 // ─── CRUD ─────────────────────────────────────────────────────────────────────
 const { filterMiddleware: postFilter } = require('../utils/contentFilter');
@@ -87,9 +96,9 @@ const previewLimit = rateLimit({
   keyGenerator: req => req.user?.id || req.ip,
   message: { success: false, message: 'Too many preview requests' },
 });
-router.get('/link-preview', previewLimit, ctrl.getLinkPreview);
+router.get('/link-preview', denyIfSuperAdmin, previewLimit, ctrl.getLinkPreview);
 
-router.get('/:id',   ctrl.getPost);
+router.get('/:id',   denyIfSuperAdmin, ctrl.getPost);
 
 router.patch('/:id',
   // SOCIAL-EDIT-01: Only the post author can edit their own post.
@@ -120,10 +129,10 @@ router.post('/:id/react',
   validate,
   ctrl.reactToPost
 );
-router.get('/:id/reactions', ctrl.getReactions);
+router.get('/:id/reactions', denyIfSuperAdmin, ctrl.getReactions);
 
 // ─── Comments ─────────────────────────────────────────────────────────────────
-router.get('/:id/comments', ctrl.getComments);
+router.get('/:id/comments', denyIfSuperAdmin, ctrl.getComments);
 router.post('/:id/comments',
   denyIfSuperAdmin,   // SA-FEED-03: SUPER_ADMIN cannot post comments
   commentLimit,

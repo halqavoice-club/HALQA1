@@ -695,7 +695,10 @@ describe('RUNTIME: SUPER_ADMIN retains update access with school membership', ()
 
   beforeAll(() => { studentApp = buildStudentApp(); });
 
-  test('SUPER_ADMIN with school membership can update student → 200', async () => {
+  test('SUPER_ADMIN with school membership → 403 (SA-SCHOOL-DATA-001: SA is denied before membership lookup)', async () => {
+    // After SA-SCHOOL-DATA-001 fix: SUPER_ADMIN is denied at requireSchoolMember()
+    // before any SchoolMembership lookup. Even a valid school-admin membership
+    // cannot grant SUPER_ADMIN school-scoped access.
     asSuperAdmin('sa-update', 'school-a');
     stubStudent('student-sa1', 'school-a');
 
@@ -705,7 +708,7 @@ describe('RUNTIME: SUPER_ADMIN retains update access with school membership', ()
       .set('x-school-id', 'school-a')
       .send({ gradeLevel: '9' });
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
   });
 });
 
