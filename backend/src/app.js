@@ -442,33 +442,37 @@ io.on('connection', (socket) => {
 
   // Speaking indicator relay (client→room)
   // P0-02 (BUG-03): Use socket.userId — never trust client-supplied userId.
-  // The old code used `speakerId || userId`, allowing any client to impersonate
-  // another participant's speaking state by sending a fake userId in the payload.
+  // A7-FIX: Also verify sender is in the liveclass socket room before relaying.
+  // Without this check, any authenticated user could inject speaking events into
+  // rooms they haven't joined by sending a payload with an arbitrary liveClassId.
   socket.on('liveclass:speaking', ({ liveClassId, speaking }) => {
     if (!liveClassId) return;
     if (!socketAllow('liveclass:speaking')) return; // rate limit
+    // A7-FIX: Sender must be in the target room (joined via liveclass:join_room).
+    // socket.rooms contains the rooms this socket has joined server-side.
+    if (!socket.rooms.has(`liveclass:${liveClassId}`)) return; // silently drop — not in this room
     // userId is captured from socket.userId at connection time (JWT-verified)
     socket.to(`liveclass:${liveClassId}`).emit('liveclass:speaking', { userId, speaking });
   });
 
   // Video on/off relay (client→room)
   // P0-03 (RT-02): Use socket.userId — never trust client-supplied userId.
+  // A7-FIX: Same room membership check as speaking.
   socket.on('liveclass:video_changed', ({ liveClassId, isVideoOn }) => {
     if (!liveClassId) return;
     if (!socketAllow('liveclass:video_changed')) return; // rate limit
+    if (!socket.rooms.has(`liveclass:${liveClassId}`)) return; // A7-FIX: sender must be in this room
     // userId is captured from socket.userId at connection time (JWT-verified)
     socket.to(`liveclass:${liveClassId}`).emit('liveclass:video_changed', { userId, isVideoOn });
   });
 
   // Emoji reaction relay (client→room)
   // Task 5 (P3-B): Strip client-supplied display names from the relay.
-  // The receiver's frontend can resolve firstName from its local participant state using
-  // the server-verified userId. This prevents display name spoofing in reaction overlays.
-  // targetUserId is kept (it's a data field, not an identity field — spoofing it only
-  // affects UI targeting, not authorization).
+  // A7-FIX: Same room membership check.
   socket.on('liveclass:reaction', ({ liveClassId, emoji, targetUserId }) => {
     if (!liveClassId || !userId) return;
     if (!socketAllow('liveclass:reaction')) return; // rate limit
+    if (!socket.rooms.has(`liveclass:${liveClassId}`)) return; // A7-FIX: sender must be in this room
     socket.to(`liveclass:${liveClassId}`).emit('liveclass:reaction', {
       userId,        // server-verified
       emoji,
