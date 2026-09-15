@@ -1396,17 +1396,19 @@ async function approveHand(req, res, next) {
     }
     return successResponse(res, { speakerSlot: slot }, 'Hand approved — mic unmuted');
   } catch (e) {
-    // PHASE-3 FIX: Handle MySQL ER_DUP_ENTRY / Prisma P2002 unique constraint violation.
-    // This occurs when two concurrent requests compute the same slot number and the
-    // second UPDATE triggers the @@unique([liveClassId, speakerSlot]) constraint.
-    // Return 400 (stage full / slot already taken) instead of propagating as 500.
-    if (
+    // PHASE-3 FIX: Handle MySQL ER_DUP_ENTRY / Prisma unique constraint violation.
+    // Prisma wraps $executeRawUnsafe MySQL errors as P2010 with the original MySQL
+    // error code (1062 for ER_DUP_ENTRY) embedded in the message. Check all paths.
+    const msg = (e?.message || '') + JSON.stringify(e?.meta || {});
+    const isDup =
       e?.code === 'P2002' ||
+      e?.code === 'P2010' ||
       e?.code === 'ER_DUP_ENTRY' ||
-      e?.message?.includes('Unique constraint') ||
-      e?.message?.includes('ER_DUP_ENTRY') ||
-      e?.message?.includes('Duplicate entry')
-    ) {
+      msg.includes('Unique constraint') ||
+      msg.includes('ER_DUP_ENTRY') ||
+      msg.includes('Duplicate entry') ||
+      msg.includes('1062');
+    if (isDup) {
       return errorResponse(res, 'Stage is full — slot already taken by a concurrent admission', 400);
     }
     next(e);
@@ -2024,16 +2026,19 @@ async function inviteToStage(req, res, next) {
     }
     return successResponse(res, { speakerSlot: slot }, 'Participant invited to stage');
   } catch (e) {
-    // PHASE-3 FIX: Handle MySQL ER_DUP_ENTRY / Prisma P2002 unique constraint violation.
-    // Concurrent invitations can compute the same slot number; the DB unique constraint
-    // on (liveClassId, speakerSlot) rejects the duplicate — return 400 not 500.
-    if (
+    // PHASE-3 FIX: Handle MySQL ER_DUP_ENTRY / Prisma unique constraint violation.
+    // Prisma wraps $executeRawUnsafe MySQL errors as P2010 with 1062 in the message.
+    const msg = (e?.message || '') + JSON.stringify(e?.meta || {});
+    const isDup =
       e?.code === 'P2002' ||
-      e?.message?.includes('Unique constraint') ||
-      e?.message?.includes('ER_DUP_ENTRY') ||
-      e?.message?.includes('Duplicate entry')
-    ) {
-      return errorResponse(res, `Stage is full — slot already taken`, 400);
+      e?.code === 'P2010' ||
+      e?.code === 'ER_DUP_ENTRY' ||
+      msg.includes('Unique constraint') ||
+      msg.includes('ER_DUP_ENTRY') ||
+      msg.includes('Duplicate entry') ||
+      msg.includes('1062');
+    if (isDup) {
+      return errorResponse(res, 'Stage is full — slot already taken', 400);
     }
     next(e);
   }

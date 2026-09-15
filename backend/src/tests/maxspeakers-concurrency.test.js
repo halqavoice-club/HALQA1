@@ -421,7 +421,8 @@ describe('GROUP-E: Slot uniqueness', () => {
 
   test('E3: approveHand catch handles P2002/ER_DUP_ENTRY and returns 400', () => {
     const start = ctrlSrc.indexOf('async function approveHand');
-    const body  = ctrlSrc.slice(start, start + 5000);
+    // approveHand is a long function -- use 8000 chars to ensure the catch block is included
+    const body  = ctrlSrc.slice(start, start + 8000);
     // PHASE-3 FIX must be present
     expect(body).toMatch(/P2002/);
     expect(body).toMatch(/ER_DUP_ENTRY|Duplicate entry|Unique constraint/i);
