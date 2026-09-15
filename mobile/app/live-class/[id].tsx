@@ -766,7 +766,6 @@ export default function LiveClassScreen() {
     socket.on('liveclass:mute_changed',     onMuteChanged);
     socket.on('liveclass:started',          onStarted);
     socket.on('liveclass:ended',            onEnded);
-    socket.on('liveclass:you_can_speak',    onCanSpeak);
     socket.on('liveclass:you_were_kicked',  onKicked);
     socket.on('liveclass:updated',          onUpdated);
     socket.on('liveclass:open_mic_changed', onOpenMicChanged);
@@ -974,7 +973,6 @@ export default function LiveClassScreen() {
       socket.off('liveclass:mute_changed',     onMuteChanged);
       socket.off('liveclass:started',          onStarted);
       socket.off('liveclass:ended',            onEnded);
-      socket.off('liveclass:you_can_speak',    onCanSpeak);
       socket.off('liveclass:you_were_kicked',  onKicked);
       socket.off('liveclass:updated',          onUpdated);
       socket.off('liveclass:open_mic_changed', onOpenMicChanged);
@@ -1286,70 +1284,39 @@ export default function LiveClassScreen() {
     }
   }, [id]);
 
-  // Promote a participant to MODERATOR role
-  const handlePromoteModerator = useCallback(async (userId: string, name: string) => {
-    Alert.alert('Promote to Moderator', `Give ${name} moderator privileges?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Promote', onPress: async () => {
-        try {
-          await api.post(`/live-classes/${id}/moderator/${userId}`);
-          setParticipants(prev => prev.map(p =>
-            p.userId === userId ? { ...p, role: 'MODERATOR' } : p
-          ));
-          showMessage({ message: `🛡 ${name} is now a moderator`, type: 'success', duration: 2000 });
-        } catch (e: any) {
-          showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
-        }
-      }},
-    ]);
-  }, [id]);
+  // Promote a participant to MODERATOR role — NOT IMPLEMENTED (no backend endpoint)
+  // PARITY-NOTE: POST /live-classes/:id/moderator/:uid does not exist.
+  // Showing a clear message rather than silently failing an API call.
+  const handlePromoteModerator = useCallback((_userId: string, name: string) => {
+    showMessage({
+      message: `Moderator promotion not available`,
+      description: 'This feature is not yet implemented.',
+      type: 'info',
+      duration: 2500,
+    });
+  }, []);
 
-  // Demote a MODERATOR back to STUDENT
-  const handleDemoteModerator = useCallback(async (userId: string, name: string) => {
-    Alert.alert('Remove Moderator', `Remove moderator role from ${name}?`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Remove', style: 'destructive', onPress: async () => {
-        try {
-          await api.delete(`/live-classes/${id}/moderator/${userId}`);
-          setParticipants(prev => prev.map(p =>
-            p.userId === userId ? { ...p, role: 'STUDENT' } : p
-          ));
-          showMessage({ message: `${name} removed from moderators`, type: 'info', duration: 2000 });
-        } catch (e: any) {
-          showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
-        }
-      }},
-    ]);
-  }, [id]);
+  // Demote a MODERATOR back to STUDENT — NOT IMPLEMENTED (no backend endpoint)
+  const handleDemoteModerator = useCallback((_userId: string, name: string) => {
+    showMessage({
+      message: `Moderator demotion not available`,
+      description: 'This feature is not yet implemented.',
+      type: 'info',
+      duration: 2500,
+    });
+  }, []);
 
-  // ── Transfer host ownership to another participant (LS-GAP-003) ─────────────
-  // After transfer: caller becomes STUDENT, target becomes HOST, hostUserId updated.
-  const handleTransferHost = useCallback((userId: string, name: string) => {
-    Alert.alert(
-      'Transfer Host',
-      `Make ${name} the new host? You will become a regular participant.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Transfer',
-          onPress: async () => {
-            try {
-              await api.post(`/live-classes/${id}/transfer/${userId}`);
-              // Optimistic update: demote ourselves, promote target
-              setParticipants(prev => prev.map(p => {
-                if (p.userId === user?.id)  return { ...p, role: 'STUDENT' };
-                if (p.userId === userId)    return { ...p, role: 'HOST' };
-                return p;
-              }));
-              showMessage({ message: `👑 ${name} is now the host`, type: 'success', duration: 3000 });
-            } catch (e: any) {
-              showMessage({ message: e?.response?.data?.message ?? 'Transfer failed', type: 'danger' });
-            }
-          },
-        },
-      ]
-    );
-  }, [id, user?.id]);
+  // Host transfer — NOT IMPLEMENTED (no backend endpoint, no ownership transfer exists)
+  // PARITY-NOTE: POST /live-classes/:id/transfer/:uid does not exist.
+  // The ownership rule is: creator stays HOST forever. Removed the misleading UI call.
+  const handleTransferHost = useCallback((_userId: string, _name: string) => {
+    showMessage({
+      message: 'Host transfer is not available',
+      description: 'The stream creator remains host for the duration of the stream.',
+      type: 'info',
+      duration: 3000,
+    });
+  }, []);
 
   const sendChat = useCallback(async () => {
     if (!chatText.trim() || !user) return;

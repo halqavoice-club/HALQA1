@@ -266,18 +266,25 @@ function GoLiveModal({ visible, onClose, onCreated }: {
   visible: boolean; onClose: () => void; onCreated: (lcId: string) => void
 }) {
   const router = useRouter();
-  const [title, setTitle]         = useState('');
-  const [description, setDesc]    = useState('');
-  const [chatEnabled, setChat]    = useState(true);
-  const [roomType, setRoomType]   = useState<'immediate' | 'scheduled' | 'permanent' | 'limited'>('immediate');
+  const [title, setTitle]             = useState('');
+  const [description, setDesc]        = useState('');
+  const [chatEnabled, setChat]        = useState(true);
+  const [handRaiseEnabled, setHandRaise] = useState(true);
+  const [whiteboardEnabled, setWhiteboard] = useState(true);
+  const [quranPanelEnabled, setQuranPanel] = useState(false);
+  const [isRecorded, setIsRecorded]   = useState(false);
+  const [maxSpeakers, setMaxSpeakers] = useState(20);
+  const [roomType, setRoomType]       = useState<'immediate' | 'scheduled' | 'permanent' | 'limited'>('immediate');
   const [scheduledAt, setScheduledAt] = useState<Date | null>(null);
-  const [loading, setLoading]     = useState(false);
+  const [loading, setLoading]         = useState(false);
   const [showDatePicker, setShowDatePicker] = useState(false);
 
   // Reset state when modal opens
   useEffect(() => {
     if (visible) {
-      setTitle(''); setDesc(''); setChat(true); setRoomType('immediate');
+      setTitle(''); setDesc(''); setChat(true); setHandRaise(true);
+      setWhiteboard(true); setQuranPanel(false); setIsRecorded(false);
+      setMaxSpeakers(20); setRoomType('immediate');
       setScheduledAt(null); setShowDatePicker(false);
     }
   }, [visible]);
@@ -302,9 +309,13 @@ function GoLiveModal({ visible, onClose, onCreated }: {
         title: title.trim() || undefined,
         description: description.trim() || undefined,
         chatEnabled,
-        handRaiseEnabled: true,
+        handRaiseEnabled,
+        whiteboardEnabled,
+        quranPanelEnabled,
         screenShareEnabled: true,
         isOpenMic: true,
+        isRecorded,
+        maxSpeakers,
         scheduledAt: roomType === 'scheduled' && scheduledAt ? scheduledAt.toISOString() : undefined,
         duration: roomType === 'limited' ? 60 : null,
       });
@@ -461,6 +472,63 @@ function GoLiveModal({ visible, onClose, onCreated }: {
                 trackColor={{ false: '#e5e7eb', true: '#c4b5fd' }}
                 thumbColor={chatEnabled ? '#7c3aed' : '#9ca3af'}
               />
+            </View>
+
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>✋ Hand Raise</Text>
+              <Switch
+                value={handRaiseEnabled}
+                onValueChange={setHandRaise}
+                trackColor={{ false: '#e5e7eb', true: '#c4b5fd' }}
+                thumbColor={handRaiseEnabled ? '#7c3aed' : '#9ca3af'}
+              />
+            </View>
+
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>🖊️ Whiteboard</Text>
+              <Switch
+                value={whiteboardEnabled}
+                onValueChange={setWhiteboard}
+                trackColor={{ false: '#e5e7eb', true: '#c4b5fd' }}
+                thumbColor={whiteboardEnabled ? '#7c3aed' : '#9ca3af'}
+              />
+            </View>
+
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>📖 Quran Panel</Text>
+              <Switch
+                value={quranPanelEnabled}
+                onValueChange={setQuranPanel}
+                trackColor={{ false: '#e5e7eb', true: '#c4b5fd' }}
+                thumbColor={quranPanelEnabled ? '#7c3aed' : '#9ca3af'}
+              />
+            </View>
+
+            <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>⏺️ Record Stream</Text>
+              <Switch
+                value={isRecorded}
+                onValueChange={setIsRecorded}
+                trackColor={{ false: '#e5e7eb', true: '#c4b5fd' }}
+                thumbColor={isRecorded ? '#7c3aed' : '#9ca3af'}
+              />
+            </View>
+
+            <Text style={[styles.fieldLabel, { marginTop: 14 }]}>
+              Max Speakers on Stage
+            </Text>
+            <View style={glStyles.speakerRow}>
+              {[2, 4, 6, 10, 20].map(n => (
+                <TouchableOpacity
+                  key={n}
+                  style={[glStyles.speakerOpt, maxSpeakers === n && glStyles.speakerOptActive]}
+                  onPress={() => setMaxSpeakers(n)}
+                >
+                  <Text style={[glStyles.speakerOptText, maxSpeakers === n && glStyles.speakerOptTextActive]}>
+                    {n}
+                  </Text>
+                </TouchableOpacity>
+              ))}
             </View>
           </ScrollView>
 
@@ -705,6 +773,12 @@ const glStyles = StyleSheet.create({
   iosPickerWrap:    { backgroundColor: '#f9fafb', borderRadius: 12, overflow: 'hidden', marginBottom: 8 },
   iosPickerDone:    { backgroundColor: '#4f46e5', padding: 12, alignItems: 'center', borderRadius: 10, margin: 8 },
   iosPickerDoneText:{ color: '#fff', fontWeight: '700', fontSize: 14 },
+  // maxSpeakers picker (GoLiveModal parity with web + create-live-class)
+  speakerRow:         { flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginTop: 8, marginBottom: 4 },
+  speakerOpt:         { flex: 1, minWidth: 44, alignItems: 'center', paddingVertical: 10, backgroundColor: '#f9fafb', borderRadius: 10, borderWidth: 1.5, borderColor: '#e5e7eb' },
+  speakerOptActive:   { borderColor: '#4f46e5', backgroundColor: '#eef2ff' },
+  speakerOptText:     { fontSize: 15, fontWeight: '700', color: '#9ca3af' },
+  speakerOptTextActive:{ color: '#4f46e5' },
 });
 
 const styles = StyleSheet.create({

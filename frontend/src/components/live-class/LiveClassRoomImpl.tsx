@@ -366,6 +366,58 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   // so the useEffect(room, videoOn) in LocalVideoTile runs with a non-null room.
   const [roomConnected,  setRoomConnected]  = useState<Room | null>(null)
 
+  // ── Full Screen presentation mode ─────────────────────────────────────────
+  // LAYOUT-ONLY STATE — this controls how the existing 1–20 speaker grid is
+  // visually presented. It NEVER changes participant roles, stage permissions,
+  // LiveKit connections, microphone state, or any backend state.
+  const roomContainerRef = useRef<HTMLDivElement>(null)
+  const [isFullscreen,        setIsFullscreen]        = useState(false)
+  // showFsControls: tap-to-reveal in fullscreen. Auto-hides after 4 seconds.
+  const [showFsControls,      setShowFsControls]      = useState(true)
+  const fsHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Sync isFullscreen with the browser Fullscreen API (Esc key / F11 sets this to false)
+  useEffect(() => {
+    const onFsChange = () => {
+      const isFsNow = !!document.fullscreenElement
+      setIsFullscreen(isFsNow)
+      if (isFsNow) {
+        setShowFsControls(true)
+        // Start auto-hide timer
+        if (fsHideTimerRef.current) clearTimeout(fsHideTimerRef.current)
+        fsHideTimerRef.current = setTimeout(() => setShowFsControls(false), 4000)
+      } else {
+        if (fsHideTimerRef.current) { clearTimeout(fsHideTimerRef.current); fsHideTimerRef.current = null }
+        setShowFsControls(true)
+      }
+    }
+    document.addEventListener('fullscreenchange', onFsChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange)
+      if (fsHideTimerRef.current) clearTimeout(fsHideTimerRef.current)
+    }
+  }, [])
+
+  const toggleFullscreen = useCallback(() => {
+    if (!roomContainerRef.current) return
+    if (!document.fullscreenElement) {
+      roomContainerRef.current.requestFullscreen({ navigationUI: 'hide' }).catch(() => {
+        // Browser fullscreen API unavailable (iOS Safari) — fall back to CSS-only fullscreen
+        setIsFullscreen(prev => !prev)
+      })
+    } else {
+      document.exitFullscreen()
+    }
+  }, [])
+
+  // Tap fullscreen overlay to show controls temporarily
+  const handleFsTap = useCallback(() => {
+    if (!isFullscreen) return
+    setShowFsControls(true)
+    if (fsHideTimerRef.current) clearTimeout(fsHideTimerRef.current)
+    fsHideTimerRef.current = setTimeout(() => setShowFsControls(false), 4000)
+  }, [isFullscreen])
+
   // ── Remote video tracks — keyed by participant identity (userId) ──────────
   const [remoteVideoTracks, setRemoteVideoTracks] = useState<Map<string, RemoteVideoTrack>>(new Map())
   const [screenTrack,       setScreenTrack]       = useState<RemoteVideoTrack | null>(null)
@@ -563,14 +615,9 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     const onSpeak    = (d: any) => setActiveSpeakers(prev => { const n = new Set(prev); d.speaking ? n.add(d.userId) : n.delete(d.userId); return n })
     const onVideo    = (d: any) => setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, isVideoOn: d.isVideoOn } : p))
     const onReaction = (d: any) => spawnEmoji(d.emoji, d.firstName || '')
-    const onCanSpeak = () => {
-      toast({ title: '🎙 You can speak now!' })
-      // DO NOT call setMicrophoneEnabled here.
-      // grant_mic triggers a full LiveKit reconnect with a canPublish:true token.
-      // setMicrophoneEnabled on the old canPublish:false token is silently rejected
-      // by the SFU anyway, but calling it causes confusing mic state flips.
-      // After reconnect, the host auto-enables mic in connectLiveKit (line ~985).
-    }
+    // liveclass:you_can_speak — DEAD EVENT (backend never emits this name).
+    // The backend emits liveclass:grant_mic instead. Removed to avoid confusion.
+    // If you see this comment in 2027+, check if the backend was updated to emit it.
     const onOpenMicChanged = (d: any) => {
       setIsOpenMic(d.isOpenMic)
       if (d.isOpenMic) {
@@ -651,9 +698,14 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     socket.on('liveclass:unmute_all',      () => setParticipants(prev => prev.map(p => p.role !== 'HOST' ? { ...p, isMuted: false } : p)))
     socket.on('liveclass:hand_raised',     onHand)
     socket.on('liveclass:hand_lowered',    onHandLow)
-    // Hand approved: lower hand + unmute for the approved user; non-host clients update their own state
+    // Hand approved: lower hand + unmute + update speakerSlot for the approved user
     socket.on('liveclass:hand_approved',   (d: any) => {
-      setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, handRaised: false, isMuted: false } : p))
+      setParticipants(prev => prev.map(p =>
+        p.userId === d.userId
+          // H-3 FIX: include speakerSlot from event payload so speaker grid updates
+          ? { ...p, handRaised: false, isMuted: false, ...(typeof d.speakerSlot === 'number' ? { speakerSlot: d.speakerSlot } : {}) }
+          : p
+      ))
     })
     // Hand rejected: lower hand for the rejected user across all clients
     socket.on('liveclass:hand_rejected',   (d: any) => {
@@ -677,7 +729,8 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     socket.on('liveclass:speaking',        onSpeak)
     socket.on('liveclass:video_changed',   onVideo)
     socket.on('liveclass:reaction',        onReaction)
-    socket.on('liveclass:you_can_speak',   onCanSpeak)
+    // liveclass:you_can_speak removed — backend never emits this event name.
+    // The authoritative event is liveclass:grant_mic (handled below).
     socket.on('liveclass:open_mic_changed', onOpenMicChanged)
     socket.on('liveclass:viewmode_changed',  onViewModeChanged)
     socket.on('liveclass:recording_started', onRecordingStarted)
@@ -686,15 +739,8 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     socket.on('liveclass:draw',              onDraw)
     socket.on('liveclass:poll',              onPoll)
 
-    // Moderator promotion/demotion events
-    socket.on('liveclass:moderator_promoted', (d: any) => {
-      setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, role: 'MODERATOR' as const } : p))
-      if (d.userId === user?.id) toast({ title: '⭐ You have been made a moderator' })
-    })
-    socket.on('liveclass:moderator_demoted', (d: any) => {
-      setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, role: 'STUDENT' as const } : p))
-      if (d.userId === user?.id) toast({ title: 'Your moderator role has been removed' })
-    })
+    // liveclass:moderator_promoted / liveclass:moderator_demoted — DEAD EVENTS.
+    // No backend endpoint emits these. Removed to avoid misleading state mutations.
 
     // MIC-02: Host approved this user to speak (or open mic was enabled).
     // The backend has set isMuted=false in DB, so the NEW token will have
@@ -742,32 +788,29 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     socket.on('liveclass:speaker_added',   onSpeakerAdded)
     socket.on('liveclass:speaker_removed', onSpeakerRemoved)
 
-    // LS-GAP-003 FIX: Host transfer events
-    const onHostTransferred = (d: any) => {
-      if (d.liveClassId !== id) return
-      // Update participant roles immediately in local state
-      setParticipants(prev => prev.map(p => {
-        if (p.userId === d.newHostId)  return { ...p, role: 'HOST'    as const }
-        if (p.userId === d.prevHostId) return { ...p, role: 'STUDENT' as const }
-        return p
-      }))
-      toast({
-        title: d.newHostId === user?.id
-          ? '👑 You are now the host!'
-          : `👑 ${d.newHostName || 'A participant'} is now the host`,
-      })
-    }
-    const onRoleChanged = (d: any) => {
+    // H-4 FIX: Demotion events — host demoted a speaker (broadcast to room)
+    const onSpeakerDemoted = (d: any) => {
       if (d.liveClassId !== id) return
       setParticipants(prev => prev.map(p =>
-        p.userId === d.userId ? { ...p, role: d.role as LCParticipant['role'] } : p
+        p.userId === d.userId ? { ...p, isMuted: true, speakerSlot: null } : p
       ))
     }
-    socket.on('liveclass:host_transferred', onHostTransferred)
-    socket.on('liveclass:role_changed',     onRoleChanged)
-    socket.on('liveclass:you_are_host',     () => {
-      toast({ title: '👑 You are now the host of this stream!' })
-    })
+    socket.on('liveclass:speaker_demoted', onSpeakerDemoted)
+
+    // H-4 FIX: You were demoted — private event to the demoted user's socket room
+    const onYouWereDemoted = (d: any) => {
+      if (d.liveClassId !== id) return
+      setParticipants(prev => prev.map(p =>
+        p.userId === user?.id ? { ...p, isMuted: true, speakerSlot: null } : p
+      ))
+      toast({ title: '⬇️ You have been moved to the audience' })
+    }
+    socket.on('liveclass:you_were_demoted', onYouWereDemoted)
+
+    // liveclass:host_transferred, liveclass:role_changed, liveclass:you_are_host —
+    // DEAD EVENTS: no backend endpoint for host transfer or role change exists.
+    // These listeners are removed to avoid misleading state mutations from phantom events.
+    // If a backend host-transfer feature is implemented in future, re-add these handlers.
 
     return () => {
       socket.emit('liveclass:leave_room', id)
@@ -790,7 +833,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       socket.off('liveclass:speaking',        onSpeak)
       socket.off('liveclass:video_changed',   onVideo)
       socket.off('liveclass:reaction',        onReaction)
-      socket.off('liveclass:you_can_speak',   onCanSpeak)
+      // liveclass:you_can_speak — not registered (dead event removed)
       socket.off('liveclass:open_mic_changed', onOpenMicChanged)
       socket.off('liveclass:viewmode_changed',  onViewModeChanged)
       socket.off('liveclass:recording_started', onRecordingStarted)
@@ -798,15 +841,14 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       socket.off('liveclass:quran_position',    onQuranPosition)
       socket.off('liveclass:draw',              onDraw)
       socket.off('liveclass:poll',              onPoll)
-      socket.off('liveclass:moderator_promoted')
-      socket.off('liveclass:moderator_demoted')
+      // moderator_promoted, moderator_demoted — not registered (no backend endpoint)
       socket.off('liveclass:grant_mic',         onGrantMic)
       socket.off('liveclass:revoke_mic',        onRevokeMic)
       socket.off('liveclass:speaker_added',     onSpeakerAdded)
       socket.off('liveclass:speaker_removed',   onSpeakerRemoved)
-      socket.off('liveclass:host_transferred',  onHostTransferred)
-      socket.off('liveclass:role_changed',      onRoleChanged)
-      socket.off('liveclass:you_are_host')
+      socket.off('liveclass:speaker_demoted',   onSpeakerDemoted)
+      socket.off('liveclass:you_were_demoted',  onYouWereDemoted)
+      // host_transferred, role_changed, you_are_host — not registered (no backend endpoint)
     }
   }, [id, queryClient, router, toast, spawnEmoji])
 
@@ -1107,6 +1149,19 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
+  // ── Auto-join for the creator after immediate/permanent start ───────────────
+  // When the host navigates here directly after "Go Live Now", the stream is
+  // already LIVE. Skip the lobby and join automatically so they land straight
+  // in the room with mic/camera active.
+  // Guard: only fires once (joined=false), only for the creator/host, only when LIVE.
+  useEffect(() => {
+    if (!lc || joined || joinMutation.isPending) return
+    if (lc.status !== 'LIVE') return
+    if (!isCreator) return
+    joinMutation.mutate()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lc?.id, lc?.status, isCreator])
+
   // ── Controls ────────────────────────────────────────────────────────────────
   const toggleMic = async () => {
     const room = roomRef.current; if (!room || !user?.id) return
@@ -1333,25 +1388,16 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     setParticipants(prev => prev.filter(p => p.userId !== uid))
   }
 
-  // ── Moderator promotion — only the creator can do this ───────────────────
-  const promoteToModerator = async (uid: string) => {
-    try {
-      await api.post('/live-classes/' + id + '/moderator/' + uid)
-      setParticipants(prev => prev.map(p => p.userId === uid ? { ...p, role: 'MODERATOR' as const } : p))
-      toast({ title: '⭐ Participant promoted to moderator' })
-    } catch (e: any) {
-      toast({ title: e?.response?.data?.message || 'Failed to promote', variant: 'destructive' })
-    }
+  // ── Moderator promotion — NOT IMPLEMENTED (no backend endpoint exists) ──────
+  // PARITY-NOTE: The backend has no POST /moderator/:uid or DELETE /moderator/:uid
+  // endpoint. These UI handlers intentionally surface a "not available" message
+  // rather than silently failing or calling a non-existent route.
+  const promoteToModerator = async (_uid: string) => {
+    toast({ title: 'Moderator promotion is not available in this version', variant: 'destructive' })
   }
 
-  const demoteModerator = async (uid: string) => {
-    try {
-      await api.delete('/live-classes/' + id + '/moderator/' + uid)
-      setParticipants(prev => prev.map(p => p.userId === uid ? { ...p, role: 'STUDENT' as const } : p))
-      toast({ title: 'Moderator role removed' })
-    } catch (e: any) {
-      toast({ title: e?.response?.data?.message || 'Failed to demote', variant: 'destructive' })
-    }
+  const demoteModerator = async (_uid: string) => {
+    toast({ title: 'Moderator demotion is not available in this version', variant: 'destructive' })
   }
 
   // ── Toggle class settings live (PATCH) — optimistic update ───────────────
@@ -1543,7 +1589,18 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               'grid-cols-2 sm:grid-cols-4'
 
   return (
-    <div className="flex flex-col h-[calc(100vh-64px)] bg-gray-950 text-white overflow-hidden relative">
+    <div
+      ref={roomContainerRef}
+      className={cn(
+        'flex flex-col bg-gray-950 text-white overflow-hidden relative',
+        // Normal mode: bounded by the dashboard layout
+        !isFullscreen && 'h-[calc(100vh-64px)]',
+        // CSS-only fullscreen fallback (when Browser Fullscreen API is unavailable e.g. iOS Safari)
+        // When the browser fullscreen API IS used, the element naturally fills the viewport.
+        isFullscreen && !document.fullscreenElement && 'fixed inset-0 z-50',
+      )}
+      onClick={handleFsTap}
+    >
 
       {/* ── Gift animations — fixed overlay, z-index 500+, never interrupts AV ── */}
       <LiveClassGiftOverlay isLowEnd={isLowEnd} />
@@ -1751,7 +1808,12 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       )}
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800 flex-shrink-0">
+      <div className={cn(
+        'flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800 flex-shrink-0',
+        // Fullscreen: overlay at top with gradient for readability, z-index above video
+        isFullscreen && 'absolute top-0 left-0 right-0 z-20 bg-gradient-to-b from-black/80 to-transparent border-b-0 transition-opacity duration-300',
+        isFullscreen && !showFsControls && 'opacity-0 pointer-events-none',
+      )}>
         <div className="flex items-center gap-3">
           <button onClick={() => router.push('/live-class')} className="p-1.5 rounded-lg hover:bg-gray-800" aria-label="Back to live classes">
             <ChevronLeft className="w-5 h-5 text-gray-400" />
@@ -1849,12 +1911,27 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               <Square className="w-3 h-3" /> End
             </Button>
           )}
+          {/* ── Full Screen toggle button ────────────────────────────────── */}
+          {joined && (
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleFullscreen() }}
+              title={isFullscreen ? 'Exit full screen' : 'Full screen'}
+              aria-label={isFullscreen ? 'Exit full screen' : 'Enter full screen'}
+              className="w-8 h-8 rounded-lg bg-gray-800 hover:bg-gray-700 flex items-center justify-center transition-colors flex-shrink-0"
+            >
+              {isFullscreen ? <Minimize2 className="w-4 h-4 text-gray-300" /> : <Maximize2 className="w-4 h-4 text-gray-400" />}
+            </button>
+          )}
         </div>
       </div>
 
       {/* ── Status bar ──────────────────────────────────────────────────────── */}
       {joined && (
-        <div className="flex items-center gap-3 px-4 py-1.5 bg-gray-950 border-b border-gray-800/60 text-[11px] flex-shrink-0 overflow-x-auto">
+        <div className={cn(
+          'flex items-center gap-3 px-4 py-1.5 bg-gray-950 border-b border-gray-800/60 text-[11px] flex-shrink-0 overflow-x-auto',
+          // Fullscreen: hide status bar to maximize immersive space
+          isFullscreen && 'hidden',
+        )}>
           <span className="flex items-center gap-1.5 shrink-0">
             <span className={cn('w-2 h-2 rounded-full',
               connState === ConnectionState.Connected    && 'bg-green-500',
@@ -1926,8 +2003,16 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       )}
 
       {/* ── Body ────────────────────────────────────────────────────────────── */}
-      <div className="flex flex-1 overflow-hidden">
-        <div className="flex-1 flex flex-col overflow-hidden">
+      <div className={cn(
+        'flex flex-1 overflow-hidden',
+        // Fullscreen: fill entire container (header/controls are overlaid)
+        isFullscreen && 'absolute inset-0',
+      )}>
+        <div className={cn(
+          'flex-1 flex flex-col overflow-hidden',
+          // Fullscreen: fill the entire container — header and controls are absolute overlays
+          isFullscreen && 'w-full',
+        )}>
 
           {/* Pre-join lobby */}
           {!joined ? (
@@ -1986,24 +2071,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                     {lc.streamType === 'PUBLIC' ? 'This stream has ended' : 'This class has ended'}
                   </p>
                 )}
-                {/* Capacity warning — only shown when a positive cap is set */}
-                {lc.status === 'LIVE' && !isHost && lc.maxParticipants != null && lc.maxParticipants > 0 && (() => {
-                  const active = lc._count?.participants ?? participants.length
-                  const max    = lc.maxParticipants
-                  const pct    = active / max
-                  const label  = lc.streamType === 'PUBLIC' ? 'viewers' : 'participants'
-                  if (pct >= 1) return (
-                    <p className="text-red-400 text-sm mt-2 font-semibold">
-                      🚫 {lc.streamType === 'PUBLIC' ? 'Stream' : 'Class'} is full ({active}/{max} {label})
-                    </p>
-                  )
-                  if (pct >= 0.9) return (
-                    <p className="text-orange-400 text-sm mt-2">
-                      ⚠️ Almost full — {max - active} spot{max - active !== 1 ? 's' : ''} left
-                    </p>
-                  )
-                  return null
-                })()}
+                {/* Capacity limit removed — streams are unlimited */}
               </div>
               {lc.status !== 'ENDED' && lc.status !== 'CANCELLED' && (
                 <Button className="bg-indigo-600 hover:bg-indigo-700 gap-2 px-8"
@@ -2432,7 +2500,12 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
           {/* ── Controls bar ──────────────────────────────────────────────── */}
           {joined && (
-            <div className="relative flex-shrink-0 bg-gray-900 border-t border-gray-800">
+            <div className={cn(
+              'relative flex-shrink-0 bg-gray-900 border-t border-gray-800',
+              // Fullscreen: overlay at bottom with gradient, slides in/out with controls
+              isFullscreen && 'absolute bottom-0 left-0 right-0 z-20 bg-gradient-to-t from-black/90 to-transparent border-t-0 transition-opacity duration-300',
+              isFullscreen && !showFsControls && 'opacity-0 pointer-events-none',
+            )}>
               {/* Emoji picker — rendered above the bar, escapes overflow-hidden via position fixed */}
               {showEmojiPicker && (
                 <div
@@ -2672,16 +2745,97 @@ export function LiveClassRoomPage({ id }: { id: string }) {
           )}
         </div>
 
+        {/* ── Full Screen info overlay (bottom-left, TikTok style) ─────── */}
+        {isFullscreen && joined && lc && (
+          <div className={cn(
+            'absolute bottom-20 left-4 z-10 max-w-[60%] transition-opacity duration-300 pointer-events-none',
+            !showFsControls && 'opacity-0',
+          )}>
+            {/* Host name + stream type */}
+            <div className="flex items-center gap-2 mb-1">
+              {(() => {
+                const hostUser = lc.teacher?.user ?? (lc as any).hostUser
+                if (!hostUser) return null
+                const hostName = `${hostUser.firstName} ${hostUser.lastName}`.trim()
+                const avatar   = hostUser.avatarUrl ?? null
+                const initials = hostName.split(' ').map((n: string) => n[0]).slice(0,2).join('').toUpperCase()
+                return (
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-6 h-6 rounded-full overflow-hidden bg-indigo-900 flex items-center justify-center text-[9px] font-bold text-indigo-300 flex-shrink-0">
+                      {avatar ? <img src={avatar} alt={hostName} className="w-full h-full object-cover" /> : initials}
+                    </div>
+                    <span className="text-white text-sm font-bold drop-shadow-md truncate">{hostName}</span>
+                  </div>
+                )
+              })()}
+              {lc.status === 'LIVE' && (
+                <span className="flex items-center gap-1 text-[10px] font-bold text-red-400 bg-black/40 px-1.5 py-0.5 rounded-full">
+                  <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" /> LIVE
+                </span>
+              )}
+            </div>
+            {/* Title */}
+            <p className="text-white/90 text-xs font-medium drop-shadow-md truncate">{lc.title}</p>
+            {/* Participant count */}
+            <p className="text-white/60 text-[10px] mt-0.5">
+              👥 {participants.length} {lc.streamType === 'PUBLIC' ? 'viewers' : 'participants'}
+              {activeSpeakers.size > 0 && ` · 🗣 ${activeSpeakers.size} speaking`}
+            </p>
+          </div>
+        )}
+
+        {/* ── Full Screen right-side action strip (TikTok style) ────────── */}
+        {isFullscreen && joined && (
+          <div className={cn(
+            'absolute bottom-20 right-4 z-10 flex flex-col gap-3 items-center transition-opacity duration-300',
+            !showFsControls && 'opacity-0 pointer-events-none',
+          )}>
+            {/* Gift */}
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleGiftPanel() }}
+              className="flex flex-col items-center gap-0.5 text-white"
+              aria-label="Send a gift"
+            >
+              <span className="w-10 h-10 rounded-full bg-black/50 flex items-center justify-center text-xl">🎁</span>
+              <span className="text-[10px] text-white/70">Gift</span>
+            </button>
+            {/* Chat */}
+            <button
+              onClick={(e) => { e.stopPropagation(); setTab('chat'); setShowSidebar(true); toggleFullscreen() }}
+              className="flex flex-col items-center gap-0.5 text-white"
+              aria-label="Open chat"
+            >
+              <span className="w-10 h-10 rounded-full bg-black/50 flex items-center justify-center">
+                <MessageSquare className="w-5 h-5" />
+              </span>
+              <span className="text-[10px] text-white/70">Chat</span>
+            </button>
+            {/* Reactions */}
+            <button
+              onClick={(e) => { e.stopPropagation(); setShowEmojiPicker(v => !v) }}
+              className="flex flex-col items-center gap-0.5 text-white"
+              aria-label="Send reaction"
+            >
+              <span className="w-10 h-10 rounded-full bg-black/50 flex items-center justify-center">
+                <Smile className="w-5 h-5" />
+              </span>
+              <span className="text-[10px] text-white/70">React</span>
+            </button>
+          </div>
+        )}
+
         {/* ── Sidebar ─────────────────────────────────────────────────────── */}
         {joined && (
           <div className={cn(
             'flex flex-col bg-gray-900 border-l border-gray-800 flex-shrink-0',
-            // Desktop: always visible as fixed sidebar
+            // Desktop: always visible as fixed sidebar (hidden in fullscreen)
             'md:w-72 md:relative md:flex',
             // Mobile: full-screen overlay, toggled by showSidebar
             showSidebar
               ? 'fixed inset-0 z-20 w-full'
               : 'hidden md:flex',
+            // Fullscreen: always hidden — sidebar not shown in immersive mode
+            isFullscreen && '!hidden',
           )}>
             <div className="flex border-b border-gray-800 overflow-x-auto">
               {/* Mobile close button */}
@@ -2737,6 +2891,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   isRecording,
                   screenShareEnabled: lc.screenShareEnabled !== false,
                   viewMode,
+                  maxSpeakers:        (lc as any).maxSpeakers ?? 20,
                 }}
                 activeSpeakers={activeSpeakers}
                 currentUserId={user?.id}
@@ -2771,18 +2926,19 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   if (socket) socket.emit('liveclass:viewmode_changed', { liveClassId: id, viewMode: mode })
                   toast({ title: mode === 'audio' ? '🔇 Switched to audio-only view' : '📹 Switched to video view' })
                 }}
+                onSetMaxSpeakers={async (n) => {
+                  try {
+                    await api.patch('/live-classes/' + id, { maxSpeakers: n })
+                    toast({ title: `🎙 Max speakers set to ${n}` })
+                    queryClient.invalidateQueries({ queryKey: ['live-class', id] })
+                  } catch (e: any) {
+                    toast({ title: e?.response?.data?.message || 'Failed to update', variant: 'destructive' })
+                  }
+                }}
                 onEdit={isHost ? () => setShowEditModal(true) : undefined}
                 onPromoteModerator={isHost ? promoteToModerator : undefined}
                 onDemoteModerator={isHost ? demoteModerator : undefined}
-                onTransferHost={isHost ? async (userId: string) => {
-                  if (!confirm('Transfer host to this participant? You will become a regular participant.')) return
-                  try {
-                    await api.post(`/live-classes/${id}/transfer/${userId}`)
-                    toast({ title: 'Host transferred successfully' })
-                  } catch (e: any) {
-                    toast({ title: e?.response?.data?.message || 'Failed to transfer host', variant: 'destructive' })
-                  }
-                } : undefined}
+                onTransferHost={undefined /* host transfer has no backend endpoint */}
               />
               </div>
             )}
