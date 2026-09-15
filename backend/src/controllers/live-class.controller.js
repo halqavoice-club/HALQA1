@@ -1395,7 +1395,22 @@ async function approveHand(req, res, next) {
       io.to(`user:${userId}`).emit('liveclass:grant_mic', { liveClassId: id, speakerSlot: slot });
     }
     return successResponse(res, { speakerSlot: slot }, 'Hand approved — mic unmuted');
-  } catch (e) { next(e); }
+  } catch (e) {
+    // PHASE-3 FIX: Handle MySQL ER_DUP_ENTRY / Prisma P2002 unique constraint violation.
+    // This occurs when two concurrent requests compute the same slot number and the
+    // second UPDATE triggers the @@unique([liveClassId, speakerSlot]) constraint.
+    // Return 400 (stage full / slot already taken) instead of propagating as 500.
+    if (
+      e?.code === 'P2002' ||
+      e?.code === 'ER_DUP_ENTRY' ||
+      e?.message?.includes('Unique constraint') ||
+      e?.message?.includes('ER_DUP_ENTRY') ||
+      e?.message?.includes('Duplicate entry')
+    ) {
+      return errorResponse(res, 'Stage is full — slot already taken by a concurrent admission', 400);
+    }
+    next(e);
+  }
 }
 
 //  REJECT HAND 
@@ -2008,7 +2023,20 @@ async function inviteToStage(req, res, next) {
       io.to(`user:${userId}`).emit('liveclass:grant_mic', { liveClassId: id, speakerSlot: slot });
     }
     return successResponse(res, { speakerSlot: slot }, 'Participant invited to stage');
-  } catch (e) { next(e); }
+  } catch (e) {
+    // PHASE-3 FIX: Handle MySQL ER_DUP_ENTRY / Prisma P2002 unique constraint violation.
+    // Concurrent invitations can compute the same slot number; the DB unique constraint
+    // on (liveClassId, speakerSlot) rejects the duplicate — return 400 not 500.
+    if (
+      e?.code === 'P2002' ||
+      e?.message?.includes('Unique constraint') ||
+      e?.message?.includes('ER_DUP_ENTRY') ||
+      e?.message?.includes('Duplicate entry')
+    ) {
+      return errorResponse(res, `Stage is full — slot already taken`, 400);
+    }
+    next(e);
+  }
 }
 
 // ─── DEMOTE FROM STAGE ────────────────────────────────────────────────────────
