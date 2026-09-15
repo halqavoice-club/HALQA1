@@ -75,6 +75,20 @@ router.post('/',
   ctrl.createPost
 );
 
+// ─── Link preview scrape ──────────────────────────────────────────────────────
+// ROUTE ORDER FIX: This route MUST be registered BEFORE GET /:id.
+// Express matches routes in registration order. If /:id were first, any request
+// to GET /posts/link-preview would be captured with id="link-preview" and return
+// 404 (post not found) instead of reaching this handler.
+// GET /api/v1/posts/link-preview?url=https://...
+// Scrapes OG / meta tags from the given URL. Rate-limited. Auth required (session only).
+const previewLimit = rateLimit({
+  windowMs: 60 * 1000, max: 30,
+  keyGenerator: req => req.user?.id || req.ip,
+  message: { success: false, message: 'Too many preview requests' },
+});
+router.get('/link-preview', previewLimit, ctrl.getLinkPreview);
+
 router.get('/:id',   ctrl.getPost);
 
 router.patch('/:id',
@@ -166,15 +180,5 @@ router.post('/:id/poll/vote',
   validate,
   ctrl.votePoll
 );
-
-// ─── Link preview scrape ──────────────────────────────────────────────────────
-// GET /api/v1/posts/link-preview?url=https://...
-// Scrapes OG / meta tags from the given URL. Rate-limited. No auth required beyond session.
-const previewLimit = rateLimit({
-  windowMs: 60 * 1000, max: 30,
-  keyGenerator: req => req.user?.id || req.ip,
-  message: { success: false, message: 'Too many preview requests' },
-});
-router.get('/link-preview', previewLimit, ctrl.getLinkPreview);
 
 module.exports = router;
