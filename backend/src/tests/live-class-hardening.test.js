@@ -182,13 +182,18 @@ describe('Task 1: Generic LiveKit token (generateToken) guards liveclass-* rooms
 // Task 2: socket school:join authorization
 // ─────────────────────────────────────────────────────────────────────────────
 describe('Task 2: socket school:join validates school membership', () => {
-  // Test the guard logic directly (simulating the socket handler)
+  // Test the guard logic directly (simulating the fixed socket handler)
+  // F-06 FIX: Updated to reflect the corrected handler logic:
+  //   1. SUPER_ADMIN is denied unconditionally — platform role ≠ school membership
+  //   2. Non-SA users must match JWT schoolId exactly
 
   function runSchoolJoin(socketUserSchoolId, socketUserRole, requestedSchoolId) {
     const joined = [];
-    // Simulate the fixed handler:
+    // Simulate the corrected handler:
     if (!requestedSchoolId) return joined;
-    if (socketUserRole !== 'SUPER_ADMIN' && socketUserSchoolId !== requestedSchoolId) return joined;
+    // F-06 FIX: SUPER_ADMIN is denied regardless of schoolId
+    if (socketUserRole === 'SUPER_ADMIN') return joined;
+    if (socketUserSchoolId !== requestedSchoolId) return joined;
     joined.push(requestedSchoolId);
     return joined;
   }
@@ -203,14 +208,22 @@ describe('Task 2: socket school:join validates school membership', () => {
     expect(result).toHaveLength(0);
   });
 
-  test('SUPER_ADMIN can join any school room', () => {
+  // F-06 FIX: SUPER_ADMIN must NOT join school socket rooms
+  test('SUPER_ADMIN with different school is denied (F-06)', () => {
     const result = runSchoolJoin('school-a', 'SUPER_ADMIN', 'school-b');
-    expect(result).toContain('school-b');
+    expect(result).toHaveLength(0);
   });
 
-  test('SUPER_ADMIN with null schoolId can join any school room', () => {
+  // F-06 FIX: SUPER_ADMIN with matching legacy schoolId is still denied
+  test('SUPER_ADMIN with matching legacy schoolId is denied (F-06)', () => {
+    const result = runSchoolJoin('school-a', 'SUPER_ADMIN', 'school-a');
+    expect(result).toHaveLength(0);
+  });
+
+  // F-06 FIX: SUPER_ADMIN with null schoolId is denied
+  test('SUPER_ADMIN with null schoolId is denied (F-06)', () => {
     const result = runSchoolJoin(null, 'SUPER_ADMIN', 'school-x');
-    expect(result).toContain('school-x');
+    expect(result).toHaveLength(0);
   });
 
   test('missing schoolId is silently rejected', () => {

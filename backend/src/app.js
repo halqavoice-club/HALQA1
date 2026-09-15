@@ -297,8 +297,17 @@ io.on('connection', (socket) => {
   // SUPER_ADMIN has no automatic cross-school socket access — they receive events
   // only for their own school, exactly like any other user.
   // userSchoolId comes from JWT at connection time — never from client payload.
+  //
+  // F-06 FIX: Added explicit SUPER_ADMIN role denial.
+  // The previous implementation checked socket.userSchoolId !== schoolId, which
+  // correctly blocked cross-school access but still allowed a SUPER_ADMIN whose
+  // JWT contained a matching legacy schoolId to join school socket rooms.
+  // SUPER_ADMIN = platform admin ONLY — they must never receive school-scoped
+  // Socket.IO room membership, regardless of what schoolId is in their JWT.
   socket.on('school:join', (schoolId) => {
     if (!schoolId) return;
+    // F-06 FIX: Deny SUPER_ADMIN unconditionally — platform role ≠ school membership
+    if (socket.userRole === 'SUPER_ADMIN') return;
     if (socket.userSchoolId !== schoolId) return; // silently reject — must match JWT school
     socket.join(`school:${schoolId}`);
   });

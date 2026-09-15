@@ -250,8 +250,25 @@ function getEffectiveRole(req) {
 // any authenticated user can access them.
 // ARCH-01: SUPER_ADMIN no longer bypasses school isolation. They must have a
 // real SchoolMembership to access school-scoped live classes.
+//
+// F-02 FIX: Added explicit SUPER_ADMIN early-exit for SCHOOL streams.
+// The previous implementation only checked lc.schoolId !== user.schoolId,
+// which meant a SUPER_ADMIN with a legacy user.schoolId matching the school
+// would pass the check — violating the SUPER_ADMIN = platform-only invariant.
+// This guard now explicitly denies SUPER_ADMIN before any schoolId comparison,
+// regardless of what legacy data exists on the user object or in the DB.
 function assertSchoolAccess(lc, user) {
   if (lc.streamType === 'PUBLIC') return;   // PUBLIC streams are open to all
+
+  // F-02 FIX: SUPER_ADMIN is a platform administrator and must NEVER access
+  // school-scoped live classes, even if legacy user.schoolId matches or legacy
+  // SchoolMembership records exist. Platform authority ≠ school authority.
+  if (user.role === 'SUPER_ADMIN') {
+    const err = new Error('Platform administrators cannot access school live classes');
+    err.status = 403;
+    throw err;
+  }
+
   if (lc.schoolId !== user.schoolId) {
     const err = new Error('Access denied to this school\'s resource');
     err.status = 403;
@@ -1389,6 +1406,21 @@ async function rejectHand(req, res, next) {
     const lc = await findLiveClass(id);
     if (!lc) return errorResponse(res, 'Live class not found', 404);
     assertSchoolAccess(lc, req.user);
+
+    // F-07 FIX: Verify caller is an active HOST or MODERATOR in this live room.
+    // The route uses resolveStreamStaffAccess (staff-level for SCHOOL, host-only
+    // for PUBLIC), but that does not verify the caller holds an active session role.
+    // approveHand already requires caller.role === HOST|MODERATOR from the
+    // participant record. rejectHand must be consistent — any staff member without
+    // an active session role (SCHOOL_ADMIN, TEACHER, SUPER_ADMIN) must be denied.
+    const caller = await prisma.liveClassParticipant.findFirst({
+      where: { liveClassId: id, userId: req.user.id, isActive: true },
+      select: { role: true },
+    });
+    if (!caller || (caller.role !== 'HOST' && caller.role !== 'MODERATOR')) {
+      return errorResponse(res, 'Only the host or moderator can reject hands', 403);
+    }
+
     await prisma.liveClassHandQueue.updateMany({ where: { liveClassId: id, userId, status: 'WAITING' }, data: { status: 'REJECTED' } });
     await prisma.liveClassParticipant.updateMany({ where: { liveClassId: id, userId }, data: { handRaised: false } });
     const io = getIo();
