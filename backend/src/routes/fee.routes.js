@@ -5,7 +5,7 @@ const validate = require('../middleware/validate');
 const { authenticate } = require('../middleware/auth.middleware');
 const { eduMember, eduAdmin } = require('../middleware/educationAuth');
 const prisma = require('../utils/prisma');
-const XLSX = require('xlsx');
+const { buildWorkbook } = require('../utils/excel');
 const { successResponse, errorResponse, paginatedResponse, getPagination, buildPaginationMeta } = require('../utils/response');
 
 router.use(authenticate);
@@ -236,7 +236,7 @@ router.get('/export', ...eduAdmin, async (req, res, next) => {
         orderBy: { createdAt: 'desc' }
       });
 
-      const data = fees.map(f => ({
+      const ws_data = fees.map(f => ({
         'Student': `${f.student?.user?.firstName} ${f.student?.user?.lastName}`,
         'Fee Type': f.feeType,
         'Description': f.description || '',
@@ -247,11 +247,7 @@ router.get('/export', ...eduAdmin, async (req, res, next) => {
         'Created': new Date(f.createdAt).toISOString().split('T')[0]
       }));
 
-      const ws = XLSX.utils.json_to_sheet(data);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Fees');
-      ws['!cols'] = Object.keys(data[0] || {}).map(k => ({ wch: Math.max(k.length + 2, 15) }));
-      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      const buffer = await buildWorkbook(ws_data, 'Fees');
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename=fees-${Date.now()}.xlsx`);
       return res.send(buffer);

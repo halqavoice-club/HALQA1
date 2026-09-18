@@ -1,5 +1,5 @@
 const prisma = require('../utils/prisma');
-const XLSX = require('xlsx');
+const { buildWorkbook } = require('../utils/excel');
 const logger = require('../utils/logger');
 
 /**
@@ -99,18 +99,8 @@ async function generateGradesReport({ schoolId, classId, termId, studentId }) {
 /**
  * Export data to Excel buffer
  */
-function exportToExcel(data, sheetName = 'Report') {
-  const ws = XLSX.utils.json_to_sheet(data);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, sheetName);
-
-  // Auto-width columns
-  const colWidths = Object.keys(data[0] || {}).map(key => ({
-    wch: Math.max(key.length, ...data.map(row => String(row[key] || '').length))
-  }));
-  ws['!cols'] = colWidths;
-
-  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+async function exportToExcel(data, sheetName = 'Report') {
+  return buildWorkbook(data, sheetName);
 }
 
 function getLetterGrade(pct) {
