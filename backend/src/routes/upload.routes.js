@@ -7,7 +7,17 @@ const rateLimit = require('express-rate-limit');
 const prisma = require('../utils/prisma');
 const { saveFile, STORAGE_TYPE } = require('../utils/storage');
 const { successResponse, errorResponse } = require('../utils/response');
-const { fromBuffer: fileTypeFromBuffer } = require('file-type');
+
+// ─── CJS → ESM interop for file-type@21.x (ESM-only) ────────────────────────
+// file-type >= 19 is pure ESM. HALQA backend is CommonJS. Dynamic import()
+// is available in Node.js 12+ from CJS and works here because validateFileBuffer
+// is already async. The module is loaded once and cached on first call.
+let _fileTypeModule;
+async function getFileType() {
+  if (!_fileTypeModule) _fileTypeModule = import('file-type');
+  return _fileTypeModule;
+}
+
 const clamav = require('../utils/clamav');
 
 // ─── L-3 FIX: Per-user rate limits on upload endpoints ───────────────────────
@@ -80,7 +90,16 @@ const upload = multer({
  */
 async function validateFileBuffer(buffer) {
   // Magic bytes validation — check actual file signature, not declared MIME
-  const detected = await fileTypeFromBuffer(buffer);
+  let detected = null;
+  try {
+    const { fileTypeFromBuffer } = await getFileType();
+    detected = await fileTypeFromBuffer(buffer);
+  } catch {
+    // Parser failure (e.g. unexpected buffer format) — treat as undetectable type.
+    // Fall through to the existing "no detection" behavior below: allow the upload
+    // since multer's fileFilter already validated the declared MIME type.
+    detected = null;
+  }
   const detectedMime = detected ? detected.mime : null;
 
   // Some valid files (plain text, CSV, SVG, certain audio) have no magic bytes.

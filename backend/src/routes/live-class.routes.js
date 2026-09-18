@@ -120,6 +120,17 @@ const giftRateLimit = rateLimit({
   message: { success: false, message: 'Too many gift requests, slow down' },
 });
 
+// ─── Join/leave rate limiter ──────────────────────────────────────────────────
+// Prevents viewer-count spam: max 10 join/leave requests per user per minute.
+// Legitimate users never hit this — it only blocks automated join/leave loops.
+const joinLeaveRateLimit = rateLimit({
+  windowMs: 60 * 1000, max: 10,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  message: { success: false, message: 'Too many join/leave requests, please slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // ─── Cover image upload — 2 MB, images only ──────────────────────────────────
 const coverUpload = multer({
   storage: multer.memoryStorage(),
@@ -200,8 +211,8 @@ router.post('/:id/start', resolveStreamStaffAccess, ctrl.startLiveClass);
 router.post('/:id/end',   resolveStreamStaffAccess, ctrl.endLiveClass);
 
 // Join/leave — resolves per-stream (PUBLIC = any auth user; SCHOOL = school member)
-router.post('/:id/join',  resolveStreamAccess, ctrl.joinLiveClass);
-router.post('/:id/leave', resolveStreamAccess, ctrl.leaveLiveClass);
+router.post('/:id/join',  joinLeaveRateLimit, resolveStreamAccess, ctrl.joinLiveClass);
+router.post('/:id/leave', joinLeaveRateLimit, resolveStreamAccess, ctrl.leaveLiveClass);
 
 // ─── LIVEKIT TOKEN ────────────────────────────────────────────────────────────
 router.post('/:id/token',        resolveStreamAccess, ctrl.getLiveKitToken);
@@ -247,7 +258,7 @@ router.post('/:id/hand/reject/:userId',  resolveStreamStaffAccess, ctrl.rejectHa
 router.get('/:id/messages',  resolveStreamAccess, ctrl.getMessages);
 router.post('/:id/messages',
   resolveStreamAccess,
-  [body('body').trim().notEmpty().withMessage('Message required')],
+  [body('body').trim().notEmpty().withMessage('Message required').isLength({ max: 2000 }).withMessage('Message must be 2000 characters or less')],
   validate,
   ctrl.sendMessage
 );
@@ -331,7 +342,8 @@ router.get('/:id/gifts/top-supporters', checkLiveClassSchool, getTopSupporters);
 async function validateCoverImage(req, res, next) {
   if (!req.file) return next();
   try {
-    const { fromBuffer: fileTypeFromBuffer } = require('file-type');
+    // CJS → ESM interop: file-type@21.x is ESM-only; use dynamic import()
+    const { fileTypeFromBuffer } = await import('file-type');
     const detected = await fileTypeFromBuffer(req.file.buffer);
     const mime = detected?.mime;
     if (!mime || !mime.startsWith('image/')) {

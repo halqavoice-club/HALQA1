@@ -51,7 +51,8 @@ const coverUpload = multer({
 async function validateCoverImage(req, res, next) {
   if (!req.file) return next();
   try {
-    const { fromBuffer: fileTypeFromBuffer } = require('file-type');
+    // CJS → ESM interop: file-type@21.x is ESM-only; use dynamic import()
+    const { fileTypeFromBuffer } = await import('file-type');
     const detected = await fileTypeFromBuffer(req.file.buffer);
     const mime = detected?.mime;
     // If file-type CAN detect a type and it's clearly not an image, reject it.
