@@ -1,17 +1,16 @@
 'use strict';
 /**
- * Phase 4B — Firebase Admin 13 Migration Tests
+ * Phase 4B/4D — Firebase Admin 14 Migration Tests
  * ─────────────────────────────────────────────────────────────────────────────
- * Verifies firebase-admin@13 compatibility with HALQA's FCM-only usage in
+ * Verifies firebase-admin@14 compatibility with HALQA's FCM-only usage in
  * backend/src/utils/push.js.
  *
- * Strategy: ALL mocking uses jest.doMock() (never jest.mock()) so there is
- * no Babel hoisting. Each test that needs a mock calls jest.resetModules()
- * then jest.doMock() before require()-ing the module under test, ensuring
- * a clean singleton state every time.
+ * firebase-admin v14 uses modular imports:
+ *   require('firebase-admin/app')      — initializeApp, getApps, cert
+ *   require('firebase-admin/messaging') — getMessaging
  *
- * The API-surface describe (section 1) requires firebase-admin with NO mock
- * active, so the real installed package is exercised.
+ * Mocking strategy: ALL mocks use jest.doMock() (not jest.mock()) to avoid
+ * Babel hoisting issues. Each test resets modules before requiring push.js.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -19,20 +18,17 @@ const PUSH_PATH = '../utils/push';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// Env var names split to avoid triggering the pre-commit secret scanner.
-// These reference CONFIG KEY NAMES — not values. firebase-admin is fully
-// mocked in every test that calls freshMockedPush(), so these env values
-// are never parsed or used for real auth.
-const FB_PROJECT   = 'FIREBASE_PROJECT_ID';
-const FB_EMAIL     = 'FIREBASE_CLIENT_EMAIL';
-const FB_SA_JSON   = 'FIREBASE_SERVICE_ACCOUNT_JSON';
-// Split key name across an array join so the literal string never appears
-const FB_PK        = ['FIREBASE', 'PRI' + 'VATE', 'KEY'].join('_');
+// Env var key names split to avoid pre-commit secret scanner pattern matching.
+const FB_PROJECT = 'FIREBASE_PROJECT_ID';
+const FB_EMAIL   = 'FIREBASE_CLIENT_EMAIL';
+const FB_SA_JSON = 'FIREBASE_SERVICE_ACCOUNT_JSON';
+const FB_PK      = ['FIREBASE', 'PRI' + 'VATE', 'KEY'].join('_');
 
-/** Return a fresh push module with no Firebase env vars set. */
+/** Fresh push module with no Firebase env vars — triggers graceful degradation. */
 function freshUnconfiguredPush() {
   jest.resetModules();
-  jest.dontMock('firebase-admin');
+  jest.dontMock('firebase-admin/app');
+  jest.dontMock('firebase-admin/messaging');
   delete process.env[FB_SA_JSON];
   delete process.env[FB_PROJECT];
   delete process.env[FB_EMAIL];
@@ -40,10 +36,15 @@ function freshUnconfiguredPush() {
   return require(PUSH_PATH);
 }
 
-/** Return a fresh push module backed by the provided mock admin object. */
-function freshMockedPush(mockAdminObj) {
+/**
+ * Fresh push module backed by mock firebase-admin/app and firebase-admin/messaging.
+ * mockApp     — mock for firebase-admin/app exports (initializeApp, getApps, cert)
+ * mockMsgObj  — mock for firebase-admin/messaging exports (getMessaging)
+ */
+function freshMockedPush(mockApp, mockMsgObj) {
   jest.resetModules();
-  jest.doMock('firebase-admin', () => mockAdminObj);
+  jest.doMock('firebase-admin/app',       () => mockApp);
+  jest.doMock('firebase-admin/messaging', () => mockMsgObj);
   process.env[FB_PROJECT] = 'halqa-test-project';
   process.env[FB_EMAIL]   = 'test-sa@halqa-test.example.com';
   process.env[FB_PK]      = 'test-fixture-not-a-real-key';
@@ -52,51 +53,54 @@ function freshMockedPush(mockAdminObj) {
 
 function cleanup() {
   jest.resetModules();
-  jest.dontMock('firebase-admin');
+  jest.dontMock('firebase-admin/app');
+  jest.dontMock('firebase-admin/messaging');
   delete process.env[FB_SA_JSON];
   delete process.env[FB_PROJECT];
   delete process.env[FB_EMAIL];
   delete process.env[FB_PK];
 }
 
-// ── 1. Firebase Admin 13 API Surface (real package, no mock) ─────────────────
-describe('firebase-admin@13 API surface', () => {
-  // Ensure the real package is used — no mock active from previous suite
-  beforeAll(() => { jest.dontMock('firebase-admin'); });
+// ── 1. Firebase Admin 14 API Surface (real package, no mock) ─────────────────
+describe('firebase-admin@14 API surface', () => {
+  beforeAll(() => {
+    jest.dontMock('firebase-admin/app');
+    jest.dontMock('firebase-admin/messaging');
+  });
   afterAll(cleanup);
 
-  test('admin package is installed at version 13.x', () => {
+  test('firebase-admin package is installed at version 14.x', () => {
     jest.resetModules();
     const admin = require('firebase-admin');
-    // SDK_VERSION was added in firebase-admin@10 and is present in v13
     expect(typeof admin.SDK_VERSION).toBe('string');
-    expect(admin.SDK_VERSION).toMatch(/^13\./);
+    expect(admin.SDK_VERSION).toMatch(/^14\./);
   });
 
-  test('admin.apps is an array-like object with .length', () => {
+  test('firebase-admin/app exports initializeApp, getApps, cert', () => {
     jest.resetModules();
-    const admin = require('firebase-admin');
-    expect(admin.apps).toBeDefined();
-    expect(typeof admin.apps.length).toBe('number');
+    const { initializeApp, getApps, cert } = require('firebase-admin/app');
+    expect(typeof initializeApp).toBe('function');
+    expect(typeof getApps).toBe('function');
+    expect(typeof cert).toBe('function');
   });
 
-  test('admin.credential.cert is a function', () => {
+  test('firebase-admin/app getApps() returns an array', () => {
     jest.resetModules();
-    const admin = require('firebase-admin');
-    expect(typeof admin.credential).toBe('object');
-    expect(typeof admin.credential.cert).toBe('function');
+    const { getApps } = require('firebase-admin/app');
+    const apps = getApps();
+    expect(Array.isArray(apps)).toBe(true);
   });
 
-  test('admin.initializeApp is a function', () => {
+  test('firebase-admin/messaging exports getMessaging', () => {
     jest.resetModules();
-    const admin = require('firebase-admin');
-    expect(typeof admin.initializeApp).toBe('function');
+    const { getMessaging } = require('firebase-admin/messaging');
+    expect(typeof getMessaging).toBe('function');
   });
 
-  test('admin.messaging is a function', () => {
+  test('firebase-admin/app initializeApp is a function', () => {
     jest.resetModules();
-    const admin = require('firebase-admin');
-    expect(typeof admin.messaging).toBe('function');
+    const { initializeApp } = require('firebase-admin/app');
+    expect(typeof initializeApp).toBe('function');
   });
 });
 
@@ -131,43 +135,47 @@ describe('push.js — graceful degradation without Firebase config', () => {
   });
 });
 
-// ── 3. push.js — FCM API (mocked firebase-admin via jest.doMock) ──────────────
-describe('push.js — FCM API with mocked firebase-admin', () => {
+// ── 3. push.js — FCM API (mocked firebase-admin/app + firebase-admin/messaging) ─
+describe('push.js — FCM API with mocked firebase-admin v14 modules', () => {
   afterEach(cleanup);
 
-  function makeMockAdmin(overrides = {}) {
-    const mockSend = jest.fn();
-    const mockAdmin = {
-      apps: [],
-      credential: { cert: jest.fn().mockReturnValue({ mock: 'credential' }) },
+  function makeMocks(appsOverride = []) {
+    const mockSend    = jest.fn();
+    const mockMsgInst = { send: mockSend };
+
+    const mockApp = {
+      getApps:       jest.fn().mockReturnValue(appsOverride),
       initializeApp: jest.fn().mockReturnValue({ mock: 'app' }),
-      messaging: jest.fn().mockReturnValue({ send: mockSend }),
-      ...overrides,
+      cert:          jest.fn().mockReturnValue({ mock: 'credential' }),
     };
-    return { mockAdmin, mockSend };
+    const mockMsg = {
+      getMessaging: jest.fn().mockReturnValue(mockMsgInst),
+    };
+
+    return { mockApp, mockMsg, mockSend, mockMsgInst };
   }
 
-  test('getMessaging() initialises app when apps is empty', () => {
-    const { mockAdmin, mockSend } = makeMockAdmin();
-    const { getMessaging } = freshMockedPush(mockAdmin);
+  test('getMessaging() initialises app when getApps() returns empty array', () => {
+    const { mockApp, mockMsg, mockSend, mockMsgInst } = makeMocks([]);
+    const { getMessaging } = freshMockedPush(mockApp, mockMsg);
     const messaging = getMessaging();
-    expect(mockAdmin.initializeApp).toHaveBeenCalledTimes(1);
-    expect(mockAdmin.messaging).toHaveBeenCalledTimes(1);
-    expect(messaging).toEqual({ send: mockSend });
+    expect(mockApp.initializeApp).toHaveBeenCalledTimes(1);
+    expect(mockMsg.getMessaging).toHaveBeenCalledTimes(1);
+    expect(messaging).toBe(mockMsgInst);
   });
 
-  test('getMessaging() reuses existing app when apps is non-empty', () => {
-    const { mockAdmin } = makeMockAdmin({ apps: [{ mock: 'existingApp' }] });
-    const { getMessaging } = freshMockedPush(mockAdmin);
+  test('getMessaging() reuses existing app when getApps() returns non-empty array', () => {
+    const { mockApp, mockMsg } = makeMocks([{ mock: 'existingApp' }]);
+    const { getMessaging } = freshMockedPush(mockApp, mockMsg);
     getMessaging();
-    expect(mockAdmin.initializeApp).not.toHaveBeenCalled();
-    expect(mockAdmin.messaging).toHaveBeenCalledTimes(1);
+    expect(mockApp.initializeApp).not.toHaveBeenCalled();
+    expect(mockMsg.getMessaging).toHaveBeenCalledTimes(1);
   });
 
   test('sendPush() constructs correct FCM message structure', async () => {
-    const { mockAdmin, mockSend } = makeMockAdmin();
+    const { mockApp, mockMsg, mockSend } = makeMocks();
     mockSend.mockResolvedValue('projects/test-project/messages/mock-id');
-    const { sendPush } = freshMockedPush(mockAdmin);
+    const { sendPush } = freshMockedPush(mockApp, mockMsg);
 
     const result = await sendPush('device-fcm-token-abc123', {
       title: 'New message',
@@ -190,34 +198,34 @@ describe('push.js — FCM API with mocked firebase-admin', () => {
   });
 
   test('sendPush() returns EXPIRED for messaging/registration-token-not-registered', async () => {
-    const { mockAdmin, mockSend } = makeMockAdmin();
+    const { mockApp, mockMsg, mockSend } = makeMocks();
     mockSend.mockRejectedValue(
       Object.assign(new Error('Token not registered'), { code: 'messaging/registration-token-not-registered' })
     );
-    const { sendPush } = freshMockedPush(mockAdmin);
+    const { sendPush } = freshMockedPush(mockApp, mockMsg);
     expect(await sendPush('expired-token', { title: 'T', body: 'B', type: 'SYSTEM' })).toBe('EXPIRED');
   });
 
   test('sendPush() returns EXPIRED for messaging/invalid-registration-token', async () => {
-    const { mockAdmin, mockSend } = makeMockAdmin();
+    const { mockApp, mockMsg, mockSend } = makeMocks();
     mockSend.mockRejectedValue(
       Object.assign(new Error('Invalid token'), { code: 'messaging/invalid-registration-token' })
     );
-    const { sendPush } = freshMockedPush(mockAdmin);
+    const { sendPush } = freshMockedPush(mockApp, mockMsg);
     expect(await sendPush('bad-token', { title: 'T', body: 'B' })).toBe('EXPIRED');
   });
 
   test('sendPush() returns false on other FCM errors', async () => {
-    const { mockAdmin, mockSend } = makeMockAdmin();
+    const { mockApp, mockMsg, mockSend } = makeMocks();
     mockSend.mockRejectedValue(
       Object.assign(new Error('Internal error'), { code: 'messaging/internal-error' })
     );
-    const { sendPush } = freshMockedPush(mockAdmin);
+    const { sendPush } = freshMockedPush(mockApp, mockMsg);
     expect(await sendPush('token', { title: 'T', body: 'B' })).toBe(false);
   });
 
   test('sendPushMulti() aggregates sent/failed/expired correctly', async () => {
-    const { mockAdmin, mockSend } = makeMockAdmin();
+    const { mockApp, mockMsg, mockSend } = makeMocks();
     const expiredErr  = Object.assign(new Error('Not registered'), { code: 'messaging/registration-token-not-registered' });
     const internalErr = Object.assign(new Error('Internal'),       { code: 'messaging/internal-error' });
 
@@ -227,7 +235,7 @@ describe('push.js — FCM API with mocked firebase-admin', () => {
       .mockRejectedValueOnce(internalErr)
       .mockResolvedValueOnce('msg-id-4');
 
-    const { sendPushMulti } = freshMockedPush(mockAdmin);
+    const { sendPushMulti } = freshMockedPush(mockApp, mockMsg);
     const result = await sendPushMulti(
       ['token1', 'token2', 'token3', 'token4'],
       { title: 'Multi test', body: 'Body', type: 'FOLLOW' },
@@ -245,18 +253,17 @@ describe('push.js — notification channel routing', () => {
 
   async function assertChannel(type, expectedChannel) {
     const mockChanSend = jest.fn().mockResolvedValue('ok');
-    const mockAdmin = {
-      apps: [{ mock: 'app' }],
-      credential: { cert: jest.fn() },
+    const mockApp = {
+      getApps:       jest.fn().mockReturnValue([{ mock: 'app' }]),
       initializeApp: jest.fn(),
-      messaging: jest.fn().mockReturnValue({ send: mockChanSend }),
+      cert:          jest.fn(),
     };
-    const { sendPush } = freshMockedPush(mockAdmin);
+    const mockMsg = { getMessaging: jest.fn().mockReturnValue({ send: mockChanSend }) };
+    const { sendPush } = freshMockedPush(mockApp, mockMsg);
     const result = await sendPush('token', { title: 'T', body: 'B', type });
     expect(result).toBe(true);
     expect(mockChanSend).toHaveBeenCalledTimes(1);
-    const msg = mockChanSend.mock.calls[0][0];
-    expect(msg.android.notification.channelId).toBe(expectedChannel);
+    expect(mockChanSend.mock.calls[0][0].android.notification.channelId).toBe(expectedChannel);
   }
 
   test('FOLLOW → social',          () => assertChannel('FOLLOW',           'social'));
@@ -280,23 +287,23 @@ describe('push.js — no duplicate Firebase app initialisation', () => {
 
   test('getMessaging() is idempotent — only initialises once', () => {
     const mockApps = [];
-    const mockAdmin = {
-      get apps() { return mockApps; },
-      credential: { cert: jest.fn().mockReturnValue({}) },
+    const mockApp = {
+      getApps:       jest.fn().mockImplementation(() => mockApps),
       initializeApp: jest.fn().mockImplementation(() => {
         mockApps.push({ mock: 'app' });
         return mockApps[0];
       }),
-      messaging: jest.fn().mockReturnValue({ send: jest.fn() }),
+      cert: jest.fn().mockReturnValue({}),
     };
+    const mockMsg = { getMessaging: jest.fn().mockReturnValue({ send: jest.fn() }) };
 
-    const { getMessaging } = freshMockedPush(mockAdmin);
+    const { getMessaging } = freshMockedPush(mockApp, mockMsg);
 
     // Call three times — initializeApp must only fire once
     getMessaging();
     getMessaging();
     getMessaging();
 
-    expect(mockAdmin.initializeApp).toHaveBeenCalledTimes(1);
+    expect(mockApp.initializeApp).toHaveBeenCalledTimes(1);
   });
 });
