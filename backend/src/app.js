@@ -131,20 +131,58 @@ const io = new Server(httpServer, {
 // Make io globally available for controllers
 global.io = io;
 
-// ─── Socket.IO authentication middleware ──────────────────────────────────────
+// ─── Socket.IO authentication middleware ─────────────────────────────────────
 const { verifyAccessToken } = require('./utils/jwt');
+const { getUserFromCache, USER_SELECT } = require('./middleware/auth.middleware');
 
 io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error('Authentication required'));
     const decoded = verifyAccessToken(token);
-    socket.userId     = decoded.userId;
-    socket.userRole   = decoded.role;
-    socket.userSchoolId = decoded.schoolId ?? null; // Task 2: available for school:join guard
+
+    // VULN-LIVE-006 FIX: Perform a current-user status check at connection time,
+    // mirroring the existing HTTP authenticate() middleware.
+    //
+    // Previously, the socket auth only validated the JWT signature and expiry.
+    // A user who was banned/suspended/deactivated after their token was issued
+    // could still establish a new Socket.IO connection for up to 15 minutes
+    // (the access-token TTL), even though all REST endpoints correctly rejected them.
+    //
+    // Fix: use the same canonical getUserFromCache() helper used by authenticate().
+    //   1. Try Redis cache first (30s TTL, same cache key as HTTP auth).
+    //   2. On cache miss or Redis unavailable (returns null) → DB fallback.
+    //   3. Check user.status and user.deletedAt — reject if not ACTIVE/valid.
+    //   4. Only set socket identity after the check passes.
+    //
+    // Redis failure degrades gracefully to DB, matching existing HTTP auth behavior.
+    // Cache invalidation at ban time (invalidateUserCache) is already called by all
+    // status-change paths, so stale ACTIVE data after a ban is not a concern.
+    let user = await getUserFromCache(decoded.userId);
+    if (!user) {
+      user = await prisma.user.findUnique({
+        where:  { id: decoded.userId },
+        select: USER_SELECT
+      });
+    }
+
+    if (!user)                            return next(new Error('Authentication failed'));
+    if (user.status === 'BANNED')         return next(new Error('Account banned'));
+    if (user.status === 'SUSPENDED')      return next(new Error('Account suspended'));
+    if (user.status === 'INACTIVE')       return next(new Error('Account inactive'));
+    if (user.deletedAt)                   return next(new Error('Authentication failed'));
+
+    // Identity is set from the validated user record, not solely from JWT claims.
+    // Role and schoolId come from the current DB record via the cache, ensuring
+    // that role changes propagate within the 30s cache TTL.
+    socket.userId       = user.id;
+    socket.userRole     = user.role;
+    socket.userSchoolId = user.schoolId ?? null; // for school:join guard
     next();
   } catch (err) {
-    next(new Error('Invalid token'));
+    if (err.name === 'TokenExpiredError') return next(new Error('Token expired'));
+    if (err.name === 'JsonWebTokenError') return next(new Error('Invalid token'));
+    next(new Error('Authentication failed'));
   }
 });
 
