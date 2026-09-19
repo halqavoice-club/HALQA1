@@ -149,12 +149,19 @@ async function generateToken(req, res, next) {
             return errorResponse(res, 'Access denied to this school\'s resource', 403);
           }
         } else {
-          // schoolId matches — verify membership is not suspended
+          // schoolId matches — verify membership is ACTIVE.
+          // VULN-LIVE-005 FIX: A null membership (record deleted, not just
+          // suspended) must also be rejected here. The previous condition
+          //   if (membership && membership.status !== 'ACTIVE')
+          // treated a null membership as passing (null is falsy), which
+          // allowed a user with a matching legacy user.schoolId but no active
+          // SchoolMembership record to proceed past this layer.
+          // Fix: require membership to exist AND be ACTIVE.
           const membership = await prisma.schoolMembership.findUnique({
             where: { userId_schoolId: { userId, schoolId: lc.schoolId } },
             select: { status: true }
           });
-          if (membership && membership.status !== 'ACTIVE') {
+          if (!membership || membership.status !== 'ACTIVE') {
             return errorResponse(res, 'Access denied — your school membership is not active', 403);
           }
         }

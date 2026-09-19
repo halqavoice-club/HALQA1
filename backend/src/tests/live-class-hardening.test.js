@@ -58,9 +58,11 @@ beforeEach(() => {
   if (!prisma.schoolMembership.findFirst) {
     prisma.schoolMembership.findFirst = jest.fn();
   }
-  // Default: no SchoolMembership record found — fall back to legacy user.schoolId
-  prisma.schoolMembership.findUnique = jest.fn().mockResolvedValue(null);
-  prisma.schoolMembership.findFirst  = jest.fn().mockResolvedValue(null);
+  // VULN-LIVE-005 FIX: Default to ACTIVE membership so positive-path tests
+  // (same-school user with active membership) pass the new null-rejection check.
+  // Tests that specifically exercise the denied case override this per-test.
+  prisma.schoolMembership.findUnique = jest.fn().mockResolvedValue({ status: 'ACTIVE' });
+  prisma.schoolMembership.findFirst  = jest.fn().mockResolvedValue({ status: 'ACTIVE' });
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -85,6 +87,11 @@ const LC_LIVE = {
   id: 'class-1', schoolId: 'school-a', status: 'LIVE', classId: 'cls-1',
   livekitRoomName: 'liveclass-class-1', chatEnabled: true, isOpenMic: false,
   maxParticipants: 100, duration: null,
+  // OWN-02–OWN-10: hostUserId must be set so assertOwner passes for the creator.
+  // Tests that call mutating endpoints use user.id: 'teacher-1' (the host).
+  hostUserId: 'teacher-1', host_user_id: 'teacher-1',
+  streamType: 'SCHOOL', stream_type: 'SCHOOL',
+  quranPanelEnabled: true, recordingStartedAt: new Date(),
 };
 const STUDENT_RECORD   = { id: 'student-1', userId: 'student-user' };
 const ENROLLED_RECORD  = { id: 'enroll-1', studentId: 'student-1', classId: 'cls-1', isActive: true };
@@ -126,6 +133,9 @@ describe('Task 1: Generic LiveKit token (generateToken) guards liveclass-* rooms
 
   test('liveclass-* roomId: cross-school user is denied 403', async () => {
     prisma.liveClass.findFirst.mockResolvedValue(LC_LIVE); // schoolId: school-a
+    // Cross-school: user-x is in school-b, class is in school-a.
+    // legacyMatch = false → membership lookup for school-a returns null (not a member).
+    prisma.schoolMembership.findUnique.mockResolvedValue(null);
     const req = makeReq({ body: { roomId: 'liveclass-class-1' }, user: { id: 'user-x', role: 'STUDENT', schoolId: 'school-b', firstName: 'X', lastName: 'X' } });
     const res = makeRes();
     await livekitCtrl.generateToken(req, res, next);
@@ -551,7 +561,12 @@ describe('E2E attack scenarios', () => {
     const { isRedisReady } = require('../utils/redis');
     isRedisReady.mockReturnValue(true);
     prisma.liveClass.findFirst.mockResolvedValue(LC_LIVE);
-    const req = makeReq({ body: { event: { type: 'snapshot', dataUrl: 'x'.repeat(200_001) } } });
+    // OWN-07: broadcastDraw now requires the caller to be the creator (assertOwner).
+    // Use user.id: 'teacher-1' which matches LC_LIVE.hostUserId.
+    const req = makeReq({
+      body: { event: { type: 'snapshot', dataUrl: 'x'.repeat(200_001) } },
+      user: { id: 'teacher-1', role: 'TEACHER', schoolId: 'school-a', firstName: 'T', lastName: 'T' },
+    });
     const res = makeRes();
     await ctrl.broadcastDraw(req, res, next);
     expect(res.status).toHaveBeenCalledWith(413);
