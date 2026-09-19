@@ -57,9 +57,19 @@ describe('Phase 3 — DM VOICE_ROOM_SHARE backend', () => {
 
     test('body is optional for VOICE_ROOM_SHARE (no body required error for share type)', () => {
       const sendFn = extractFn(ctrlSrc, 'sendMessage');
-      // The body-required check is inside the else branch (non-share types only)
-      // VOICE_ROOM_SHARE block should not require body
-      const shareBlock = sendFn.slice(sendFn.indexOf('VOICE_ROOM_SHARE'), sendFn.indexOf('VOICE_ROOM_SHARE') + 800);
+      // P8C FIX (Category B — stale scan window): The test originally scanned from
+      // the FIRST occurrence of 'VOICE_ROOM_SHARE' in sendMessage, which lands on
+      // the req.body destructuring line. Because 'req.body' then 'required' then
+      // 'VOICE_ROOM_SHARE' all appear within 800 chars from that point (the error
+      // message "refEntityId is required for VOICE_ROOM_SHARE messages"), the pattern
+      // /VOICE_ROOM_SHARE.*body.*required/s falsely matched.
+      //
+      // Fix: start the scan from the SECOND occurrence — the if (msgType === ...) block —
+      // which is the actual conditional that enforces VOICE_ROOM_SHARE-specific rules.
+      // The body-required check is in the else branch for non-share types only.
+      const firstIdx  = sendFn.indexOf('VOICE_ROOM_SHARE');
+      const secondIdx = sendFn.indexOf('VOICE_ROOM_SHARE', firstIdx + 1);
+      const shareBlock = sendFn.slice(secondIdx, secondIdx + 800);
       expect(shareBlock).not.toMatch(/body.*required.*VOICE_ROOM_SHARE|VOICE_ROOM_SHARE.*body.*required/s);
     });
 
