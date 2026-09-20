@@ -323,17 +323,46 @@ describe('PARITY-09: RN moderator handlers do NOT call non-existent /moderator/ 
 // ─────────────────────────────────────────────────────────────────────────────
 // PARITY-10: Host ownership rule enforced in backend
 // ─────────────────────────────────────────────────────────────────────────────
-describe('PARITY-10: Host ownership — assertOwner applied to all mutation functions', () => {
+describe('PARITY-10: Host ownership — authorization applied to all mutation functions', () => {
   let src;
   beforeAll(() => { src = readSrc(BACKEND_CTRL); });
 
-  ['updateLiveClass', 'deleteLiveClass', 'startLiveClass', 'endLiveClass'].forEach(fn => {
-    test(`${fn} calls assertOwner`, () => {
+  // DEL-HOST Gap 1 fix: updateLiveClass no longer uses assertOwner — it uses
+  // isHostForEdit (creator OR delegated host) as the gate, with field-level
+  // restrictions below. deleteLiveClass remains assertOwner (structural op).
+  // startLiveClass and endLiveClass use assertHostOrDelegate (operational ops).
+  ['deleteLiveClass'].forEach(fn => {
+    test(`${fn} calls assertOwner (structural op — creator only)`, () => {
       if (!src) return;
       const idx = src.indexOf(`async function ${fn}`);
       expect(idx).toBeGreaterThan(-1);
       const body = src.slice(idx, idx + 800);
       expect(body).toMatch(/assertOwner/);
+    });
+  });
+
+  test('updateLiveClass uses isHostForEdit gate (DEL-HOST Gap 1 fix — creator or delegated host)', () => {
+    if (!src) return;
+    const idx = src.indexOf('async function updateLiveClass');
+    expect(idx).toBeGreaterThan(-1);
+    const body = src.slice(idx, idx + 1500);
+    // Gap 1: isHostForEdit replaces assertOwner as the entry gate
+    expect(body).toMatch(/isHostForEdit/);
+    // assertOwner NOT called in updateLiveClass (delegated host must reach field checks)
+    expect(body).not.toMatch(/assertOwner\(lc,\s*req\.user\)/);
+    // Creator-only field restrictions still enforced inside
+    expect(body).toMatch(/isCreatorForEdit/);
+    expect(body).toMatch(/maxSpeakers/);
+    expect(body).toMatch(/isRecorded/);
+  });
+
+  ['startLiveClass', 'endLiveClass'].forEach(fn => {
+    test(`${fn} calls assertHostOrDelegate (DEL-HOST operational op)`, () => {
+      if (!src) return;
+      const idx = src.indexOf(`async function ${fn}`);
+      expect(idx).toBeGreaterThan(-1);
+      const body = src.slice(idx, idx + 800);
+      expect(body).toMatch(/assertHostOrDelegate/);
     });
   });
 

@@ -61,6 +61,10 @@ const next = jest.fn();
 const LC = {
   id: 'class-1', schoolId: 'school-a', status: 'LIVE',
   livekitRoomName: 'liveclass-class-1', chatEnabled: true, quranPanelEnabled: false,
+  // OWN-06-OWN-07: hostUserId must match test user
+  hostUserId: 'teacher-1', host_user_id: 'teacher-1',
+  streamType: 'SCHOOL', stream_type: 'SCHOOL',
+  recordingStartedAt: new Date(), isOpenMic: false,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

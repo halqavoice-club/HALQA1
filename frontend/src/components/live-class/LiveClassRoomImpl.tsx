@@ -54,9 +54,10 @@ interface LiveClass {
   maxParticipants: number | null  // null = unlimited (public streams default)
   duration: number | null; scheduledAt: string | null
   recordingUrl: string | null
-  // hostUserId — set for PUBLIC streams; the creator's userId
-  // used to grant host controls to normal users (MEMBER role) who own the stream
+  // hostUserId — the creator's userId (permanent; never changes)
   hostUserId: string | null
+  // delegatedHostId — optional current operational host (SCHOOL streams only)
+  delegatedHostId?: string | null
   class?: { id: string; name: string } | null
   teacher?: { id: string; user: { id: string; firstName: string; lastName: string; avatarUrl?: string | null } } | null
   hostUser?: { id: string; firstName: string; lastName: string; avatarUrl?: string | null } | null
@@ -523,12 +524,20 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
   // ── isCreator / isHost / canManage — MUST come after lc is declared ─────────
   // isCreator: we created this live class (hostUserId matches our userId).
+  // This is ownership — used for assignment UI and list page ownership only.
   const isCreator = !!lc && !!user && lc.hostUserId === user.id
 
-  // isHost: server assigned us HOST role (authoritative), OR we are the creator
-  // (needed pre-join and for PUBLIC streams before participant data loads).
+  // DEL-HOST: isDelegatedHost — SCHOOL streams only.
+  const isDelegatedHost =
+    !!lc && !!user &&
+    lc.streamType === 'SCHOOL' &&
+    lc.delegatedHostId != null &&
+    lc.delegatedHostId === user.id
+
+  // isHost: server assigned HOST role (authoritative via participant record),
+  // OR we are the creator, OR we are the delegated host.
   // NEVER derived from global User.role — that leaks cross-school admin access.
-  const isHost = myParticipantRole === 'HOST' || isCreator
+  const isHost = myParticipantRole === 'HOST' || isCreator || isDelegatedHost
 
   // canManage: HOST or MODERATOR — can mute/kick/approve hands/run polls.
   const canManage = isHost || isModerator
@@ -807,10 +816,44 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     }
     socket.on('liveclass:you_were_demoted', onYouWereDemoted)
 
-    // liveclass:host_transferred, liveclass:role_changed, liveclass:you_are_host —
-    // DEAD EVENTS: no backend endpoint for host transfer or role change exists.
-    // These listeners are removed to avoid misleading state mutations from phantom events.
-    // If a backend host-transfer feature is implemented in future, re-add these handlers.
+    // DEL-HOST: delegated host assignment/revocation events
+    const onHostAssigned = (d: any) => {
+      if (d.liveClassId !== id) return
+      queryClient.setQueryData(['live-class', id], (old: LiveClass | undefined) => {
+        if (!old) return old
+        return { ...old, delegatedHostId: d.delegatedHostId ?? null }
+      })
+      queryClient.invalidateQueries({ queryKey: ['live-class', id] })
+      if (d.delegatedHostId === user?.id) {
+        toast({ title: 'You are now the delegated host' })
+        setParticipants(prev => prev.map(p =>
+          p.userId === user?.id ? { ...p, role: 'HOST' as const } : p
+        ))
+      }
+    }
+    const onHostRevoked = (d: any) => {
+      if (d.liveClassId !== id) return
+      queryClient.setQueryData(['live-class', id], (old: LiveClass | undefined) => {
+        if (!old) return old
+        return { ...old, delegatedHostId: null }
+      })
+      queryClient.invalidateQueries({ queryKey: ['live-class', id] })
+    }
+    const onYourHostRevoked = (d: any) => {
+      if (d.liveClassId !== id) return
+      queryClient.setQueryData(['live-class', id], (old: LiveClass | undefined) => {
+        if (!old) return old
+        return { ...old, delegatedHostId: null }
+      })
+      queryClient.invalidateQueries({ queryKey: ['live-class', id] })
+      setParticipants(prev => prev.map(p =>
+        p.userId === user?.id ? { ...p, role: 'MODERATOR' as const } : p
+      ))
+      toast({ title: 'Your delegated host role has been revoked', variant: 'destructive' })
+    }
+    socket.on('liveclass:host_assigned',      onHostAssigned)
+    socket.on('liveclass:host_revoked',       onHostRevoked)
+    socket.on('liveclass:your_host_revoked',  onYourHostRevoked)
 
     return () => {
       socket.emit('liveclass:leave_room', id)
@@ -1398,6 +1441,17 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
   const demoteModerator = async (_uid: string) => {
     toast({ title: 'Moderator demotion is not available in this version', variant: 'destructive' })
+  }
+
+  // DEL-HOST: Assign a delegated operational host — CREATOR ONLY.
+  const assignDelegatedHost = async (userId: string) => {
+    try {
+      await api.patch('/live-classes/' + id + '/host', { userId })
+      toast({ title: 'Delegated host assigned' })
+      queryClient.invalidateQueries({ queryKey: ['live-class', id] })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to assign delegated host', variant: 'destructive' })
+    }
   }
 
   // ── Toggle class settings live (PATCH) — optimistic update ───────────────
@@ -2938,7 +2992,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                 onEdit={isHost ? () => setShowEditModal(true) : undefined}
                 onPromoteModerator={isHost ? promoteToModerator : undefined}
                 onDemoteModerator={isHost ? demoteModerator : undefined}
-                onTransferHost={undefined /* host transfer has no backend endpoint */}
+                onTransferHost={isCreator ? assignDelegatedHost : undefined}
               />
               </div>
             )}

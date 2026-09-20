@@ -304,6 +304,8 @@ model User {
   liveClassHandQueue      LiveClassHandQueue[]   @relation("LiveClassHandQueue")
   // Hosted public live streams (no school required)
   hostedPublicLiveStreams LiveClass[]            @relation("LiveClassHost")
+  // Delegated hosting — live classes where this user is the current delegated operational host
+  delegatedLiveClasses    LiveClass[]            @relation("LiveClassDelegatedHost")
   // Report & Block
   reportsSent        UserReport[]       @relation("ReportsSent")
   reportsReceived    UserReport[]       @relation("ReportsReceived")
@@ -1660,6 +1662,13 @@ model LiveClass {
   // For SCHOOL streams this duplicates teacher.userId but is set for consistency.
   hostUserId         String?         @map("host_user_id")
   hostUser           User?           @relation("LiveClassHost", fields: [hostUserId], references: [id], onDelete: SetNull)
+  // delegatedHostId: optional delegated operational host for SCHOOL streams.
+  // NULL = creator is the operational host (default / backward-compatible).
+  // Non-NULL = this user is the currently authorized operational host in addition to the creator.
+  // Only the creator (hostUserId) may set or clear this field.
+  // Always NULL for PUBLIC streams. Cleared atomically when the class ends.
+  delegatedHostId    String?         @map("delegated_host_id")
+  delegatedHost      User?           @relation("LiveClassDelegatedHost", fields: [delegatedHostId], references: [id], onDelete: SetNull)
   title              String
   description        String?         @db.Text
   scheduledAt        DateTime?
@@ -1696,6 +1705,7 @@ model LiveClass {
   @@index([classId])
   @@index([teacherId])
   @@index([hostUserId])
+  @@index([delegatedHostId])
   @@index([status])
   @@index([scheduledAt])
   @@map("live_classes")

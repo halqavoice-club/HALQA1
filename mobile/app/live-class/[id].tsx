@@ -33,8 +33,10 @@ import { LiveVideoGrid, type VideoSpeaker } from '@/components/live-class/LiveVi
 interface LiveClass {
   id: string; title: string; description?: string;
   host: { id: string; name: string; avatar?: string };
-  // hostUserId — the userId of the creator (used to detect ownership without joining)
+  // hostUserId — the userId of the creator (permanent; never changes)
   hostUserId?: string;
+  // delegatedHostId — optional current operational host (SCHOOL streams only)
+  delegatedHostId?: string | null;
   // streamType — 'SCHOOL' or 'PUBLIC'
   streamType?: string;
   participantsCount: number;
@@ -532,7 +534,12 @@ export default function LiveClassScreen() {
 
   // isHost: server assigned HOST role when we joined, OR we are the creator.
   // NEVER derived from global User.role — that causes cross-school admin leaks.
-  const isHost = myParticipantRole === 'HOST' || isCreator;
+  const isDelegatedHost =
+    !!liveClass && !!user &&
+    liveClass.streamType === 'SCHOOL' &&
+    liveClass.delegatedHostId != null &&
+    liveClass.delegatedHostId === user.id;
+  const isHost = myParticipantRole === 'HOST' || isCreator || isDelegatedHost;
 
   // isTeacher: alias kept for socket event handlers and controls visibility.
   // true if HOST or MODERATOR (both get management controls).
@@ -945,6 +952,32 @@ export default function LiveClassScreen() {
       showMessage({ message: '⬇️ You have been moved to the audience', type: 'info', duration: 2000 });
     };
     socket.on('liveclass:you_were_demoted', onYouWereDemoted);
+
+    const onHostAssigned = (d: any) => {
+      if (d.liveClassId !== id) return;
+      qc.setQueryData(['live-class', id], (old: any) => old ? { ...old, delegatedHostId: d.delegatedHostId ?? null } : old);
+      qc.invalidateQueries({ queryKey: ['live-class', id] });
+      if (d.delegatedHostId === user?.id) {
+        showMessage({ message: 'You are now the delegated host', type: 'success', duration: 3000 });
+        setParticipants(prev => prev.map(p => p.userId === user?.id ? { ...p, role: 'HOST' } : p));
+      }
+    };
+    const onHostRevoked = (d: any) => {
+      if (d.liveClassId !== id) return;
+      qc.setQueryData(['live-class', id], (old: any) => old ? { ...old, delegatedHostId: null } : old);
+      qc.invalidateQueries({ queryKey: ['live-class', id] });
+    };
+    const onYourHostRevoked = (d: any) => {
+      if (d.liveClassId !== id) return;
+      qc.setQueryData(['live-class', id], (old: any) => old ? { ...old, delegatedHostId: null } : old);
+      qc.invalidateQueries({ queryKey: ['live-class', id] });
+      setParticipants(prev => prev.map(p => p.userId === user?.id ? { ...p, role: 'MODERATOR' } : p));
+      showMessage({ message: 'Your delegated host role has been revoked', type: 'danger', duration: 3000 });
+    };
+    socket.on('liveclass:host_assigned',      onHostAssigned);
+    socket.on('liveclass:host_revoked',       onHostRevoked);
+    socket.on('liveclass:your_host_revoked',  onYourHostRevoked);
+
     // Sprint 4: wire isSpeaking to real LiveKit audio activity
     // The useLiveKitAudio hook emits voice:speaking when the local participant's speaking
     // state changes. We relay this to all room members via Socket.IO so their grids
@@ -997,6 +1030,9 @@ export default function LiveClassScreen() {
       socket.off('liveclass:speaker_removed',      onSpeakerRemoved);
       socket.off('liveclass:speaker_demoted',      onSpeakerDemoted);
       socket.off('liveclass:you_were_demoted',     onYouWereDemoted);
+      socket.off('liveclass:host_assigned',        onHostAssigned);
+      socket.off('liveclass:host_revoked',         onHostRevoked);
+      socket.off('liveclass:your_host_revoked',    onYourHostRevoked);
       socket.off('voice:speaking', onVoiceSpeaking);
     };
   }, [id, user, isHost, qc, router, lk]);
@@ -1309,14 +1345,27 @@ export default function LiveClassScreen() {
   // Host transfer — NOT IMPLEMENTED (no backend endpoint, no ownership transfer exists)
   // PARITY-NOTE: POST /live-classes/:id/transfer/:uid does not exist.
   // The ownership rule is: creator stays HOST forever. Removed the misleading UI call.
-  const handleTransferHost = useCallback((_userId: string, _name: string) => {
-    showMessage({
-      message: 'Host transfer is not available',
-      description: 'The stream creator remains host for the duration of the stream.',
-      type: 'info',
-      duration: 3000,
-    });
-  }, []);
+  const handleAssignHost = useCallback((targetUserId: string, name: string) => {
+    Alert.alert(
+      'Assign Delegated Host',
+      \Make \ the operational host? You remain the class owner.\,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Assign',
+          onPress: async () => {
+            try {
+              await api.patch(\/live-classes/\/host\, { userId: targetUserId });
+              showMessage({ message: \ is now the delegated host\, type: 'success', duration: 2500 });
+              qc.invalidateQueries({ queryKey: ['live-class', id] });
+            } catch (e: any) {
+              showMessage({ message: e?.response?.data?.message ?? 'Failed to assign delegated host', type: 'danger', duration: 3000 });
+            }
+          },
+        },
+      ],
+    );
+  }, [id, qc]);
 
   const sendChat = useCallback(async () => {
     if (!chatText.trim() || !user) return;
@@ -2354,7 +2403,7 @@ export default function LiveClassScreen() {
 
       {/* Modals */}
       <HandQueueModal visible={showHands} hands={hands} onClose={() => setShowHands(false)} onApprove={handleApproveHand} onReject={handleRejectHand} />
-      <ParticipantsModal visible={showParticipants} participants={participants} myId={user?.id ?? ''} onClose={() => setShowParticipants(false)} onMute={handleMuteParticipant} onKick={handleKickParticipant} onDemote={handleDemoteFromStage} onInvite={handleInviteToStage} isHost={isHost} onPromoteMod={handlePromoteModerator} onDemoteMod={handleDemoteModerator} onTransferHost={isHost ? handleTransferHost : undefined} />
+      <ParticipantsModal visible={showParticipants} participants={participants} myId={user?.id ?? ''} onClose={() => setShowParticipants(false)} onMute={handleMuteParticipant} onKick={handleKickParticipant} onDemote={handleDemoteFromStage} onInvite={handleInviteToStage} isHost={isHost} onPromoteMod={handlePromoteModerator} onDemoteMod={handleDemoteModerator} onTransferHost={isCreator ? handleAssignHost : undefined} />
       <LiveClassGiftPanel
         liveClassId={id ?? ''}
         participants={participants.map(p => ({ userId: p.userId, role: p.role, firstName: p.firstName, lastName: p.lastName, avatarUrl: p.avatarUrl }))}

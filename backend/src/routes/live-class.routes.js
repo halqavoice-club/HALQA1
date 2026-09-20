@@ -357,4 +357,43 @@ async function validateCoverImage(req, res, next) {
 
 router.post('/:id/cover', resolveStreamStaffAccess, coverUpload.single('cover'), validateCoverImage, ctrl.uploadCoverImage);
 
+// ─── DELEGATED HOST ASSIGNMENT / REVOCATION ───────────────────────────────────
+// PATCH /:id/host  — creator assigns a delegated operational host (SCHOOL only)
+// DELETE /:id/host — creator revokes the current delegated host (SCHOOL only)
+//
+// Both routes use authenticate (already applied above) + eduMember school guard.
+// The controller enforces: creator-only, SCHOOL-only, staff-only target,
+// SUPER_ADMIN blocked, atomic update, and audit logging.
+router.patch('/:id/host',
+  (req, res, next) => {
+    // Only SCHOOL streams support delegation — and only school members can call this.
+    // We apply eduMember for SCHOOL, but the controller will also gate on streamType.
+    const middlewares = eduMember;
+    let i = 0;
+    const run = (err) => {
+      if (err) return next(err);
+      if (i >= middlewares.length) return next();
+      middlewares[i++](req, res, run);
+    };
+    run();
+  },
+  [body('userId').notEmpty().withMessage('userId is required')],
+  validate,
+  ctrl.assignDelegatedHost
+);
+
+router.delete('/:id/host',
+  (req, res, next) => {
+    const middlewares = eduMember;
+    let i = 0;
+    const run = (err) => {
+      if (err) return next(err);
+      if (i >= middlewares.length) return next();
+      middlewares[i++](req, res, run);
+    };
+    run();
+  },
+  ctrl.revokeDelegatedHost
+);
+
 module.exports = router;
