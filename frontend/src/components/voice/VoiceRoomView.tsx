@@ -335,6 +335,7 @@ export function VoiceRoomView({ onLeave }: Props) {
     isChatOpen, toggleChat, isHandQueueOpen, toggleHandQueue,
     speakerQueue, isWaitingListOpen, toggleWaitingList,
     wallet, isGiftPanelOpen, toggleGiftPanel,
+    registerLiveKitDisconnect, clearLiveKitDisconnect,
   } = useVoiceStore()
 
   const roomId = activeRoom?.id ?? null
@@ -377,6 +378,13 @@ export function VoiceRoomView({ onLeave }: Props) {
     enableMic,
     disableMic,
   } = useLiveKit(roomId)
+
+  // Register the LiveKit disconnect fn in the store so the join page for a
+  // different room can fully tear down this session before switching.
+  useEffect(() => {
+    registerLiveKitDisconnect(disconnect)
+    return () => clearLiveKitDisconnect()
+  }, [disconnect, registerLiveKitDisconnect, clearLiveKitDisconnect]) // eslint-disable-line
 
   const [volume, setVolume] = useState(100)
 

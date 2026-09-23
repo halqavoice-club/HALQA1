@@ -16,6 +16,10 @@ const ALWAYS_ALLOWED = [
   '/education', '/school-memberships',
   // Education onboarding — accessible without school membership
   '/schools/join', '/school-memberships/create',
+  // Social features — all authenticated users can access these regardless of role
+  '/live-class', '/live-stream', '/voice-club', '/feed', '/explore',
+  '/communities', '/dm', '/group-chat', '/messages', '/social',
+  '/creator', '/wallet', '/leaderboard',
 ]
 
 /**

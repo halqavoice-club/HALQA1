@@ -1719,10 +1719,6 @@ export default function VoiceRoomScreen() {
         });
       }
 
-      // Populate participants from response
-      // SEAT SYNC FIX: Include _joinedAt from API data so the sort key is available
-      // from the start. The API returns participants already sorted by [role, joinedAt]
-      // so the initial sort is correct, but _joinedAt enables stable re-sort on updates.
       const parts = (roomData?.participants || []).map((p: any) => ({
         id:               p.userId ?? p.id,
         name:             p.user ? `${p.user.firstName} ${p.user.lastName}`.trim() : 'User',
@@ -1732,7 +1728,7 @@ export default function VoiceRoomScreen() {
         isSpeaking:       false,
         handRaised:       p.handRaised ?? false,
         mutedByModerator: p.mutedByModerator ?? false,
-        isActive:         p.isActive !== false, // default true; false only if explicitly inactive
+        isActive:         p.isActive !== false,
         seatNumber:       p.seatNumber != null ? Number(p.seatNumber) : null,
         _joinedAt:        p.joinedAt ?? '',
       }));
@@ -1743,7 +1739,6 @@ export default function VoiceRoomScreen() {
         isActive: true, seatNumber: null,
         _joinedAt: '',
       }]);
-      // Seed locked seats from join response
       if (Array.isArray(roomData?.lockedSeats)) {
         setLockedSeats(roomData.lockedSeats);
       }
@@ -1753,20 +1748,61 @@ export default function VoiceRoomScreen() {
         const tokenRes = await api.post(`/voice/${id}/livekit-token`);
         const { token: lkToken, livekitUrl } = tokenRes.data.data;
         if (lkToken && livekitUrl) {
-          // Pass roomId so useLiveKitAudio can emit voice:speaking via socket (FIX-12)
           await lk.connect(livekitUrl, lkToken, true /* start muted */, id);
         }
       } catch { /* non-fatal — audio not available in Expo Go */ }
-      showMessage({ message: `Joined ${room.name}`, type: 'success' });
+      showMessage({ message: `Joined ${room.name ?? room.title}`, type: 'success' });
     } catch (err: any) {
-      // 409 = user already in another Voice Club room — not a system error, show as warning
-      const is409 = err?.response?.status === 409;
+      const code = err?.response?.data?.errors?.code;
+      if (code === 'VOICE_ROOM_ALREADY_ACTIVE') {
+        // Show native conflict dialog — names room B (the active one) clearly.
+        // The conflict data lives under response.data.errors (not response.data directly).
+        const activeRoomEmoji = err?.response?.data?.errors?.activeRoomEmoji ?? '🎙️';
+        const activeRoomTitle = err?.response?.data?.errors?.activeRoomTitle ?? 'another room';
+        const activeRoomId    = err?.response?.data?.errors?.activeRoomId    ?? '';
+        const activeRoomTopic = err?.response?.data?.errors?.activeRoomTopic ?? null;
+        const subtitle = activeRoomTopic
+          ? `"${activeRoomTitle}" · ${activeRoomTopic}`
+          : `"${activeRoomTitle}"`;
+
+        Alert.alert(
+          `${activeRoomEmoji} You're already in a room`,
+          `You are currently in ${subtitle}.\n\nLeave that Voice Club to join this one?`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Leave & Join',
+              style: 'destructive',
+              onPress: async () => {
+                setIsConnecting(true);
+                try {
+                  // 1. Disconnect LiveKit from room B
+                  lk.disconnect();
+                  // 2. Leave room B on server
+                  try { await api.post(`/voice/${activeRoomId}/leave`); } catch {}
+                  // 3. Leave Socket.IO room B
+                  const socket = getSocket();
+                  if (socket) socket.emit('voice:leave_room', activeRoomId);
+                  // 4. Clear store
+                  clearActiveRoom();
+                  // 5. Join room A (this room)
+                  await handleJoin();
+                } finally {
+                  setIsConnecting(false);
+                }
+              },
+            },
+          ],
+          { cancelable: true }
+        );
+        return;
+      }
       showMessage({
         message: err?.response?.data?.message ?? 'Failed to join room',
-        type: is409 ? 'warning' : 'danger',
+        type: 'danger',
       });
     } finally { setIsConnecting(false); }
-  }, [id, room, loadChat]);
+  }, [id, room, loadChat, lk, clearActiveRoom]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLeave = useCallback(() => {
     Alert.alert('Leave Room', 'Are you sure you want to leave?', [

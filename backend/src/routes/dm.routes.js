@@ -28,7 +28,7 @@ router.post('/conversations/:convId/messages',
     // { nullable: true } so that body:null (sent by VOICE_ROOM_SHARE when user adds no note)
     // is treated as absent rather than failing isString().
     body('body').optional({ nullable: true }).isString().isLength({ max: 5000 }).withMessage('Message too long (max 5000 chars)'),
-    body('msgType').optional().isIn(['TEXT', 'IMAGE', 'VIDEO', 'GIF', 'VOICE', 'AUDIO', 'FILE', 'VOICE_ROOM_SHARE'])
+    body('msgType').optional().isIn(['TEXT', 'IMAGE', 'VIDEO', 'GIF', 'VOICE', 'AUDIO', 'FILE', 'VOICE_ROOM_SHARE', 'LIVE_CLASS_SHARE'])
       .withMessage('Invalid msgType'),
     body('mediaUrl').optional().isString().isLength({ min: 1, max: 2048 }).withMessage('Invalid mediaUrl'),
     body('mimeType').optional().isString().isLength({ max: 128 }),

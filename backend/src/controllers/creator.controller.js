@@ -10,20 +10,16 @@ const { getIo }      = require('../sockets');
 const { successResponse, errorResponse } = require('../utils/response');
 const { notify }     = require('../services/notification.service');
 const logger         = require('../utils/logger');
-
-const PLATFORM_CUT = 0.5;
-const toDiamonds   = (coins) => Math.floor(coins * (1 - PLATFORM_CUT));
-
-const CREATOR_SELECT = {
-  id: true, userId: true, displayName: true, tagline: true,
-  isActive: true, isVerified: true, totalEarned: true,
-  subscriberCount: true, tipCount: true, links: true, createdAt: true,
-  user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true, bio: true } }
-};
+const { toDiamonds } = require('../services/economy.config');
+const { writePlatformRevenueFromSpend } = require('../utils/platformRevenue');
 
 // ─── BECOME A CREATOR ─────────────────────────────────────────────────────────
 async function becomeCreator(req, res, next) {
   try {
+    // SUPER_ADMIN isolation (Task 10.1): platform admin cannot create a creator profile
+    if (req.user.role === 'SUPER_ADMIN') {
+      return errorResponse(res, 'SUPER_ADMIN cannot create a creator profile', 403);
+    }
     const { displayName, tagline, links } = req.body;
     const existing = await prisma.creatorProfile.findUnique({ where: { userId: req.user.id } });
     if (existing) return successResponse(res, existing, 'Already a creator');
@@ -125,6 +121,10 @@ async function updateTier(req, res, next) {
 // ─── SUBSCRIBE TO CREATOR ─────────────────────────────────────────────────────
 async function subscribe(req, res, next) {
   try {
+    // SUPER_ADMIN isolation (Task 10.1): platform admin cannot subscribe to creators
+    if (req.user.role === 'SUPER_ADMIN') {
+      return errorResponse(res, 'SUPER_ADMIN cannot subscribe to creator tiers', 403);
+    }
     const { userId: creatorUserId } = req.params;
     const { tierId } = req.body;
     const subscriberId = req.user.id;
@@ -140,7 +140,8 @@ async function subscribe(req, res, next) {
     const tier = profile.tiers.find(t => t.id === tierId && t.isActive);
     if (!tier) return errorResponse(res, 'Tier not found', 404);
 
-    // Check existing active subscription
+    // Check existing active subscription (pre-transaction read is fine — duplicate active check is
+    // inside the transaction too via upsert; this just avoids pointless DB work on clear duplicates)
     const existing = await prisma.creatorSubscription.findUnique({
       where: { subscriberId_creatorId: { subscriberId, creatorId: profile.id } }
     });
@@ -148,39 +149,87 @@ async function subscribe(req, res, next) {
       return successResponse(res, existing, 'Already subscribed');
     }
 
-    // Deduct coins from subscriber
-    const wallet = await prisma.wallet.findUnique({ where: { userId: subscriberId } });
-    if (!wallet || wallet.coins < tier.priceCoins) {
-      return errorResponse(res, `Not enough coins. Need ${tier.priceCoins}, have ${wallet?.coins ?? 0}`, 402);
-    }
-
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
     const diamonds  = toDiamonds(tier.priceCoins);
 
-    await prisma.$transaction(async (tx) => {
-      // Deduct coins from subscriber
-      await tx.wallet.update({ where: { userId: subscriberId }, data: { coins: { decrement: tier.priceCoins }, totalSpent: { increment: tier.priceCoins } } });
-      // Credit diamonds to creator
-      await tx.wallet.upsert({ where: { userId: creatorUserId }, create: { userId: creatorUserId, coins: 0, diamonds, totalSpent: 0, totalEarned: diamonds }, update: { diamonds: { increment: diamonds }, totalEarned: { increment: diamonds } } });
-      // Create/update subscription
-      const sub = await tx.creatorSubscription.upsert({
-        where:  { subscriberId_creatorId: { subscriberId, creatorId: profile.id } },
-        create: { id: uuidv4(), subscriberId, creatorId: profile.id, tierId, status: 'ACTIVE', expiresAt, coinsCharged: tier.priceCoins },
-        update: { tierId, status: 'ACTIVE', expiresAt, renewedAt: new Date(), coinsCharged: { increment: tier.priceCoins } }
+    // ── Atomic transaction with optimistic lock ───────────────────────────────
+    // The pre-transaction balance check has been REMOVED to eliminate the TOCTOU
+    // race condition. The balance is now validated exclusively via the optimistic
+    // lock on wallet.update (WHERE coins >= priceCoins).
+    //
+    // If two concurrent subscribe requests arrive simultaneously:
+    //   - Both enter the transaction
+    //   - Only one wins the optimistic lock (WHERE coins >= priceCoins)
+    //   - The loser gets P2025 → rolls back → returns 402
+    //   - Wallet.coins can never go below zero (DB CHECK constraint is the final guard)
+    let sub;
+    try {
+      sub = await prisma.$transaction(async (tx) => {
+        // 1. Optimistic-lock coin deduction: only succeeds if coins >= priceCoins
+        //    P2025 is thrown if no row matches → insufficient balance under concurrency
+        await tx.wallet.update({
+          where: { userId: subscriberId, coins: { gte: tier.priceCoins } },
+          data:  { coins: { decrement: tier.priceCoins }, totalSpent: { increment: tier.priceCoins } }
+        });
+
+        // 2. Credit diamonds to creator
+        await tx.wallet.upsert({
+          where:  { userId: creatorUserId },
+          create: { userId: creatorUserId, coins: 0, diamonds, totalSpent: 0, totalEarned: diamonds },
+          update: { diamonds: { increment: diamonds }, totalEarned: { increment: diamonds } }
+        });
+
+        // 3. Create/update subscription
+        const subscription = await tx.creatorSubscription.upsert({
+          where:  { subscriberId_creatorId: { subscriberId, creatorId: profile.id } },
+          create: { id: uuidv4(), subscriberId, creatorId: profile.id, tierId, status: 'ACTIVE', expiresAt, coinsCharged: tier.priceCoins },
+          update: { tierId, status: 'ACTIVE', expiresAt, renewedAt: new Date(), coinsCharged: { increment: tier.priceCoins } }
+        });
+
+        // 4. Increment subscriber count on creator profile
+        await tx.creatorProfile.update({
+          where: { id: profile.id },
+          data:  { subscriberCount: { increment: existing ? 0 : 1 }, totalEarned: { increment: diamonds } }
+        });
+
+        // 5. Write SUBSCRIPTION ledger entry — FATAL (no .catch)
+        //    Task 6.1: removed .catch(() => {}) — ledger failure rolls back entire transaction
+        await tx.walletTransaction.create({
+          data: {
+            userId:         subscriberId,
+            type:           'SUBSCRIPTION',
+            coins:          -tier.priceCoins,
+            description:    `Subscribed to ${tier.name} tier of creator ${creatorUserId}`,
+            subscriptionId: subscription.id
+          }
+        });
+
+        // 6. Write platform revenue entry — FATAL (no .catch)
+        //    Platform retains 50% of subscription charge.
+        await writePlatformRevenueFromSpend(tx, {
+          sourceType: 'SUBSCRIPTION',
+          sourceId:   subscription.id,
+          userId:     subscriberId,
+          spendCoins: tier.priceCoins,
+        });
+
+        return subscription;
       });
-      // Increment subscriber count
-      await tx.creatorProfile.update({ where: { id: profile.id }, data: { subscriberCount: { increment: existing ? 0 : 1 }, totalEarned: { increment: diamonds } } });
-      // Wallet ledger entry
-      await tx.walletTransaction.create({
-        data: {
-          userId:         subscriberId,
-          type:           'SUBSCRIPTION',
-          coins:          -tier.priceCoins,
-          description:    `Subscribed to ${tier.name} tier of creator ${creatorUserId}`,
-          subscriptionId: sub.id
-        }
-      }).catch(() => {}); // non-fatal
-    });
+    } catch (txErr) {
+      // P2025 = optimistic lock miss (insufficient coins at commit time)
+      if (txErr.code === 'P2025' || txErr.message?.includes('Record to update not found')) {
+        const currentWallet = await prisma.wallet.findUnique({
+          where:  { userId: subscriberId },
+          select: { coins: true }
+        });
+        return errorResponse(
+          res,
+          `Not enough coins. Need ${tier.priceCoins}, have ${currentWallet?.coins ?? 0}`,
+          402
+        );
+      }
+      throw txErr;
+    }
 
     await notify(creatorUserId, {
       type:  'NEW_SUBSCRIBER',
@@ -219,6 +268,10 @@ async function unsubscribe(req, res, next) {
 // ─── SEND TIP ─────────────────────────────────────────────────────────────────
 async function sendTip(req, res, next) {
   try {
+    // SUPER_ADMIN isolation (Task 10.1): platform admin cannot send tips
+    if (req.user.role === 'SUPER_ADMIN') {
+      return errorResponse(res, 'SUPER_ADMIN cannot send creator tips', 403);
+    }
     const { userId: creatorUserId } = req.params;
     const { amount, message, postId, idempotencyKey } = req.body;
     const senderId = req.user.id;
@@ -248,7 +301,8 @@ async function sendTip(req, res, next) {
       });
       await tx.creatorProfile.update({ where: { id: profile.id }, data: { tipCount: { increment: 1 }, totalEarned: { increment: diamonds } } });
 
-      // Wallet ledger entry — records coin debit for audit trail
+      // Wallet ledger entry — FATAL (no .catch)
+      // Task 6.2: removed .catch(() => {}) — ledger failure rolls back entire tip transaction
       await tx.walletTransaction.create({
         data: {
           userId:      senderId,
@@ -257,7 +311,16 @@ async function sendTip(req, res, next) {
           description: `Tip to creator ${creatorUserId}${message ? ': ' + message.substring(0, 50) : ''}`,
           tipId:       t.id
         }
-      }).catch(() => {}); // non-fatal
+      });
+
+      // Platform revenue entry — FATAL (no .catch)
+      // Platform retains 50% of tip amount.
+      await writePlatformRevenueFromSpend(tx, {
+        sourceType: 'TIP',
+        sourceId:   t.id,
+        userId:     senderId,
+        spendCoins: amount,
+      });
 
       return t;
     });
@@ -331,133 +394,10 @@ async function getMySubscriptions(req, res, next) {
   } catch (e) { next(e); }
 }
 
-// ─── PAYOUT REQUEST ───────────────────────────────────────────────────────────
-// Creators can request to withdraw their diamond balance.
-// Diamonds are converted to USD at a configurable rate (default: 100 diamonds = $1).
-// Payout requests are recorded and processed manually by platform admins,
-// or automatically via Stripe Connect (future integration).
-//
-// Conversion rate: DIAMOND_TO_USD env var (default: 100 diamonds per $1)
-// Minimum payout: MIN_PAYOUT_DIAMONDS env var (default: 1000 diamonds = $10)
-
-const DIAMOND_TO_USD   = parseFloat(process.env.DIAMOND_TO_USD   || '100');  // diamonds per $1
-const MIN_PAYOUT       = parseInt(process.env.MIN_PAYOUT_DIAMONDS || '1000', 10);
-
-async function requestPayout(req, res, next) {
-  try {
-    const { diamonds, paymentMethod = 'bank_transfer', paymentDetails } = req.body;
-
-    if (!diamonds || diamonds < MIN_PAYOUT) {
-      return errorResponse(res, `Minimum payout is ${MIN_PAYOUT} diamonds ($${(MIN_PAYOUT / DIAMOND_TO_USD).toFixed(2)})`, 400);
-    }
-    if (!paymentDetails?.accountHolder) {
-      return errorResponse(res, 'paymentDetails.accountHolder is required', 400);
-    }
-
-    // Verify creator profile
-    const profile = await prisma.creatorProfile.findUnique({ where: { userId: req.user.id } });
-    if (!profile || !profile.isActive) return errorResponse(res, 'Creator profile not found', 404);
-
-    // Check diamond balance
-    const wallet = await prisma.wallet.findUnique({ where: { userId: req.user.id } });
-    if (!wallet || wallet.diamonds < diamonds) {
-      return errorResponse(res, `Insufficient diamonds. You have ${wallet?.diamonds ?? 0}, requested ${diamonds}`, 400);
-    }
-
-    const usdAmount   = parseFloat((diamonds / DIAMOND_TO_USD).toFixed(2));
-    const platformFee = parseFloat((usdAmount * 0.1).toFixed(2));  // 10% platform fee
-    const netAmount   = parseFloat((usdAmount - platformFee).toFixed(2));
-
-    // Atomically deduct diamonds and create payout record
-    await prisma.$transaction([
-      // Deduct diamonds from wallet
-      prisma.wallet.update({
-        where: { userId: req.user.id },
-        data:  { diamonds: { decrement: diamonds } }
-      }),
-      // Record the payout request as a WalletTransaction (REFUND type = outgoing)
-      prisma.walletTransaction.create({
-        data: {
-          userId:      req.user.id,
-          type:        'REFUND',
-          coins:       0,
-          description: `Payout request: ${diamonds} diamonds → $${netAmount} (after ${platformFee} platform fee)`,
-        }
-      })
-    ]);
-
-    // Notify platform admins about the payout request
-    const { getIo } = require('../sockets');
-    const io = getIo();
-    if (io) {
-      io.to('role:SUPER_ADMIN').emit('creator:payout_requested', {
-        userId:          req.user.id,
-        creatorName:     `${req.user.firstName} ${req.user.lastName}`,
-        diamonds,
-        usdAmount,
-        platformFee,
-        netAmount,
-        paymentMethod,
-        // Don't log full payment details — just flag that they exist
-        hasPaymentDetails: true,
-        requestedAt:     new Date().toISOString()
-      });
-    }
-
-    logger.info(`[creator:payout] ${req.user.id} requested ${diamonds} diamonds ($${netAmount} net)`);
-
-    return successResponse(res, {
-      diamonds,
-      usdAmount,
-      platformFee,
-      netAmount,
-      paymentMethod,
-      status: 'PENDING',
-      message: 'Payout request submitted. Processing takes 3-5 business days.'
-    }, 'Payout request submitted successfully');
-  } catch (e) { next(e); }
-}
-
-// ─── GET PAYOUT INFO ──────────────────────────────────────────────────────────
-async function getPayoutInfo(req, res, next) {
-  try {
-    const profile = await prisma.creatorProfile.findUnique({ where: { userId: req.user.id } });
-    if (!profile) return errorResponse(res, 'Creator profile not found', 404);
-
-    const wallet = await prisma.wallet.findUnique({
-      where:  { userId: req.user.id },
-      select: { diamonds: true, totalEarned: true }
-    });
-
-    const diamonds    = wallet?.diamonds ?? 0;
-    const usdValue    = parseFloat((diamonds / DIAMOND_TO_USD).toFixed(2));
-    const platformFee = parseFloat((usdValue * 0.1).toFixed(2));
-    const netValue    = parseFloat((usdValue - platformFee).toFixed(2));
-    const canRequest  = diamonds >= MIN_PAYOUT;
-
-    return successResponse(res, {
-      diamonds,
-      usdValue,
-      platformFee,
-      netValue,
-      minPayout:       MIN_PAYOUT,
-      minPayoutUsd:    parseFloat((MIN_PAYOUT / DIAMOND_TO_USD).toFixed(2)),
-      conversionRate:  `${DIAMOND_TO_USD} diamonds = $1`,
-      platformFeeRate: '10%',
-      canRequest,
-      totalEarned:     wallet?.totalEarned ?? 0,
-      message:         canRequest
-        ? `You can withdraw $${netValue} (after 10% platform fee)`
-        : `Minimum ${MIN_PAYOUT} diamonds required. You have ${diamonds}.`
-    });
-  } catch (e) { next(e); }
-}
-
 module.exports = {
   becomeCreator, getCreatorProfile, updateCreatorProfile,
   createTier, updateTier,
   subscribe, unsubscribe,
   sendTip,
   getDashboard, getMySubscriptions,
-  requestPayout, getPayoutInfo
 };

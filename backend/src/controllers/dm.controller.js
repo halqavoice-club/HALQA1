@@ -296,16 +296,13 @@ async function sendMessage(req, res, next) {
       refEntityType, refEntityId,
     } = req.body;
 
-    // Enforce allowed message types (includes VOICE_ROOM_SHARE added in Phase 5)
-    const ALLOWED_TYPES = ['TEXT', 'IMAGE', 'VIDEO', 'GIF', 'VOICE', 'AUDIO', 'FILE', 'VOICE_ROOM_SHARE'];
+    // Enforce allowed message types (includes VOICE_ROOM_SHARE and LIVE_CLASS_SHARE)
+    const ALLOWED_TYPES = ['TEXT', 'IMAGE', 'VIDEO', 'GIF', 'VOICE', 'AUDIO', 'FILE', 'VOICE_ROOM_SHARE', 'LIVE_CLASS_SHARE'];
     if (!ALLOWED_TYPES.includes(msgType)) {
       return errorResponse(res, `Invalid msgType. Allowed: ${ALLOWED_TYPES.join(', ')}`, 400);
     }
 
     // ── VOICE_ROOM_SHARE: structured reference validation ─────────────────────
-    // Phase 5: when sharing a Voice Club room to DM, only the roomId is trusted.
-    // The client must supply refEntityType = "VoiceRoom" and a non-empty refEntityId.
-    // Title, host, participant count, privacy, status — all come from the DB, never the client.
     if (msgType === 'VOICE_ROOM_SHARE') {
       if (!refEntityId || !refEntityId.trim()) {
         return errorResponse(res, 'refEntityId is required for VOICE_ROOM_SHARE messages', 400);
@@ -313,7 +310,6 @@ async function sendMessage(req, res, next) {
       if (refEntityType !== 'VoiceRoom') {
         return errorResponse(res, 'refEntityType must be "VoiceRoom" for VOICE_ROOM_SHARE messages', 400);
       }
-      // Verify the VoiceRoom exists and is not soft-deleted
       const voiceRoom = await prisma.voiceRoom.findUnique({
         where: { id: refEntityId.trim() },
         select: { id: true, deletedAt: true },
@@ -322,6 +318,23 @@ async function sendMessage(req, res, next) {
         return errorResponse(res, 'Voice Club room not found', 404);
       }
       // body is optional for VOICE_ROOM_SHARE (the room card is the content)
+
+    // ── LIVE_CLASS_SHARE: live class / live stream reference validation ────────
+    } else if (msgType === 'LIVE_CLASS_SHARE') {
+      if (!refEntityId || !refEntityId.trim()) {
+        return errorResponse(res, 'refEntityId is required for LIVE_CLASS_SHARE messages', 400);
+      }
+      if (refEntityType !== 'LiveClass') {
+        return errorResponse(res, 'refEntityType must be "LiveClass" for LIVE_CLASS_SHARE messages', 400);
+      }
+      const liveClass = await prisma.$queryRawUnsafe(
+        'SELECT id FROM live_classes WHERE id = ? AND deletedAt IS NULL LIMIT 1',
+        refEntityId.trim()
+      );
+      if (!liveClass || liveClass.length === 0) {
+        return errorResponse(res, 'Live class not found', 404);
+      }
+      // body is optional for LIVE_CLASS_SHARE
     } else {
       // Non-share types: existing validation unchanged
       const isMediaMsg = msgType !== 'TEXT';

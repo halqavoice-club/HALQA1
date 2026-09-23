@@ -1,6 +1,10 @@
-# Product: Halqa Management System
+# Product: Halqa Platform
 
-**Halqa** is a full-stack Islamic school management platform with an integrated social and live media layer. It is used by school admins, teachers, students, and guardians across multiple schools (multi-tenant via a SUPER_ADMIN platform tier).
+**Halqa** is a general-purpose, multi-purpose digital platform. HALQA is a place where people connect, talk, learn, create, teach, share, build communities, participate in live experiences, and earn.
+
+HALQA is not Islamic-only and not school-only. School Management and Education are specialized domains within the platform — not the global product identity. Islamic education, Islamic communities, and Islamic-oriented school features are supported use cases. Users do not need school membership to use HALQA's general platform capabilities (social, voice, live, messaging, communities, creator tools).
+
+The platform is multi-tenant. School-scoped features (ERP, Live Classes, attendance, grades) are used by school admins, teachers, students, and guardians across multiple schools, governed by a SUPER_ADMIN platform tier.
 
 ## Core Domains
 

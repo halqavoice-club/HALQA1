@@ -21,6 +21,7 @@ const payoutLimit = rateLimit({
 router.use(authenticate);
 
 // ── User endpoints ────────────────────────────────────────────────────────────
+router.get('/info',    ctrl.getPayoutInfo);
 router.get('/history', ctrl.getPayoutHistory);
 
 router.post('/request',

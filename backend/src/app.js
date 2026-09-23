@@ -1134,6 +1134,7 @@ const adminStatsRoutes   = require('./routes/admin-stats.routes');
 const adminActionsRoutes = require('./routes/admin-actions.routes');
 app.use('/api/v1/admin/stats',   adminStatsRoutes);        // Super Admin platform statistics
 app.use('/api/v1/admin/actions', adminActionsRoutes);      // Sprint 2: Admin termination endpoints (LS-GAP-001)
+app.use('/api/v1/admin/economy', require('./routes/admin-economy.routes')); // Task 13.1: Economy revenue reporting (SUPER_ADMIN only)
 app.use('/api/v1/school-memberships', schoolMembershipRoutes); // School Memberships (Education domain)
 app.use('/api/v1/stories',        storyRoutes);           // Phase B-3: Stories
 app.use('/api/v1/communities',    communityRoutes);       // Phase B-4: Communities

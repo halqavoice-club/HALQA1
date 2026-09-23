@@ -18,6 +18,7 @@ const QUEUE_NAMES = {
   POST_SCHEDULER:       'post-scheduler',
   ROOM_REMINDERS:       'room-reminders',         // Push notifications for scheduled voice rooms
   LIVE_CLASS_AUTOEND:   'live-class-autoend',     // Sprint 3: durable auto-end for duration-limited classes
+  ECONOMY_RECONCILIATION: 'economy-reconciliation', // Task 12.2: daily wallet/ledger balance check
 };
 
 /**
@@ -91,6 +92,8 @@ function startWorkers() {
     createPostSchedulerWorker,
     createRoomReminderWorker,
     createLiveClassAutoEndWorker,
+    createEconomyReconciliationWorker,
+    createVoiceStaleSessionWorker,
   } = require('../workers');
 
   workers.email          = createEmailWorker(connection);
@@ -101,6 +104,13 @@ function startWorkers() {
   workers.postScheduler  = createPostSchedulerWorker(connection);
   workers.roomReminders  = createRoomReminderWorker(connection);
   workers.liveClassAutoEnd = createLiveClassAutoEndWorker(connection);
+
+  // Economy reconciliation — read-only daily wallet/ledger balance check
+  workers.economyReconciliation = createEconomyReconciliationWorker(connection);
+
+  // Voice stale-session worker — marks orphaned voiceParticipant records inactive
+  // every 10 minutes, preventing stale isActive=true records from blocking joins.
+  workers.voiceStaleSession = createVoiceStaleSessionWorker(connection);
 
   logger.info('[queue] Core workers started from src/workers/');
 
@@ -426,6 +436,25 @@ async function scheduleCleanup() {
   await cleanupQueue.add('orphaned-gift-check', {}, {
     repeat: { pattern: '0 4 * * 0' },  // cron: 04:00 every Sunday
     jobId:  'orphaned-gift-check',
+  });
+
+  // Economy reconciliation — daily wallet/ledger balance check (Task 12.2)
+  // Read-only: computes expected wallet.coins from SUM(wallet_transactions.coins)
+  // and reports discrepancies. No automatic corrections applied.
+  // Runs at 02:00 UTC daily (after the social-cleanup and audit-archive windows).
+  const reconciliationQueue = createQueue(QUEUE_NAMES.ECONOMY_RECONCILIATION);
+  await reconciliationQueue.add('economy-reconciliation', {}, {
+    repeat: { pattern: '0 2 * * *' },  // cron: 02:00 UTC daily
+    jobId:  'economy-reconciliation',
+  });
+
+  // Voice stale-session sweep — marks orphaned voiceParticipant records inactive.
+  // Runs every 10 minutes. Protects against browser crash, force-close, server
+  // restart, and iOS background termination leaving isActive=true permanently.
+  const voiceStaleQueue = createQueue('voice-stale-session');
+  await voiceStaleQueue.add('voice-stale-sweep', {}, {
+    repeat: { every: 10 * 60 * 1000 }, // every 10 minutes
+    jobId:  'voice-stale-sweep',
   });
 }
 

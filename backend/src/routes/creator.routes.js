@@ -69,20 +69,24 @@ router.post('/:userId/tip',
 // ── My subscriptions ──────────────────────────────────────────────────────────
 router.get('/my/subscriptions', ctrl.getMySubscriptions);
 
-// ── Payout (L9 fix) ────────────────────────────────────────────────────────────
-// GET  /creators/me/payout-info    — show balance, conversion rate, min payout
-// POST /creators/me/payout-request — submit a withdrawal request
-router.get('/me/payout-info', ctrl.getPayoutInfo);
+// ── Payout routes (DEPRECATED — Task 5.2) ─────────────────────────────────────
+// These endpoints have been removed. All payout logic is in payout.controller.js.
+// Use GET  /api/v1/wallet/payout/info    for payout eligibility and rates.
+// Use POST /api/v1/wallet/payout/request for submitting a payout request.
+router.get('/me/payout-info', (req, res) => {
+  return res.status(410).json({
+    success: false,
+    message: 'This endpoint has been removed. Use GET /api/v1/wallet/payout/info instead.',
+    replacement: '/api/v1/wallet/payout/info'
+  });
+});
 
-router.post('/me/payout-request',
-  [
-    body('diamonds').isInt({ min: 1 }).withMessage('diamonds must be a positive integer'),
-    body('paymentMethod').optional().isIn(['bank_transfer', 'paypal', 'stripe_connect']),
-    body('paymentDetails').isObject().withMessage('paymentDetails is required'),
-    body('paymentDetails.accountHolder').notEmpty().withMessage('paymentDetails.accountHolder is required'),
-  ],
-  validate,
-  ctrl.requestPayout
-);
+router.post('/me/payout-request', (req, res) => {
+  return res.status(410).json({
+    success: false,
+    message: 'This endpoint has been removed. Use POST /api/v1/wallet/payout/request instead.',
+    replacement: '/api/v1/wallet/payout/request'
+  });
+});
 
 module.exports = router;

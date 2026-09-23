@@ -7,7 +7,9 @@ import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
-  ActivityIndicator, Alert, TextInput, Platform, Image, Modal, ScrollView, BackHandler} from 'react-native';
+  ActivityIndicator, Alert, TextInput, Platform, Image, Modal, ScrollView, BackHandler,
+  Share, Dimensions} from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
@@ -28,6 +30,7 @@ import { SpeakerGrid } from '@/components/voice/layout/SpeakerGrid';
 import { useDynamicLayoutStore } from '@/components/voice/layout/useDynamicLayoutStore';
 import type { SpeakerSlot } from '../../../src/lib/layout/layoutTypes';
 import { LiveVideoGrid, type VideoSpeaker } from '@/components/live-class/LiveVideoGrid';
+import { LiveClassShareModal } from '@/components/live-class/LiveClassShareModal';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface LiveClass {
@@ -65,7 +68,7 @@ interface Participant {
 // ─── Edit Stream Modal ────────────────────────────────────────────────────────
 function EditStreamModal({ visible, lc, onClose, onUpdated, onDeleted }: {
   visible: boolean;
-  lc: { id: string; title: string; description?: string; status: string } | null;
+  lc: { id: string; title: string; description?: string; status: string; coverImageUrl?: string | null } | null;
   onClose: () => void;
   onUpdated: () => void;
   onDeleted: () => void;
@@ -75,6 +78,8 @@ function EditStreamModal({ visible, lc, onClose, onUpdated, onDeleted }: {
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [coverUri, setCoverUri]   = useState<string | null>(null);
+  const [coverMime, setCoverMime] = useState<string>('image/jpeg');
 
   // Sync fields when modal opens
   useEffect(() => {
@@ -82,10 +87,31 @@ function EditStreamModal({ visible, lc, onClose, onUpdated, onDeleted }: {
       setTitle(lc.title ?? '');
       setDescription(lc.description ?? '');
       setConfirmDelete(false);
+      // Resolve relative path to absolute URL so Image source works on mobile
+      setCoverUri(lc.coverImageUrl ? avatarUrl(lc.coverImageUrl, '') : null);
+      setCoverMime('image/jpeg');
     }
   }, [lc, visible]);
 
   if (!lc) return null;
+
+  const pickCoverImage = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      showMessage({ message: 'Photo library permission required', type: 'warning' });
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [16, 9],
+      quality: 0.8,
+    });
+    if (!result.canceled && result.assets.length > 0) {
+      setCoverUri(result.assets[0].uri);
+      setCoverMime(result.assets[0].mimeType ?? 'image/jpeg');
+    }
+  };
 
   const handleSave = async () => {
     if (!title.trim()) {
@@ -98,6 +124,17 @@ function EditStreamModal({ visible, lc, onClose, onUpdated, onDeleted }: {
         title: title.trim(),
         description: description.trim() || null,
       });
+      // Upload cover if a new local image was selected (uri starts with file:// or content://)
+      if (coverUri && (coverUri.startsWith('file://') || coverUri.startsWith('content://'))) {
+        try {
+          const formData = new FormData();
+          const filename = coverUri.split('/').pop() ?? 'cover.jpg';
+          formData.append('cover', { uri: coverUri, name: filename, type: coverMime } as any);
+          await api.post(`/live-classes/${lc.id}/cover`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+          });
+        } catch (_e) { /* non-critical */ }
+      }
       showMessage({ message: '✅ Stream updated', type: 'success' });
       onUpdated();
       onClose();
@@ -139,6 +176,24 @@ function EditStreamModal({ visible, lc, onClose, onUpdated, onDeleted }: {
           </View>
 
           <ScrollView contentContainerStyle={editStyles.body} keyboardShouldPersistTaps="handled">
+            {/* Cover image */}
+            <Text style={editStyles.label}>Cover Image</Text>
+            <TouchableOpacity style={editStyles.coverPicker} onPress={pickCoverImage} activeOpacity={0.8}>
+              {coverUri ? (
+                <Image source={{ uri: coverUri }} style={{ width: '100%', height: '100%', borderRadius: 10 }} resizeMode="cover" />
+              ) : (
+                <View style={{ alignItems: 'center', gap: 6 }}>
+                  <Ionicons name="image-outline" size={28} color="#9ca3af" />
+                  <Text style={{ color: '#9ca3af', fontSize: 12 }}>Tap to upload cover (16:9)</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+            {coverUri && (
+              <TouchableOpacity onPress={() => setCoverUri(null)} style={{ marginTop: 4 }}>
+                <Text style={{ color: '#ef4444', fontSize: 12 }}>Remove cover</Text>
+              </TouchableOpacity>
+            )}
+
             {/* Title */}
             <Text style={editStyles.label}>Title *</Text>
             <TextInput
@@ -229,6 +284,7 @@ const editStyles = StyleSheet.create({
   label:            { fontSize: 12, fontWeight: '700', color: '#6b7280', marginBottom: 6, marginTop: 16, textTransform: 'uppercase', letterSpacing: 0.5 },
   input:            { borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 12, padding: 12, fontSize: 15, color: '#111827', backgroundColor: '#f9fafb' },
   inputMulti:       { height: 88, textAlignVertical: 'top' },
+  coverPicker:      { height: 100, borderWidth: 1.5, borderColor: '#e5e7eb', borderStyle: 'dashed', borderRadius: 12, backgroundColor: '#f9fafb', justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
   saveBtn:          { backgroundColor: '#4f46e5', borderRadius: 12, padding: 14, alignItems: 'center', marginTop: 20 },
   saveBtnText:      { color: '#fff', fontWeight: '800', fontSize: 15 },
   deleteSep:        { height: 1, backgroundColor: '#f3f4f6', marginTop: 24, marginBottom: 16 },
@@ -318,7 +374,7 @@ function HandQueueModal({ visible, hands, onClose, onApprove, onReject }: {
 }
 
 // ─── Participants Modal (teacher can mute/kick) ───────────────────────────────
-function ParticipantsModal({ visible, participants, myId, onClose, onMute, onKick, onDemote, onInvite, onPromoteMod, onDemoteMod, onTransferHost, isHost }: {
+function ParticipantsModal({ visible, participants, myId, onClose, onMute, onKick, onDemote, onInvite, onPromoteMod, onDemoteMod, onTransferHost, isHost, followMap, followLoading, onFollow }: {
   visible: boolean; participants: Participant[]; myId: string; onClose: () => void;
   isHost: boolean;
   onMute:          (userId: string, muted: boolean) => void;
@@ -328,6 +384,10 @@ function ParticipantsModal({ visible, participants, myId, onClose, onMute, onKic
   onPromoteMod:    (userId: string, name: string) => void;
   onDemoteMod:     (userId: string, name: string) => void;
   onTransferHost?: (userId: string, name: string) => void;
+  /** FOLLOW: keyed by userId — tracks follow state for any participant */
+  followMap:     Record<string, boolean>;
+  followLoading: Record<string, boolean>;
+  onFollow:      (userId: string) => void;
 }) {
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="formSheet" onRequestClose={onClose}>
@@ -345,6 +405,8 @@ function ParticipantsModal({ visible, participants, myId, onClose, onMute, onKic
             const name = `${p.firstName} ${p.lastName}`;
             const isOnStage = p.speakerSlot != null || p.role === 'HOST' || p.role === 'MODERATOR';
             const isModerator = p.role === 'MODERATOR';
+            const pIsFollowing = followMap[p.userId] ?? false;
+            const pFollowLoading = followLoading[p.userId] ?? false;
             return (
               <View style={styles.pRow}>
                 <Image source={{ uri: avatarUrl(p.avatarUrl, name) }} style={styles.pAvatar} />
@@ -354,7 +416,30 @@ function ParticipantsModal({ visible, participants, myId, onClose, onMute, onKic
                     {p.role}{p.handRaised ? ' · ✋' : ''}{isOnStage && p.role !== 'HOST' && p.role !== 'MODERATOR' ? ' · 🎙 On Stage' : ''}
                   </Text>
                 </View>
-                {!isMe && isHost && (
+                <View style={{ flexDirection: 'row', gap: 6, alignItems: 'center' }}>
+                  {/* Follow button — shown for every non-self participant */}
+                  {!isMe && (
+                    <TouchableOpacity
+                      style={[
+                        styles.pBtn,
+                        { backgroundColor: pIsFollowing ? '#f0fdf4' : '#eef2ff', minWidth: 36 },
+                      ]}
+                      onPress={() => onFollow(p.userId)}
+                      disabled={pFollowLoading}
+                      accessibilityLabel={pIsFollowing ? `Unfollow ${name}` : `Follow ${name}`}
+                    >
+                      {pFollowLoading ? (
+                        <ActivityIndicator size="small" color="#4f46e5" />
+                      ) : (
+                        <Ionicons
+                          name={pIsFollowing ? 'checkmark' : 'person-add-outline'}
+                          size={15}
+                          color={pIsFollowing ? '#10b981' : '#4f46e5'}
+                        />
+                      )}
+                    </TouchableOpacity>
+                  )}
+                  {!isMe && isHost && (
                   <View style={{ flexDirection: 'row', gap: 6 }}>
                     <TouchableOpacity style={styles.pBtn} onPress={() => onMute(p.userId, !p.isMuted)}>
                       <Ionicons name={p.isMuted ? 'mic-off' : 'mic'} size={16} color={p.isMuted ? '#ef4444' : '#10b981'} />
@@ -396,7 +481,8 @@ function ParticipantsModal({ visible, participants, myId, onClose, onMute, onKic
                       </TouchableOpacity>
                     )}
                   </View>
-                )}
+                  )}
+                </View>
               </View>
             );
           }}
@@ -444,6 +530,8 @@ export default function LiveClassScreen() {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showGifts, setShowGifts] = useState(false);
+  // "More" bottom sheet — screen share, audio/video mode, whiteboard
+  const [showMoreSheet, setShowMoreSheet] = useState(false);
   // DI-01: Attendance state for teachers
   const [attendance, setAttendance] = useState<any[]>([]);
   const [loadingAttendance, setLoadingAttendance] = useState(false);
@@ -455,6 +543,28 @@ export default function LiveClassScreen() {
   // showFsOverlay: tap-to-show overlay controls in fullscreen; auto-hides after 4s
   const [showFsOverlay,  setShowFsOverlay]  = useState(true);
   const fsOverlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // SPRINT-3: Portrait-first fullscreen height for PUBLIC streams.
+  // On PUBLIC streams the video area expands to full portrait screen height
+  // (minus status bar + bottom inset). On SCHOOL streams it keeps the existing
+  // flex-based layout so the tab bar below remains visible.
+  const { height: screenHeight } = Dimensions.get('window');
+
+  // SPRINT-4: Share + Follow state
+  // followMap: tracks follow state keyed by userId — works for any participant
+  const [followMap,     setFollowMap]     = useState<Record<string, boolean>>({});
+  const [followLoading, setFollowLoading] = useState<Record<string, boolean>>({});
+  // Share modal
+  const [showShareModal, setShowShareModal] = useState(false);
+
+  // ── Spotlight / individual participant maximize ────────────────────────────
+  // PRESENTATION ONLY — local UI state. Does NOT change LiveKit connections,
+  // speaker slots, roles, maxSpeakers, or any backend state.
+  // Each viewer independently selects their own primary participant.
+  const [selectedParticipantId, setSelectedParticipantId] = useState<string | null>(null);
+
+  // SPRINT-4: Share and Follow handlers are declared AFTER useQuery (below)
+  // because they depend on liveClass and hostUserId.
 
   const handleToggleFullscreen = useCallback(() => {
     setIsFullscreen(prev => {
@@ -532,18 +642,103 @@ export default function LiveClassScreen() {
   // liveClass is now in scope (declared above by useQuery).
   const isCreator = !!liveClass && !!user && liveClass.hostUserId === user.id;
 
-  // isHost: server assigned HOST role when we joined, OR we are the creator.
-  // NEVER derived from global User.role — that causes cross-school admin leaks.
+  // DEL-HOST: isDelegatedHost — SCHOOL streams only.
+  // lc.delegatedHostId is the server-authoritative current delegated host.
   const isDelegatedHost =
     !!liveClass && !!user &&
     liveClass.streamType === 'SCHOOL' &&
     liveClass.delegatedHostId != null &&
     liveClass.delegatedHostId === user.id;
+
+  // isHost: server assigned HOST role when we joined, OR we are the creator,
+  // OR we are the currently delegated host.
+  // NEVER derived from global User.role — that causes cross-school admin leaks.
   const isHost = myParticipantRole === 'HOST' || isCreator || isDelegatedHost;
 
   // isTeacher: alias kept for socket event handlers and controls visibility.
   // true if HOST or MODERATOR (both get management controls).
   const isTeacher = isHost || myParticipantRole === 'MODERATOR';
+
+  // ── SPRINT-3/4: liveClass-dependent derivations (must be after useQuery) ──
+  const isPublicStream = (liveClass as any)?.streamType === 'PUBLIC';
+  // hostUserId: creator's userId — used as the primary follow target
+  const hostUserId = (liveClass as any)?.hostUserId ?? liveClass?.host?.id ?? null;
+  const isOwnStream = hostUserId === user?.id;
+  // isFollowing: convenience alias for the host's follow state
+  const isFollowing = hostUserId ? (followMap[hostUserId] ?? false) : false;
+
+  // Auto-clear spotlight when the selected participant leaves or is removed from stage.
+  // Uses participants array (available at this point) to check stage presence.
+  // A participant is "on stage" if their role is HOST/MODERATOR or speakerSlot is set.
+  useEffect(() => {
+    if (!selectedParticipantId) return;
+    const onStage = participants.find(p =>
+      p.userId === selectedParticipantId &&
+      (typeof p.speakerSlot === 'number' || p.role === 'HOST' || p.role === 'MODERATOR')
+    );
+    if (!onStage) setSelectedParticipantId(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [participants, selectedParticipantId]);
+
+  // Load initial follow state for the host when liveClass data arrives
+  useEffect(() => {
+    if (!hostUserId || isOwnStream) return;
+    api.get(`/social/counts/${hostUserId}`)
+      .then(r => {
+        // getSocialCounts returns { isFollowing: boolean }
+        const following = r.data?.data?.isFollowing ?? false;
+        setFollowMap(prev => ({ ...prev, [hostUserId]: following }));
+      })
+      .catch(() => {}); // non-fatal — follow button defaults to false
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostUserId]);
+
+  // SPRINT-4: Share handler — opens rich share modal (DM / Group / Community / Feed / Copy)
+  const handleShare = useCallback(() => {
+    setShowShareModal(true);
+  }, []);
+
+  // SPRINT-4: Follow/unfollow any participant by userId
+  const handleFollowUser = useCallback(async (targetUserId: string) => {
+    if (!targetUserId || targetUserId === user?.id) return;
+    setFollowLoading(prev => ({ ...prev, [targetUserId]: true }));
+    const currentlyFollowing = followMap[targetUserId] ?? false;
+    try {
+      if (currentlyFollowing) {
+        await api.delete(`/social/follow/${targetUserId}`);
+        setFollowMap(prev => ({ ...prev, [targetUserId]: false }));
+        showMessage({ message: 'Unfollowed', type: 'info', duration: 1500 });
+      } else {
+        await api.post(`/social/follow/${targetUserId}`);
+        setFollowMap(prev => ({ ...prev, [targetUserId]: true }));
+        showMessage({ message: '✅ Following!', type: 'success', duration: 1500 });
+      }
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger', duration: 2000 });
+    } finally {
+      setFollowLoading(prev => ({ ...prev, [targetUserId]: false }));
+    }
+  }, [followMap, user?.id]);
+
+  // Open DM conversation with a participant
+  const openDmWithUser = useCallback(async (targetUserId: string) => {
+    try {
+      const res = await api.get(`/dm/conversations/${targetUserId}/with`);
+      const convId = res.data.data?.id;
+      if (convId) router.push({ pathname: '/dm/[id]', params: { id: convId } } as any);
+    } catch {
+      showMessage({ message: 'Could not open conversation', type: 'danger', duration: 2000 });
+    }
+  }, [router]);
+
+  // showParticipantSheet is declared after handleKickParticipant/handleDemoteFromStage
+  // (those are declared further down and needed in the callback dependency array)
+
+  // Alias for host follow (used in info card / fullscreen strip buttons)
+  const handleFollowHost = useCallback(async () => {
+    if (!hostUserId) return;
+    await handleFollowUser(hostUserId);
+  }, [hostUserId, handleFollowUser]);
 
   // ── Dynamic Layout Store — shared with SpeakerGrid ───────────────────────
   // We access the store directly (not via useDynamicLayout hook) because
@@ -953,31 +1148,45 @@ export default function LiveClassScreen() {
     };
     socket.on('liveclass:you_were_demoted', onYouWereDemoted);
 
+    // DEL-HOST: Delegated host assignment events
     const onHostAssigned = (d: any) => {
       if (d.liveClassId !== id) return;
-      qc.setQueryData(['live-class', id], (old: any) => old ? { ...old, delegatedHostId: d.delegatedHostId ?? null } : old);
+      // Update liveClass query cache so isDelegatedHost recomputes
+      qc.setQueryData(['live-class', id], (old: any) => {
+        if (!old) return old;
+        return { ...old, delegatedHostId: d.delegatedHostId ?? null };
+      });
       qc.invalidateQueries({ queryKey: ['live-class', id] });
       if (d.delegatedHostId === user?.id) {
-        showMessage({ message: 'You are now the delegated host', type: 'success', duration: 3000 });
-        setParticipants(prev => prev.map(p => p.userId === user?.id ? { ...p, role: 'HOST' } : p));
+        showMessage({ message: '🎙 You are now the delegated host', type: 'success', duration: 3000 });
+        setParticipants(prev => prev.map(p =>
+          p.userId === user?.id ? { ...p, role: 'HOST' } : p
+        ));
       }
     };
     const onHostRevoked = (d: any) => {
       if (d.liveClassId !== id) return;
-      qc.setQueryData(['live-class', id], (old: any) => old ? { ...old, delegatedHostId: null } : old);
+      qc.setQueryData(['live-class', id], (old: any) => {
+        if (!old) return old;
+        return { ...old, delegatedHostId: null };
+      });
       qc.invalidateQueries({ queryKey: ['live-class', id] });
     };
     const onYourHostRevoked = (d: any) => {
       if (d.liveClassId !== id) return;
-      qc.setQueryData(['live-class', id], (old: any) => old ? { ...old, delegatedHostId: null } : old);
+      qc.setQueryData(['live-class', id], (old: any) => {
+        if (!old) return old;
+        return { ...old, delegatedHostId: null };
+      });
       qc.invalidateQueries({ queryKey: ['live-class', id] });
-      setParticipants(prev => prev.map(p => p.userId === user?.id ? { ...p, role: 'MODERATOR' } : p));
-      showMessage({ message: 'Your delegated host role has been revoked', type: 'danger', duration: 3000 });
+      setParticipants(prev => prev.map(p =>
+        p.userId === user?.id ? { ...p, role: 'MODERATOR' } : p
+      ));
+      showMessage({ message: '⚠️ Your delegated host role has been revoked', type: 'danger', duration: 3000 });
     };
     socket.on('liveclass:host_assigned',      onHostAssigned);
     socket.on('liveclass:host_revoked',       onHostRevoked);
     socket.on('liveclass:your_host_revoked',  onYourHostRevoked);
-
     // Sprint 4: wire isSpeaking to real LiveKit audio activity
     // The useLiveKitAudio hook emits voice:speaking when the local participant's speaking
     // state changes. We relay this to all room members via Socket.IO so their grids
@@ -1342,24 +1551,28 @@ export default function LiveClassScreen() {
     });
   }, []);
 
-  // Host transfer — NOT IMPLEMENTED (no backend endpoint, no ownership transfer exists)
-  // PARITY-NOTE: POST /live-classes/:id/transfer/:uid does not exist.
-  // The ownership rule is: creator stays HOST forever. Removed the misleading UI call.
+  // DEL-HOST: Assign a delegated operational host — CREATOR ONLY.
+  // Calls PATCH /live-classes/:id/host. Only wired to UI when isCreator is true.
+  // The delegated host gets HOST role for the session; creator retains ownership.
   const handleAssignHost = useCallback((targetUserId: string, name: string) => {
     Alert.alert(
       'Assign Delegated Host',
-      \Make \ the operational host? You remain the class owner.\,
+      `Make ${name} the operational host for this session? You remain the class owner.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Assign',
           onPress: async () => {
             try {
-              await api.patch(\/live-classes/\/host\, { userId: targetUserId });
-              showMessage({ message: \ is now the delegated host\, type: 'success', duration: 2500 });
+              await api.patch(`/live-classes/${id}/host`, { userId: targetUserId });
+              showMessage({ message: `✅ ${name} is now the delegated host`, type: 'success', duration: 2500 });
               qc.invalidateQueries({ queryKey: ['live-class', id] });
             } catch (e: any) {
-              showMessage({ message: e?.response?.data?.message ?? 'Failed to assign delegated host', type: 'danger', duration: 3000 });
+              showMessage({
+                message: e?.response?.data?.message ?? 'Failed to assign delegated host',
+                type: 'danger',
+                duration: 3000,
+              });
             }
           },
         },
@@ -1406,6 +1619,71 @@ export default function LiveClassScreen() {
     const socket = getSocket();
     if (socket) socket.emit('liveclass:reaction', { liveClassId: id, emoji });
   }, [id]);
+
+  // ── Unified participant action sheet (all joined users) ───────────────────
+  // React / Follow / DM available to everyone.
+  // Spotlight + moderation actions visible to HOST only.
+  // Placed here so all required handlers (handleMuteParticipant etc.) are in scope.
+  const showParticipantSheet = useCallback((
+    speakerUserId: string,
+    speakerName: string,
+    isCurrentlySelected: boolean,
+  ) => {
+    const isSelf = speakerUserId === user?.id;
+    const currentFollowing = followMap[speakerUserId] ?? false;
+
+    const actions: Array<{ text: string; style?: 'cancel'|'destructive'; onPress?: () => void }> = [
+      { text: 'Cancel', style: 'cancel' },
+    ];
+
+    // HOST-only: spotlight toggle
+    if (isHost) {
+      actions.push({
+        text: isCurrentlySelected
+          ? '⊠ Remove spotlight (back to grid)'
+          : '⊡ Spotlight (make primary video)',
+        onPress: () => setSelectedParticipantId(isCurrentlySelected ? null : speakerUserId),
+      });
+    }
+
+    // Everyone: React with emoji (opens reactions picker)
+    actions.push({
+      text: '😊 React with emoji',
+      onPress: () => setShowReactions(true),
+    });
+
+    // Everyone (not self): Follow/Unfollow
+    if (!isSelf) {
+      actions.push({
+        text: currentFollowing ? `✓ Unfollow ${speakerName}` : `+ Follow ${speakerName}`,
+        onPress: () => handleFollowUser(speakerUserId),
+      });
+    }
+
+    // Everyone (not self): Send private message
+    if (!isSelf) {
+      actions.push({
+        text: '💬 Send private message',
+        onPress: () => openDmWithUser(speakerUserId),
+      });
+    }
+
+    // HOST-only: moderation
+    if (isHost && !isSelf) {
+      actions.push(
+        { text: '🔇 Mute', onPress: () => handleMuteParticipant(speakerUserId, true) },
+        { text: '⬇️ Move to audience', onPress: () => handleDemoteFromStage(speakerUserId, speakerName) },
+        { text: '🚫 Remove from class', style: 'destructive', onPress: () => handleKickParticipant(speakerUserId, speakerName) },
+      );
+    }
+
+    Alert.alert(speakerName, 'Participant actions', actions);
+  }, [
+    user?.id, isHost, followMap,
+    setSelectedParticipantId, setShowReactions,
+    handleFollowUser, openDmWithUser,
+    handleMuteParticipant, handleDemoteFromStage, handleKickParticipant,
+  ]);
 
   // NEW: request to speak (student sends request to host)
   const handleSpeakRequest = useCallback(async () => {
@@ -1653,6 +1931,11 @@ export default function LiveClassScreen() {
               // Fullscreen: expand to fill the whole screen (behind tabs, over header)
               isFullscreen && StyleSheet.absoluteFillObject,
               isFullscreen && { zIndex: 100, backgroundColor: '#000' },
+              // SPRINT-3: Portrait-first for PUBLIC streams — full height even before fullscreen
+              !isFullscreen && isPublicStream && liveClass.status === 'LIVE' && {
+                height: screenHeight * 0.72,
+                maxHeight: 560,
+              },
             ]}
           >
             {/* Fullscreen: top overlay — back button + title + LIVE + exit fullscreen */}
@@ -1722,22 +2005,119 @@ export default function LiveClassScreen() {
                       )}
                     </View>
 
-                    {/* TikTok-style 4-column video grid */}
-                    <LiveVideoGrid
-                      speakers={videoSpeakers}
-                      currentUserId={user?.id ?? ''}
-                      isHost={isHost}
-                      onLongPressTile={isHost ? (speaker) => {
-                        const name = speaker.displayName;
-                        Alert.alert(name, 'Speaker actions', [
-                          { text: 'Cancel', style: 'cancel' },
-                          { text: '🔇 Mute', onPress: () => handleMuteParticipant(speaker.userId, true) },
-                          { text: '⬇️ Move to audience', onPress: () => handleDemoteFromStage(speaker.userId, name) },
-                          { text: '🚫 Remove from class', style: 'destructive', onPress: () => handleKickParticipant(speaker.userId, name) },
-                        ]);
-                      } : undefined}
-                      style={styles.speakerGrid}
-                    />
+                    {/* TikTok-style video grid with Spotlight support.
+                        ── SPOTLIGHT MODE: when selectedParticipantId is set,
+                           shows primary large tile + horizontal secondary strip.
+                        ── GRID MODE: existing 4-column LiveVideoGrid (unchanged).
+                        Single tap = spotlight select/deselect.
+                        Long press = existing host moderation actions (unchanged). */}
+                    {selectedParticipantId && videoSpeakers.find(s => s.userId === selectedParticipantId) ? (() => {
+                      const primary = videoSpeakers.find(s => s.userId === selectedParticipantId)!;
+                      const secondaries = videoSpeakers.filter(s => s.userId !== selectedParticipantId);
+                      return (
+                        <View style={{ flex: 1 }}>
+                          {/* Primary large tile — tap opens unified action sheet */}
+                          <TouchableOpacity
+                            activeOpacity={0.9}
+                            onPress={() => {
+                              // Tap primary tile → full participant action sheet (React/Follow/DM + HOST actions)
+                              if (primary.userId === user?.id) return;
+                              showParticipantSheet(primary.userId, primary.displayName, true);
+                            }}
+                            onLongPress={() => {
+                              if (primary.userId === user?.id) return;
+                              showParticipantSheet(primary.userId, primary.displayName, true);
+                            }}
+                            style={[
+                              styles.speakerGrid,
+                              { flex: 1, borderRadius: 12, overflow: 'hidden', borderWidth: 2, borderColor: '#4f46e5' },
+                            ]}
+                            accessibilityLabel={`${primary.displayName} — tap to return to grid`}
+                          >
+                            {/* Reuse LiveVideoGrid for a single-tile render */}
+                            <LiveVideoGrid
+                              speakers={[primary]}
+                              currentUserId={user?.id ?? ''}
+                              isHost={isHost}
+                              style={{ flex: 1 }}
+                            />
+                            {/* "Tap to return" hint — visible to Host only */}
+                            {isHost && (
+                            <View style={{
+                              position: 'absolute', top: 8, right: 8,
+                              backgroundColor: 'rgba(79,70,229,0.85)', borderRadius: 8,
+                              paddingHorizontal: 8, paddingVertical: 3,
+                            }} pointerEvents="none">
+                              <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>
+                                ✕ Return to grid
+                              </Text>
+                            </View>
+                            )}
+                          </TouchableOpacity>
+
+                          {/* Secondary horizontal strip */}
+                          {secondaries.length > 0 && (
+                            <ScrollView
+                              horizontal
+                              showsHorizontalScrollIndicator={false}
+                              style={{ maxHeight: 90, marginTop: 4 }}
+                              contentContainerStyle={{ gap: 4, paddingHorizontal: 2 }}
+                            >
+                              {secondaries.map(s => (
+                                <TouchableOpacity
+                                  key={s.userId}
+                                  onPress={() => {
+                                    // Tap secondary tile → unified action sheet (React/Follow/DM + HOST spotlight/mods)
+                                    if (s.userId === user?.id) return;
+                                    showParticipantSheet(s.userId, s.displayName, false);
+                                  }}
+                                  onLongPress={() => {
+                                    if (s.userId === user?.id) return;
+                                    showParticipantSheet(s.userId, s.displayName, false);
+                                  }}
+                                  style={{ width: 80, height: 80, borderRadius: 10, overflow: 'hidden' }}
+                                  accessibilityLabel={`${s.displayName} — tap to spotlight`}
+                                >
+                                  <LiveVideoGrid
+                                    speakers={[s]}
+                                    currentUserId={user?.id ?? ''}
+                                    isHost={isHost}
+                                    style={{ width: 80, height: 80 }}
+                                  />
+                                </TouchableOpacity>
+                              ))}
+                            </ScrollView>
+                          )}
+                        </View>
+                      );
+                    })() : (
+                      // ── GRID MODE (Option A parity: single tap opens action sheet, HOST gets spotlight option) ──
+                      <LiveVideoGrid
+                        speakers={videoSpeakers}
+                        currentUserId={user?.id ?? ''}
+                        isHost={isHost}
+                        onPressTile={(speaker) => {
+                          // Single tap → unified participant action sheet (Option A parity)
+                          // Contains: React, Follow, DM (everyone), Spotlight + moderation (HOST only)
+                          if (speaker.userId === user?.id) return; // no action on own tile
+                          showParticipantSheet(
+                            speaker.userId,
+                            speaker.displayName,
+                            selectedParticipantId === speaker.userId,
+                          );
+                        }}
+                        onLongPressTile={(speaker) => {
+                          // Long press → same action sheet (alternative gesture, same actions)
+                          if (speaker.userId === user?.id) return;
+                          showParticipantSheet(
+                            speaker.userId,
+                            speaker.displayName,
+                            selectedParticipantId === speaker.userId,
+                          );
+                        }}
+                        style={styles.speakerGrid}
+                      />
+                    )}
 
                     {/* Participant count + view-all */}
                     <View style={styles.participantCount}>
@@ -1767,6 +2147,40 @@ export default function LiveClassScreen() {
                               {me?.handRaised ? 'Cancel request' : '✋ Request to speak'}
                             </Text>
                           </TouchableOpacity>
+                        </View>
+                      );
+                    })()}
+
+                    {/* Audience avatar grid — unlimited, 5 columns, scrollable with page */}
+                    {(() => {
+                      const audienceList = participants.filter(p =>
+                        p.role !== 'HOST' && p.role !== 'MODERATOR' &&
+                        p.speakerSlot == null && !p.handRaised
+                      );
+                      if (audienceList.length === 0) return null;
+                      return (
+                        <View style={{ marginTop: 10, backgroundColor: 'rgba(17,24,39,0.6)', borderRadius: 14, padding: 10, borderWidth: 1, borderColor: '#1e293b' }}>
+                          <Text style={{ color: '#9ca3af', fontSize: 11, fontWeight: '700', marginBottom: 8 }}>
+                            👥 Audience ({audienceList.length})
+                          </Text>
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                            {audienceList.map(p => {
+                              const name = `${p.firstName} ${p.lastName}`.trim();
+                              const initials = `${p.firstName?.[0] ?? ''}${p.lastName?.[0] ?? ''}`.toUpperCase();
+                              const src = p.avatarUrl ? avatarUrl(p.avatarUrl, name) : null;
+                              return (
+                                <View key={p.userId} style={{ width: '17%', alignItems: 'center', gap: 3 }}>
+                                  <View style={{ width: 44, height: 44, borderRadius: 22, overflow: 'hidden', backgroundColor: '#312e81', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#4338ca' }}>
+                                    {src
+                                      ? <Image source={{ uri: src }} style={{ width: 44, height: 44 }} />
+                                      : <Text style={{ color: '#a5b4fc', fontWeight: '700', fontSize: 14 }}>{initials}</Text>
+                                    }
+                                  </View>
+                                  <Text style={{ color: '#9ca3af', fontSize: 8, textAlign: 'center' }} numberOfLines={1}>{name}</Text>
+                                </View>
+                              );
+                            })}
+                          </View>
                         </View>
                       );
                     })()}
@@ -1841,6 +2255,40 @@ export default function LiveClassScreen() {
                         </View>
                       );
                     })()}
+
+                    {/* Audience avatar grid — placeholder video mode */}
+                    {(() => {
+                      const audienceList = participants.filter(p =>
+                        p.role !== 'HOST' && p.role !== 'MODERATOR' &&
+                        p.speakerSlot == null && !p.handRaised
+                      );
+                      if (audienceList.length === 0) return null;
+                      return (
+                        <View style={{ marginTop: 10, backgroundColor: 'rgba(17,24,39,0.6)', borderRadius: 14, padding: 10, borderWidth: 1, borderColor: '#1e293b', width: '100%' }}>
+                          <Text style={{ color: '#9ca3af', fontSize: 11, fontWeight: '700', marginBottom: 8 }}>
+                            👥 Audience ({audienceList.length})
+                          </Text>
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                            {audienceList.map(p => {
+                              const name = `${p.firstName} ${p.lastName}`.trim();
+                              const initials = `${p.firstName?.[0] ?? ''}${p.lastName?.[0] ?? ''}`.toUpperCase();
+                              const src = p.avatarUrl ? avatarUrl(p.avatarUrl, name) : null;
+                              return (
+                                <View key={p.userId} style={{ width: '17%', alignItems: 'center', gap: 3 }}>
+                                  <View style={{ width: 44, height: 44, borderRadius: 22, overflow: 'hidden', backgroundColor: '#312e81', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#4338ca' }}>
+                                    {src
+                                      ? <Image source={{ uri: src }} style={{ width: 44, height: 44 }} />
+                                      : <Text style={{ color: '#a5b4fc', fontWeight: '700', fontSize: 14 }}>{initials}</Text>
+                                    }
+                                  </View>
+                                  <Text style={{ color: '#9ca3af', fontSize: 8, textAlign: 'center' }} numberOfLines={1}>{name}</Text>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        </View>
+                      );
+                    })()}
                   </View>
                 )
               ) : (
@@ -1848,7 +2296,7 @@ export default function LiveClassScreen() {
                   {/* Cover image — shown when available (public streams + school classes) */}
                   {(liveClass as any).coverImageUrl ? (
                     <Image
-                      source={{ uri: (liveClass as any).coverImageUrl }}
+                      source={{ uri: avatarUrl((liveClass as any).coverImageUrl, liveClass.title) }}
                       style={styles.coverImage}
                       resizeMode="cover"
                       accessibilityLabel={`Cover image for ${liveClass.title}`}
@@ -1885,6 +2333,35 @@ export default function LiveClassScreen() {
                 </View>
               )}
             </View>
+
+            {/* ── Persistent fullscreen FAB ─────────────────────────────────
+                 Pinned to bottom-right of the video area in ALL states:
+                 speaker grid, audio-only, host placeholder, and pre-join.
+                 Not shown in fullscreen (top/right-strip handles exit there). */}
+            {!isFullscreen && (
+              <TouchableOpacity
+                onPress={handleToggleFullscreen}
+                style={{
+                  position: 'absolute',
+                  bottom: 10,
+                  right: 10,
+                  width: 34,
+                  height: 34,
+                  borderRadius: 10,
+                  backgroundColor: 'rgba(0,0,0,0.55)',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 20,
+                  borderWidth: 1,
+                  borderColor: 'rgba(255,255,255,0.18)',
+                }}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityLabel="Enter full screen"
+                accessibilityRole="button"
+              >
+                <Ionicons name="expand-outline" size={17} color="#fff" />
+              </TouchableOpacity>
+            )}
             {/* Info card — hidden in fullscreen (overlay handles it) */}
             {!isFullscreen && (
               <View style={styles.infoCard}>
@@ -1897,6 +2374,43 @@ export default function LiveClassScreen() {
                   )}
                 </View>
                 {liveClass.description ? <Text style={styles.infoDesc}>{liveClass.description}</Text> : null}
+                {/* SPRINT-4: Share + Follow row — available for all stream types */}
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                    {/* Follow host button (hide for own stream) */}
+                    {!isOwnStream && hostUserId && (
+                      <TouchableOpacity
+                        style={{
+                          flexDirection: 'row', alignItems: 'center', gap: 5,
+                          backgroundColor: isFollowing ? '#1e293b' : '#ef4444',
+                          paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20,
+                        }}
+                        onPress={handleFollowHost}
+                        disabled={followLoading[hostUserId] ?? false}
+                        accessibilityLabel={isFollowing ? 'Unfollow host' : 'Follow host'}
+                      >
+                        {(followLoading[hostUserId] ?? false)
+                          ? <ActivityIndicator size="small" color="#fff" />
+                          : <Ionicons name={isFollowing ? 'checkmark' : 'add'} size={14} color="#fff" />
+                        }
+                        <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>
+                          {isFollowing ? 'Following' : 'Follow'}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                    {/* Share button — opens rich share modal */}
+                    <TouchableOpacity
+                      style={{
+                        flexDirection: 'row', alignItems: 'center', gap: 5,
+                        backgroundColor: '#1e293b', borderWidth: 1, borderColor: '#334155',
+                        paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20,
+                      }}
+                      onPress={handleShare}
+                      accessibilityLabel="Share stream"
+                    >
+                      <Ionicons name="share-social-outline" size={14} color="#a5b4fc" />
+                      <Text style={{ color: '#a5b4fc', fontWeight: '700', fontSize: 13 }}>Share</Text>
+                    </TouchableOpacity>
+                  </View>
               </View>
             )}
 
@@ -1927,6 +2441,32 @@ export default function LiveClassScreen() {
                 <TouchableOpacity style={fsSt.actionBtn} onPress={() => setShowGifts(true)}>
                   <Text style={{ fontSize: 22 }}>🎁</Text>
                   <Text style={fsSt.actionLabel}>Gift</Text>
+                </TouchableOpacity>
+                {/* SPRINT-4: Follow host button — hide for own stream */}
+                {!isOwnStream && hostUserId && (
+                  <TouchableOpacity
+                    style={fsSt.actionBtn}
+                    onPress={handleFollowHost}
+                    disabled={followLoading[hostUserId] ?? false}
+                    accessibilityLabel={isFollowing ? 'Unfollow host' : 'Follow host'}
+                  >
+                    <View style={{
+                      width: 40, height: 40, borderRadius: 20,
+                      backgroundColor: isFollowing ? '#374151' : '#ef4444',
+                      alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      {(followLoading[hostUserId] ?? false)
+                        ? <ActivityIndicator size="small" color="#fff" />
+                        : <Text style={{ fontSize: 18 }}>{isFollowing ? '✓' : '+'}</Text>
+                      }
+                    </View>
+                    <Text style={fsSt.actionLabel}>{isFollowing ? 'Following' : 'Follow'}</Text>
+                  </TouchableOpacity>
+                )}
+                {/* Share button — available for all stream types */}
+                <TouchableOpacity style={fsSt.actionBtn} onPress={handleShare} accessibilityLabel="Share stream">
+                  <Ionicons name="share-social-outline" size={22} color="#fff" />
+                  <Text style={fsSt.actionLabel}>Share</Text>
                 </TouchableOpacity>
                 {/* Chat */}
                 <TouchableOpacity style={fsSt.actionBtn} onPress={() => {
@@ -2293,7 +2833,13 @@ export default function LiveClassScreen() {
                 ))}
               </View>
             )}
-            <View style={[styles.controls, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+            {/* Horizontally scrollable controls row — prevents buttons being clipped on small screens */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={[styles.controls, { paddingBottom: Math.max(insets.bottom, 8) }]}
+              keyboardShouldPersistTaps="handled"
+            >
               {!isHost && liveClass.handRaiseEnabled && (
                 <TouchableOpacity style={[styles.ctrlBtn, handRaised && styles.ctrlBtnActive]} onPress={toggleHand}>
                   <Text style={{ fontSize: 20 }}>✋</Text>
@@ -2365,11 +2911,21 @@ export default function LiveClassScreen() {
                 <Text style={{ fontSize: 20 }}>🎁</Text>
                 <Text style={styles.ctrlLabel}>Gift</Text>
               </TouchableOpacity>
-              {isHost && hands.length > 0 && (
-                <TouchableOpacity style={[styles.ctrlBtn, { position: 'relative' }]} onPress={() => setShowHands(true)}>
+              {/* Hand queue — always visible for host when hand-raise is enabled.
+                  Badge shows count when hands are raised. Tapping opens the hand queue modal. */}
+              {isHost && liveClass.handRaiseEnabled && (
+                <TouchableOpacity
+                  style={[styles.ctrlBtn, hands.length > 0 && { backgroundColor: '#d97706' }, { position: 'relative' }]}
+                  onPress={() => setShowHands(true)}
+                  accessibilityLabel={hands.length > 0 ? `${hands.length} raised hand${hands.length > 1 ? 's' : ''} — tap to review` : 'Hand queue — no raised hands'}
+                >
                   <Text style={{ fontSize: 20 }}>✋</Text>
-                  <Text style={styles.ctrlLabel}>Hands</Text>
-                  <View style={[styles.badge, { position: 'absolute', top: 4, right: 4 }]}><Text style={styles.badgeText}>{hands.length}</Text></View>
+                  <Text style={[styles.ctrlLabel, hands.length > 0 && { color: '#fef3c7' }]}>Hands</Text>
+                  {hands.length > 0 && (
+                    <View style={[styles.badge, { position: 'absolute', top: 4, right: 4 }]}>
+                      <Text style={styles.badgeText}>{hands.length > 9 ? '9+' : hands.length}</Text>
+                    </View>
+                  )}
                 </TouchableOpacity>
               )}
               {/* Host shortcut: whiteboard */}
@@ -2392,18 +2948,188 @@ export default function LiveClassScreen() {
                   <Text style={[styles.ctrlLabel, isScreenSharing && { color: '#dc2626' }]}>Share</Text>
                 </TouchableOpacity>
               )}
+              {/* More ⋯ button — Screen Share, Audio/Video Mode, Whiteboard */}
+              <TouchableOpacity
+                style={styles.ctrlBtn}
+                onPress={() => setShowMoreSheet(true)}
+                accessibilityLabel="More options"
+                accessibilityRole="button"
+              >
+                <Ionicons name="ellipsis-horizontal" size={22} color="#a5b4fc" />
+                <Text style={styles.ctrlLabel}>More</Text>
+              </TouchableOpacity>
               <TouchableOpacity style={[styles.ctrlBtn, styles.ctrlBtnDanger]} onPress={isHost ? handleEndClass : handleLeave}>
                 <Ionicons name={isHost ? 'stop' : 'call'} size={22} color="#fff" />
                 <Text style={[styles.ctrlLabel, { color: '#fff' }]}>{isHost ? 'End' : 'Leave'}</Text>
               </TouchableOpacity>
-            </View>
+            </ScrollView>
           </View>
         )}
       </KeyboardAvoidingView>
 
       {/* Modals */}
+      {/* ── More Sheet — Screen Share, Audio/Video Mode, Whiteboard ── */}
+      <Modal
+        visible={showMoreSheet}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowMoreSheet(false)}
+      >
+        <TouchableOpacity
+          style={{ flex: 1 }}
+          activeOpacity={1}
+          onPress={() => setShowMoreSheet(false)}
+        />
+        <SafeAreaView style={{
+          backgroundColor: '#1a1a2e',
+          borderTopLeftRadius: 20,
+          borderTopRightRadius: 20,
+          borderTopWidth: 1,
+          borderColor: '#334155',
+          paddingBottom: insets.bottom + 8,
+        }}>
+          {/* Handle */}
+          <View style={{ alignItems: 'center', paddingTop: 10, paddingBottom: 4 }}>
+            <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: '#475569' }} />
+          </View>
+          <Text style={{ color: '#e2e8f0', fontWeight: '800', fontSize: 15, textAlign: 'center', paddingBottom: 14 }}>
+            More Options
+          </Text>
+
+          {/* Screen Share */}
+          <TouchableOpacity
+            style={{
+              flexDirection: 'row', alignItems: 'center', gap: 14,
+              paddingHorizontal: 20, paddingVertical: 15,
+              backgroundColor: isScreenSharing ? 'rgba(220,38,38,0.12)' : 'transparent',
+            }}
+            onPress={() => { setShowMoreSheet(false); handleToggleScreenShare(); }}
+          >
+            <View style={{
+              width: 42, height: 42, borderRadius: 12,
+              backgroundColor: isScreenSharing ? '#dc2626' : '#1e293b',
+              alignItems: 'center', justifyContent: 'center',
+            }}>
+              <Ionicons name="desktop-outline" size={20} color={isScreenSharing ? '#fff' : '#a5b4fc'} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: '#f1f5f9', fontWeight: '700', fontSize: 15 }}>
+                {isScreenSharing ? 'Stop Screen Share' : 'Screen Share'}
+              </Text>
+              <Text style={{ color: '#64748b', fontSize: 12, marginTop: 1 }}>
+                {isScreenSharing ? 'Currently sharing your screen' : 'Share your screen with participants'}
+              </Text>
+            </View>
+            {isScreenSharing && (
+              <View style={{ backgroundColor: '#dc2626', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 }}>
+                <Text style={{ color: '#fff', fontSize: 10, fontWeight: '800' }}>LIVE</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+
+          {/* Audio Only / Video Mode toggle */}
+          <TouchableOpacity
+            style={{ flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 20, paddingVertical: 15 }}
+            onPress={() => {
+              setShowMoreSheet(false);
+              const next = viewMode === 'video' ? 'audio' : 'video';
+              setViewMode(next);
+              const socket = getSocket();
+              socket?.emit('liveclass:viewmode_changed', { liveClassId: id, viewMode: next });
+            }}
+          >
+            <View style={{
+              width: 42, height: 42, borderRadius: 12,
+              backgroundColor: viewMode === 'audio' ? '#4f46e5' : '#1e293b',
+              alignItems: 'center', justifyContent: 'center',
+            }}>
+              <Ionicons
+                name={viewMode === 'audio' ? 'musical-note-outline' : 'videocam-outline'}
+                size={20}
+                color={viewMode === 'audio' ? '#fff' : '#a5b4fc'}
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: '#f1f5f9', fontWeight: '700', fontSize: 15 }}>
+                {viewMode === 'video' ? 'Switch to Audio Only' : 'Switch to Video Mode'}
+              </Text>
+              <Text style={{ color: '#64748b', fontSize: 12, marginTop: 1 }}>
+                {viewMode === 'video'
+                  ? 'Hide video, show only audio and avatars'
+                  : 'Show video tiles for all speakers'}
+              </Text>
+            </View>
+            <View style={{
+              backgroundColor: viewMode === 'audio' ? '#4f46e522' : 'transparent',
+              paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,
+              borderWidth: 1, borderColor: viewMode === 'audio' ? '#4f46e5' : 'transparent',
+            }}>
+              <Text style={{ color: viewMode === 'audio' ? '#818cf8' : '#475569', fontSize: 11, fontWeight: '700' }}>
+                {viewMode === 'audio' ? 'AUDIO' : 'VIDEO'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          {/* Whiteboard */}
+          <TouchableOpacity
+            style={{ flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 20, paddingVertical: 15 }}
+            onPress={() => {
+              setShowMoreSheet(false);
+              setActiveTab(prev => (prev === 'whiteboard' ? 'video' : 'whiteboard') as any);
+            }}
+          >
+            <View style={{
+              width: 42, height: 42, borderRadius: 12,
+              backgroundColor: activeTab === 'whiteboard' ? '#7c3aed' : '#1e293b',
+              alignItems: 'center', justifyContent: 'center',
+            }}>
+              <Ionicons name="pencil-outline" size={20} color={activeTab === 'whiteboard' ? '#fff' : '#a5b4fc'} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: '#f1f5f9', fontWeight: '700', fontSize: 15 }}>
+                {activeTab === 'whiteboard' ? 'Close Whiteboard' : 'Open Whiteboard'}
+              </Text>
+              <Text style={{ color: '#64748b', fontSize: 12, marginTop: 1 }}>
+                {activeTab === 'whiteboard'
+                  ? 'Return to video/audio view'
+                  : 'Collaborative drawing board'}
+              </Text>
+            </View>
+            {activeTab === 'whiteboard' && (
+              <View style={{ backgroundColor: '#7c3aed22', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, borderWidth: 1, borderColor: '#7c3aed' }}>
+                <Text style={{ color: '#a78bfa', fontSize: 10, fontWeight: '800' }}>OPEN</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+
+          {/* Divider + Cancel */}
+          <View style={{ height: 1, backgroundColor: '#1e293b', marginHorizontal: 20, marginVertical: 6 }} />
+          <TouchableOpacity
+            style={{ alignItems: 'center', paddingVertical: 14 }}
+            onPress={() => setShowMoreSheet(false)}
+          >
+            <Text style={{ color: '#94a3b8', fontWeight: '700', fontSize: 15 }}>Cancel</Text>
+          </TouchableOpacity>
+        </SafeAreaView>
+      </Modal>
       <HandQueueModal visible={showHands} hands={hands} onClose={() => setShowHands(false)} onApprove={handleApproveHand} onReject={handleRejectHand} />
-      <ParticipantsModal visible={showParticipants} participants={participants} myId={user?.id ?? ''} onClose={() => setShowParticipants(false)} onMute={handleMuteParticipant} onKick={handleKickParticipant} onDemote={handleDemoteFromStage} onInvite={handleInviteToStage} isHost={isHost} onPromoteMod={handlePromoteModerator} onDemoteMod={handleDemoteModerator} onTransferHost={isCreator ? handleAssignHost : undefined} />
+      <ParticipantsModal
+        visible={showParticipants}
+        participants={participants}
+        myId={user?.id ?? ''}
+        onClose={() => setShowParticipants(false)}
+        onMute={handleMuteParticipant}
+        onKick={handleKickParticipant}
+        onDemote={handleDemoteFromStage}
+        onInvite={handleInviteToStage}
+        isHost={isHost}
+        onPromoteMod={handlePromoteModerator}
+        onDemoteMod={handleDemoteModerator}
+        onTransferHost={isCreator ? handleAssignHost : undefined}
+        followMap={followMap}
+        followLoading={followLoading}
+        onFollow={handleFollowUser}
+      />
       <LiveClassGiftPanel
         liveClassId={id ?? ''}
         participants={participants.map(p => ({ userId: p.userId, role: p.role, firstName: p.firstName, lastName: p.lastName, avatarUrl: p.avatarUrl }))}
@@ -2412,10 +3138,25 @@ export default function LiveClassScreen() {
       />
       <EditStreamModal
         visible={showEditModal}
-        lc={liveClass ? { id: (liveClass as any).id ?? id ?? '', title: liveClass.title, description: liveClass.description, status: liveClass.status } : null}
+        lc={liveClass ? {
+          id: (liveClass as any).id ?? id ?? '',
+          title: liveClass.title,
+          description: liveClass.description,
+          status: liveClass.status,
+          coverImageUrl: (liveClass as any).coverImageUrl ?? null,
+        } : null}
         onClose={() => setShowEditModal(false)}
         onUpdated={() => qc.invalidateQueries({ queryKey: ['live-class', id] })}
         onDeleted={() => router.replace('/(tabs)/live-class' as any)}
+      />
+      {/* ── Share modal — DM / Group / Community / Feed / Copy ─── */}
+      <LiveClassShareModal
+        visible={showShareModal}
+        liveClassId={id ?? ''}
+        title={liveClass?.title ?? ''}
+        streamType={((liveClass as any)?.streamType ?? 'PUBLIC') as 'SCHOOL' | 'PUBLIC'}
+        webUrl={`${process.env.EXPO_PUBLIC_WEB_URL ?? 'https://halqa.app'}/live-class/${id}`}
+        onClose={() => setShowShareModal(false)}
       />
     </>
   );
@@ -2527,8 +3268,8 @@ const styles = StyleSheet.create({
   pRole:            { fontSize: 11, color: '#9ca3af' },
   pBtn:             { padding: 7, backgroundColor: '#f3f4f6', borderRadius: 8 },
   // Bottom controls
-  controls:         { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingTop: 10 },
-  ctrlBtn:          { alignItems: 'center', justifyContent: 'center', backgroundColor: '#1e1e3a', borderRadius: 14, padding: 10, minWidth: 58, height: 58 },
+  controls:         { flexDirection: 'row', justifyContent: 'flex-start', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingTop: 10 },
+  ctrlBtn:          { alignItems: 'center', justifyContent: 'center', backgroundColor: '#1e1e3a', borderRadius: 14, padding: 8, minWidth: 52, height: 52 },
   ctrlBtnActive:    { backgroundColor: '#4f46e522', borderWidth: 1.5, borderColor: '#4f46e5' },
   ctrlBtnDanger:    { backgroundColor: '#ef4444' },
   ctrlLabel:        { color: '#9ca3af', fontSize: 10, marginTop: 3, fontWeight: '600' },

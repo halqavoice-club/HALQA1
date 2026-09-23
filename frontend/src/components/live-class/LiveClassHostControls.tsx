@@ -30,6 +30,7 @@ export interface ClassSettings {
   isRecording:          boolean
   screenShareEnabled:   boolean   // host can allow/restrict screen sharing by participants
   viewMode:             'video' | 'audio'  // host can switch all participants to audio-only
+  maxSpeakers:          number    // max simultaneous active speakers on stage
 }
 
 export interface HostControlsProps {
@@ -57,6 +58,7 @@ export interface HostControlsProps {
   onToggleWhiteboard: () => void
   onToggleSetting:    (key: keyof Pick<ClassSettings, 'chatEnabled' | 'handRaiseEnabled' | 'quranPanelEnabled' | 'whiteboardEnabled' | 'screenShareEnabled'>) => void
   onSetViewMode:      (mode: 'video' | 'audio') => void
+  onSetMaxSpeakers:   (n: number) => void
   onEdit?:            () => void
   // Moderator management — only HOST can do these
   onPromoteModerator?: (userId: string) => void
@@ -329,7 +331,7 @@ export function LiveClassHostControls({
   onMute, onKick, onDemote, onInviteToStage,
   onApproveHand, onRejectHand,
   onToggleOpenMic, onToggleRecording, onToggleWhiteboard,
-  onToggleSetting, onSetViewMode, onEdit,
+  onToggleSetting, onSetViewMode, onSetMaxSpeakers, onEdit,
   onPromoteModerator, onDemoteModerator, onTransferHost,
 }: HostControlsProps) {
   const students       = participants.filter(p => p.role !== 'HOST')
@@ -491,6 +493,33 @@ export function LiveClassHostControls({
               enabled={activePanel === 'whiteboard'}
               onToggle={onToggleWhiteboard}
             />
+
+            {/* Max speakers on stage */}
+            <div className="rounded-xl bg-gray-900/50 border border-gray-800/50 p-2.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Max Speakers on Stage</p>
+                <span className="text-xs font-bold text-indigo-400">{settings.maxSpeakers}</span>
+              </div>
+              <div className="flex gap-1.5 flex-wrap">
+                {[2, 4, 6, 8, 10, 20].map(n => (
+                  <button
+                    key={n}
+                    onClick={() => onSetMaxSpeakers(n)}
+                    className={cn(
+                      'flex-1 min-w-[32px] py-1.5 rounded-lg text-xs font-bold border transition-colors',
+                      settings.maxSpeakers === n
+                        ? 'bg-indigo-600 text-white border-indigo-500'
+                        : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-white hover:bg-gray-700'
+                    )}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-gray-600">
+                {activeSpeakerCount} / {settings.maxSpeakers} stage slots in use
+              </p>
+            </div>
           </Section>
         )}
 

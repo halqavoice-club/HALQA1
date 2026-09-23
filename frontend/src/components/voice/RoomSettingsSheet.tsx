@@ -1132,9 +1132,15 @@ function EditRoomPanel({ onBack }: { onBack: () => void }) {
 // ─── Main Sheet ────────────────────────────────────────────────────────────────
 type Panel = 'avatar' | 'edit' | 'members' | 'room-members' | 'mic-seat' | 'comment' | 'message-type' | 'history' | 'music' | null
 
-export function RoomSettingsSheet({ open, onClose, isHost, amModerating, onMuteAll, onUnmuteAll, onToggleOpenMic, onToggleMicLock, isOpenMic = false, micLocked = false }: Props) {
+export function RoomSettingsSheet({ open, onClose, isHost, amModerating, onMuteAll, onUnmuteAll, onToggleOpenMic, onToggleMicLock, isOpenMic: isOpenMicProp = false, micLocked: micLockedProp = false }: Props) {
   const { activeRoom } = useVoiceStore()
   const [panel, setPanel] = useState<Panel>(null)
+
+  // Read isOpenMic and micLocked directly from the live store so the toggles
+  // reflect real-time socket updates without requiring the sheet to be reopened.
+  // Fall back to props when activeRoom is not yet available (e.g. members page).
+  const isOpenMic = activeRoom?.isOpenMic ?? isOpenMicProp
+  const micLocked = activeRoom?.micLocked  ?? micLockedProp
 
   // ── Lifted audio state — persists across panel navigation ──────────────────
   const audioRef     = useRef<HTMLAudioElement | null>(null)

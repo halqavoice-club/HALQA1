@@ -110,7 +110,10 @@ const prismaMock = {
   behaviorLog:           modelMock(),
   creatorProfile:        modelMock(),
   creatorSubscription:   modelMock(),
+  creatorTier:           modelMock(),
   creatorTip:            modelMock(),
+  payoutRequest:         modelMock(),
+  platformRevenueEntry:  modelMock(),
   assignmentSubmission:  modelMock(),
   examSubmission:        modelMock(),
 };

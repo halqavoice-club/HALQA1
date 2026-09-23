@@ -85,7 +85,7 @@ router.post(
     // { nullable: true } so that body:null (sent by VOICE_ROOM_SHARE when user adds no note)
     // is treated as absent rather than failing isString().
     body('body').optional({ nullable: true }).isString().isLength({ max: 4000 }),
-    body('type').optional().isIn(['TEXT', 'IMAGE', 'VIDEO', 'GIF', 'AUDIO', 'VOICE', 'FILE', 'DOCUMENT', 'POLL', 'SYSTEM', 'VOICE_ROOM_SHARE']),
+    body('type').optional().isIn(['TEXT', 'IMAGE', 'VIDEO', 'GIF', 'AUDIO', 'VOICE', 'FILE', 'DOCUMENT', 'POLL', 'SYSTEM', 'VOICE_ROOM_SHARE', 'LIVE_CLASS_SHARE']),
     body('mediaUrl').optional().isString().isLength({ min: 1, max: 2048 }).withMessage('Invalid mediaUrl'),
     body('mimeType').optional().isString().isLength({ max: 128 }),
     body('fileSize').optional().isInt({ min: 1, max: 52428800 }),

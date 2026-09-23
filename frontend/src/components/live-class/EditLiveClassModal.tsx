@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { X, Loader2, ImagePlus, PenLine, Trash2, AlertTriangle } from 'lucide-react'
+import { getFileUrl } from '@/lib/avatar'
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 const schema = z.object({
@@ -37,7 +38,9 @@ export function EditLiveClassModal({ lc, onClose, onUpdated, onDeleted }: Props)
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const coverInputRef = useRef<HTMLInputElement>(null)
-  const [coverPreview, setCoverPreview] = useState<string | null>(lc.coverImageUrl)
+  const [coverPreview, setCoverPreview] = useState<string | null>(
+    lc.coverImageUrl ? getFileUrl(lc.coverImageUrl) : null
+  )
   const [coverFile, setCoverFile] = useState<File | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
 

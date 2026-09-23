@@ -52,7 +52,7 @@ interface RoleConfig {
 // they are controlled by SchoolMembership, not global role.
 const SOCIAL_ROUTES = [
   '/dashboard',
-  '/feed', '/explore', '/communities', '/voice-club', '/live-class',
+  '/feed', '/explore', '/communities', '/voice-club', '/live-class', '/live-stream',
   '/dm', '/group-chat', '/messages', '/social',
   '/creator', '/wallet', '/marketplace',
   '/notifications', '/profile', '/settings',
@@ -121,6 +121,7 @@ export const ROLE_CONFIG: Record<UserRole, RoleConfig> = {
       '/communities',
       '/voice-club',
       '/live-class',
+      '/live-stream',  // Public live streams — SA can view for moderation
     ],
     restrictedRoutes: [
       // Social content creation — SUPER_ADMIN must not post/comment/react

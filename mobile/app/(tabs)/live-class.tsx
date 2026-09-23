@@ -6,6 +6,8 @@
  */
 import { useEffect, useState } from 'react';
 import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
+import * as ImagePicker from 'expo-image-picker';
+import { getAvatarUrl } from '@/lib/avatar';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   ActivityIndicator, RefreshControl, Modal, TextInput,
@@ -30,6 +32,7 @@ interface LiveClass {
   status: 'SCHEDULED' | 'LIVE' | 'ENDED' | 'CANCELLED'
   duration: number | null
   scheduledAt: string | null
+  coverImageUrl?: string | null
   hostUserId?: string | null
   class?: { id: string; name: string } | null
   teacher?: { user: { id: string; firstName: string; lastName: string; avatarUrl?: string | null } } | null
@@ -51,7 +54,11 @@ function StreamTypeBadge({ streamType }: { streamType: 'SCHOOL' | 'PUBLIC' }) {
 }
 
 // ─── Class card ───────────────────────────────────────────────────────────────
-function ClassCard({ lc, onPress, onLongPress, onHostPress }: { lc: LiveClass; onPress: () => void; onLongPress?: () => void; onHostPress?: (userId: string) => void }) {
+function ClassCard({ lc, onPress, onLongPress, onHostPress, liveViewerCount }: {
+  lc: LiveClass; onPress: () => void; onLongPress?: () => void; onHostPress?: (userId: string) => void;
+  /** SPRINT-1: real-time viewer count from socket; overrides _count.participants when set */
+  liveViewerCount?: number;
+}) {
   const isLive = lc.status === 'LIVE';
   const hostId = lc.teacher?.user?.id ?? lc.hostUser?.id ?? null;
   const hostName = lc.teacher?.user
@@ -66,6 +73,8 @@ function ClassCard({ lc, onPress, onLongPress, onHostPress }: { lc: LiveClass; o
   const contextLine = lc.streamType === 'SCHOOL' && lc.class?.name
     ? lc.class.name
     : null;
+  // Use live socket count when available, otherwise fall back to polled count
+  const displayCount = liveViewerCount ?? lc._count.participants;
 
   return (
     <TouchableOpacity
@@ -83,11 +92,15 @@ function ClassCard({ lc, onPress, onLongPress, onHostPress }: { lc: LiveClass; o
             ? { backgroundColor: '#f5f3ff' }
             : { backgroundColor: '#ede9fe' },
         ]}>
-          <Ionicons
-            name="videocam-outline"
-            size={24}
-            color={isLive ? '#ef4444' : lc.streamType === 'PUBLIC' ? '#7c3aed' : '#4f46e5'}
-          />
+          {lc.coverImageUrl ? (
+            <Image source={{ uri: getAvatarUrl(lc.coverImageUrl) ?? '' }} style={{ width: 48, height: 48, borderRadius: 10 }} resizeMode="cover" />
+          ) : (
+            <Ionicons
+              name="videocam-outline"
+              size={24}
+              color={isLive ? '#ef4444' : lc.streamType === 'PUBLIC' ? '#7c3aed' : '#4f46e5'}
+            />
+          )}
         </View>
 
         <View style={{ flex: 1 }}>
@@ -125,8 +138,11 @@ function ClassCard({ lc, onPress, onLongPress, onHostPress }: { lc: LiveClass; o
 
         <View style={{ alignItems: 'flex-end', minWidth: 48 }}>
           <Text style={styles.cardParticipants}>
-            {lc._count.participants}{' '}
+            {displayCount}{' '}
             <Ionicons name="people-outline" size={11} color="#9ca3af" />
+            {liveViewerCount !== undefined && isLive && (
+              <Text style={{ color: '#ef4444' }}> •</Text>
+            )}
           </Text>
           {lc.duration && (
             <Text style={styles.cardTime}>{lc.duration}m</Text>
@@ -272,28 +288,51 @@ function GoLiveModal({ visible, onClose, onCreated }: {
   const [handRaiseEnabled, setHandRaise] = useState(true);
   const [whiteboardEnabled, setWhiteboard] = useState(true);
   const [quranPanelEnabled, setQuranPanel] = useState(false);
+  const [screenShareEnabled, setScreenShare] = useState(true);
   const [isRecorded, setIsRecorded]   = useState(false);
   const [maxSpeakers, setMaxSpeakers] = useState(20);
   const [roomType, setRoomType]       = useState<'immediate' | 'scheduled' | 'permanent' | 'limited'>('immediate');
   const [scheduledAt, setScheduledAt] = useState<Date | null>(null);
+  const [duration, setDuration]       = useState(60);
   const [loading, setLoading]         = useState(false);
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const [coverUri, setCoverUri]       = useState<string | null>(null);
+  const [coverMime, setCoverMime]     = useState<string>('image/jpeg');
 
   // Reset state when modal opens
   useEffect(() => {
     if (visible) {
       setTitle(''); setDesc(''); setChat(true); setHandRaise(true);
-      setWhiteboard(true); setQuranPanel(false); setIsRecorded(false);
+      setWhiteboard(true); setQuranPanel(false); setScreenShare(true); setIsRecorded(false);
       setMaxSpeakers(20); setRoomType('immediate');
-      setScheduledAt(null); setShowDatePicker(false);
+      setScheduledAt(null); setShowDatePicker(false); setDuration(60);
+      setCoverUri(null); setCoverMime('image/jpeg');
     }
   }, [visible]);
+
+  const pickCoverImage = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      showMessage({ message: 'Photo library permission required', type: 'warning' });
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true,
+      aspect: [16, 9],
+      quality: 0.8,
+    });
+    if (!result.canceled && result.assets.length > 0) {
+      setCoverUri(result.assets[0].uri);
+      setCoverMime(result.assets[0].mimeType ?? 'image/jpeg');
+    }
+  };
 
   const ROOM_TYPES: Array<{ id: typeof roomType; label: string; sub: string; icon: string }> = [
     { id: 'immediate', label: 'Immediate',  sub: 'Go live right now',        icon: '▶️' },
     { id: 'scheduled', label: 'Scheduled',  sub: 'Choose a future time',     icon: '📅' },
     { id: 'permanent', label: 'Permanent',  sub: 'Always open, no auto-end', icon: '♾️' },
-    { id: 'limited',   label: 'Limited',    sub: 'Auto-ends after 60 min',   icon: '⏱️' },
+    { id: 'limited',   label: 'Limited',    sub: 'Auto-ends after duration',  icon: '⏱️' },
   ];
 
   const handleCreate = async () => {
@@ -312,14 +351,26 @@ function GoLiveModal({ visible, onClose, onCreated }: {
         handRaiseEnabled,
         whiteboardEnabled,
         quranPanelEnabled,
-        screenShareEnabled: true,
+        screenShareEnabled,
         isOpenMic: true,
         isRecorded,
         maxSpeakers,
         scheduledAt: roomType === 'scheduled' && scheduledAt ? scheduledAt.toISOString() : undefined,
-        duration: roomType === 'limited' ? 60 : null,
+        duration: roomType === 'limited' ? duration : null,
       });
       const lc = res.data.data;
+
+      // Upload cover image if selected (non-critical)
+      if (coverUri && lc?.id) {
+        try {
+          const formData = new FormData();
+          const filename = coverUri.split('/').pop() ?? 'cover.jpg';
+          formData.append('cover', { uri: coverUri, name: filename, type: coverMime } as any);
+          await api.post(`/live-classes/${lc.id}/cover`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+          });
+        } catch (_e) { /* non-critical */ }
+      }
 
       // Immediate and permanent: auto-start then navigate directly to the live room
       if (roomType === 'immediate' || roomType === 'permanent') {
@@ -464,6 +515,28 @@ function GoLiveModal({ visible, onClose, onCreated }: {
               maxLength={500}
             />
 
+            {/* Cover image */}
+            <Text style={styles.fieldLabel}>Cover Image (optional)</Text>
+            <TouchableOpacity
+              style={glStyles.coverPicker}
+              onPress={pickCoverImage}
+              activeOpacity={0.8}
+            >
+              {coverUri ? (
+                <Image source={{ uri: coverUri }} style={{ width: '100%', height: '100%', borderRadius: 10 }} resizeMode="cover" />
+              ) : (
+                <View style={{ alignItems: 'center', gap: 4 }}>
+                  <Ionicons name="image-outline" size={24} color="#9ca3af" />
+                  <Text style={{ color: '#9ca3af', fontSize: 12 }}>Tap to upload (16:9)</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+            {coverUri && (
+              <TouchableOpacity onPress={() => setCoverUri(null)} style={{ marginTop: 2 }}>
+                <Text style={{ color: '#ef4444', fontSize: 11 }}>Remove cover</Text>
+              </TouchableOpacity>
+            )}
+
             <View style={styles.toggleRow}>
               <Text style={styles.toggleLabel}>💬 Live chat</Text>
               <Switch
@@ -505,6 +578,16 @@ function GoLiveModal({ visible, onClose, onCreated }: {
             </View>
 
             <View style={styles.toggleRow}>
+              <Text style={styles.toggleLabel}>🖥️ Screen Share</Text>
+              <Switch
+                value={screenShareEnabled}
+                onValueChange={setScreenShare}
+                trackColor={{ false: '#e5e7eb', true: '#c4b5fd' }}
+                thumbColor={screenShareEnabled ? '#7c3aed' : '#9ca3af'}
+              />
+            </View>
+
+            <View style={styles.toggleRow}>
               <Text style={styles.toggleLabel}>⏺️ Record Stream</Text>
               <Switch
                 value={isRecorded}
@@ -513,6 +596,28 @@ function GoLiveModal({ visible, onClose, onCreated }: {
                 thumbColor={isRecorded ? '#7c3aed' : '#9ca3af'}
               />
             </View>
+
+            {/* Duration picker — only for limited type */}
+            {roomType === 'limited' && (
+              <>
+                <Text style={[styles.fieldLabel, { marginTop: 14 }]}>
+                  Duration (minutes)
+                </Text>
+                <View style={glStyles.speakerRow}>
+                  {[30, 60, 90, 120, 180, 240].map(n => (
+                    <TouchableOpacity
+                      key={n}
+                      style={[glStyles.speakerOpt, duration === n && glStyles.speakerOptActive]}
+                      onPress={() => setDuration(n)}
+                    >
+                      <Text style={[glStyles.speakerOptText, duration === n && glStyles.speakerOptTextActive]}>
+                        {n >= 60 ? `${n / 60}h${n % 60 ? `${n % 60}m` : ''}` : `${n}m`}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </>
+            )}
 
             <Text style={[styles.fieldLabel, { marginTop: 14 }]}>
               Max Speakers on Stage
@@ -560,6 +665,11 @@ export default function LiveClassScreen() {
   const queryClient = useQueryClient();
   const [showGoLive, setShowGoLive] = useState(false);
   const [editingLc, setEditingLc]   = useState<LiveClass | null>(null);
+  // SPRINT-1: real-time viewer counts keyed by liveClassId
+  const [viewerCounts, setViewerCounts] = useState<Record<string, number>>({});
+  // Search + status filter
+  const [search, setSearch]             = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'LIVE' | 'SCHEDULED' | 'ENDED'>('all');
 
   // SA-LC-MOBILE-01: SUPER_ADMIN = Platform Administration ONLY — cannot create live classes.
   // Any other authenticated user can go live (public stream).
@@ -594,25 +704,61 @@ export default function LiveClassScreen() {
     socket.emit('feed:join:public');  // listen for public stream notifications
 
     const refresh = () => queryClient.invalidateQueries({ queryKey: ['live-classes'] });
-    socket.on('liveclass:started',   refresh);
-    socket.on('liveclass:scheduled', refresh);
-    socket.on('liveclass:ended',     refresh);
-    socket.on('liveclass:updated',   refresh);
+    // SPRINT-1: real-time viewer count — update local state without a full refetch
+    const onViewerCount = (d: { liveClassId: string; count: number }) => {
+      setViewerCounts(prev => ({ ...prev, [d.liveClassId]: d.count }));
+    };
+    // Show a toast when any stream goes live (parity with web)
+    const onStarted = (d: { liveClassId?: string; title?: string }) => {
+      refresh();
+      if (d.title) {
+        showMessage({ message: `🔴 ${d.title} is now live!`, type: 'info', duration: 3000 });
+      }
+    };
+    socket.on('liveclass:started',      onStarted);
+    socket.on('liveclass:scheduled',    refresh);
+    socket.on('liveclass:ended',        refresh);
+    socket.on('liveclass:updated',      refresh);
+    socket.on('liveclass:viewer_count', onViewerCount);
 
     return () => {
       if (schoolId) socket.emit('school:leave', schoolId);
       socket.emit('feed:leave:public');
-      socket.off('liveclass:started',   refresh);
-      socket.off('liveclass:scheduled', refresh);
-      socket.off('liveclass:ended',     refresh);
-      socket.off('liveclass:updated',   refresh);
+      socket.off('liveclass:started',      onStarted);
+      socket.off('liveclass:scheduled',    refresh);
+      socket.off('liveclass:ended',        refresh);
+      socket.off('liveclass:updated',      refresh);
+      socket.off('liveclass:viewer_count', onViewerCount);
     };
   }, [queryClient, user?.schoolId]);
 
-  const classes: LiveClass[] = data || [];
-  const live      = classes.filter(c => c.status === 'LIVE');
-  const scheduled = classes.filter(c => c.status === 'SCHEDULED');
-  const past      = classes.filter(c => c.status === 'ENDED').slice(0, 10);
+  const allClasses: LiveClass[] = data || [];
+
+  // Apply search + status filter
+  const classes = allClasses.filter(c => {
+    if (statusFilter !== 'all' && c.status !== statusFilter) return false;
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return (
+      c.title.toLowerCase().includes(q) ||
+      (c.class?.name ?? '').toLowerCase().includes(q) ||
+      ((c.teacher?.user
+        ? `${c.teacher.user.firstName} ${c.teacher.user.lastName}`
+        : c.hostUser
+        ? `${c.hostUser.firstName} ${c.hostUser.lastName}`
+        : ''
+      ).toLowerCase().includes(q))
+    );
+  });
+
+  // SPRINT-2: sort live PUBLIC streams by real-time viewer count (highest first)
+  const liveAll   = classes.filter(c => c.status === 'LIVE');
+  const livePublicSorted = [...liveAll.filter(c => c.streamType === 'PUBLIC')]
+    .sort((a, b) => (viewerCounts[b.id] ?? b._count.participants) - (viewerCounts[a.id] ?? a._count.participants));
+  const liveSchool = liveAll.filter(c => c.streamType === 'SCHOOL');
+  const live       = [...livePublicSorted, ...liveSchool];
+  const scheduled  = classes.filter(c => c.status === 'SCHEDULED');
+  const past       = classes.filter(c => c.status === 'ENDED').slice(0, 10);
 
   // Build flat list with section markers
   type ListItem = LiveClass & { _section: string };
@@ -623,6 +769,13 @@ export default function LiveClassScreen() {
   ];
 
   const allItems = [...live, ...scheduled, ...past.slice(0, 10)];
+
+  const STATUS_FILTERS: Array<{ key: typeof statusFilter; label: string }> = [
+    { key: 'all',       label: 'All' },
+    { key: 'LIVE',      label: '🔴 Live' },
+    { key: 'SCHEDULED', label: 'Upcoming' },
+    { key: 'ENDED',     label: 'Past' },
+  ];
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -661,6 +814,46 @@ export default function LiveClassScreen() {
         </View>
       </View>
 
+      {/* ── Search bar ─────────────────────────────────────────────────── */}
+      <View style={styles.searchRow}>
+        <View style={styles.searchBox}>
+          <Ionicons name="search-outline" size={16} color="#9ca3af" />
+          <TextInput
+            style={styles.searchInput}
+            value={search}
+            onChangeText={setSearch}
+            placeholder="Search streams..."
+            placeholderTextColor="#9ca3af"
+            returnKeyType="search"
+            clearButtonMode="while-editing"
+          />
+          {search.length > 0 && (
+            <TouchableOpacity onPress={() => setSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Ionicons name="close-circle" size={16} color="#9ca3af" />
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+
+      {/* ── Status filter tabs ─────────────────────────────────────────── */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.filterRow}
+      >
+        {STATUS_FILTERS.map(f => (
+          <TouchableOpacity
+            key={f.key}
+            style={[styles.filterTab, statusFilter === f.key && styles.filterTabActive]}
+            onPress={() => setStatusFilter(f.key)}
+          >
+            <Text style={[styles.filterTabText, statusFilter === f.key && styles.filterTabTextActive]}>
+              {f.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
       {isLoading ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" color="#4f46e5" />
@@ -689,15 +882,7 @@ export default function LiveClassScreen() {
                 <ClassCard
                   lc={item}
                   onPress={() => {
-                    // Offer camera test before joining a LIVE class
-                    if (item.status === 'LIVE') {
-                      router.push({
-                        pathname: '/live-class/camera-test',
-                        params: { classId: item.id },
-                      } as any);
-                    } else {
-                      router.push({ pathname: '/live-class/[id]', params: { id: item.id } } as any);
-                    }
+                    router.push({ pathname: '/live-class/[id]', params: { id: item.id } } as any);
                   }}
                   onHostPress={(userId) =>
                     router.push({ pathname: '/profile/[id]', params: { id: userId } } as any)
@@ -710,6 +895,7 @@ export default function LiveClassScreen() {
                       setEditingLc(item);
                     }
                   }}
+                  liveViewerCount={viewerCounts[item.id]}
                 />
               </View>
             );
@@ -718,9 +904,13 @@ export default function LiveClassScreen() {
           ListEmptyComponent={
             <View style={styles.empty}>
               <Ionicons name="videocam-off-outline" size={48} color="#d1d5db" />
-              <Text style={styles.emptyTitle}>No live streams yet</Text>
-              <Text style={styles.emptySubtitle}>Tap "Go Live" to start broadcasting</Text>
-              {canCreate && (
+              <Text style={styles.emptyTitle}>
+                {search ? `No results for "${search}"` : 'No live streams yet'}
+              </Text>
+              <Text style={styles.emptySubtitle}>
+                {search ? 'Try a different search term' : 'Tap "Go Live" to start broadcasting'}
+              </Text>
+              {canCreate && !search && (
                 <View style={styles.emptyActions}>
                   <TouchableOpacity style={[styles.goLiveHeaderBtn, { marginTop: 16 }]} onPress={() => setShowGoLive(true)}>
                     <Ionicons name="radio-outline" size={16} color="#fff" />
@@ -745,7 +935,7 @@ export default function LiveClassScreen() {
       <GoLiveModal
         visible={showGoLive}
         onClose={() => setShowGoLive(false)}
-        onCreated={(lcId: string) => {
+        onCreated={(_lcId: string) => {
           setShowGoLive(false);
           queryClient.invalidateQueries({ queryKey: ['live-classes'] });
         }}
@@ -769,6 +959,7 @@ const glStyles = StyleSheet.create({
   typeLabelActive:  { color: '#4338ca' },
   typeSub:          { fontSize: 10, color: '#9ca3af', textAlign: 'center' },
   datePicker:       { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#f9fafb', borderRadius: 12, borderWidth: 1, borderColor: '#e5e7eb', paddingHorizontal: 12, paddingVertical: 12, marginBottom: 4 },
+  coverPicker:      { height: 90, borderWidth: 1.5, borderColor: '#e5e7eb', borderStyle: 'dashed', borderRadius: 10, backgroundColor: '#f9fafb', justifyContent: 'center', alignItems: 'center', overflow: 'hidden', marginBottom: 4 },
   datePickerText:   { flex: 1, fontSize: 14, color: '#1e293b', fontWeight: '500' },
   iosPickerWrap:    { backgroundColor: '#f9fafb', borderRadius: 12, overflow: 'hidden', marginBottom: 8 },
   iosPickerDone:    { backgroundColor: '#4f46e5', padding: 12, alignItems: 'center', borderRadius: 10, margin: 8 },
@@ -791,6 +982,15 @@ const styles = StyleSheet.create({
   createClassBtnText:{ color: '#4f46e5', fontWeight: '700', fontSize: 13 },
   goLiveHeaderBtn:   { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#4f46e5', paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20 },
   goLiveHeaderText:  { color: '#fff', fontWeight: '700', fontSize: 13 },
+  // Search + filter
+  searchRow:         { paddingHorizontal: 12, paddingTop: 8, paddingBottom: 4 },
+  searchBox:         { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#f3f4f6', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 9, borderWidth: 1, borderColor: '#e5e7eb' },
+  searchInput:       { flex: 1, fontSize: 14, color: '#111827', padding: 0 },
+  filterRow:         { paddingHorizontal: 12, paddingBottom: 6, gap: 6 },
+  filterTab:         { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, backgroundColor: '#f3f4f6', borderWidth: 1, borderColor: '#e5e7eb' },
+  filterTabActive:   { backgroundColor: '#4f46e5', borderColor: '#4f46e5' },
+  filterTabText:     { fontSize: 12, fontWeight: '600', color: '#6b7280' },
+  filterTabTextActive: { color: '#fff' },
   sectionHeader:     { fontSize: 13, fontWeight: '700', color: '#6b7280', paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8 },
   card:              { backgroundColor: '#fff', marginHorizontal: 12, marginBottom: 8, borderRadius: 16, borderWidth: 1, borderColor: '#f3f4f6' },
   liveCard:          { borderColor: '#fecaca' },

@@ -11,6 +11,8 @@ const { createStorageWorker       } = require('./storage.worker');
 const { createPostSchedulerWorker } = require('./post-scheduler.worker');
 const { createRoomReminderWorker      } = require('./room-reminder.worker');
 const { createLiveClassAutoEndWorker  } = require('./live-class-autoend.worker');
+const { createEconomyReconciliationWorker } = require('./economy-reconciliation.worker');
+const { createVoiceStaleSessionWorker } = require('./voice-stale-session.worker');
 
 module.exports = {
   createEmailWorker,
@@ -21,4 +23,6 @@ module.exports = {
   createPostSchedulerWorker,
   createRoomReminderWorker,
   createLiveClassAutoEndWorker,
+  createEconomyReconciliationWorker,
+  createVoiceStaleSessionWorker,
 };

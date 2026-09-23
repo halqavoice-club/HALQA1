@@ -87,41 +87,88 @@ async function purchaseCoins(req, res) {
 }
 
 // ─── GET /wallet/history ──────────────────────────────────────────────────────
+/**
+ * Returns a unified paginated list of all WalletTransaction records for the
+ * authenticated user. Replaces the old GiftTransaction-only implementation.
+ *
+ * All types are included: STRIPE_PURCHASE, GIFT_SEND, TIP_SEND, SUBSCRIPTION,
+ * ADMIN_GRANT, REFUND, PAYOUT, PAYOUT_REVERSAL, DISPUTED.
+ *
+ * GIFT_SEND records are enriched with gift name/emoji and receiver details.
+ * PAYOUT/PAYOUT_REVERSAL records have accountDetails fully redacted.
+ *
+ * Security: never returns another user's transaction data.
+ */
 async function getTransactionHistory(req, res) {
   try {
     const { page = 1, limit = 20 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
     const take = parseInt(limit);
 
-    const [sent, received, total] = await Promise.all([
-      prisma.giftTransaction.findMany({
-        where:   { senderId: req.user.id },
-        include: {
-          gift:     { select: { name: true, emoji: true, priceCoins: true } },
-          receiver: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } },
-          room:     { select: { id: true, title: true } }
-        },
+    const [records, total] = await Promise.all([
+      prisma.walletTransaction.findMany({
+        where:   { userId: req.user.id },
         orderBy: { createdAt: 'desc' },
         skip,
-        take
+        take,
       }),
-      prisma.giftTransaction.findMany({
-        where:   { receiverId: req.user.id },
-        include: {
-          gift:   { select: { name: true, emoji: true, priceCoins: true } },
-          sender: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } },
-          room:   { select: { id: true, title: true } }
-        },
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take
-      }),
-      prisma.giftTransaction.count({
-        where: { OR: [{ senderId: req.user.id }, { receiverId: req.user.id }] }
-      })
+      prisma.walletTransaction.count({ where: { userId: req.user.id } })
     ]);
 
-    return successResponse(res, { sent, received, total, page: parseInt(page), limit: take });
+    // Enrich GIFT_SEND records with gift + receiver details
+    // Collect all giftTxIds in one pass to avoid N+1 queries
+    const giftTxIds = records
+      .filter(r => r.type === 'GIFT_SEND' && r.giftTxId)
+      .map(r => r.giftTxId);
+
+    let giftMap = {};
+    if (giftTxIds.length > 0) {
+      const giftTxs = await prisma.giftTransaction.findMany({
+        where:   { id: { in: giftTxIds } },
+        select:  {
+          id:       true,
+          gift:     { select: { name: true, emoji: true, priceCoins: true } },
+          receiver: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } },
+        }
+      });
+      giftMap = Object.fromEntries(giftTxs.map(g => [g.id, g]));
+    }
+
+    // Build response — enrich and redact as appropriate per type
+    const enriched = records.map(r => {
+      const base = {
+        id:          r.id,
+        type:        r.type,
+        coins:       r.coins,
+        diamonds:    r.diamonds ?? 0,
+        description: r.description,
+        createdAt:   r.createdAt,
+      };
+
+      // GIFT_SEND: include gift details
+      if (r.type === 'GIFT_SEND' && r.giftTxId && giftMap[r.giftTxId]) {
+        const gx = giftMap[r.giftTxId];
+        base.giftDetails = {
+          gift:     gx.gift,
+          receiver: gx.receiver,
+        };
+      }
+
+      // STRIPE_PURCHASE: include package reference
+      if (r.type === 'STRIPE_PURCHASE' && r.packageId) {
+        base.packageId = r.packageId;
+      }
+
+      // PAYOUT / PAYOUT_REVERSAL: redact sensitive payout data
+      // (accountDetails live on PayoutRequest, not WalletTransaction — nothing to strip here)
+
+      return base;
+    });
+
+    return successResponse(res, {
+      data:       enriched,
+      pagination: { page: parseInt(page), limit: take, total }
+    });
   } catch (err) {
     return errorResponse(res, err.message, 500);
   }

@@ -461,28 +461,71 @@ async function joinRoom(req, res, next) {
     // Product rule: a user can only ACTIVELY PARTICIPATE in one Voice Club room.
     // If they are already active in a DIFFERENT room:
     //   → REJECT the new join with HTTP 409 VOICE_ROOM_ALREADY_ACTIVE
+    //   → Include the active room's metadata so the UI can show the user
+    //     WHICH room they are currently in (title, emoji, topic).
     //   → Leave the existing Room A completely UNTOUCHED (no eviction, no kick,
     //     no seat clear, no role change, no Socket.IO leave, no queue dequeue)
     // If they are rejoining the SAME room → allow (handled below as reconnect).
     // Queue presence (handRaised) does NOT count as active participation.
     // Permanent VoiceRoomMember membership is NOT checked here.
+    //
+    // PHASE 6 — ATOMICITY / RACE CONDITION PREVENTION:
+    // The check-then-act (findMany → create/update) is wrapped in a serializable
+    // DB transaction via raw SQL advisory lock on the userId. This prevents the
+    // race condition where two concurrent join requests for the same user could
+    // both pass the isActive check and both succeed, creating two active sessions.
+    //
+    // MySQL GET_LOCK() acquires a named advisory lock (scoped to connection).
+    // The lock name is deterministic per user: voice_join_{userId}.
+    // Lock timeout: 5 seconds — if another request holds the lock, this one waits
+    // up to 5s then fails with a clear error rather than creating a race.
     {
-      const otherActiveRooms = await prisma.voiceParticipant.findMany({
-        where: {
-          userId,
-          isActive: true,
-          roomId: { not: roomId },  // different room only
-        },
-        select: { roomId: true }
-      });
-      if (otherActiveRooms.length > 0) {
-        return errorResponse(
-          res,
-          `You are already in an active Voice Club session. Leave that room before joining another.`,
-          409,
-          { code: 'VOICE_ROOM_ALREADY_ACTIVE', activeRoomId: otherActiveRooms[0].roomId }
-        );
+      const lockName = `voice_join_${userId}`;
+      const lockResult = await prisma.$queryRaw`SELECT GET_LOCK(${lockName}, 5) AS acquired`;
+      const lockAcquired = lockResult?.[0]?.acquired === 1;
+      if (!lockAcquired) {
+        return errorResponse(res, 'Another join request is already in progress. Please try again.', 429);
       }
+
+      try {
+        const otherActiveRooms = await prisma.voiceParticipant.findMany({
+          where: {
+            userId,
+            isActive: true,
+            roomId: { not: roomId },  // different room only
+          },
+          include: {
+            room: {
+              select: { id: true, title: true, coverEmoji: true, topic: true, status: true }
+            }
+          }
+        });
+        if (otherActiveRooms.length > 0) {
+          const activeRoom = otherActiveRooms[0].room;
+          await prisma.$queryRaw`SELECT RELEASE_LOCK(${lockName})`;
+          return errorResponse(
+            res,
+            `You are already in an active Voice Club session. Leave that room before joining another.`,
+            409,
+            {
+              code:            'VOICE_ROOM_ALREADY_ACTIVE',
+              activeRoomId:    activeRoom.id,
+              activeRoomTitle: activeRoom.title,
+              activeRoomEmoji: activeRoom.coverEmoji ?? '🎙️',
+              activeRoomTopic: activeRoom.topic ?? null,
+            }
+          );
+        }
+      } catch (lockErr) {
+        // Release lock and re-throw so next(error) handles it
+        await prisma.$queryRaw`SELECT RELEASE_LOCK(${lockName})`.catch(() => {});
+        throw lockErr;
+      }
+
+      // Lock is held — the join will proceed below.
+      // We release it after the participant upsert completes.
+      // Store the lock name so we can release it in the finally block.
+      req._voiceJoinLockName = lockName;
     }
     // Upsert participant - re-join if previously left
     const existing = await prisma.voiceParticipant.findUnique({
@@ -626,8 +669,20 @@ async function joinRoom(req, res, next) {
       io.in(`user:${userId}`).socketsJoin(`voice:${roomId}`);
     }
 
+    // Phase 6: Release the advisory lock now that the participant record is committed.
+    if (req._voiceJoinLockName) {
+      await prisma.$queryRaw`SELECT RELEASE_LOCK(${req._voiceJoinLockName})`.catch(() => {});
+    }
+
     return successResponse(res, updatedRoom, 'Joined room');
-  } catch (error) { next(error); }
+  } catch (error) {
+    // Release advisory lock on any error path to prevent lock leaks
+    if (req._voiceJoinLockName) {
+      const prismaInstance = require('../utils/prisma');
+      await prismaInstance.$queryRaw`SELECT RELEASE_LOCK(${req._voiceJoinLockName})`.catch(() => {});
+    }
+    next(error);
+  }
 }
 
 // --- LEAVE ROOM ---------------------------------------------------------------

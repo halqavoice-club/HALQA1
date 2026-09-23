@@ -1101,20 +1101,21 @@ model LibraryIssue {
 
 // ─── FEE MANAGEMENT ──────────────────────────────────────────────────────────
 model FeeRecord {
-  id          String   @id @default(uuid())
-  schoolId    String?
-  studentId   String
-  student     Student  @relation(fields: [studentId], references: [id])
-  feeType     String   @default("TUITION") // TUITION, REGISTRATION, EXAM, ACTIVITY, TRANSPORT, OTHER
-  amount      Decimal  @db.Decimal(10, 2)
-  description String?  @db.Text
-  status      String   @default("PENDING") // PENDING, PAID, OVERDUE, WAIVED
-  dueDate     DateTime?
-  paidAt      DateTime?
-  notes       String?  @db.Text
-  createdBy   String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id              String   @id @default(uuid())
+  schoolId        String?
+  studentId       String
+  student         Student  @relation(fields: [studentId], references: [id])
+  feeType         String   @default("TUITION") // TUITION, REGISTRATION, EXAM, ACTIVITY, TRANSPORT, OTHER
+  amount          Decimal  @db.Decimal(10, 2)
+  description     String?  @db.Text
+  status          String   @default("PENDING") // PENDING, PAID, OVERDUE, WAIVED
+  dueDate         DateTime?
+  paidAt          DateTime?
+  notes           String?  @db.Text
+  createdBy       String?
+  stripeSessionId String?  @unique @db.VarChar(255) // M-C: Stripe session ID for fee-payment idempotency guard
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([schoolId])
   @@index([studentId])
@@ -1415,12 +1416,24 @@ model Wallet {
 // Additive model — records every coin credit and debit with source traceability.
 // stripeSessionId has a @unique constraint — this is the primary defence against
 // Stripe webhook double-credit at the DB layer (beyond Redis idempotency).
+//
+// Valid type values (as of economy consolidation M-D):
+//   STRIPE_PURCHASE  — Stripe checkout completed; coins credited
+//   GIFT_SEND        — Gift sent; coins debited from sender
+//   TIP_SEND         — Creator tip sent; coins debited from sender
+//   SUBSCRIPTION     — Creator subscription charged; coins debited
+//   ADMIN_GRANT      — Admin coin grant; coins credited
+//   REFUND           — Coin refund; coins credited (legacy)
+//   PAYOUT           — Diamond reservation on payout request; diamonds debited
+//   PAYOUT_REVERSAL  — Diamond restoration on payout reject/cancel; diamonds credited
+//   DISPUTED         — Stripe chargeback flag; no coin/diamond movement
 model WalletTransaction {
   id               String   @id @default(uuid())
   userId           String
   user             User     @relation("WalletTransactions", fields: [userId], references: [id], onDelete: Cascade)
-  type             String   // STRIPE_PURCHASE | GIFT_SEND | TIP_SEND | SUBSCRIPTION | ADMIN_GRANT | REFUND
-  coins            Int      // positive = credit, negative = debit
+  type             String   // see valid type values above
+  coins            Int      // positive = credit, negative = debit (coins)
+  diamonds         Int      @default(0) // positive = credit, negative = debit (diamonds); 0 for coin-only records
   description      String?  @db.VarChar(255)
   stripeSessionId  String?  @unique  // unique constraint prevents Stripe double-credit
   packageId        String?
@@ -1434,6 +1447,32 @@ model WalletTransaction {
   @@index([createdAt])
   @@index([userId, createdAt])
   @@map("wallet_transactions")
+}
+
+// ─── PLATFORM REVENUE LEDGER ─────────────────────────────────────────────────
+// Explicit record of every coin amount retained by the platform (50% share).
+// Previously this was implicit — coins disappeared into the void.
+// Now every monetised event writes one entry here inside the same DB transaction.
+//
+// source_type values:
+//   GIFT         — platform share of a gift send
+//   TIP          — platform share of a creator tip
+//   SUBSCRIPTION — platform share of a subscription charge
+//   COIN_PURCHASE— full gross inflow from a Stripe coin purchase
+model PlatformRevenueEntry {
+  id          String   @id @default(uuid())
+  sourceType  String   @db.VarChar(50)  // GIFT | TIP | SUBSCRIPTION | COIN_PURCHASE
+  sourceId    String   @db.VarChar(36)  // ID of originating record
+  userId      String   @db.VarChar(36)  // user whose action generated the revenue
+  coins       Int                       // platform share in coins (positive)
+  usdEquiv    Decimal  @db.Decimal(10, 2) @default(0) // coins / 100
+  createdAt   DateTime @default(now())
+
+  @@index([sourceType])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([sourceType, createdAt])
+  @@map("platform_revenue_entries")
 }
 
 model CoinPackage {
@@ -3245,9 +3284,9 @@ model PayoutRequest {
   id             String    @id @default(uuid())
   userId         String
   diamonds       Int                          // diamonds requested for withdrawal
-  usdAmount      Float                        // USD value (diamonds × 0.005)
+  usdAmount      Decimal   @db.Decimal(10, 2) // USD value stored as exact decimal (M-B: was Float)
   method         String    @db.VarChar(30)    // 'bank_transfer' | 'paypal' | 'stripe'
-  accountDetails String    @db.Text           // JSON: method-specific payout details
+  accountDetails String    @db.Text           // JSON: method-specific payout details (will be encrypted in Task 4.3)
   status         String    @default("PENDING") @db.VarChar(20)
   adminNote      String?   @db.VarChar(500)
   transactionRef String?   @db.VarChar(200)  // external payment reference

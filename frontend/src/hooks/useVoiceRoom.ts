@@ -472,11 +472,15 @@ export function useVoiceRoom(roomId: string | null) {
 
     const onMicGrabbed = (data: {
       roomId: string; userId: string; firstName: string; lastName: string
+      avatarUrl: string | null; seatNumber?: number | null
     }) => {
       if (data.roomId !== roomId) return
       updateParticipant(data.userId, {
-        role: VOICE_ROLES.SPEAKER, isMuted: false,
-        handRaised: false, handRaisedAt: null
+        role:        VOICE_ROLES.SPEAKER,
+        isMuted:     false,
+        handRaised:  false,
+        handRaisedAt: null,
+        seatNumber:  data.seatNumber ?? null,  // ← apply the assigned seat so avatar appears in grid
       })
       if (data.userId !== user?.id) {
         toast({ title: `🎙️ ${data.firstName} ${data.lastName} grabbed the mic` })
@@ -537,8 +541,19 @@ export function useVoiceRoom(roomId: string | null) {
       toast({ title: '❌ Request declined', description: data.message, variant: 'destructive' })
     }
 
-    const onPromotedToSpeaker = (data: { roomId: string; message: string }) => {
+    const onPromotedToSpeaker = (data: { roomId: string; message: string; seatNumber?: number | null }) => {
       if (data.roomId !== roomId) return
+      // Apply seatNumber immediately so the seat grid renders without waiting
+      // for the subsequent voice:role_changed event (which may arrive slightly later).
+      if (user?.id && data.seatNumber != null) {
+        updateParticipant(user.id, {
+          role:        VOICE_ROLES.SPEAKER,
+          isMuted:     false,
+          seatNumber:  data.seatNumber,
+          handRaised:  false,
+          handRaisedAt: null,
+        })
+      }
       toast({ title: '🎙️ You\'re on stage!', description: data.message })
     }
 
@@ -1064,7 +1079,7 @@ export function useVoiceRoom(roomId: string | null) {
     }
     try {
       const res = await api.post(`/voice/${roomId}/grab-mic`)
-      const { queued, position, role } = res.data.data ?? {}
+      const { queued, position, role, seatNumber, isMuted } = res.data.data ?? {}
       if (queued) {
         // Queued because open-mic is off or stage is full
         const activeRoom = useVoiceStore.getState().activeRoom
@@ -1076,6 +1091,20 @@ export function useVoiceRoom(roomId: string | null) {
           description: reason,
         })
       } else {
+        // Optimistic update — apply role + seatNumber immediately from the API
+        // response so the seat grid renders without waiting for socket round-trip.
+        // The subsequent voice:mic_grabbed / voice:role_changed / voice:stage_state
+        // events will reconcile any discrepancy.
+        const myUserId = require('@/store/auth.store').useAuthStore.getState().user?.id
+        if (myUserId && seatNumber != null) {
+          useVoiceStore.getState().updateParticipant(myUserId, {
+            role:        asRole(role ?? 'SPEAKER'),
+            isMuted:     false,
+            seatNumber:  Number(seatNumber),
+            handRaised:  false,
+            handRaisedAt: null,
+          })
+        }
         toast({ title: '🎙️ You\'re on stage!', description: 'Your mic is now active.' })
       }
     } catch (e: any) {

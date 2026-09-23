@@ -7,6 +7,7 @@ import api from '@/lib/api'
 import { useAuthStore } from '@/store/auth.store'
 import { useVoiceStore, VoiceRoom } from '@/store/voice.store'
 import { useToast } from '@/components/ui/use-toast'
+import { getSocket } from '@/lib/socket'
 // FE-002: Use the error-boundary-wrapped version so LiveKit/SDK crashes
 // show a recovery UI instead of crashing the entire page.
 import { VoiceRoomWithBoundary } from '@/components/voice/VoiceRoomWithBoundary'
@@ -26,8 +27,10 @@ export default function VoiceRoomPage() {
   const router = useRouter()
   const { user } = useAuthStore()
   const { toast } = useToast()
-  const { activeRoom, setActiveRoom } = useVoiceStore()
-  const resetRoom = useVoiceStore(s => s.resetRoom)
+  const {
+    activeRoom, setActiveRoom, resetRoom,
+    _liveKitDisconnect,
+  } = useVoiceStore()
 
   // Clean up all room-scoped store state when navigating away from this page
   useEffect(() => () => resetRoom(), [resetRoom])
@@ -36,6 +39,13 @@ export default function VoiceRoomPage() {
   const [loading, setLoading] = useState(true)
   const [joining, setJoining] = useState(false)
   const [error, setError]     = useState<string | null>(null)
+
+  // Active-session conflict state — shown when user tries to join while in another room.
+  // conflictRoom holds the full metadata of room B returned by the 409 response.
+  const [conflictRoom, setConflictRoom] = useState<{
+    id: string; title: string; emoji: string; topic: string | null
+  } | null>(null)
+  const [leavingConflict, setLeavingConflict] = useState(false)
 
   // Load room info
   useEffect(() => {
@@ -70,7 +80,74 @@ export default function VoiceRoomPage() {
       const res = await api.post(`/voice/${id}/join`)
       setActiveRoom(res.data.data)
     } catch (e: any) {
+      const code = e?.response?.data?.errors?.code
+      if (code === 'VOICE_ROOM_ALREADY_ACTIVE') {
+        // Backend now returns full room B metadata — use it to show the user
+        // exactly which room they're currently in, not the destination room.
+        // The conflict data lives under response.data.errors (not response.data directly).
+        setConflictRoom({
+          id:    e?.response?.data?.errors?.activeRoomId    ?? '',
+          title: e?.response?.data?.errors?.activeRoomTitle ?? 'another room',
+          emoji: e?.response?.data?.errors?.activeRoomEmoji ?? '🎙️',
+          topic: e?.response?.data?.errors?.activeRoomTopic ?? null,
+        })
+        setJoining(false)
+        return
+      }
       toast({ title: e?.response?.data?.message || 'Failed to join room', variant: 'destructive' })
+      setJoining(false)
+    }
+  }
+
+  // Full teardown of room B, then join room A
+  const handleLeaveAndJoin = async () => {
+    if (!conflictRoom || !id) return
+    setLeavingConflict(true)
+
+    // 1. Disconnect LiveKit audio from room B (stops mic, detaches audio elements)
+    _liveKitDisconnect?.()
+
+    // 2. Leave room B via API (marks voiceParticipant.isActive = false in DB)
+    try {
+      await api.post(`/voice/${conflictRoom.id}/leave`)
+    } catch {
+      // Proceed even if already gone
+    }
+
+    // 3. Leave Socket.IO voice room B so no further events arrive from B
+    const socket = getSocket()
+    if (socket) {
+      socket.emit('voice:leave_room', conflictRoom.id)
+    }
+
+    // 4. Reset all room-scoped Zustand state (clears activeRoom, messages,
+    //    participants, queue, gifts, etc.)
+    resetRoom()
+
+    setConflictRoom(null)
+    setLeavingConflict(false)
+
+    // 5. Join room A — setActiveRoom triggers VoiceRoomView to mount and
+    //    connect LiveKit to A automatically
+    setJoining(true)
+    try {
+      const res = await api.post(`/voice/${id}/join`)
+      setActiveRoom(res.data.data)
+      setJoining(false)
+    } catch (e: any) {
+      const code = e?.response?.data?.errors?.code
+      if (code === 'VOICE_ROOM_ALREADY_ACTIVE') {
+        // Rare race: user somehow got active in another room between leave and join.
+        // Show the conflict dialog again with the new active room info.
+        setConflictRoom({
+          id:    e?.response?.data?.errors?.activeRoomId    ?? '',
+          title: e?.response?.data?.errors?.activeRoomTitle ?? 'another room',
+          emoji: e?.response?.data?.errors?.activeRoomEmoji ?? '🎙️',
+          topic: e?.response?.data?.errors?.activeRoomTopic ?? null,
+        })
+      } else {
+        toast({ title: e?.response?.data?.message || 'Failed to join room', variant: 'destructive' })
+      }
       setJoining(false)
     }
   }
@@ -126,6 +203,53 @@ export default function VoiceRoomPage() {
 
   return (
     <div className="max-w-md mx-auto py-8 px-4">
+      {/* ── Active-session conflict dialog ─────────────────────────────────── */}
+      {conflictRoom && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.92 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full max-w-sm bg-white rounded-3xl shadow-2xl overflow-hidden"
+          >
+            <div className="bg-gradient-to-br from-orange-400 to-pink-500 p-6 text-white text-center">
+              <span className="text-4xl">{conflictRoom.emoji}</span>
+              <h2 className="text-lg font-black mt-2">You&apos;re already in a room</h2>
+              <p className="text-white/90 text-sm mt-1 font-semibold">
+                &ldquo;{conflictRoom.title}&rdquo;
+              </p>
+              {conflictRoom.topic && (
+                <p className="text-white/70 text-xs mt-0.5">{conflictRoom.topic}</p>
+              )}
+            </div>
+            <div className="p-6 space-y-3">
+              <p className="text-sm text-gray-600 text-center">
+                Leave <strong className="text-gray-900">&ldquo;{conflictRoom.title}&rdquo;</strong> and
+                join <strong className="text-gray-900">&ldquo;{room?.title ?? 'this room'}&rdquo;</strong>?
+              </p>
+              <button
+                onClick={handleLeaveAndJoin}
+                disabled={leavingConflict}
+                className="w-full flex items-center justify-center gap-2 py-3 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-2xl font-bold text-sm hover:opacity-90 disabled:opacity-60 transition-all"
+              >
+                {leavingConflict ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Mic className="w-4 h-4" />
+                )}
+                {leavingConflict ? 'Leaving…' : 'Leave & Join This Room'}
+              </button>
+              <button
+                onClick={() => setConflictRoom(null)}
+                disabled={leavingConflict}
+                className="w-full py-3 border border-gray-200 rounded-2xl font-semibold text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-60 transition-all"
+              >
+                Cancel
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
       {/* Back link */}
       <Link href="/voice-club" className="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 mb-6 transition-colors">
         <ArrowLeft className="w-4 h-4" />

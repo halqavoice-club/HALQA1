@@ -15,7 +15,7 @@ import {
   CalendarDays, LayoutGrid, Headphones, DollarSign, Radio,
   UserPlus, MessagesSquare, Video, Wallet, Rss, UsersRound,
   Compass, Sparkles, Bell, Home, GraduationCap as EduIcon,
-  Wrench, QrCode, Trophy, PlusCircle, Activity,
+  Wrench, QrCode, Trophy, PlusCircle, Activity, Globe,
 } from 'lucide-react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { getAvatarUrl } from '@/lib/avatar'
@@ -364,6 +364,7 @@ export function Sidebar() {
           { label: 'Communities', href: '/communities', icon: UsersRound },
           { label: t.voiceClub, href: '/voice-club', icon: Radio },
           { label: 'Live Rooms', href: '/live-class', icon: Video },
+          { label: 'Live Streams', href: '/live-stream', icon: Globe },
           { label: 'Messages', href: '/dm', icon: MessagesSquare, badge: 'dm' as const },
           { label: 'Groups', href: '/group-chat', icon: Users, badge: 'group' as const },
           { label: 'Friends', href: '/social', icon: UserPlus, badge: 'social' as const },

@@ -140,6 +140,7 @@ export function MobileNav() {
           { label: 'Communities', href: '/communities', icon: UsersRound  },
           { label: t.voiceClub,   href: '/voice-club',  icon: Radio       },
           { label: 'Live Rooms',  href: '/live-class',  icon: Video       },
+          { label: 'Live Streams',href: '/live-stream', icon: Globe       },
           { label: t.messages,    href: '/dm',          icon: MessageSquare},
           { label: 'Groups',      href: '/group-chat',  icon: Users       },
           { label: 'Creator',     href: '/creator',     icon: Sparkles    },
@@ -174,6 +175,11 @@ export function MobileNav() {
   // Hides the mobile nav bar while the user is inside a voice room so the
   // voice room's own bottom bar (Gift, Mic, React, Chat, Leave) is visible.
   if (activeVoiceRoom) return null
+
+  // Hides the mobile nav bar while the user is inside a live class room so the
+  // live class controls bar (Mic, Camera, Chat, Leave, etc.) is fully visible
+  // and not covered by this 64px fixed bottom navigation bar.
+  if (/^\/live-class\/[^/]+/.test(pathname ?? '')) return null
 
   return (
     <>

@@ -26,6 +26,8 @@ const { getCache, setCache } = require('../utils/redis');
 const { successResponse, errorResponse } = require('../utils/response');
 const { resolveRoom, resolveParticipant, resolveActiveRecipients } = require('../utils/roomResolver');
 const logger = require('../utils/logger');
+const { toDiamonds } = require('../services/economy.config');
+const { writePlatformRevenueFromSpend } = require('../utils/platformRevenue');
 
 // Safe cache wrappers — a cache failure must never abort a gift transaction.
 // The daily spend cap and combo counter are best-effort; the DB transaction
@@ -40,7 +42,7 @@ async function safeSetCache(key, value, ttl) {
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const PLATFORM_CUT   = 0.5;   // 50% platform fee
+// PLATFORM_CUT and toDiamonds are imported from economy.config.js (single source of truth)
 const DAILY_CAP      = parseInt(process.env.GIFT_DAILY_CAP || '50000', 10);
 const COMBO_WINDOW   = 5000;  // ms — rapid sends within this window count as combo
 
@@ -59,11 +61,6 @@ const PRIORITY_HOLD_MS = {
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Coins → diamonds after platform cut (floor) */
-function toDiamonds(coins) {
-  return Math.floor(coins * (1 - PLATFORM_CUT));
-}
 
 /** Redis key for daily spend tracking */
 const dailySpendKey = (userId) => {
@@ -99,6 +96,10 @@ async function listGifts(req, res) {
  */
 async function sendGift(req, res) {
   try {
+    // SUPER_ADMIN isolation (Task 10.1): platform admin cannot send gifts
+    if (req.user.role === 'SUPER_ADMIN') {
+      return errorResponse(res, 'SUPER_ADMIN cannot send gifts in platform rooms', 403);
+    }
     // roomType is injected by the route middleware; defaults to 'voice' for backward compat
     const roomType = req.roomType || 'voice';
     const roomId   = req.params.id;
@@ -149,11 +150,31 @@ async function sendGift(req, res) {
     const totalCoins    = gift.priceCoins * giftCount;
     const totalDiamonds = toDiamonds(totalCoins);
 
-    // ── Daily spend cap ───────────────────────────────────────────────────
+    // ── Daily spend cap — Redis fast path + DB fallback ──────────────────
+    // Security: Redis unavailability must NOT allow cap bypass.
+    // If Redis returns null (unavailable), fall back to a DB aggregate query.
+    // If both fail, reject the request with 503.
     const rawSpent = await safeGetCache(dailySpendKey(senderId));
-    const spentToday = typeof rawSpent === 'number' ? rawSpent
-      : typeof rawSpent === 'string' ? parseInt(rawSpent, 10)
-      : 0;
+    let spentToday;
+    if (rawSpent !== null && rawSpent !== undefined) {
+      // Redis hit — fast path
+      spentToday = typeof rawSpent === 'number' ? rawSpent : parseInt(rawSpent, 10);
+    } else {
+      // Redis miss — DB fallback (Task 7.1)
+      try {
+        const startOfDay = new Date();
+        startOfDay.setUTCHours(0, 0, 0, 0);
+        const agg = await prisma.giftTransaction.aggregate({
+          where: { senderId, createdAt: { gte: startOfDay } },
+          _sum:  { coinsSpent: true }
+        });
+        spentToday = agg._sum.coinsSpent ?? 0;
+        logger.warn(`[gift] Redis unavailable — used DB fallback for daily cap (user ${senderId}, spent ${spentToday})`);
+      } catch (dbErr) {
+        logger.error(`[gift] DB cap fallback failed for user ${senderId}: ${dbErr.message}`);
+        return errorResponse(res, 'Service temporarily unavailable — please retry in a moment', 503);
+      }
+    }
     if (spentToday + totalCoins > DAILY_CAP) {
       return errorResponse(res, `Daily spending limit of ${DAILY_CAP} coins reached`, 429);
     }
@@ -212,7 +233,8 @@ async function sendGift(req, res) {
           }
         });
 
-        // 4b. Write wallet ledger entry for audit trail
+        // 4b. Write wallet ledger entry — FATAL (no .catch)
+        // Task 7.2: ledger failure rolls back the entire gift transaction
         await tx.walletTransaction.create({
           data: {
             userId:      senderId,
@@ -221,7 +243,16 @@ async function sendGift(req, res) {
             description: `Sent ${giftCount}x ${gift.name} to room ${roomId}`,
             giftTxId:    txn.id
           }
-        }).catch(() => {}); // non-fatal — gift succeeds even if ledger fails
+        });
+
+        // 4c. Write platform revenue entry — FATAL (no .catch)
+        // Records the platform's 50% share explicitly in the revenue ledger.
+        await writePlatformRevenueFromSpend(tx, {
+          sourceType: 'GIFT',
+          sourceId:   txn.id,
+          userId:     senderId,
+          spendCoins: totalCoins,
+        });
 
         // 5. Upsert room leaderboard
         await tx.roomGiftLeaderboard.upsert({
@@ -517,6 +548,10 @@ async function getDailyLeaderboard(req, res) {
  */
 async function sendGiftToAll(req, res) {
   try {
+    // SUPER_ADMIN isolation (Task 10.1): platform admin cannot send gifts
+    if (req.user.role === 'SUPER_ADMIN') {
+      return errorResponse(res, 'SUPER_ADMIN cannot send gifts in platform rooms', 403);
+    }
     const roomType = req.roomType || 'voice';
     const roomId   = req.params.id;
     const senderId = req.user.id;
@@ -566,10 +601,27 @@ async function sendGiftToAll(req, res) {
     const diamondsPerReceiver = toDiamonds(coinsPerReceiver);
     const totalCoinsNeeded    = coinsPerReceiver * receiverParticipants.length;
 
-    // ── Daily spend cap ───────────────────────────────────────────────────
+    // ── Daily spend cap — Redis fast path + DB fallback ──────────────────
     const rawSpent   = await safeGetCache(dailySpendKey(senderId));
-    const spentToday = typeof rawSpent === 'number' ? rawSpent
-      : typeof rawSpent === 'string' ? parseInt(rawSpent, 10) : 0;
+    let spentToday;
+    if (rawSpent !== null && rawSpent !== undefined) {
+      spentToday = typeof rawSpent === 'number' ? rawSpent
+        : typeof rawSpent === 'string' ? parseInt(rawSpent, 10) : 0;
+    } else {
+      try {
+        const startOfDay = new Date();
+        startOfDay.setUTCHours(0, 0, 0, 0);
+        const agg = await prisma.giftTransaction.aggregate({
+          where: { senderId, createdAt: { gte: startOfDay } },
+          _sum:  { coinsSpent: true }
+        });
+        spentToday = agg._sum.coinsSpent ?? 0;
+        logger.warn(`[gift] Redis unavailable — used DB fallback for daily cap (user ${senderId}, spent ${spentToday})`);
+      } catch (dbErr) {
+        logger.error(`[gift] DB cap fallback failed for user ${senderId}: ${dbErr.message}`);
+        return errorResponse(res, 'Service temporarily unavailable — please retry in a moment', 503);
+      }
+    }
     if (spentToday + totalCoinsNeeded > DAILY_CAP) {
       return errorResponse(res, `Daily spending limit of ${DAILY_CAP} coins reached`, 429);
     }
@@ -640,6 +692,15 @@ async function sendGiftToAll(req, res) {
           where:  { roomId_userId: { roomId, userId: senderId } },
           create: { roomId, roomType, userId: senderId, totalCoins: totalCoinsForLeaderboard, giftCount: totalGiftCountForLeaderboard, updatedAt: new Date() },
           update: { totalCoins: { increment: totalCoinsForLeaderboard }, giftCount: { increment: totalGiftCountForLeaderboard }, updatedAt: new Date() }
+        });
+
+        // Write platform revenue entry for the entire send-to-all — FATAL (no .catch)
+        // One consolidated entry per send-to-all call (platform takes 50% of total spend).
+        await writePlatformRevenueFromSpend(tx, {
+          sourceType: 'GIFT',
+          sourceId:   txns[0]?.id || uuidv4(), // reference first transaction
+          userId:     senderId,
+          spendCoins: totalCoinsNeeded,
         });
 
         return { updatedSender, txns };

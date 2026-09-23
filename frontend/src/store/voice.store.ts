@@ -236,6 +236,11 @@ interface VoiceState {
 
   // Reset all room-scoped state (call on unmount of voice room page)
   resetRoom: () => void
+
+  // LiveKit disconnect ref — set by VoiceRoomView so any page can trigger full teardown
+  _liveKitDisconnect: (() => void) | null
+  registerLiveKitDisconnect: (fn: () => void) => void
+  clearLiveKitDisconnect: () => void
 }
 
 export const useVoiceStore = create<VoiceState>((set, get) => ({
@@ -409,4 +414,12 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     isHandQueueOpen: false,
     isWaitingListOpen: false,
   }),
+
+  // ─── LiveKit disconnect ref ───────────────────────────────────────────────
+  // VoiceRoomView registers its disconnect() here so that any page (e.g. the
+  // join page for a different room) can fully tear down the active LiveKit
+  // session before switching rooms.
+  _liveKitDisconnect: null,
+  registerLiveKitDisconnect: (fn) => set({ _liveKitDisconnect: fn }),
+  clearLiveKitDisconnect: () => set({ _liveKitDisconnect: null }),
 }))
