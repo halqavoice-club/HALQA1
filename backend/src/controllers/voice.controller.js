@@ -333,40 +333,108 @@ async function createRoom(req, res, next) {
     // tagging rooms to the creator's school and hiding them from other schools.
     const schoolId = null;
 
-    // BUG FIX: wrap room + host participant creation in a transaction
-    // so we never end up with a room that has no host participant
-    // HOST-AUDIENCE: host starts in AUDIENCE role (muted). They can take
-    // Seat 1 at any time via grabMic, which bypasses all locks for HOST/MOD.
+    // ── GLOBAL ONE-ROOM INVARIANT: FOR UPDATE + READ COMMITTED ────────────────
+    // createRoom() previously bypassed the one-active-room invariant that
+    // joinRoom() enforces. A host already active in Room A could call
+    // POST /voice/rooms and become active in both Room A and Room B.
+    //
+    // Fix: apply exactly the same serialization primitive as joinRoom():
+    //   1. READ COMMITTED isolation — each statement reads latest committed state.
+    //   2. SELECT ... FOR UPDATE on the User row — InnoDB exclusive row lock.
+    //      Serializes concurrent createRoom + joinRoom calls for the same user.
+    //   3. Active-room conflict check after lock acquired.
+    //   4. Room + HOST participant creation inside the same transaction if clean.
+    //   5. Transaction commits, then row lock releases, then Socket.IO fires.
+    //
+    // No same-room reconnect exception here — createRoom always creates a NEW room,
+    // so any existing active participant in any room is a conflict.
+
     const roomId = uuidv4();
-    await prisma.$transaction([
-      prisma.voiceRoom.create({
-        data: {
-          id:          roomId,
-          hostId,
-          schoolId,
-          title,
-          description,
-          privacy,
-          topic,
-          coverEmoji,
-          maxSpeakers,
-          status:         scheduledAt ? STATUS.SCHEDULED : STATUS.LIVE,
-          scheduledAt:    scheduledAt ? new Date(scheduledAt) : null,
-          lastActivityAt: new Date(),
-        }
-      }),
-      prisma.voiceParticipant.create({
-        data: {
-          id:       uuidv4(),
-          roomId,
-          userId:   hostId,
-          role:     VOICE_ROLES.HOST,
-          isMuted:  true,   // HOST starts muted in audience — takes Seat 1 when ready
-          isActive: true,
-          joinedAt: new Date(),
-        }
-      })
-    ]);
+    let conflictRoom = null; // set if 409 applies
+
+    try {
+      await prisma.$transaction(
+        async (tx) => {
+          // ── 1. Acquire InnoDB exclusive row lock on the User row ────────────
+          // Serializes concurrent createRoom / joinRoom calls for the same user.
+          // Under READ COMMITTED, a concurrent joinRoom's subsequent reads will
+          // see our committed room+participant after we commit, and vice versa.
+          await tx.$queryRaw`SELECT id FROM users WHERE id = ${hostId} FOR UPDATE`;
+
+          // ── 2. Check for any existing active room (no same-room exception) ──
+          // createRoom always creates a NEW room, so ANY active participant is a conflict.
+          const otherActiveRooms = await tx.voiceParticipant.findMany({
+            where: {
+              userId:   hostId,
+              isActive: true,
+            },
+            include: {
+              room: {
+                select: { id: true, title: true, coverEmoji: true, topic: true, status: true }
+              }
+            }
+          });
+
+          if (otherActiveRooms.length > 0) {
+            conflictRoom = otherActiveRooms[0].room;
+            const err = new Error('VOICE_ROOM_ALREADY_ACTIVE');
+            err.statusCode = 409;
+            throw err;
+          }
+
+          // ── 3. Create room + HOST participant atomically ────────────────────
+          // Both writes are inside the same transaction under the User row lock,
+          // so no second transaction can insert a conflicting participant between
+          // the conflict check and the participant creation.
+          await tx.voiceRoom.create({
+            data: {
+              id:          roomId,
+              hostId,
+              schoolId,
+              title,
+              description,
+              privacy,
+              topic,
+              coverEmoji,
+              maxSpeakers,
+              status:         scheduledAt ? STATUS.SCHEDULED : STATUS.LIVE,
+              scheduledAt:    scheduledAt ? new Date(scheduledAt) : null,
+              lastActivityAt: new Date(),
+            }
+          });
+
+          await tx.voiceParticipant.create({
+            data: {
+              id:       uuidv4(),
+              roomId,
+              userId:   hostId,
+              role:     VOICE_ROLES.HOST,
+              isMuted:  true,   // HOST starts muted in audience — takes Seat 1 when ready
+              isActive: true,
+              joinedAt: new Date(),
+            }
+          });
+          // Transaction commits here — User row lock released on COMMIT
+        },
+        { isolationLevel: require('@prisma/client').Prisma.TransactionIsolationLevel.ReadCommitted }
+      );
+    } catch (txErr) {
+      if (txErr.statusCode === 409 && txErr.message === 'VOICE_ROOM_ALREADY_ACTIVE') {
+        return errorResponse(
+          res,
+          'You are already in an active Voice Club session. Leave that room before creating another.',
+          409,
+          {
+            code:            'VOICE_ROOM_ALREADY_ACTIVE',
+            activeRoomId:    conflictRoom.id,
+            activeRoomTitle: conflictRoom.title,
+            activeRoomEmoji: conflictRoom.coverEmoji ?? '🎙️',
+            activeRoomTopic: conflictRoom.topic ?? null,
+          }
+        );
+      }
+      throw txErr;
+    }
 
     // Only transition to LIVE immediately if this is not a future scheduled room.
     // A room with scheduledAt in the future should stay SCHEDULED until that time arrives.

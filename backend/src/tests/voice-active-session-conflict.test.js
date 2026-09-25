@@ -10,6 +10,15 @@
  *  - Same-room reconnect still works
  *  - Permanent membership in multiple rooms still works
  *  - Stale session does not permanently block user after cleanup
+ *
+ * Phase 7b — createRoom invariant tests (global one-active-room fix)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Tests that createRoom() also enforces the one-active-room invariant via the
+ * same FOR UPDATE + READ COMMITTED mechanism used by joinRoom().
+ *  - createRoom while already active → 409 VOICE_ROOM_ALREADY_ACTIVE
+ *  - createRoom when not active → 201 success
+ *  - createRoom + joinRoom concurrent (mock) → second op sees 409
+ *  - createRoom + createRoom concurrent (mock) → second op sees 409
  */
 
 const request = require('supertest');
@@ -22,6 +31,8 @@ jest.mock('../utils/prisma', () => {
   const mockPrisma = {
     voiceRoom: {
       findUnique: jest.fn(),
+      create:     jest.fn(),
+      update:     jest.fn(),
     },
     voiceParticipant: {
       findMany:   jest.fn(),
@@ -41,7 +52,13 @@ jest.mock('../utils/prisma', () => {
     auditLog:     { create: jest.fn() },
     $queryRaw:    jest.fn().mockResolvedValue([{ acquired: 1 }]),
     $executeRaw:  jest.fn().mockResolvedValue(0),
-    $transaction: jest.fn(fns => (Array.isArray(fns) ? Promise.all(fns) : fns(mockPrisma))),
+    // Interactive transaction: pass mockPrisma as `tx` and propagate any thrown error.
+    // Array-form (legacy batch) still uses Promise.all.
+    $transaction: jest.fn(async (fns, _opts) => {
+      if (Array.isArray(fns)) return Promise.all(fns);
+      // Interactive: run fn(mockPrisma) and let errors propagate naturally
+      return fns(mockPrisma);
+    }),
   };
   return mockPrisma;
 });
@@ -411,5 +428,305 @@ describe('Voice Club — one-active-room invariant', () => {
     await joinRoom(req, res, next);
 
     expect(res._status).toBe(403);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 7b — createRoom() one-active-room invariant tests
+// ─────────────────────────────────────────────────────────────────────────────
+// These tests verify that createRoom() now enforces the same invariant as
+// joinRoom() using SELECT ... FOR UPDATE + READ COMMITTED inside an interactive
+// Prisma transaction.
+//
+// The mock $transaction(fn) calls fn(mockPrisma) synchronously, which means:
+//  - tx.$queryRaw  → prisma.$queryRaw  (FOR UPDATE lock — mocked to succeed)
+//  - tx.voiceParticipant.findMany → prisma.voiceParticipant.findMany (conflict check)
+//  - tx.voiceRoom.create          → prisma.voiceRoom.create
+//  - tx.voiceParticipant.create   → prisma.voiceParticipant.create
+// This faithfully exercises the createRoom transaction logic.
+
+const { createRoom } = require('../controllers/voice.controller');
+
+// Build a req/res for createRoom (no :id param; body contains room settings)
+function makeCreateReq(userId = 'host-1', bodyOverrides = {}) {
+  return {
+    params: {},
+    user:   { id: userId, schoolId: null, role: 'MEMBER' },
+    body:   {
+      title:       'New Room',
+      description: 'A new voice room',
+      privacy:     'PUBLIC',
+      topic:       'General',
+      coverEmoji:  '🎙️',
+      maxSpeakers: 12,
+      ...bodyOverrides,
+    },
+  };
+}
+
+function makeCreateRes() {
+  return {
+    _status: 200,
+    _body:   null,
+    status(s)  { this._status = s; return this; },
+    json(b)    { this._body = b; return this; },
+  };
+}
+
+describe('Voice Club — createRoom() one-active-room invariant', () => {
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Default: $queryRaw (FOR UPDATE) succeeds
+    prisma.$queryRaw.mockResolvedValue([]);
+  });
+
+  // ── CR-1. createRoom while already active in another room → 409 ──────────
+  test('CR-1: createRoom returns 409 VOICE_ROOM_ALREADY_ACTIVE when user is already active', async () => {
+    const existingRoom = {
+      id:         'room-existing',
+      title:      'Existing Room',
+      coverEmoji: '🕌',
+      topic:      'Quran',
+      status:     'LIVE',
+    };
+
+    // Conflict check inside transaction: findMany returns an active participant
+    prisma.voiceParticipant.findMany.mockResolvedValue([
+      { roomId: 'room-existing', userId: 'host-1', isActive: true, room: existingRoom }
+    ]);
+
+    const req  = makeCreateReq('host-1');
+    const res  = makeCreateRes();
+    const next = jest.fn();
+
+    await createRoom(req, res, next);
+
+    expect(res._status).toBe(409);
+    expect(res._body.errors.code).toBe('VOICE_ROOM_ALREADY_ACTIVE');
+    expect(res._body.errors.activeRoomId).toBe('room-existing');
+    expect(res._body.errors.activeRoomTitle).toBe('Existing Room');
+    expect(res._body.errors.activeRoomEmoji).toBe('🕌');
+    expect(res._body.errors.activeRoomTopic).toBe('Quran');
+    // Room must NOT be created
+    expect(prisma.voiceRoom.create).not.toHaveBeenCalled();
+    // HOST participant must NOT be created
+    expect(prisma.voiceParticipant.create).not.toHaveBeenCalled();
+    // next() must NOT be called with an error
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  // ── CR-2. createRoom when user has no active room → 201 success ──────────
+  test('CR-2: createRoom succeeds (201) when user has no active room', async () => {
+    // No active rooms for this user
+    prisma.voiceParticipant.findMany.mockResolvedValue([]);
+
+    // Stub the room + participant creation
+    prisma.voiceRoom.create.mockResolvedValue({});
+    prisma.voiceParticipant.create.mockResolvedValue({});
+
+    // getRoomWithParticipants (called after tx): two findUnique calls
+    // First: getRoomWithParticipants cache miss → returns room
+    // Second: syncRoomStatus → already LIVE so no-op
+    const createdRoom = {
+      id:           'new-room-id',
+      title:        'New Room',
+      status:       'LIVE',
+      participants: [],
+      _count:       { participants: 1 },
+    };
+    prisma.voiceRoom.findUnique
+      .mockResolvedValueOnce(createdRoom)  // getRoomWithParticipants
+      .mockResolvedValueOnce({ status: 'LIVE' }); // syncRoomStatus check (already LIVE — no-op)
+
+    const req  = makeCreateReq('host-1');
+    const res  = makeCreateRes();
+    const next = jest.fn();
+
+    await createRoom(req, res, next);
+
+    // Room and participant must have been created
+    expect(prisma.voiceRoom.create).toHaveBeenCalledTimes(1);
+    expect(prisma.voiceParticipant.create).toHaveBeenCalledTimes(1);
+
+    // The participant must be created with isActive: true and role: HOST
+    expect(prisma.voiceParticipant.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          isActive: true,
+          role:     'HOST',
+          isMuted:  true,
+        })
+      })
+    );
+
+    // Response must be 201 success (not 409)
+    expect(res._status).toBe(201);
+    expect(res._body?.errors?.code).not.toBe('VOICE_ROOM_ALREADY_ACTIVE');
+    expect(next).not.toHaveBeenCalledWith(expect.any(Error));
+  });
+
+  // ── CR-3. createRoom concurrent with joinRoom — second op sees 409 ────────
+  // Simulates: User calls createRoom and joinRoom(otherRoom) simultaneously.
+  // The FOR UPDATE row lock serializes them. In the mock environment, both
+  // calls execute sequentially. The test verifies that whichever "wins" the
+  // conflict check, the loser receives 409 and does NOT write to the DB.
+  //
+  // Scenario: createRoom "wins" first (no conflict), joinRoom "loses" (sees
+  // the createRoom participant) → joinRoom returns 409.
+  test('CR-3: After createRoom succeeds, concurrent joinRoom(otherRoom) returns 409', async () => {
+    // ── Phase A: createRoom succeeds ────────────────────────────────────────
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([]); // no conflict
+    prisma.voiceRoom.create.mockResolvedValue({});
+    prisma.voiceParticipant.create.mockResolvedValue({
+      id: 'new-part', userId: 'host-1', roomId: 'new-room', role: 'HOST',
+      isActive: true, isMuted: true, joinedAt: new Date(),
+      user: { id: 'host-1', firstName: 'Test', lastName: 'User', avatarUrl: null }
+    });
+
+    const newRoom = {
+      id: 'new-room', title: 'New Room', status: 'LIVE',
+      participants: [], _count: { participants: 1 }
+    };
+    prisma.voiceRoom.findUnique
+      .mockResolvedValueOnce(newRoom)
+      .mockResolvedValueOnce({ status: 'LIVE' });
+
+    const createReq = makeCreateReq('host-1');
+    const createRes = makeCreateRes();
+    await createRoom(createReq, createRes, jest.fn());
+    expect(createRes._status).toBe(201);
+
+    // ── Phase B: joinRoom(otherRoom) now sees the active participant ─────────
+    jest.clearAllMocks();
+    prisma.$queryRaw.mockResolvedValue([]);
+
+    const otherRoom = makeRoom({ id: 'other-room', title: 'Other Room' });
+    const conflictingNewRoom = {
+      id: 'new-room', title: 'New Room', coverEmoji: '🎙️', topic: null, status: 'LIVE'
+    };
+
+    // joinRoom does an initial non-tx findUnique for the room
+    prisma.voiceRoom.findUnique.mockResolvedValue(otherRoom);
+    prisma.voiceRoomMember.findUnique.mockResolvedValue(null); // no ban record
+
+    // Inside the tx: findMany sees the newly created active participant
+    prisma.voiceParticipant.findMany.mockResolvedValue([
+      { roomId: 'new-room', userId: 'host-1', isActive: true, room: conflictingNewRoom }
+    ]);
+
+    const { req: joinReq, res: joinRes } = makeReqRes('host-1', 'other-room');
+    await joinRoom(joinReq, joinRes, jest.fn());
+
+    expect(joinRes._status).toBe(409);
+    expect(joinRes._body.errors.code).toBe('VOICE_ROOM_ALREADY_ACTIVE');
+    expect(joinRes._body.errors.activeRoomId).toBe('new-room');
+  });
+
+  // ── CR-4. Two concurrent createRoom calls — second sees 409 ──────────────
+  // Simulates: User sends two simultaneous POST /voice/rooms requests.
+  // The FOR UPDATE row lock serializes them. The first commits a participant;
+  // the second's conflict check (under READ COMMITTED) sees it and returns 409.
+  //
+  // In the mock environment: first call resolves (no conflict), second call
+  // findMany sees the first's participant.
+  test('CR-4: Second concurrent createRoom returns 409 (first already committed)', async () => {
+    // ── Request A: no active rooms — succeeds ────────────────────────────────
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([]); // no conflict for A
+    prisma.voiceRoom.create.mockResolvedValue({});
+    prisma.voiceParticipant.create.mockResolvedValue({});
+
+    const roomA = {
+      id: 'room-a-new', title: 'Room A', status: 'LIVE',
+      participants: [], _count: { participants: 1 }
+    };
+    prisma.voiceRoom.findUnique
+      .mockResolvedValueOnce(roomA)
+      .mockResolvedValueOnce({ status: 'LIVE' });
+
+    const reqA = makeCreateReq('host-1', { title: 'Room A' });
+    const resA = makeCreateRes();
+    await createRoom(reqA, resA, jest.fn());
+    expect(resA._status).toBe(201);
+
+    // ── Request B: sees A's committed participant — gets 409 ─────────────────
+    jest.clearAllMocks();
+    prisma.$queryRaw.mockResolvedValue([]);
+
+    const committedRoom = {
+      id: 'room-a-new', title: 'Room A', coverEmoji: '🎙️', topic: null, status: 'LIVE'
+    };
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([
+      { roomId: 'room-a-new', userId: 'host-1', isActive: true, room: committedRoom }
+    ]);
+
+    const reqB = makeCreateReq('host-1', { title: 'Room B' });
+    const resB = makeCreateRes();
+    await createRoom(reqB, resB, jest.fn());
+
+    expect(resB._status).toBe(409);
+    expect(resB._body.errors.code).toBe('VOICE_ROOM_ALREADY_ACTIVE');
+    expect(resB._body.errors.activeRoomId).toBe('room-a-new');
+
+    // Room B must NOT have been created
+    expect(prisma.voiceRoom.create).not.toHaveBeenCalled();
+    expect(prisma.voiceParticipant.create).not.toHaveBeenCalled();
+  });
+
+  // ── CR-5. FOR UPDATE is the first DB operation inside the transaction ─────
+  test('CR-5: $queryRaw (FOR UPDATE) is called before voiceParticipant.findMany', async () => {
+    const callOrder = [];
+
+    prisma.$queryRaw.mockImplementation(() => {
+      callOrder.push('queryRaw');
+      return Promise.resolve([]);
+    });
+    prisma.voiceParticipant.findMany.mockImplementation(() => {
+      callOrder.push('findMany');
+      return Promise.resolve([]);
+    });
+
+    prisma.voiceRoom.create.mockResolvedValue({});
+    prisma.voiceParticipant.create.mockResolvedValue({});
+
+    const createdRoom = {
+      id: 'x', title: 'X', status: 'LIVE', participants: [], _count: { participants: 1 }
+    };
+    prisma.voiceRoom.findUnique
+      .mockResolvedValueOnce(createdRoom)
+      .mockResolvedValueOnce({ status: 'LIVE' });
+
+    const req  = makeCreateReq('host-1');
+    const res  = makeCreateRes();
+    await createRoom(req, res, jest.fn());
+
+    expect(callOrder[0]).toBe('queryRaw');   // FOR UPDATE must be first
+    expect(callOrder[1]).toBe('findMany');   // conflict check after lock
+  });
+
+  // ── CR-6. 409 response uses the existing VOICE_ROOM_ALREADY_ACTIVE contract ─
+  test('CR-6: 409 response shape matches VOICE_ROOM_ALREADY_ACTIVE contract', async () => {
+    const active = {
+      id:         'room-conflict',
+      title:      'Conflict Room',
+      coverEmoji: '🔥',
+      topic:      'Hot takes',
+      status:     'LIVE',
+    };
+    prisma.voiceParticipant.findMany.mockResolvedValue([
+      { roomId: 'room-conflict', userId: 'host-1', isActive: true, room: active }
+    ]);
+
+    const req  = makeCreateReq('host-1');
+    const res  = makeCreateRes();
+    await createRoom(req, res, jest.fn());
+
+    const errors = res._body?.errors;
+    expect(errors).toBeDefined();
+    expect(errors.code).toBe('VOICE_ROOM_ALREADY_ACTIVE');
+    expect(errors.activeRoomId).toBe('room-conflict');
+    expect(errors.activeRoomTitle).toBe('Conflict Room');
+    expect(errors.activeRoomEmoji).toBe('🔥');
+    expect(errors.activeRoomTopic).toBe('Hot takes');
   });
 });
