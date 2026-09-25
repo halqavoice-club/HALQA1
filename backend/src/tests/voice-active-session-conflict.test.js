@@ -312,23 +312,30 @@ describe('Voice Club — one-active-room invariant', () => {
     expect(next).not.toHaveBeenCalledWith(expect.any(Error));
   });
 
-  // ── E. Concurrent join requests — only one succeeds ─────────────────────────
-  test('E: Concurrent join requests — advisory lock prevents double-active', async () => {
-    // Simulate the second request not acquiring the lock (acquired: 0) → 429
+  // ── E. Concurrent join requests — InnoDB row lock serializes, one returns 409 ─
+  test('E: Concurrent join requests — row lock serializes, second gets 409', async () => {
+    // With SELECT FOR UPDATE + READ COMMITTED, the second request is serialized
+    // at the DB level — it does not get a 429 (GET_LOCK is gone).
+    // Instead: one request succeeds (200), the other sees the active participant
+    // and returns 409 VOICE_ROOM_ALREADY_ACTIVE.
+    // In the mock environment, both $queryRaw calls (SFU) return immediately,
+    // so we simulate the "second request arrives after first committed" scenario:
+    // findMany returns an active participant (as if the first committed).
     const roomA = makeRoom({ id: 'room-a' });
+    const roomB = makeRoom({ id: 'room-b', title: 'Room B' });
+
     prisma.voiceRoom.findUnique.mockResolvedValue(roomA);
     prisma.voiceRoomMember.findUnique.mockResolvedValue(null);
-    prisma.voiceParticipant.findMany.mockResolvedValue([]);
-    prisma.voiceParticipant.findUnique.mockResolvedValue(null);
-    prisma.voiceParticipant.create.mockResolvedValue(makeParticipant());
-    prisma.voiceParticipant.count.mockResolvedValue(1);
-
-    // Request 2 — lock not acquired (0)
-    prisma.$queryRaw.mockResolvedValue([{ acquired: 0 }]);
+    // Simulate: user is already active in room-b (first request won)
+    prisma.voiceParticipant.findMany.mockResolvedValue([
+      { roomId: 'room-b', userId: 'user-1', room: roomB }
+    ]);
 
     const { req: req2, res: res2 } = makeReqRes('user-1', 'room-a');
     await joinRoom(req2, res2, jest.fn());
-    expect(res2._status).toBe(429);
+    // Second request must receive 409, not 429 (no GET_LOCK anymore)
+    expect(res2._status).toBe(409);
+    expect(res2._body?.errors?.code).toBe('VOICE_ROOM_ALREADY_ACTIVE');
   });
 
   // ── F. Stale session — after cleanup, user can join ─────────────────────────

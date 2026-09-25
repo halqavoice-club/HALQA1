@@ -457,230 +457,286 @@ async function joinRoom(req, res, next) {
     }
 
 
-    // ── ONE-ROOM-AT-A-TIME ENFORCEMENT — REJECT, DON'T AUTO-EVICT ────────────
+    // ── ONE-ROOM-AT-A-TIME ENFORCEMENT — InnoDB USER-ROW LOCK + READ COMMITTED ──
     // Product rule: a user can only ACTIVELY PARTICIPATE in one Voice Club room.
-    // If they are already active in a DIFFERENT room:
-    //   → REJECT the new join with HTTP 409 VOICE_ROOM_ALREADY_ACTIVE
-    //   → Include the active room's metadata so the UI can show the user
-    //     WHICH room they are currently in (title, emoji, topic).
-    //   → Leave the existing Room A completely UNTOUCHED (no eviction, no kick,
-    //     no seat clear, no role change, no Socket.IO leave, no queue dequeue)
-    // If they are rejoining the SAME room → allow (handled below as reconnect).
-    // Queue presence (handRaised) does NOT count as active participation.
-    // Permanent VoiceRoomMember membership is NOT checked here.
     //
-    // PHASE 6 — ATOMICITY / RACE CONDITION PREVENTION:
-    // The check-then-act (findMany → create/update) is wrapped in a serializable
-    // DB transaction via raw SQL advisory lock on the userId. This prevents the
-    // race condition where two concurrent join requests for the same user could
-    // both pass the isActive check and both succeed, creating two active sessions.
+    // ARCHITECTURE (replacing the previous GET_LOCK approach):
     //
-    // MySQL GET_LOCK() acquires a named advisory lock (scoped to connection).
-    // The lock name is deterministic per user: voice_join_{userId}.
-    // Lock timeout: 5 seconds — if another request holds the lock, this one waits
-    // up to 5s then fails with a clear error rather than creating a race.
-    {
-      const lockName = `voice_join_${userId}`;
-      const lockResult = await prisma.$queryRaw`SELECT GET_LOCK(${lockName}, 5) AS acquired`;
-      const lockAcquired = lockResult?.[0]?.acquired === 1;
-      if (!lockAcquired) {
-        return errorResponse(res, 'Another join request is already in progress. Please try again.', 429);
-      }
-
-      try {
-        const otherActiveRooms = await prisma.voiceParticipant.findMany({
-          where: {
-            userId,
-            isActive: true,
-            roomId: { not: roomId },  // different room only
-          },
-          include: {
-            room: {
-              select: { id: true, title: true, coverEmoji: true, topic: true, status: true }
-            }
-          }
-        });
-        if (otherActiveRooms.length > 0) {
-          const activeRoom = otherActiveRooms[0].room;
-          await prisma.$queryRaw`SELECT RELEASE_LOCK(${lockName})`;
-          return errorResponse(
-            res,
-            `You are already in an active Voice Club session. Leave that room before joining another.`,
-            409,
-            {
-              code:            'VOICE_ROOM_ALREADY_ACTIVE',
-              activeRoomId:    activeRoom.id,
-              activeRoomTitle: activeRoom.title,
-              activeRoomEmoji: activeRoom.coverEmoji ?? '🎙️',
-              activeRoomTopic: activeRoom.topic ?? null,
-            }
-          );
-        }
-      } catch (lockErr) {
-        // Release lock and re-throw so next(error) handles it
-        await prisma.$queryRaw`SELECT RELEASE_LOCK(${lockName})`.catch(() => {});
-        throw lockErr;
-      }
-
-      // Lock is held — the join will proceed below.
-      // We release it after the participant upsert completes.
-      // Store the lock name so we can release it in the finally block.
-      req._voiceJoinLockName = lockName;
-    }
-    // Upsert participant - re-join if previously left
-    const existing = await prisma.voiceParticipant.findUnique({
-      where: { roomId_userId: { roomId, userId } }
-    });
-
-    let participant;
-    if (existing) {
-      participant = await prisma.voiceParticipant.update({
-        where: { roomId_userId: { roomId, userId } },
-        data: {
-          isActive:    true,
-          joinedAt:    new Date(),
-          leftAt:      null,
-          isMuted:     true,
-          handRaised:  false,
-          handRaisedAt: null,
-        },
-        include: {
-          user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } }
-        }
-      });
-      // Clear seatNumber on re-join — they are in audience until they grab a seat
-      await prisma.$executeRaw`
-        UPDATE voice_participants SET seatNumber = NULL
-        WHERE roomId = ${roomId} AND userId = ${userId}
-      `.catch(() => {});
-    } else {
-      // Determine role: host gets HOST, everyone else gets AUDIENCE
-      const role = room.hostId === userId ? VOICE_ROLES.HOST : VOICE_ROLES.AUDIENCE;
-      participant = await prisma.voiceParticipant.create({
-        data: {
-          id:       uuidv4(),
-          roomId,
-          userId,
-          role,
-          // HOST starts muted — they can take Seat 1 whenever ready
-          isMuted:  true,
-          isActive: true,
-          joinedAt: new Date(),
-        },
-        include: {
-          user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } }
-        }
-      });
-    }
-
-    // BE-005: Previously this was 3 separate sequential calls:
-    //   syncRoomStatus() → 2 DB hits (findUnique + countActive + update)
-    //   invalidateRoomCache() → Redis delete
-    //   getRoomWithParticipants() → DB hit + Redis write
+    //   Previous: GET_LOCK advisory lock + REPEATABLE READ
+    //   Problem:  GET_LOCK released before COMMIT; second transaction's
+    //             REPEATABLE READ snapshot predates first commit → 3% violation
+    //             rate confirmed under real MariaDB 10.4.32 concurrency.
     //
-    // Now: syncRoomStatus() and invalidateRoomCache() are merged inside
-    // syncRoomStatus itself (it already calls invalidateRoomCache).
-    // getRoomWithParticipants() hits the cache we just populated — 1 DB hit max.
-    await syncRoomStatus(roomId, schoolId);
-    // syncRoomStatus already calls invalidateRoomCache — no second call needed.
-    const updatedRoom = await getRoomWithParticipants(roomId);
+    //   Fix: SELECT ... FOR UPDATE on the User row + READ COMMITTED isolation.
+    //
+    //   READ COMMITTED: each statement reads the latest committed state.
+    //   SELECT ... FOR UPDATE: InnoDB exclusive row lock on User row.
+    //
+    //   Serialization proof:
+    //     Tx A: BEGIN(RC) → SFU(user) [lock granted] → findMany → INSERT → COMMIT
+    //     Tx B: BEGIN(RC) → SFU(user) [BLOCKS until A commits] → findMany (reads
+    //           A's committed participant) → conflict → 409
+    //
+    //   SFU(user) blocks Tx B until Tx A commits. Under READ COMMITTED, Tx B's
+    //   findMany executes after A commits and reads A's committed participant.
+    //   Both cannot commit. Invariant guaranteed at the DB level.
+    //
+    // Outcomes:
+    //   - Different room      → 409 VOICE_ROOM_ALREADY_ACTIVE (Room A metadata)
+    //   - Same room reconnect → allowed, participant upserted
+    //   - New join            → participant created
+    //   - Transaction throws  → rollback, no partial participant state
 
-    // ── Auto-create permanent membership on first join ──────────────────────
-    // If member record doesn't exist or was REMOVED (re-join), create/restore it.
-    // If BLOCKED, they would have been caught by the existing blocked check above.
-    // Owner always gets OWNER role; all others get MEMBER.
+    // State captured inside the transaction, used for post-transaction work.
+    let participant  = null;
+    let conflictRoom = null; // set when 409 applies
+
     try {
-      const existingMember = await prisma.voiceRoomMember.findUnique({
-        where: { roomId_userId: { roomId, userId } },
-        select: { id: true, status: true, role: true }
-      });
-      if (!existingMember) {
-        // Check capacity
-        const memberCount = await prisma.voiceRoomMember.count({ where: { roomId, status: 'ACTIVE' } });
-        const maxMembers = (() => {
-          const caps = { 1:500,2:1000,3:2000,4:3500,5:5000,6:8000,7:12000,8:18000,9:25000,10:50000 };
-          return caps[updatedRoom?.roomLevel ?? 1] ?? 500;
-        })();
-        if (memberCount < maxMembers) {
-          const memberRole = room.hostId === userId ? 'OWNER' : 'MEMBER';
-          await prisma.voiceRoomMember.create({
-            data: {
-              id: require('crypto').randomUUID(),
-              roomId, userId,
-              role: memberRole,
-              status: 'ACTIVE',
-              memberLevel: 1,
-              lastActiveAt: new Date(),
-              isBanned: false,
+      await prisma.$transaction(
+        async (tx) => {
+          // ── 1. Acquire InnoDB exclusive row lock on the User row ─────────────
+          // This is the serialization primitive. Under READ COMMITTED, Tx B is
+          // blocked here until Tx A commits. After unblocking, Tx B's subsequent
+          // reads see Tx A's committed participant record.
+          await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+
+          // ── 2. Check for other active rooms (different-room conflict) ────────
+          // Under READ COMMITTED, this reads the latest committed state.
+          // If Tx A already committed its participant (having held the row lock
+          // above), this query will see it and return a conflict.
+          const otherActiveRooms = await tx.voiceParticipant.findMany({
+            where: {
+              userId,
+              isActive: true,
+              roomId: { not: roomId },  // different room only — same room is reconnect
+            },
+            include: {
+              room: {
+                select: { id: true, title: true, coverEmoji: true, topic: true, status: true }
+              }
             }
           });
-          // Emit member count update
-          const newCount = memberCount + 1;
-          const io2 = getIo();
-          if (io2) {
-            io2.to(`voice:${roomId}`).emit('voice:member_joined', {
-              roomId, userId,
-              firstName: participant.user.firstName,
-              lastName: participant.user.lastName,
-              avatarUrl: participant.user.avatarUrl,
-              role: memberRole,
-              memberLevel: 1,
-              memberCount: newCount,
-              maxMembers,
-              roomLevel: updatedRoom?.roomLevel ?? 1,
+
+          if (otherActiveRooms.length > 0) {
+            conflictRoom = otherActiveRooms[0].room;
+            const err = new Error('VOICE_ROOM_ALREADY_ACTIVE');
+            err.statusCode = 409;
+            throw err;
+          }
+
+          // ── 3. Upsert participant (reconnect or new join) ──────────────────
+          const existing = await tx.voiceParticipant.findUnique({
+            where: { roomId_userId: { roomId, userId } }
+          });
+
+          if (existing) {
+            // Reconnect path — restore to active audience state
+            participant = await tx.voiceParticipant.update({
+              where: { roomId_userId: { roomId, userId } },
+              data: {
+                isActive:     true,
+                joinedAt:     new Date(),
+                leftAt:       null,
+                isMuted:      true,
+                handRaised:   false,
+                handRaisedAt: null,
+              },
+              include: {
+                user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } }
+              }
+            });
+            // Clear seatNumber on re-join — they are in audience until they grab a seat
+            await tx.$executeRaw`
+              UPDATE voice_participants SET seatNumber = NULL
+              WHERE roomId = ${roomId} AND userId = ${userId}
+            `;
+          } else {
+            // New join — create participant
+            const role = room.hostId === userId ? VOICE_ROLES.HOST : VOICE_ROLES.AUDIENCE;
+            participant = await tx.voiceParticipant.create({
+              data: {
+                id:       uuidv4(),
+                roomId,
+                userId,
+                role,
+                isMuted:  true,
+                isActive: true,
+                joinedAt: new Date(),
+              },
+              include: {
+                user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } }
+              }
             });
           }
-        }
-      } else if (existingMember.status === 'REMOVED') {
-        // Re-joining — restore membership
-        await prisma.voiceRoomMember.update({
-          where: { roomId_userId: { roomId, userId } },
-          data: { status: 'ACTIVE', lastActiveAt: new Date() }
-        });
-      } else {
-        // Already active — update lastActiveAt
-        await prisma.voiceRoomMember.update({
-          where: { roomId_userId: { roomId, userId } },
-          data: { lastActiveAt: new Date() }
-        });
+
+          // ── 4. Auto-create / restore permanent membership ──────────────────
+          try {
+            const existingMember = await tx.voiceRoomMember.findUnique({
+              where: { roomId_userId: { roomId, userId } },
+              select: { id: true, status: true, role: true }
+            });
+            if (!existingMember) {
+              const memberCount = await tx.voiceRoomMember.count({ where: { roomId, status: 'ACTIVE' } });
+              const caps = { 1:500,2:1000,3:2000,4:3500,5:5000,6:8000,7:12000,8:18000,9:25000,10:50000 };
+              const maxMembers = caps[room.roomLevel ?? 1] ?? 500;
+              if (memberCount < maxMembers) {
+                const memberRole = room.hostId === userId ? 'OWNER' : 'MEMBER';
+                await tx.voiceRoomMember.create({
+                  data: {
+                    id: require('crypto').randomUUID(),
+                    roomId, userId,
+                    role: memberRole,
+                    status: 'ACTIVE',
+                    memberLevel: 1,
+                    lastActiveAt: new Date(),
+                    isBanned: false,
+                  }
+                });
+              }
+            } else if (existingMember.status === 'REMOVED') {
+              await tx.voiceRoomMember.update({
+                where: { roomId_userId: { roomId, userId } },
+                data: { status: 'ACTIVE', lastActiveAt: new Date() }
+              });
+            } else {
+              await tx.voiceRoomMember.update({
+                where: { roomId_userId: { roomId, userId } },
+                data: { lastActiveAt: new Date() }
+              });
+            }
+          } catch (memberErr) {
+            // Non-fatal: membership creation failure must not abort the join
+            logger.warn(`[voice] Auto-membership creation failed for ${userId} in ${roomId}: ${memberErr.message}`);
+          }
+          // Transaction commits here — User row lock released on COMMIT
+        },
+        { isolationLevel: require('@prisma/client').Prisma.TransactionIsolationLevel.ReadCommitted }
+      );
+
+    } catch (txErr) {
+      // Handle typed errors thrown from inside the transaction
+      if (txErr.statusCode === 409 && txErr.message === 'VOICE_ROOM_ALREADY_ACTIVE') {
+        return errorResponse(
+          res,
+          `You are already in an active Voice Club session. Leave that room before joining another.`,
+          409,
+          {
+            code:            'VOICE_ROOM_ALREADY_ACTIVE',
+            activeRoomId:    conflictRoom.id,
+            activeRoomTitle: conflictRoom.title,
+            activeRoomEmoji: conflictRoom.coverEmoji ?? '🎙️',
+            activeRoomTopic: conflictRoom.topic ?? null,
+          }
+        );
       }
-    } catch (memberErr) {
-      // Non-fatal — voice room join succeeds even if membership creation fails
-      logger.warn(`[voice] Auto-membership creation failed for ${userId} in ${roomId}: ${memberErr.message}`);
+      // Unexpected error — let next() handle it
+      throw txErr;
     }
-    // ── End auto-membership ─────────────────────────────────────────────────
+
+    // ── POST-TRANSACTION: Room status, cache, and Socket.IO ───────────────────
+    // These run OUTSIDE the transaction so they do not hold the InnoDB row lock.
+
+    // BE-005: Previously this was 3 separate sequential calls.
+    // syncRoomStatus() already calls invalidateRoomCache internally.
+    await syncRoomStatus(roomId, schoolId);
+    const updatedRoom = await getRoomWithParticipants(roomId);
 
     // Update participant count on the feed live card
     const activeCount = updatedRoom?._count?.participants ?? 0;
     broadcastLiveUpdate('voice_room', roomId, activeCount);
 
+    // RT-FIX-1: Add the joining user's socket to the room BEFORE broadcasting
+    // voice:user_joined. Previously socketsJoin() was called AFTER the emit,
+    // so the joining user's own socket could miss room-wide events that fired
+    // immediately after join (e.g. queue_updated, stage_state).
     const io = getIo();
     if (io) {
-      io.to(`voice:${roomId}`).emit('voice:user_joined', {
-        roomId,
-        userId:    participant.userId,
-        firstName: participant.user.firstName,
-        lastName:  participant.user.lastName,
-        avatarUrl: participant.user.avatarUrl,
-        role:      participant.role,
-      });
-      // VC-GAP-004 FIX: Use socketsJoin() for multi-tab/multi-server join.
-      // Works across all nodes via Redis adapter.
       io.in(`user:${userId}`).socketsJoin(`voice:${roomId}`);
     }
 
-    // Phase 6: Release the advisory lock now that the participant record is committed.
-    if (req._voiceJoinLockName) {
-      await prisma.$queryRaw`SELECT RELEASE_LOCK(${req._voiceJoinLockName})`.catch(() => {});
+    // FIX-MEMBER-JOIN: Emit voice:member_joined AFTER socketsJoin so the joining
+    // user's socket is already in the room and receives their own member_joined event.
+    // Previously this was emitted inside the auto-membership block BEFORE socketsJoin,
+    // so User B never received their own voice:member_joined.
+    try {
+      const memberCountNow = await prisma.voiceRoomMember.count({ where: { roomId, status: 'ACTIVE' } });
+      const io3 = getIo();
+      if (io3) {
+        io3.to(`voice:${roomId}`).emit('voice:member_joined', {
+          roomId, userId,
+          firstName: participant.user.firstName,
+          lastName:  participant.user.lastName,
+          avatarUrl: participant.user.avatarUrl,
+          memberCount: memberCountNow,
+          roomLevel: updatedRoom?.roomLevel ?? 1,
+        });
+      }
+    } catch { /* non-fatal */ }
+
+    // RT-FIX-2: Include seatNumber in the join broadcast. A user who reconnects
+    // while still having a seat (or is auto-promoted between join and broadcast)
+    // must appear on the correct seat immediately on all clients, without waiting
+    // for a separate voice:role_changed or voice:mic_grabbed event.
+    let joinSeatNumber = null;
+    try {
+      const seatRow = await prisma.$queryRaw`
+        SELECT seatNumber FROM voice_participants
+        WHERE roomId = ${roomId} AND userId = ${userId} LIMIT 1
+      `;
+      joinSeatNumber = seatRow?.[0]?.seatNumber != null ? Number(seatRow[0].seatNumber) : null;
+    } catch { /* non-fatal — defaults to null (audience) */ }
+
+    if (io) {
+      io.to(`voice:${roomId}`).emit('voice:user_joined', {
+        roomId,
+        userId:           participant.userId,
+        firstName:        participant.user.firstName,
+        lastName:         participant.user.lastName,
+        avatarUrl:        participant.user.avatarUrl,
+        role:             participant.role,
+        isMuted:          participant.isMuted ?? true,
+        mutedByModerator: participant.mutedByModerator ?? false,
+        handRaised:       participant.handRaised ?? false,
+        isActive:         true,
+        isPinned:         participant.isPinned ?? false,
+        seatNumber:       joinSeatNumber,
+        joinedAt:         participant.joinedAt?.toISOString?.() ?? new Date().toISOString(),
+      });
+
+      // FIX-JOIN-STAGE: Send the current authoritative stage state directly to
+      // the joining user. This ensures they see who is already on stage the
+      // moment they join, without waiting for a separate event cycle.
+      try {
+        const stageRows = await prisma.$queryRaw`
+          SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
+                 vp.handRaised, vp.mutedByModerator, vp.joinedAt
+          FROM voice_participants vp
+          WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
+          ORDER BY vp.seatNumber ASC
+        `;
+        if (stageRows.length > 0) {
+          io.to(`user:${userId}`).emit('voice:stage_state', {
+            roomId,
+            stageParticipants: stageRows.map(r => ({
+              userId:           r.userId,
+              role:             r.role,
+              isMuted:          Boolean(r.isMuted),
+              seatNumber:       Number(r.seatNumber),
+              isPinned:         Boolean(r.isPinned),
+              handRaised:       Boolean(r.handRaised),
+              mutedByModerator: Boolean(r.mutedByModerator),
+              joinedAt:         r.joinedAt,
+            })),
+            stageCount: stageRows.length,
+          });
+        }
+      } catch { /* non-fatal */ }
     }
+
+    // Phase 6: (Advisory lock removed — transaction commits above.)
 
     return successResponse(res, updatedRoom, 'Joined room');
   } catch (error) {
-    // Release advisory lock on any error path to prevent lock leaks
-    if (req._voiceJoinLockName) {
-      const prismaInstance = require('../utils/prisma');
-      await prismaInstance.$queryRaw`SELECT RELEASE_LOCK(${req._voiceJoinLockName})`.catch(() => {});
-    }
     next(error);
   }
 }
@@ -1214,13 +1270,19 @@ async function promoteParticipant(req, res, next) {
     if (io) {
       io.to(`voice:${roomId}`).emit('voice:role_changed', {
         roomId, userId: targetUserId, role,
-        ...(assignedSeatNumber != null && { seatNumber: assignedSeatNumber })
+        // Explicitly include seatNumber: null when demoting to AUDIENCE so clients
+        // never have to infer the seat clearance from the role alone.
+        ...(assignedSeatNumber != null
+          ? { seatNumber: assignedSeatNumber }
+          : { seatNumber: null }),
       });
       io.to(`user:${targetUserId}`).emit('voice:your_role_changed', {
         roomId,
-        userId: targetUserId,   // always include userId so mobile onRoleChanged can find the participant
+        userId: targetUserId,
         role,
-        ...(assignedSeatNumber != null && { seatNumber: assignedSeatNumber })
+        ...(assignedSeatNumber != null
+          ? { seatNumber: assignedSeatNumber }
+          : { seatNumber: null }),
       });
       if (role === VOICE_ROLES.AUDIENCE) {
         // Auto-promote next queued user if a slot was freed
@@ -2000,8 +2062,24 @@ async function dropMic(req, res, next) {
 
     const io = getIo();
     if (io) {
-      // Broadcast seat release with explicit seatNumber=null
-      if (!isPrivileged) {
+      // RT-FIX-7: HOST/MOD drop-mic must emit voice:role_changed (with seatNumber: null)
+      // in addition to voice:mute_changed. Previously HOST drop-mic only emitted
+      // voice:mute_changed, so clients watching onRoleChanged never cleared the seat.
+      // voice:mute_changed carries seatNumber: null for both HOST and SPEAKER paths,
+      // which is correct — but web/RN onRoleChanged also checks role transition,
+      // so emitting role_changed for the privileged case ensures both handlers fire.
+      if (isPrivileged) {
+        // HOST/MOD: role stays the same but seat is released — emit role_changed
+        // so all clients' onRoleChanged fires and clears seatNumber via the
+        // existing null-aware merge. seatNumber: null is explicit (authoritative).
+        io.to(`voice:${roomId}`).emit('voice:role_changed', {
+          roomId, userId, role: participant.role, seatNumber: null
+        });
+        io.to(`user:${userId}`).emit('voice:your_role_changed', {
+          roomId, userId, role: participant.role, seatNumber: null
+        });
+      } else {
+        // Broadcast seat release with explicit seatNumber=null
         io.to(`voice:${roomId}`).emit('voice:role_changed', {
           roomId, userId, role: VOICE_ROLES.AUDIENCE, seatNumber: null
         });
@@ -2012,6 +2090,33 @@ async function dropMic(req, res, next) {
       io.to(`voice:${roomId}`).emit('voice:mute_changed', {
         roomId, userId, isMuted: true, seatNumber: null
       });
+
+      // RT-FIX-9: Broadcast authoritative stage snapshot after drop-mic so all
+      // clients fully reconcile the seat grid. This is the same reconciliation
+      // used by grabMic and _promoteUser — it eliminates the race where
+      // voice:role_changed and voice:mute_changed arrive out of order.
+      try {
+        const stageRows = await prisma.$queryRaw`
+          SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
+                 vp.handRaised, vp.mutedByModerator, vp.joinedAt
+          FROM voice_participants vp
+          WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
+          ORDER BY vp.seatNumber ASC
+        `;
+        io.to(`voice:${roomId}`).emit('voice:stage_state', {
+          roomId,
+          stageParticipants: stageRows.map(r => ({
+            ...r,
+            seatNumber:       Number(r.seatNumber),
+            isMuted:          Boolean(r.isMuted),
+            isPinned:         Boolean(r.isPinned),
+            handRaised:       Boolean(r.handRaised),
+            mutedByModerator: Boolean(r.mutedByModerator),
+          })),
+          stageCount: stageRows.length,
+        });
+      } catch { /* non-fatal */ }
+
       // Auto-promote next queued user since a seat was freed
       try { await autoPromoteNext(roomId, io); } catch {}
     }
