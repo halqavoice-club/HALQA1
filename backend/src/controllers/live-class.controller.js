@@ -2,6 +2,7 @@ const { AccessToken, RoomServiceClient } = require('livekit-server-sdk');
 const prisma = require('../utils/prisma');
 const { successResponse, errorResponse, getPagination, buildPaginationMeta } = require('../utils/response');
 const { getIo } = require('../sockets');
+const { getLivekitRoomService } = require('../utils/livekitService');
 const { broadcastLiveStart, broadcastLiveEnd } = require('../utils/feedLive');
 const { queueBulkNotifications } = require('../services/queue.service');
 const logger = require('../utils/logger');
@@ -284,17 +285,6 @@ function assertSchoolAccess(lc, user, reqSchoolId) {
     err.status = 403;
     throw err;
   }
-}
-
-// ─── LiveKit RoomServiceClient factory (P0-05: BUG-01 server-side kick) ───────
-// Returns null when LiveKit env vars are not configured.
-// A new client is created per kick call (stateless HTTP API — no pooling needed).
-function getLivekitRoomService() {
-  const url    = process.env.LIVEKIT_URL;
-  const key    = process.env.LIVEKIT_API_KEY;
-  const secret = process.env.LIVEKIT_API_SECRET;
-  if (!url || !key || !secret) return null;
-  return new RoomServiceClient(url, key, secret);
 }
 
 // ─── Host access guard (GAP-01: defence-in-depth for bulk moderation) ────────
