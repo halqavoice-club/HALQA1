@@ -29,6 +29,8 @@ const logger = require('../utils/logger');
 const { broadcastLiveStart, broadcastLiveEnd, broadcastLiveUpdate } = require('../utils/feedLive');
 const { queueBulkNotifications } = require('../services/queue.service');
 const { scheduleRoomReminder, cancelRoomReminder } = require('../services/queue.service');
+// PH17-001/002/003 FIX: SFU helpers for capability enforcement
+const { sfuEvict, sfuRevokePublish, getLivekitRoomService } = require('../utils/livekitService');
 
 //  STATUS CONSTANTS 
 // Rooms are PERSISTENT  they never auto-delete when empty.
@@ -1447,6 +1449,11 @@ async function kickParticipant(req, res, next) {
 
     await safeDeleteCache(roomCacheKey(roomId));
 
+    // PH17-002 FIX: SFU eviction on kick — best-effort, DB kick always persists.
+    // Terminates the kicked user's active LiveKit WebRTC connection so their
+    // 1h token cannot be used to stay in the SFU room after being kicked at DB level.
+    sfuEvict(roomId, targetUserId, '[voice:kick]').catch(() => {});
+
     const io = getIo();
     if (io) {
       io.to(`user:${targetUserId}`).emit('voice:kicked', { roomId });
@@ -1512,6 +1519,9 @@ async function banParticipant(req, res, next) {
     } catch {}
 
     await safeDeleteCache(roomCacheKey(roomId));
+
+    // PH17-002 FIX: SFU eviction on ban — best-effort, DB ban always persists.
+    sfuEvict(roomId, targetUserId, '[voice:ban]').catch(() => {});
 
     const io = getIo();
     if (io) {
@@ -1726,6 +1736,65 @@ async function toggleMicLock(req, res, next) {
       io.to(`voice:${roomId}`).emit('voice:mic_lock_changed', {
         roomId, micLocked: newState, changedBy: userId
       });
+    }
+
+    // PH22-003 FIX: Enforce mic-lock at the SFU level so connected participants
+    // cannot bypass the lock by keeping their existing WebRTC publish track.
+    //
+    // LOCK (newState = true):
+    //   Query all active SPEAKERs (HOST and MODERATOR are excluded — privileged).
+    //   Call updateParticipant(canPublish:false) for each SPEAKER.
+    //   Best-effort per participant — one failure does not abort others.
+    //
+    // UNLOCK (newState = false):
+    //   Query all active participants with seatNumber != null (on stage):
+    //   HOST, MODERATOR, and seated SPEAKERs.
+    //   Call updateParticipant(canPublish:true) for each.
+    //   Unseated SPEAKERs and AUDIENCE remain canPublish:false.
+    //
+    // getLivekitRoomService() returns null when LiveKit is not configured —
+    // skip SFU calls gracefully in that case.
+    const svc = getLivekitRoomService();
+    if (svc) {
+      const logger = require('../utils/logger');
+      if (newState) {
+        // LOCK: revoke SPEAKER publish — HOST/MOD retain privilege
+        const speakers = await prisma.voiceParticipant.findMany({
+          where: { roomId, isActive: true, role: 'SPEAKER' },
+          select: { userId: true },
+        });
+        await Promise.all(speakers.map(async p => {
+          try {
+            await svc.updateParticipant(roomId, p.userId, {
+              permission: { canPublish: false, canSubscribe: true, canPublishData: true },
+            });
+          } catch (err) {
+            logger.warn(`[voice:mic-lock] SFU revoke failed for ${p.userId} in ${roomId}: ${err.message}`);
+          }
+        }));
+      } else {
+        // UNLOCK: restore publish for seated stage participants (HOST, MOD, seated SPEAKER)
+        const stage = await prisma.voiceParticipant.findMany({
+          where: {
+            roomId, isActive: true,
+            role: { in: ['HOST', 'MODERATOR', 'SPEAKER'] },
+          },
+          select: { userId: true, role: true, seatNumber: true },
+        });
+        // HOST and MODERATOR always restored; SPEAKER only if seated (seatNumber != null)
+        const toRestore = stage.filter(p =>
+          p.role === 'HOST' || p.role === 'MODERATOR' || p.seatNumber != null
+        );
+        await Promise.all(toRestore.map(async p => {
+          try {
+            await svc.updateParticipant(roomId, p.userId, {
+              permission: { canPublish: true, canSubscribe: true, canPublishData: true },
+            });
+          } catch (err) {
+            logger.warn(`[voice:mic-unlock] SFU restore failed for ${p.userId} in ${roomId}: ${err.message}`);
+          }
+        }));
+      }
     }
 
     return successResponse(res, { micLocked: newState });

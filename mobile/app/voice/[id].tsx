@@ -1271,6 +1271,18 @@ export default function VoiceRoomScreen() {
       setParticipants(prev => prev.map(p => p.id === d.userId ? { ...p, handRaised: d.raised } : p));
     };
 
+    // RT-FIX-6: Moderator removed — clear seatNumber so stage grid stays consistent.
+    // Backend emits voice:moderator_removed when HOST removes a MODERATOR.
+    // The demoted user's seat must be cleared immediately on all clients.
+    const onModeratorRemoved = (d: { roomId: string; userId: string }) => {
+      if (d.roomId !== id) return;
+      setParticipants(prev => prev.map(p =>
+        p.id === d.userId
+          ? { ...p, role: 'AUDIENCE' as const, isMuted: true, seatNumber: null, handRaised: false }
+          : p
+      ));
+    };
+
     // Room went IDLE (all left) or was explicitly terminated by host/admin
     // PERMANENT ROOMS: voice:room_ended fires when host calls endRoom() (ENDED terminal state)
     // OR when the room transitions LIVE → IDLE after 5-min grace (empty room sleep).
@@ -1441,6 +1453,7 @@ export default function VoiceRoomScreen() {
     socket.on('voice:role_changed',   onRoleChanged);
     socket.on('voice:your_role_changed', onRoleChanged);
     socket.on('voice:kicked',         onKicked);
+    socket.on('voice:moderator_removed', onModeratorRemoved);  // RT-FIX-6
     socket.on('voice:hand_raised',    onHandRaised);
     socket.on('voice:room_ended',     onRoomEnded);
     socket.on('voice:open_mic_changed', onOpenMicChanged);
@@ -1748,7 +1761,25 @@ export default function VoiceRoomScreen() {
         const tokenRes = await api.post(`/voice/${id}/livekit-token`);
         const { token: lkToken, livekitUrl } = tokenRes.data.data;
         if (lkToken && livekitUrl) {
-          await lk.connect(livekitUrl, lkToken, true /* start muted */, id);
+          // PH19-002 FIX: pass tokenFetcher so every reconnect path obtains
+          // a fresh token from the authoritative backend endpoint rather than
+          // reusing the stale cached token.
+          //
+          // tokenFetcher calls POST /voice/:id/livekit-token — the same endpoint
+          // that issued the initial token. The backend verifies:
+          //   1. Room exists and is not ENDED
+          //   2. Caller has an active VoiceParticipant record (isActive:true)
+          //
+          // A kicked/banned user will have isActive:false in the DB by the time
+          // their Disconnected event fires and reconnect is attempted. The backend
+          // returns 403, which causes tokenFetcher to throw, which halts retries.
+          const tokenFetcher = async (): Promise<string> => {
+            const res = await api.post(`/voice/${id}/livekit-token`);
+            const token = res.data?.data?.token;
+            if (!token) throw new Error('No token in response');
+            return token;
+          };
+          await lk.connect(livekitUrl, lkToken, true /* start muted */, id, tokenFetcher);
         }
       } catch { /* non-fatal — audio not available in Expo Go */ }
       showMessage({ message: `Joined ${room.name ?? room.title}`, type: 'success' });

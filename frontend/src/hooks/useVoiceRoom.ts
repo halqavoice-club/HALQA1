@@ -226,7 +226,8 @@ export function useVoiceRoom(roomId: string | null) {
 
     const onModeratorRemoved = (data: { roomId: string; userId: string }) => {
       if (data.roomId !== roomId) return
-      updateParticipant(data.userId, { role: VOICE_ROLES.AUDIENCE, isMuted: true })
+      // RT-FIX-8: clear seatNumber so the grid slot is freed immediately
+      updateParticipant(data.userId, { role: VOICE_ROLES.AUDIENCE, isMuted: true, seatNumber: null })
     }
 
     const onAdminTransferred = (data: {
