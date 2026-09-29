@@ -18,26 +18,50 @@ function extractFn(src, fnName, nextFnName) {
   return src.slice(start, end === -1 ? src.length : end);
 }
 
-// Extract only the executable code block (not comments) from ONE-ROOM-AT-A-TIME section.
-// Strategy: find the { } block after the marker, strip comments.
+// Extract the one-room enforcement sub-block from the ONE-ROOM-AT-A-TIME section.
+//
+// The enforcement lives inside a prisma.$transaction() callback, so we cannot
+// simply take the first { } after the marker (that would grab the full
+// transaction body including unrelated membership code).
+//
+// Strategy: after the marker, find the `otherActiveRooms` findMany call and
+// extract from there to the end of the following `if (otherActiveRooms …)` block.
+// This gives us exactly the code that checks for conflicts and throws 409 —
+// without the unrelated membership-management code that follows.
 function extractEnforcementCodeBlock(src) {
   const markerIdx = src.indexOf('ONE-ROOM-AT-A-TIME');
   if (markerIdx === -1) return '';
-  // Find the opening { of the enforcement block
-  const braceStart = src.indexOf('{', markerIdx);
-  if (braceStart === -1) return '';
-  // Find matching closing brace
+
+  // Find 'otherActiveRooms' declaration after the marker
+  const queryIdx = src.indexOf('otherActiveRooms', markerIdx);
+  if (queryIdx === -1) return '';
+
+  // Find the start of that statement (const keyword or the line beginning)
+  const stmtStart = src.lastIndexOf('\n', queryIdx) + 1; // start of line
+
+  // Extract from the query declaration through to the closing } of the if block.
+  // The pattern is:
+  //   const otherActiveRooms = await tx.voiceParticipant.findMany({ ... });
+  //   if (otherActiveRooms.length > 0) { ... }
+  //
+  // Find the if(...) { following the query and extract its block.
+  const ifIdx = src.indexOf('if (otherActiveRooms', queryIdx);
+  if (ifIdx === -1) return src.slice(stmtStart, stmtStart + 800);
+
+  const braceStart = src.indexOf('{', ifIdx);
+  if (braceStart === -1) return src.slice(stmtStart, ifIdx + 100);
+
   let depth = 0;
   let i = braceStart;
   while (i < src.length) {
     if (src[i] === '{') depth++;
     else if (src[i] === '}') {
       depth--;
-      if (depth === 0) return src.slice(braceStart, i + 1);
+      if (depth === 0) return src.slice(stmtStart, i + 1);
     }
     i++;
   }
-  return src.slice(braceStart, braceStart + 1000);
+  return src.slice(stmtStart, stmtStart + 1200);
 }
 
 describe('Phase 3 — joinRoom rejects second room (never evicts Room A)', () => {
@@ -60,7 +84,9 @@ describe('Phase 3 — joinRoom rejects second room (never evicts Room A)', () =>
   });
 
   test('rejection message tells user to leave existing room', () => {
-    expect(codeBlock).toMatch(/Leave|leave/);
+    // The "leave" message is surfaced in the post-transaction catch block
+    // that converts the thrown 409 error into an HTTP response. Check joinFn.
+    expect(joinFn).toMatch(/Leave|leave/);
   });
 
   test('does NOT call prisma update in enforcement block (Room A NOT deactivated)', () => {
@@ -97,7 +123,9 @@ describe('Phase 3 — joinRoom rejects second room (never evicts Room A)', () =>
   });
 
   test('enforcement uses prisma DB query (not just in-memory state)', () => {
-    expect(codeBlock).toMatch(/prisma\.voiceParticipant\.findMany/);
+    // Inside a Prisma transaction the client is aliased as `tx`, not `prisma`.
+    // Both tx.voiceParticipant and prisma.voiceParticipant are the same model.
+    expect(codeBlock).toMatch(/voiceParticipant\.findMany/);
   });
 });
 
@@ -177,6 +205,8 @@ describe('Phase 11 — Socket.IO correctness: rejected join emits nothing false'
   });
 
   test('rejection is a return statement (no code after it in block)', () => {
-    expect(codeBlock).toMatch(/return errorResponse/);
+    // Inside the transaction the enforcement throws an error; the post-transaction
+    // catch block converts it to a return errorResponse. Both are in joinFn.
+    expect(joinFn).toMatch(/return errorResponse/);
   });
 });
