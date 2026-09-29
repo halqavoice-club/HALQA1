@@ -2531,6 +2531,14 @@ async function demoteFromStage(req, res, next) {
       // liveclass:you_were_demoted → target user only: show notification
       io.to(`user:${userId}`).emit('liveclass:you_were_demoted', { liveClassId: id });
     }
+
+    // PH17-004 FIX: Revoke SFU publish capability on speaker demotion — best-effort.
+    // The demoted speaker's existing token may still carry canPublish:true.
+    // sfuRevokePublish sets canPublish=false on their live SFU connection immediately
+    // so the mic is silenced at the SFU level, not just in the client UI.
+    const { sfuRevokePublish } = require('../utils/livekitService');
+    sfuRevokePublish(lc.livekitRoomName || `liveclass-${id}`, userId, false, '[live-class:demote]').catch(() => {});
+
     return successResponse(res, null, 'Participant moved to audience');
   } catch (e) { next(e); }
 }

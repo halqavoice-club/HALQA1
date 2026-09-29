@@ -1,6 +1,6 @@
 'use strict';
 /**
- * livekitService.js — Shared LiveKit RoomServiceClient factory
+ * livekitService.js — Shared LiveKit RoomServiceClient factory + helpers
  * ─────────────────────────────────────────────────────────────────────────────
  * Centralises RoomServiceClient construction so both voice.controller.js and
  * live-class.controller.js share the same credential/client pattern without
@@ -13,9 +13,20 @@
  * Callers MUST treat a null return as "LiveKit not configured in this
  * environment" and skip the call gracefully. They must NOT throw or fail
  * the parent HTTP response when the client is null.
+ *
+ * PH17-002/003/004 FIX: Added sfuEvict() and sfuRevokePublish() helpers.
+ * These wrap the LiveKit RoomServiceClient calls that enforce capability
+ * changes at the SFU level — removing a participant or stripping their
+ * canPublish permission — so the DB authorization state is reflected in
+ * the SFU without waiting for the 1h token TTL to expire.
+ *
+ * Both helpers are best-effort: a LiveKit API failure is logged and swallowed.
+ * The DB change and Socket.IO notification always persist regardless of whether
+ * the SFU call succeeds. This matches the existing live-class kick pattern.
  */
 
 const { RoomServiceClient } = require('livekit-server-sdk');
+const logger = require('./logger');
 
 /**
  * Returns a configured RoomServiceClient, or null if LiveKit env vars are absent.
@@ -31,4 +42,63 @@ function getLivekitRoomService() {
   return new RoomServiceClient(host, key, secret);
 }
 
-module.exports = { getLivekitRoomService };
+/**
+ * PH17-002 FIX: Best-effort SFU eviction on kick/ban.
+ *
+ * Calls removeParticipant() so the user's existing LiveKit connection is
+ * terminated immediately — their 1h token can no longer be used to rejoin
+ * the SFU room after this call, because the SFU validates room membership
+ * on every connection attempt.
+ *
+ * Best-effort: LiveKit API failures are logged and swallowed.
+ * The DB kick/ban always persists regardless.
+ *
+ * @param {string} roomName  — LiveKit room name (= voice roomId or liveclass livekitRoomName)
+ * @param {string} identity  — participant identity (= userId)
+ * @param {string} logPrefix — e.g. '[voice]' or '[live-class]' for log context
+ */
+async function sfuEvict(roomName, identity, logPrefix = '[livekit]') {
+  const svc = getLivekitRoomService();
+  if (!svc) return; // LiveKit not configured — skip gracefully
+  try {
+    await svc.removeParticipant(roomName, identity);
+    logger.info(`${logPrefix} SFU eviction succeeded for ${identity} in ${roomName}`);
+  } catch (err) {
+    logger.warn(`${logPrefix} SFU eviction failed for ${identity} in ${roomName}: ${err.message}`);
+  }
+}
+
+/**
+ * PH17-001/003/004 FIX: Best-effort SFU capability revocation on demotion/mute.
+ *
+ * Calls updateParticipant() to set canPublish=false on the live SFU participant.
+ * This means a demoted SPEAKER or muted AUDIENCE member cannot publish audio
+ * even if their token still contains canPublish:true (issued before demotion).
+ *
+ * The SFU enforces the updated permission immediately — no reconnect required.
+ * When the participant later gets promoted again, a fresh token request will
+ * issue canPublish:true and updateParticipant() with canPublish:true restores it.
+ *
+ * Best-effort: LiveKit API failures are logged and swallowed.
+ *
+ * @param {string}  roomName    — LiveKit room name
+ * @param {string}  identity    — participant identity (= userId)
+ * @param {boolean} canPublish  — true to restore, false to revoke
+ * @param {string}  logPrefix   — log context prefix
+ */
+async function sfuRevokePublish(roomName, identity, canPublish, logPrefix = '[livekit]') {
+  const svc = getLivekitRoomService();
+  if (!svc) return; // LiveKit not configured — skip gracefully
+  try {
+    await svc.updateParticipant(roomName, identity, undefined, {
+      canPublish:     canPublish,
+      canSubscribe:   true,
+      canPublishData: canPublish,
+    });
+    logger.info(`${logPrefix} SFU canPublish=${canPublish} set for ${identity} in ${roomName}`);
+  } catch (err) {
+    logger.warn(`${logPrefix} SFU updateParticipant failed for ${identity} in ${roomName}: ${err.message}`);
+  }
+}
+
+module.exports = { getLivekitRoomService, sfuEvict, sfuRevokePublish };

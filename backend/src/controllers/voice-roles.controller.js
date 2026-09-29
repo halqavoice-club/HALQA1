@@ -25,6 +25,8 @@ const { successResponse, errorResponse } = require('../utils/response');
 const { getIo } = require('../sockets');
 const { VOICE_ROLES } = require('../middleware/voiceRole.middleware');
 const logger = require('../utils/logger');
+// PH17-003 FIX: SFU capability revocation on demotion/mute
+const { sfuEvict, sfuRevokePublish } = require('../utils/livekitService');
 
 // ── Audit helper (fire-and-forget, never throws) ──────────────────────────────
 async function _rolesAudit(actorId, action, roomId, meta = {}) {
@@ -143,8 +145,17 @@ async function removeModerator(req, res, next) {
         updatedAt: new Date()
       }
     });
+    // RT-FIX-10: Clear seatNumber when moderator is demoted to audience.
+    // A moderator on stage occupies a seat — demotion must free that seat.
+    await prisma.$executeRaw`UPDATE voice_participants SET seatNumber = NULL WHERE id = ${target.id}`.catch(() => {});
 
     await safeDeleteCache(roomCacheKey(roomId));
+
+    // PH17-003 FIX: Revoke SFU publish capability when moderator is removed.
+    // The demoted user's existing token may still have canPublish:true from
+    // when they were assigned moderator. sfuRevokePublish forces canPublish=false
+    // on the live SFU connection immediately — no reconnect needed.
+    sfuRevokePublish(roomId, targetUserId, false, '[voice:remove-mod]').catch(() => {});
 
     const io = getIo();
     if (io) {
@@ -152,10 +163,12 @@ async function removeModerator(req, res, next) {
         roomId,
         userId: targetUserId
       });
+      // RT-FIX-8: Include seatNumber:null so clients clear the stage grid slot.
       io.to(`voice:${roomId}`).emit('voice:role_changed', {
         roomId,
-        userId: targetUserId,
-        role:   VOICE_ROLES.AUDIENCE
+        userId:     targetUserId,
+        role:       VOICE_ROLES.AUDIENCE,
+        seatNumber: null,
       });
       io.to(`user:${targetUserId}`).emit('voice:moderator_removed', {
         roomId,
@@ -298,6 +311,15 @@ async function muteAll(req, res, next) {
     }
 
     _rolesAudit(callerId, 'MUTE_ALL', roomId, { mutedCount: targets.length });
+
+    // PH17-003 FIX: Revoke SFU publish for each muted speaker — best-effort.
+    // A SPEAKER whose token has canPublish:true can still publish until their
+    // token expires. sfuRevokePublish sets canPublish=false on the live SFU
+    // connection immediately so the revocation takes effect without token expiry.
+    targets.forEach(t => {
+      sfuRevokePublish(roomId, t.userId, false, '[voice:mute-all]').catch(() => {});
+    });
+
     return successResponse(res, { mutedCount: targets.length },
       `Muted ${targets.length} speaker${targets.length > 1 ? 's' : ''}`);
   } catch (error) { next(error); }
