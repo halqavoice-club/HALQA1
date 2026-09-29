@@ -266,9 +266,26 @@ export function useLiveKitAudio(): LiveKitAudioState {
         if (isTransient && reconnectCountRef.current < MAX_RECONNECT_ATTEMPTS) {
           const delay = BASE_RETRY_DELAY_MS * Math.pow(2, reconnectCountRef.current);
           reconnectCountRef.current += 1;
-          reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = setTimeout(async () => {
             isConnectingRef.current = false;
-            connect(lastUrlRef.current, lastTokenRef.current, lastStartMutedRef.current);
+            if (!isUnmountedRef.current) {
+              // PH19-002 FIX: use fresh token on catch-block retry too.
+              // A connection error during room.connect() may happen immediately
+              // after a kick/ban — fetching a fresh token lets the backend
+              // deny the reconnect if authorization has changed.
+              let retryToken = lastTokenRef.current;
+              if (tokenFetcherRef.current) {
+                try {
+                  retryToken = await tokenFetcherRef.current();
+                  lastTokenRef.current = retryToken;
+                } catch {
+                  // 403/401 — stop retrying
+                  reconnectCountRef.current = MAX_RECONNECT_ATTEMPTS;
+                  return;
+                }
+              }
+              connect(lastUrlRef.current, retryToken, lastStartMutedRef.current);
+            }
           }, delay);
         } else {
           showMessage({
@@ -284,12 +301,28 @@ export function useLiveKitAudio(): LiveKitAudioState {
   }, [quality]); // eslint-disable-line
 
   // ─── Force reconnect (Phase 7) ────────────────────────────────────────────
+  // PH19-002 FIX: fetch a fresh token before reconnecting.
+  // The force-reconnect path is triggered by background resume (AppState).
+  // A kicked/banned/demoted user who backgrounds and re-foregrounds the app
+  // must be denied at the backend when they attempt to get a new token.
   const reconnect = useCallback(async () => {
-    if (!lastUrlRef.current || !lastTokenRef.current) return;
+    if (!lastUrlRef.current) return;
     reconnectCountRef.current = 0;
     isConnectingRef.current   = false;
     clearReconnectTimer();
-    await connect(lastUrlRef.current, lastTokenRef.current, lastStartMutedRef.current);
+
+    let freshToken = lastTokenRef.current;
+    if (tokenFetcherRef.current) {
+      try {
+        freshToken = await tokenFetcherRef.current();
+        lastTokenRef.current = freshToken;
+      } catch {
+        // 403/401 from backend — user is no longer authorized, do not reconnect
+        return;
+      }
+    }
+    if (!freshToken) return; // no token available at all — give up
+    await connect(lastUrlRef.current, freshToken, lastStartMutedRef.current);
   }, [connect]);
 
   // ─── Disconnect ───────────────────────────────────────────────────────────

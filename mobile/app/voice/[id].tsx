@@ -1761,7 +1761,25 @@ export default function VoiceRoomScreen() {
         const tokenRes = await api.post(`/voice/${id}/livekit-token`);
         const { token: lkToken, livekitUrl } = tokenRes.data.data;
         if (lkToken && livekitUrl) {
-          await lk.connect(livekitUrl, lkToken, true /* start muted */, id);
+          // PH19-002 FIX: pass tokenFetcher so every reconnect path obtains
+          // a fresh token from the authoritative backend endpoint rather than
+          // reusing the stale cached token.
+          //
+          // tokenFetcher calls POST /voice/:id/livekit-token — the same endpoint
+          // that issued the initial token. The backend verifies:
+          //   1. Room exists and is not ENDED
+          //   2. Caller has an active VoiceParticipant record (isActive:true)
+          //
+          // A kicked/banned user will have isActive:false in the DB by the time
+          // their Disconnected event fires and reconnect is attempted. The backend
+          // returns 403, which causes tokenFetcher to throw, which halts retries.
+          const tokenFetcher = async (): Promise<string> => {
+            const res = await api.post(`/voice/${id}/livekit-token`);
+            const token = res.data?.data?.token;
+            if (!token) throw new Error('No token in response');
+            return token;
+          };
+          await lk.connect(livekitUrl, lkToken, true /* start muted */, id, tokenFetcher);
         }
       } catch { /* non-fatal — audio not available in Expo Go */ }
       showMessage({ message: `Joined ${room.name ?? room.title}`, type: 'success' });
