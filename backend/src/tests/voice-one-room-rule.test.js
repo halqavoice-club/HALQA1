@@ -139,7 +139,9 @@ describe('Phase 6 — Same-room reconnect is allowed (not rejected)', () => {
 
   test('existing participant is upserted (reconnect path)', () => {
     expect(joinFn).toMatch(/existing.*voiceParticipant|Upsert participant/);
-    const upsertBlock = joinFn.match(/Upsert participant[\s\S]{0,600}/)?.[0] ?? '';
+    // PH24C-003 inserted a wasKicked check between "Upsert participant" and isActive:true
+    // Expanded window from 600 to 1000 chars to accommodate the new check
+    const upsertBlock = joinFn.match(/Upsert participant[\s\S]{0,1000}/)?.[0] ?? '';
     expect(upsertBlock).toMatch(/isActive.*true/);
   });
 });

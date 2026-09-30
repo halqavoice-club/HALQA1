@@ -143,20 +143,54 @@ async function autoPromoteNext(roomId, io) {
     return autoPromoteNext(roomId, io);
   }
 
-  if (isMod) {
-    await prisma.$executeRaw`
-      UPDATE voice_participants
-      SET seatNumber = ${promotedSeat}, isMuted = 0,
-          handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
-      WHERE roomId = ${roomId} AND userId = ${userId}
-    `;
-  } else {
-    await prisma.$executeRaw`
-      UPDATE voice_participants
-      SET seatNumber = ${promotedSeat}, role = 'SPEAKER', isMuted = 0,
-          handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
-      WHERE roomId = ${roomId} AND userId = ${userId}
-    `;
+  // PH24C-004 FIX: Wrap seat assignment in try/catch to handle concurrent seat collision.
+  // Two simultaneous autoPromoteNext calls (e.g. two speakers drop at once) could both
+  // select the same lowest free seat, then race to write it. The @@unique([roomId,seatNumber])
+  // constraint catches the second write as P2002/ER_DUP_ENTRY. Previously this error
+  // propagated uncaught. Now: detect the collision, clean up the stale queue entry,
+  // and recurse to try the next eligible user — matching the existing grabMic pattern.
+  try {
+    if (isMod) {
+      await prisma.$executeRaw`
+        UPDATE voice_participants
+        SET seatNumber = ${promotedSeat}, isMuted = 0,
+            handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
+        WHERE roomId = ${roomId} AND userId = ${userId}
+      `;
+    } else {
+      await prisma.$executeRaw`
+        UPDATE voice_participants
+        SET seatNumber = ${promotedSeat}, role = 'SPEAKER', isMuted = 0,
+            handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
+        WHERE roomId = ${roomId} AND userId = ${userId}
+      `;
+    }
+  } catch (assignErr) {
+    // PH24C-004: Detect duplicate-seat race (P2002 Prisma / ER_DUP_ENTRY MySQL)
+    const isDupSeat = assignErr.code === 'P2002' ||
+      (assignErr.message && (
+        assignErr.message.includes('Duplicate entry') ||
+        assignErr.message.includes('ER_DUP_ENTRY') ||
+        assignErr.message.includes('voice_participants_roomId_seatNumber_key')
+      ));
+    if (isDupSeat) {
+      logger.warn(`[autoPromote] Seat race for userId=${userId} room=${roomId} seat=${promotedSeat} — skipping to next in queue`);
+      // Clean up the stale handRaised flag so the host queue display is accurate
+      try {
+        await prisma.voiceParticipant.update({
+          where: { roomId_userId: { roomId, userId } },
+          data: { handRaised: false, handRaisedAt: null, updatedAt: new Date() }
+        });
+      } catch { /* non-fatal */ }
+      if (io) {
+        io.to(`voice:${roomId}`).emit('voice:hand_raised', { roomId, userId, raised: false });
+      }
+      // Recurse to try next in queue — autoPromoteNext already has existing recursion
+      // with termination conditions (empty queue returns null), so infinite loop is impossible.
+      return autoPromoteNext(roomId, io);
+    }
+    // Non-seat-race error — re-throw so callers see it
+    throw assignErr;
   }
 
   try { await deleteCache(roomCacheKey(roomId)); } catch (err) { /* ignore */ }
