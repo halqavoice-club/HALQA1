@@ -319,9 +319,30 @@ io.on('connection', (socket) => {
   });
 
   // ── Emoji reaction (broadcast to room) — enforces reactionsEnabled ─────────
+  // PH19-001 FIX: Added socket-room membership guard — same pattern as voice:speaking.
+  // Previously the handler only checked authentication, rate limiting, and reactionsEnabled.
+  // An authenticated user who had NOT joined voice:${roomId} (i.e. was not an active
+  // VoiceParticipant in that room) could still emit voice:reaction with an arbitrary
+  // roomId and have it broadcast to all subscribers of that room.
+  //
+  // Fix: verify socket.rooms.has(`voice:${roomId}`) before allowing the broadcast.
+  // socket.rooms is populated exclusively by voice:join_room, which enforces the DB
+  // invariant: VoiceParticipant.roomId = roomId AND VoiceParticipant.userId = socket.userId
+  // AND VoiceParticipant.isActive = true.  kick/ban eviction calls socketsLeave() which
+  // removes the socket from the room channel — so kicked/banned users are also blocked.
+  //
+  // Authorization order:
+  //   1. authenticated identity (userId from socket, set at connection)
+  //   2. rate limit (socketAllow)
+  //   3. socket room membership — NEW (PH19-001 fix)
+  //   4. reactionsEnabled room setting
+  //   5. broadcast to target room only
   socket.on('voice:reaction', async ({ roomId, emoji }) => {
     if (!roomId || !userId) return;
     if (!socketAllow('voice:reaction')) return;
+    // PH19-001 FIX: Reject if this socket is not a member of voice:${roomId}.
+    // Matches the existing voice:speaking authorization pattern (P0-3 above).
+    if (!socket.rooms.has(`voice:${roomId}`)) return;
     try {
       const cached = await getCache(`voice:room:${roomId}`).catch(() => null);
       const enabled = cached ? cached.reactionsEnabled !== false : true;
