@@ -16,6 +16,17 @@ const createLimit = rateLimit({
   message: { success: false, message: 'Too many communities created, slow down' }
 });
 
+// COMM-P3-003 FIX: Rate limit community updates.
+// updateCommunity emits community:updated to ALL room subscribers on every call.
+// An ADMIN in a tight PATCH loop could flood all members' sockets.
+// Limit: 20 updates per 10 minutes per user — generous for legitimate use,
+// blocks sustained socket-flooding abuse.
+const patchLimit = rateLimit({
+  windowMs: 10 * 60 * 1000, max: 20,
+  keyGenerator: req => req.user?.id || req.ip,
+  message: { success: false, message: 'Too many community updates, slow down' }
+});
+
 // Rate limit invite creation: 20 per admin per hour
 const inviteLimit = rateLimit({
   windowMs: 60 * 60 * 1000, max: 20,
@@ -65,6 +76,7 @@ router.post('/',
 router.get('/:idOrSlug',    ctrl.getCommunity);
 
 router.patch('/:idOrSlug',
+  patchLimit,
   [
     body('name').optional().trim().notEmpty().isLength({ max: 120 }),
     body('privacy').optional().isIn(['PUBLIC','PRIVATE','INVITE_ONLY']),
