@@ -408,6 +408,13 @@ async function removeGroupMember(req, res) {
 
     // BUG-9 FIX: Notify room members that someone was removed.
     if (getIo()) {
+      // MSG-P2-003 FIX: Evict the removed user's sockets from the conversation room.
+      // Without this, the removed member's open sockets remain in `conversation:${conversationId}`
+      // and continue receiving all group events (messages, reactions, settings) in real-time.
+      // socketsLeave() removes only the conversation room — it does NOT disconnect the socket
+      // or remove the user from any other rooms (personal, voice, dm, etc.).
+      // Mirrors the existing Voice Club kick/ban pattern (kickParticipant / banParticipant).
+      getIo().in(`user:${userId}`).socketsLeave(`conversation:${conversationId}`);
       getIo().to(`conversation:${conversationId}`).emit('group:member_removed', {
         conversationId, userId, removedBy: currentUserId, memberCount
       });

@@ -632,8 +632,15 @@ io.on('connection', (socket) => {
   // Previously `tid || userId` allowed any user to spoof another user's typing indicator.
   // BUG-5 FIX: emit `userName` not `name` — mobile client destructures `userName`.
   // Accept both `name` (web) and `userName` (mobile) from client payload.
+  // MSG-P2-002 FIX: Added socket room membership check — same pattern as voice:speaking (P0-3)
+  // and liveclass:speaking (A7-FIX). The socket must be in `conversation:${convId}` to emit
+  // a typing indicator to that group. This is only possible after passing the DB-gated
+  // group:join handler above (GroupMember.leftAt: null). Defense-in-depth: no client can
+  // inject typing events into a group room their socket has not legitimately joined.
   socket.on('group:typing_start', ({ convId, name, userName }) => {
     if (!convId) return;
+    // MSG-P2-002 FIX: Reject if this socket is not a member of conversation:${convId}.
+    if (!socket.rooms.has(`conversation:${convId}`)) return;
     const displayName = userName || name || '';
     // userId is captured from socket.userId at connection time (JWT-verified)
     socket.to(`conversation:${convId}`).emit('group:typing_start', { convId, userId, userName: displayName });
@@ -641,6 +648,8 @@ io.on('connection', (socket) => {
 
   socket.on('group:typing_stop', ({ convId }) => {
     if (!convId) return;
+    // MSG-P2-002 FIX: Reject if this socket is not a member of conversation:${convId}.
+    if (!socket.rooms.has(`conversation:${convId}`)) return;
     // userId is captured from socket.userId at connection time (JWT-verified)
     // Emit userId so clients can look up the member name from their local state
     socket.to(`conversation:${convId}`).emit('group:typing_stop', { convId, userId });
