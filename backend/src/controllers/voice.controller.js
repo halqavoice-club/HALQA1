@@ -512,20 +512,11 @@ async function joinRoom(req, res, next) {
       }
     }
 
-    // ── P0-1 FIX: Check room-level ban (DB-authoritative) ─────────────────
-    // VoiceRoomMember.isBanned is the persistent ban record.
-    // A banned user must not be able to rejoin even after being kicked.
-    // Host is always exempt from ban checks (they own the room).
-    if (room.hostId !== userId) {
-      const banRecord = await prisma.voiceRoomMember.findUnique({
-        where: { roomId_userId: { roomId, userId } },
-        select: { isBanned: true }
-      });
-      if (banRecord?.isBanned) {
-        return errorResponse(res, 'You are banned from this room', 403);
-      }
-    }
-
+    // ── P0-1: Ban check moved inside the serializing transaction (PH24C-002).
+    // The authoritative check is now step 2b inside the FOR UPDATE transaction,
+    // which prevents the TOCTOU window where a concurrent ban could commit between
+    // this pre-check and the transaction commit. The pre-check below is removed.
+    // (Host is always exempt — checked implicitly: hostId never has a ban record.)
 
     // ── ONE-ROOM-AT-A-TIME ENFORCEMENT — InnoDB USER-ROW LOCK + READ COMMITTED ──
     // Product rule: a user can only ACTIVELY PARTICIPATE in one Voice Club room.
@@ -570,6 +561,35 @@ async function joinRoom(req, res, next) {
           // reads see Tx A's committed participant record.
           await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
 
+          // ── 1b. PH24C-002 FIX (hardened): Authoritative ban check with VRM row lock ──
+          // Lock order: Users(FOR UPDATE) → VoiceRoomMember(FOR UPDATE) → VoiceParticipant(write)
+          // This canonical ordering eliminates the circular-wait deadlock that would occur if
+          // banParticipant() (VRM→VP) and joinRoom (VP→VRM) ran concurrently.
+          //
+          // The room.hostId bypass is REMOVED. After transferAdmin(), room.hostId may still
+          // point to the original creator whose VoiceParticipant.role is no longer HOST —
+          // they can be legitimately banned. Skipping the ban check for them would let a
+          // banned user rejoin, violating invariant D (isBanned=true → isActive=false).
+          // The ban check applies universally to every user, including the room creator.
+          //
+          // SELECT FOR UPDATE on the VRM row serializes against banParticipant():
+          //   JOIN holds VRM lock → BAN blocks at VRM upsert → JOIN commits → BAN proceeds.
+          // No circular wait: BAN (reordered to VRM→VP) and JOIN (VRM→VP) use the same order.
+          {
+            const banRecord = await tx.$queryRaw`
+              SELECT id, isBanned FROM voice_room_members
+              WHERE roomId = ${roomId} AND userId = ${userId}
+              FOR UPDATE
+            `;
+            // banRecord is an array from $queryRaw; first row is the VRM entry if it exists
+            const vrm = banRecord[0] ?? null;
+            if (vrm?.isBanned) {
+              const err = new Error('BANNED_FROM_ROOM');
+              err.statusCode = 403;
+              throw err;
+            }
+          }
+
           // ── 2. Check for other active rooms (different-room conflict) ────────
           // Under READ COMMITTED, this reads the latest committed state.
           // If Tx A already committed its participant (having held the row lock
@@ -600,6 +620,15 @@ async function joinRoom(req, res, next) {
           });
 
           if (existing) {
+            // PH24C-003 FIX: Check wasKicked before allowing same-room reconnect.
+            // A user who was kicked (wasKicked=true) must not be able to silently
+            // re-enter the room via the reconnect path. The host can reset this by
+            // calling unbanParticipant or a future dedicated unkick endpoint.
+            if (existing.wasKicked) {
+              const err = new Error('KICKED_FROM_ROOM');
+              err.statusCode = 403;
+              throw err;
+            }
             // Reconnect path — restore to active audience state
             participant = await tx.voiceParticipant.update({
               where: { roomId_userId: { roomId, userId } },
@@ -685,6 +714,14 @@ async function joinRoom(req, res, next) {
 
     } catch (txErr) {
       // Handle typed errors thrown from inside the transaction
+      // PH24C-002: ban check throws BANNED_FROM_ROOM (403) inside tx
+      if (txErr.statusCode === 403 && txErr.message === 'BANNED_FROM_ROOM') {
+        return errorResponse(res, 'You are banned from this room', 403);
+      }
+      // PH24C-003: kicked reconnect check throws KICKED_FROM_ROOM (403) inside tx
+      if (txErr.statusCode === 403 && txErr.message === 'KICKED_FROM_ROOM') {
+        return errorResponse(res, 'You were removed from this room and cannot rejoin', 403);
+      }
       if (txErr.statusCode === 409 && txErr.message === 'VOICE_ROOM_ALREADY_ACTIVE') {
         return errorResponse(
           res,
@@ -1436,12 +1473,25 @@ async function kickParticipant(req, res, next) {
       return errorResponse(res, 'Only the host can kick a moderator', 403);
     }
 
+    // PH24C-001 FIX: Set isActive=false, seatNumber=null, and wasKicked=true atomically
+    // in a single Prisma update. Previously seatNumber was cleared by a separate
+    // fire-and-forget $executeRaw — if that failed, the seat became permanently
+    // ghost-occupied (@@unique([roomId, seatNumber]) prevented re-assignment).
+    // PH24C-003 FIX: wasKicked=true is set here so the joinRoom() reconnect path
+    // can check it and reject the kicked user from immediately rejoining this room.
     await prisma.voiceParticipant.update({
       where: { roomId_userId: { roomId, userId: targetUserId } },
-      data: { isActive: false, leftAt: new Date(), handRaised: false, handRaisedAt: null }
+      data: {
+        isActive:     false,
+        leftAt:       new Date(),
+        handRaised:   false,
+        handRaisedAt: null,
+        seatNumber:   null,    // PH24C-001: atomic seat release (no longer fire-and-forget)
+        wasKicked:    true,    // PH24C-003: session-scoped kick flag prevents immediate reconnect
+      }
     });
-    // Clear seatNumber on kick
-    prisma.$executeRaw`UPDATE voice_participants SET seatNumber = NULL WHERE roomId = ${roomId} AND userId = ${targetUserId}`.catch(() => {});
+    // PH24C-001: the separate $executeRaw seatNumber clear is removed — it is now
+    // part of the Prisma update above.
     try {
       const { dequeue: dq } = require('../utils/voiceQueue');
       await dq(roomId, targetUserId);
@@ -1494,12 +1544,12 @@ async function banParticipant(req, res, next) {
       return errorResponse(res, 'Only the host can ban a moderator', 403);
     }
 
-    // Mark participant inactive + persistent ban record
+    // PH24C-005 FIX: Reorder to VRM→VP to match JOIN's VRM→VP lock order.
+    // Previous order (VP→VRM) could deadlock with joinRoom's VRM→VP under concurrent
+    // ban+join. Both transactions now acquire VoiceRoomMember before VoiceParticipant,
+    // eliminating the circular wait (JOIN waits for VRM; BAN already holds VRM, not VP).
+    // Also adds seatNumber: null to fix the ghost-seat bug (@@unique([roomId,seatNumber])).
     await prisma.$transaction([
-      prisma.voiceParticipant.update({
-        where: { roomId_userId: { roomId, userId: targetUserId } },
-        data: { isActive: false, leftAt: new Date(), handRaised: false, handRaisedAt: null }
-      }),
       prisma.voiceRoomMember.upsert({
         where: { roomId_userId: { roomId, userId: targetUserId } },
         create: {
@@ -1509,7 +1559,17 @@ async function banParticipant(req, res, next) {
           memberLevel: 1, isBanned: true, joinedAt: new Date()
         },
         update: { isBanned: true }
-      })
+      }),
+      prisma.voiceParticipant.update({
+        where: { roomId_userId: { roomId, userId: targetUserId } },
+        data: {
+          isActive: false,
+          seatNumber: null,
+          leftAt: new Date(),
+          handRaised: false,
+          handRaisedAt: null,
+        }
+      }),
     ]);
 
     // Remove from queue
@@ -1894,11 +1954,18 @@ async function grabMic(req, res, next) {
     if (room.status === 'ENDED') return errorResponse(res, 'This room has been archived', 400);
 
     // ── 2. Validate participant ───────────────────────────────────────────
+    // PH24C-006 FIX: Add wasKicked and isBanned (via VRM) to the raw SQL SELECT.
+    // Defense-in-depth: a kicked or banned user must not be able to grab the mic
+    // even if they somehow remain active (e.g. race between kick and grabMic).
     const rawParticipant = await prisma.$queryRaw`
-      SELECT id, roomId, userId, role, isMuted, mutedByModerator,
-             handRaised, handRaisedAt, seatNumber, isPinned, isActive
-      FROM voice_participants
-      WHERE roomId = ${roomId} AND userId = ${userId}
+      SELECT vp.id, vp.roomId, vp.userId, vp.role, vp.isMuted, vp.mutedByModerator,
+             vp.handRaised, vp.handRaisedAt, vp.seatNumber, vp.isPinned, vp.isActive,
+             vp.wasKicked,
+             COALESCE(vrm.isBanned, 0) AS isBanned
+      FROM voice_participants vp
+      LEFT JOIN voice_room_members vrm
+        ON vrm.roomId = vp.roomId AND vrm.userId = vp.userId
+      WHERE vp.roomId = ${roomId} AND vp.userId = ${userId}
       LIMIT 1
     `;
     const participant = rawParticipant[0] ?? null;
@@ -1907,9 +1974,19 @@ async function grabMic(req, res, next) {
     }
 
     // Convert MySQL tinyint booleans
-    participant.isMuted   = Boolean(participant.isMuted);
-    participant.handRaised = Boolean(participant.handRaised);
-    participant.isActive  = Boolean(participant.isActive);
+    participant.isMuted        = Boolean(participant.isMuted);
+    participant.handRaised     = Boolean(participant.handRaised);
+    participant.isActive       = Boolean(participant.isActive);
+    participant.wasKicked      = Boolean(participant.wasKicked);
+    participant.isBanned       = Boolean(participant.isBanned);
+
+    // PH24C-006: Defense-in-depth checks — kicked/banned users cannot take the stage.
+    if (participant.wasKicked) {
+      return errorResponse(res, 'You have been removed from this room', 403);
+    }
+    if (participant.isBanned) {
+      return errorResponse(res, 'You are banned from this room', 403);
+    }
 
     const isPrivileged = MODERATOR_ROLES.includes(participant.role); // HOST or MOD
     const isHost = participant.role === VOICE_ROLES.HOST;

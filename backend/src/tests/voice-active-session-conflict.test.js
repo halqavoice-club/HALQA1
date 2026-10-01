@@ -419,9 +419,17 @@ describe('Voice Club — one-active-room invariant', () => {
   });
 
   // ── J. Banned user cannot join ───────────────────────────────────────────────
+  // PH24C: ban check now uses SELECT FOR UPDATE via $queryRaw inside transaction.
+  // The $queryRaw mock must return a VRM row with isBanned=1 for the banned path.
   test('J: Banned user returns 403', async () => {
     prisma.voiceRoom.findUnique.mockResolvedValue(makeRoom({ hostId: 'host-1' }));
-    prisma.voiceRoomMember.findUnique.mockResolvedValue({ isBanned: true });
+
+    // The transaction calls $queryRaw twice:
+    //   1. Users FOR UPDATE (returns user row — any truthy result)
+    //   2. VRM FOR UPDATE (returns VRM row with isBanned=1 → triggers 403)
+    prisma.$queryRaw
+      .mockResolvedValueOnce([{ id: 'user-99' }])          // Users FOR UPDATE
+      .mockResolvedValueOnce([{ id: 'vrm-1', isBanned: 1 }]); // VRM FOR UPDATE — banned
 
     const { req, res } = makeReqRes('user-99', 'room-a'); // user-99, not host
     const next = jest.fn();
