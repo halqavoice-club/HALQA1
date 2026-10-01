@@ -167,7 +167,7 @@ function RegisterContent() {
           : 'You already have an account — signed you in.',
       })
 
-      router.push('/dashboard')
+      router.push('/feed')
     } catch (error: any) {
       toast({ title: 'Google Sign-Up failed', description: error.message, variant: 'destructive' })
     } finally {

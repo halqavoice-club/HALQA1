@@ -9,13 +9,15 @@ import {
   ChevronUp, Radio, PenLine, BookOpen, MessageSquare,
   Hand, HandMetal, Settings, Users,
   Volume2, VolumeX, Crown,
-  Shield, Slash, Monitor,
+  Shield, Slash, Monitor, Pencil,
 } from 'lucide-react'
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface LCParticipant {
-  id: string; userId: string; role: 'HOST' | 'STUDENT' | 'OBSERVER'
+  id: string; userId: string; role: 'HOST' | 'MODERATOR' | 'STUDENT' | 'OBSERVER'
   isMuted: boolean; isVideoOn: boolean; handRaised: boolean
+  // MIC-02: speakerSlot is non-null when this participant is an active speaker on stage.
+  // null = audience (subscribe-only). Mirrors the DB column.
+  speakerSlot?: number | null
   user: { id: string; firstName: string; lastName: string; avatarUrl: string | null }
 }
 
@@ -28,6 +30,7 @@ export interface ClassSettings {
   isRecording:          boolean
   screenShareEnabled:   boolean   // host can allow/restrict screen sharing by participants
   viewMode:             'video' | 'audio'  // host can switch all participants to audio-only
+  maxSpeakers:          number    // max simultaneous active speakers on stage
 }
 
 export interface HostControlsProps {
@@ -39,13 +42,15 @@ export interface HostControlsProps {
   currentUserId:      string | undefined
   activePanel:        'whiteboard' | null
   // Actions
-  onStart:            () => void
-  onEnd:              () => void
+  onStart?:           () => void
+  onEnd?:             () => void
   onMuteAll:          () => void
   onUnmuteAll:        () => void
   onLowerAllHands:    () => void
   onMute:             (userId: string, muted: boolean) => void
   onKick:             (userId: string) => void
+  onDemote:           (userId: string) => void
+  onInviteToStage:    (userId: string) => void
   onApproveHand:      (userId: string) => void
   onRejectHand:       (userId: string) => void
   onToggleOpenMic:    () => void
@@ -53,6 +58,13 @@ export interface HostControlsProps {
   onToggleWhiteboard: () => void
   onToggleSetting:    (key: keyof Pick<ClassSettings, 'chatEnabled' | 'handRaiseEnabled' | 'quranPanelEnabled' | 'whiteboardEnabled' | 'screenShareEnabled'>) => void
   onSetViewMode:      (mode: 'video' | 'audio') => void
+  onSetMaxSpeakers:   (n: number) => void
+  onEdit?:            () => void
+  // Moderator management — only HOST can do these
+  onPromoteModerator?: (userId: string) => void
+  onDemoteModerator?:  (userId: string) => void
+  // Host transfer — LS-GAP-003 fix
+  onTransferHost?:     (userId: string) => void
 }
 
 // ─── Section wrapper ──────────────────────────────────────────────────────────
@@ -119,14 +131,21 @@ function ToggleRow({
 
 // ─── Participant row ──────────────────────────────────────────────────────────
 function ParticipantRow({
-  p, isSpeaking, isCurrentUser,
-  onMute, onKick, onApproveHand, onRejectHand,
+  p, isSpeaking, isCurrentUser, isHost,
+  onMute, onKick, onDemote, onInviteToStage, onApproveHand, onRejectHand,
+  onPromoteModerator, onDemoteModerator, onTransferHost,
 }: {
   p: LCParticipant; isSpeaking: boolean; isCurrentUser: boolean
-  onMute:        (muted: boolean) => void
-  onKick:        () => void
-  onApproveHand: () => void
-  onRejectHand:  () => void
+  isHost: boolean  // true = caller is HOST (can promote/demote mod); false = MODERATOR
+  onMute:              (muted: boolean) => void
+  onKick:              () => void
+  onDemote:            () => void
+  onInviteToStage:     () => void
+  onApproveHand:       () => void
+  onRejectHand:        () => void
+  onPromoteModerator:  () => void
+  onDemoteModerator:   () => void
+  onTransferHost?:     () => void
 }) {
   const [showActions, setShowActions] = useState(false)
   const avatarSrc = getAvatarUrl(p.user.avatarUrl)
@@ -159,10 +178,16 @@ function ParticipantRow({
             {p.role === 'HOST' && (
               <Crown className="w-3 h-3 text-yellow-400 flex-shrink-0" />
             )}
+            {p.role === 'MODERATOR' && (
+              <span className="text-[9px] text-blue-400 font-bold ml-0.5">MOD</span>
+            )}
           </div>
           <div className="flex items-center gap-1.5 mt-0.5">
             {p.handRaised && (
               <span className="text-[10px] text-yellow-400 bg-yellow-900/30 px-1 rounded font-bold">✋ Raised</span>
+            )}
+            {p.speakerSlot != null && (
+              <span className="text-[10px] text-indigo-400 bg-indigo-900/30 px-1 rounded font-bold">🎙 On Stage</span>
             )}
             {isSpeaking && (
               <span className="text-[10px] text-green-400 flex items-center gap-0.5">
@@ -248,6 +273,50 @@ function ParticipantRow({
           >
             <UserX className="w-3 h-3" /> Remove
           </button>
+          {/* MIC-02: Demote active speaker back to audience */}
+          {p.speakerSlot != null && (
+            <button
+              onClick={() => { onDemote(); setShowActions(false) }}
+              className="flex items-center gap-1 text-[10px] text-orange-400 hover:text-orange-300 bg-orange-900/20 hover:bg-orange-900/40 border border-orange-800/40 px-2 py-1 rounded-lg transition-colors"
+            >
+              <MicOff className="w-3 h-3" /> Demote from stage
+            </button>
+          )}
+          {/* Invite audience member directly to stage (no hand raise needed) */}
+          {p.speakerSlot == null && !p.handRaised && (
+            <button
+              onClick={() => { onInviteToStage(); setShowActions(false) }}
+              className="flex items-center gap-1 text-[10px] text-indigo-400 hover:text-indigo-300 bg-indigo-900/20 hover:bg-indigo-900/40 border border-indigo-800/40 px-2 py-1 rounded-lg transition-colors"
+            >
+              <Mic className="w-3 h-3" /> Invite to stage
+            </button>
+          )}
+          {/* Promote/demote moderator — HOST only */}
+          {isHost && p.role !== 'MODERATOR' && (
+            <button
+              onClick={() => { onPromoteModerator(); setShowActions(false) }}
+              className="flex items-center gap-1 text-[10px] text-yellow-400 hover:text-yellow-300 bg-yellow-900/20 hover:bg-yellow-900/40 border border-yellow-800/40 px-2 py-1 rounded-lg transition-colors"
+            >
+              <Crown className="w-3 h-3" /> Make moderator
+            </button>
+          )}
+          {isHost && p.role === 'MODERATOR' && (
+            <button
+              onClick={() => { onDemoteModerator(); setShowActions(false) }}
+              className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-300 bg-gray-800 hover:bg-gray-700 border border-gray-700 px-2 py-1 rounded-lg transition-colors"
+            >
+              <Shield className="w-3 h-3" /> Remove moderator
+            </button>
+          )}
+          {/* Transfer host — HOST only; outer block already excludes HOST participants */}
+          {isHost && onTransferHost && (
+            <button
+              onClick={() => { onTransferHost(); setShowActions(false) }}
+              className="flex items-center gap-1 text-[10px] text-yellow-300 hover:text-yellow-200 bg-yellow-900/20 hover:bg-yellow-900/40 border border-yellow-700/40 px-2 py-1 rounded-lg transition-colors"
+            >
+              <Crown className="w-3 h-3" /> Make host
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -259,15 +328,18 @@ export function LiveClassHostControls({
   liveClassId, status, participants, settings, activeSpeakers,
   currentUserId, activePanel,
   onStart, onEnd, onMuteAll, onUnmuteAll, onLowerAllHands,
-  onMute, onKick,
+  onMute, onKick, onDemote, onInviteToStage,
   onApproveHand, onRejectHand,
   onToggleOpenMic, onToggleRecording, onToggleWhiteboard,
-  onToggleSetting, onSetViewMode,
+  onToggleSetting, onSetViewMode, onSetMaxSpeakers, onEdit,
+  onPromoteModerator, onDemoteModerator, onTransferHost,
 }: HostControlsProps) {
   const students       = participants.filter(p => p.role !== 'HOST')
   const raisedHands    = participants.filter(p => p.handRaised)
   const mutedCount     = students.filter(p => p.isMuted).length
   const unmutedCount   = students.filter(p => !p.isMuted).length
+  // MIC-02: active speakers = non-HOST participants with a speakerSlot assigned
+  const activeSpeakerCount = participants.filter(p => p.role !== 'HOST' && p.speakerSlot != null).length
 
   return (
     <div className="flex flex-col h-full overflow-y-auto">
@@ -278,7 +350,17 @@ export function LiveClassHostControls({
           title="Class Control"
           icon={<Settings className="w-3.5 h-3.5" />}
         >
-          {status === 'SCHEDULED' && (
+          {/* Edit title / cover */}
+          {onEdit && status !== 'ENDED' && status !== 'CANCELLED' && (
+            <button
+              onClick={onEdit}
+              className="w-full flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white text-xs font-semibold px-4 py-2 rounded-xl transition-colors"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              Edit Title &amp; Cover
+            </button>
+          )}
+          {onStart && status === 'SCHEDULED' && (
             <button
               onClick={onStart}
               className="w-full flex items-center justify-center gap-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition-colors"
@@ -300,14 +382,16 @@ export function LiveClassHostControls({
                 colorOn="text-red-400"
               />
 
-              {/* End class */}
-              <button
-                onClick={onEnd}
-                className="w-full flex items-center justify-center gap-2 bg-gray-800 hover:bg-red-900/40 border border-gray-700 hover:border-red-700/50 text-red-400 hover:text-red-300 text-xs font-semibold px-4 py-2 rounded-xl transition-colors"
-              >
-                <Slash className="w-3.5 h-3.5" />
-                End Class
-              </button>
+              {/* End class — creator only */}
+              {onEnd && (
+                <button
+                  onClick={onEnd}
+                  className="w-full flex items-center justify-center gap-2 bg-gray-800 hover:bg-red-900/40 border border-gray-700 hover:border-red-700/50 text-red-400 hover:text-red-300 text-xs font-semibold px-4 py-2 rounded-xl transition-colors"
+                >
+                  <Slash className="w-3.5 h-3.5" />
+                  End Class
+                </button>
+              )}
             </div>
           )}
 
@@ -409,6 +493,33 @@ export function LiveClassHostControls({
               enabled={activePanel === 'whiteboard'}
               onToggle={onToggleWhiteboard}
             />
+
+            {/* Max speakers on stage */}
+            <div className="rounded-xl bg-gray-900/50 border border-gray-800/50 p-2.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Max Speakers on Stage</p>
+                <span className="text-xs font-bold text-indigo-400">{settings.maxSpeakers}</span>
+              </div>
+              <div className="flex gap-1.5 flex-wrap">
+                {[2, 4, 6, 8, 10, 20].map(n => (
+                  <button
+                    key={n}
+                    onClick={() => onSetMaxSpeakers(n)}
+                    className={cn(
+                      'flex-1 min-w-[32px] py-1.5 rounded-lg text-xs font-bold border transition-colors',
+                      settings.maxSpeakers === n
+                        ? 'bg-indigo-600 text-white border-indigo-500'
+                        : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-white hover:bg-gray-700'
+                    )}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-gray-600">
+                {activeSpeakerCount} / {settings.maxSpeakers} stage slots in use
+              </p>
+            </div>
           </Section>
         )}
 
@@ -542,10 +653,16 @@ export function LiveClassHostControls({
                 p={p}
                 isSpeaking={activeSpeakers.has(p.userId)}
                 isCurrentUser={p.userId === currentUserId}
+                isHost={!!onPromoteModerator}
                 onMute={(muted) => onMute(p.userId, muted)}
                 onKick={() => onKick(p.userId)}
+                onDemote={() => onDemote(p.userId)}
+                onInviteToStage={() => onInviteToStage(p.userId)}
                 onApproveHand={() => onApproveHand(p.userId)}
                 onRejectHand={() => onRejectHand(p.userId)}
+                onPromoteModerator={() => onPromoteModerator?.(p.userId)}
+                onDemoteModerator={() => onDemoteModerator?.(p.userId)}
+                onTransferHost={onTransferHost ? () => onTransferHost(p.userId) : undefined}
               />
             ))}
           </div>
@@ -556,9 +673,10 @@ export function LiveClassHostControls({
         </Section>
 
         {/* ── Stats ──────────────────────────────────────────────────────── */}
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-4 gap-2">
           {[
             { label: 'Total',    value: participants.length, color: 'text-gray-300' },
+            { label: 'On Stage', value: activeSpeakerCount,  color: 'text-indigo-400' },
             { label: 'Live mic', value: unmutedCount,        color: 'text-green-400' },
             { label: 'Muted',    value: mutedCount,          color: 'text-red-400'   },
           ].map(({ label, value, color }) => (

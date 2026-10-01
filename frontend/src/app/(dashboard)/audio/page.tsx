@@ -345,7 +345,7 @@ export default function AudioPage() {
       fd.append('courseId', uploadForm.courseId)
       if (uploadForm.categoryId) fd.append('categoryId', uploadForm.categoryId)
 
-      await api.post('/audio/lessons', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+      await api.post('/audio/lessons', fd)
       toast({ title: 'Audio lesson uploaded successfully' })
       queryClient.invalidateQueries({ queryKey: ['audio-lessons'] })
       setUploadFile(null)

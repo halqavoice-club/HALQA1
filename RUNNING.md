@@ -78,9 +78,9 @@ This script kills port 5000, regenerates Prisma client, then restarts with 512MB
 Open a **new terminal**:
 
 ```bash
-cd frontend
-npm install   # first time only
-npm run dev
+1214244*[]
+1214244*[]   # first time only
+1214244*[]
 ```
 
 ✅ App running at: `http://localhost:3000`
@@ -90,7 +90,7 @@ npm run dev
 ## Login Credentials
 
 | Role | Email | Password |
-|------|-------|----------|
+|------|-------|----------|x 
 | Super Admin | superadmin@halqa.com | Admin@2024 |
 | School Admin | admin@halqa-academy.com | Admin@2024 |
 | Teacher | teacher@halqa-academy.com | Teacher@2024 |

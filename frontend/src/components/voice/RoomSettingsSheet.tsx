@@ -65,9 +65,9 @@ function AvatarPanel({ onBack }: { onBack: () => void }) {
     try {
       const form = new FormData()
       form.append('cover', file)
-      const res = await api.post(`/voice/${activeRoom.id}/cover`, form, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      })
+      // Do NOT set Content-Type manually — let the browser/axios set it
+      // automatically with the correct multipart boundary.
+      const res = await api.post(`/voice/${activeRoom.id}/cover`, form)
       updateRoom({ coverImageUrl: res.data.data.coverImageUrl })
       setPreview(null)
       setFile(null)
@@ -889,14 +889,14 @@ function QuickControls({
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
         {(onToggleOpenMic || isHost) && (
           <button
-            aria-label={`Open Mic is ${isOpenMic ? 'on' : 'off'}. Tap to toggle.`}
+            aria-label={`Open Mic (free stage access) is ${isOpenMic ? 'on' : 'off'}. Tap to toggle.`}
             onClick={() => onToggleOpenMic?.()}
             style={{ ...btnBase, background: isOpenMic ? '#ede9fe' : '#fff', color: isOpenMic ? '#7c3aed' : '#374151', border: '1px solid', borderColor: isOpenMic ? '#c4b5fd' : '#e5e7eb' }}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
             <div>
-              <div style={{ fontSize: 12, fontWeight: 700 }}>Open Mic</div>
-              <div style={{ fontSize: 10, opacity: 0.65 }}>{isOpenMic ? 'ON' : 'OFF'}</div>
+              <div style={{ fontSize: 12, fontWeight: 700 }}>Free Stage</div>
+              <div style={{ fontSize: 10, opacity: 0.65 }}>{isOpenMic ? 'ON — anyone can join' : 'OFF — approval needed'}</div>
             </div>
           </button>
         )}
@@ -925,7 +925,7 @@ function QuickControls({
           {(onMuteAll || isHost) && (
             <button
               data-testid="btn-mute-all"
-              aria-label="Mute all speakers"
+              aria-label="Mute all speakers on stage"
               onClick={handleMuteAll}
               disabled={mutingAll}
               style={{
@@ -942,7 +942,10 @@ function QuickControls({
                 ? <span style={{ fontSize: 12, fontWeight: 700 }}>…</span>
                 : <>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
-                    <span style={{ fontSize: 12, fontWeight: 700 }}>🔇 Mute All</span>
+                    <div style={{ textAlign: 'left' }}>
+                      <div style={{ fontSize: 12, fontWeight: 700 }}>🔇 Mute All</div>
+                      <div style={{ fontSize: 10, opacity: 0.65 }}>Silence speakers on stage</div>
+                    </div>
                   </>
               }
             </button>
@@ -950,7 +953,7 @@ function QuickControls({
           {(onUnmuteAll || isHost) && (
             <button
               data-testid="btn-unmute-all"
-              aria-label="Unmute all speakers"
+              aria-label="Unmute all speakers on stage"
               onClick={handleUnmuteAll}
               disabled={unmutingAll}
               style={{
@@ -967,7 +970,10 @@ function QuickControls({
                 ? <span style={{ fontSize: 12, fontWeight: 700 }}>…</span>
                 : <>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-                    <span style={{ fontSize: 12, fontWeight: 700 }}>🔊 Unmute All</span>
+                    <div style={{ textAlign: 'left' }}>
+                      <div style={{ fontSize: 12, fontWeight: 700 }}>🔊 Unmute All</div>
+                      <div style={{ fontSize: 10, opacity: 0.65 }}>Unsilence speakers on stage</div>
+                    </div>
                   </>
               }
             </button>
@@ -978,12 +984,163 @@ function QuickControls({
   )
 }
 
-// ─── Main Sheet ────────────────────────────────────────────────────────────────
-type Panel = 'avatar' | 'members' | 'room-members' | 'mic-seat' | 'comment' | 'message-type' | 'history' | 'music' | null
+// ─── Sub-panel: Edit Room (title, description, topic, privacy) ───────────────
+function EditRoomPanel({ onBack }: { onBack: () => void }) {
+  const { activeRoom, updateRoom } = useVoiceStore()
+  const { toast } = useToast()
+  const [title,       setTitle]    = useState(activeRoom?.title ?? '')
+  const [description, setDesc]     = useState(activeRoom?.description ?? '')
+  const [topic,       setTopic]    = useState(activeRoom?.topic ?? '')
+  const [privacy,     setPrivacy]  = useState<'PUBLIC'|'PRIVATE'|'INVITE_ONLY'>(
+    (activeRoom?.privacy as 'PUBLIC'|'PRIVATE'|'INVITE_ONLY') ?? 'PUBLIC'
+  )
+  const [saving, setSaving]        = useState(false)
 
-export function RoomSettingsSheet({ open, onClose, isHost, amModerating, onMuteAll, onUnmuteAll, onToggleOpenMic, onToggleMicLock, isOpenMic = false, micLocked = false }: Props) {
+  // Sync if room changes while panel is open
+  useEffect(() => {
+    setTitle(activeRoom?.title ?? '')
+    setDesc(activeRoom?.description ?? '')
+    setTopic(activeRoom?.topic ?? '')
+    setPrivacy((activeRoom?.privacy as 'PUBLIC'|'PRIVATE'|'INVITE_ONLY') ?? 'PUBLIC')
+  }, [activeRoom?.title, activeRoom?.description, activeRoom?.topic, activeRoom?.privacy]) // eslint-disable-line
+
+  const save = async () => {
+    if (!activeRoom) return
+    if (!title.trim()) { toast({ title: 'Title is required', variant: 'destructive' }); return }
+    setSaving(true)
+    try {
+      await api.patch(`/voice/${activeRoom.id}`, {
+        title:       title.trim(),
+        description: description.trim() || null,
+        topic:       topic.trim() || null,
+        privacy,
+      })
+      updateRoom({ title: title.trim(), description: description.trim() || null, topic: topic.trim() || null, privacy })
+      toast({ title: '✅ Room updated' })
+      onBack()
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to save', variant: 'destructive' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const privacyOptions = [
+    { value: 'PUBLIC',      label: '🌍 Public',      sub: 'Anyone can join' },
+    { value: 'PRIVATE',     label: '🔒 Private',     sub: 'Invite-only entry' },
+    { value: 'INVITE_ONLY', label: '✉️ Invite Only', sub: 'Members must request' },
+  ] as const
+
+  return (
+    <div className="rs-panel">
+      <div className="rs-panel-header">
+        <button className="rs-back" onClick={onBack}>←</button>
+        <h3 className="rs-panel-title">Edit Room Info</h3>
+      </div>
+      <div className="rs-section" style={{ padding: '16px' }}>
+        {/* Title */}
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+            Room Title *
+          </label>
+          <input
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            maxLength={120}
+            placeholder="Enter room title…"
+            style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #e5e7eb', fontSize: 14, color: '#1e293b', background: '#f9fafb', outline: 'none', boxSizing: 'border-box' }}
+          />
+          <span style={{ fontSize: 10, color: '#9ca3af', float: 'right', marginTop: 3 }}>{title.length}/120</span>
+        </div>
+
+        {/* Topic */}
+        <div style={{ marginBottom: 14, clear: 'both' }}>
+          <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+            Topic (optional)
+          </label>
+          <input
+            value={topic}
+            onChange={e => setTopic(e.target.value)}
+            maxLength={100}
+            placeholder="e.g. Quran recitation, discussion…"
+            style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #e5e7eb', fontSize: 14, color: '#1e293b', background: '#f9fafb', outline: 'none', boxSizing: 'border-box' }}
+          />
+        </div>
+
+        {/* Description */}
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+            Description (optional)
+          </label>
+          <textarea
+            value={description}
+            onChange={e => setDesc(e.target.value)}
+            maxLength={500}
+            rows={3}
+            placeholder="Tell people what your room is about…"
+            style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: '1px solid #e5e7eb', fontSize: 13, color: '#1e293b', background: '#f9fafb', outline: 'none', resize: 'vertical', boxSizing: 'border-box', lineHeight: 1.5 }}
+          />
+          <span style={{ fontSize: 10, color: '#9ca3af', float: 'right', marginTop: 3 }}>{description.length}/500</span>
+        </div>
+
+        {/* Privacy */}
+        <div style={{ marginBottom: 20, clear: 'both' }}>
+          <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
+            Privacy
+          </label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {privacyOptions.map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => setPrivacy(opt.value)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+                  borderRadius: 10, border: `1.5px solid ${privacy === opt.value ? '#7c3aed' : '#e5e7eb'}`,
+                  background: privacy === opt.value ? '#ede9fe' : '#f9fafb',
+                  cursor: 'pointer', textAlign: 'left', transition: 'all 0.12s'
+                }}
+              >
+                <div style={{
+                  width: 16, height: 16, borderRadius: 8, border: `2px solid ${privacy === opt.value ? '#7c3aed' : '#9ca3af'}`,
+                  background: privacy === opt.value ? '#7c3aed' : 'transparent',
+                  flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center'
+                }}>
+                  {privacy === opt.value && <div style={{ width: 6, height: 6, borderRadius: 3, background: '#fff' }} />}
+                </div>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#1e293b' }}>{opt.label}</div>
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 1 }}>{opt.sub}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Save */}
+        <button
+          onClick={save}
+          disabled={saving || !title.trim()}
+          className="rs-save-btn"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Main Sheet ────────────────────────────────────────────────────────────────
+type Panel = 'avatar' | 'edit' | 'members' | 'room-members' | 'mic-seat' | 'comment' | 'message-type' | 'history' | 'music' | null
+
+export function RoomSettingsSheet({ open, onClose, isHost, amModerating, onMuteAll, onUnmuteAll, onToggleOpenMic, onToggleMicLock, isOpenMic: isOpenMicProp = false, micLocked: micLockedProp = false }: Props) {
   const { activeRoom } = useVoiceStore()
   const [panel, setPanel] = useState<Panel>(null)
+
+  // Read isOpenMic and micLocked directly from the live store so the toggles
+  // reflect real-time socket updates without requiring the sheet to be reopened.
+  // Fall back to props when activeRoom is not yet available (e.g. members page).
+  const isOpenMic = activeRoom?.isOpenMic ?? isOpenMicProp
+  const micLocked = activeRoom?.micLocked  ?? micLockedProp
 
   // ── Lifted audio state — persists across panel navigation ──────────────────
   const audioRef     = useRef<HTMLAudioElement | null>(null)
@@ -1023,6 +1180,7 @@ export function RoomSettingsSheet({ open, onClose, isHost, amModerating, onMuteA
     {
       group: 'settings',
       items: [
+        { id: 'edit',         icon: ClipboardList, label: '✏️ Edit Title & Description', show: isHost,        badge: 0 },
         { id: 'mic-seat',     icon: Mic,           label: 'Mic Seat',           show: isHost,                    badge: 0 },
         { id: 'comment',      icon: MessageSquare, label: 'Chat & Reactions',   show: isHost || amModerating,    badge: 0 },
         { id: 'message-type', icon: MessageCircle, label: 'Message Type',       show: isHost,                    badge: 0 },
@@ -1077,6 +1235,7 @@ export function RoomSettingsSheet({ open, onClose, isHost, amModerating, onMuteA
             <AnimatePresence mode="wait">
               <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
               {panel === 'avatar'       && <AvatarPanel           key="avatar"       onBack={() => setPanel(null)} />}
+              {panel === 'edit'         && <EditRoomPanel         key="edit"         onBack={() => setPanel(null)} />}
               {panel === 'members'      && <MemberPanel          key="members"      onBack={() => setPanel(null)} />}
               {panel === 'room-members' && activeRoom && <RoomMembersPanel key="room-members" roomId={activeRoom.id} isHost={isHost} amModerating={amModerating} onBack={() => setPanel(null)} />}
               {panel === 'mic-seat'     && <MicSeatPanel         key="mic-seat"     onBack={() => setPanel(null)} />}
@@ -1143,12 +1302,21 @@ export function RoomSettingsSheet({ open, onClose, isHost, amModerating, onMuteA
                         <p className="rs-room-desc">{activeRoom.description}</p>
                       )}
                       {isHost && (
-                        <button
-                          className="rs-room-edit-link"
-                          onClick={() => setPanel('avatar')}
-                        >
-                          <Image className="w-3 h-3" /> Change room image
-                        </button>
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+                          <button
+                            className="rs-room-edit-link"
+                            onClick={() => setPanel('avatar')}
+                          >
+                            <Image className="w-3 h-3" /> Change cover
+                          </button>
+                          <button
+                            className="rs-room-edit-link"
+                            onClick={() => setPanel('edit')}
+                            style={{ color: '#7c3aed' }}
+                          >
+                            ✏️ Edit title & description
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>

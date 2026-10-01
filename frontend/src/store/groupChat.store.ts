@@ -31,14 +31,29 @@ export interface GcMessage {
   mediaUrl: string | null
   mimeType: string | null
   fileSize: number | null
+  fileName: string | null
+  duration: number | null
   replyToId: string | null
   replyTo: GcReplyTo | null
   reactions: GcReaction[]
   deletedAt: string | null
   createdAt: string
-  readBy: string[]              // array of userIds who have read this message
-  isPinned?: boolean            // whether this message is pinned in the chat
-  forwardedFrom?: string        // original message id if this message was forwarded
+  readBy: string[]
+  isPinned?: boolean
+  forwardedFrom?: string
+  // Phase 5: structured entity reference (VOICE_ROOM_SHARE)
+  refEntityType?: string | null
+  refEntityId?: string | null
+  voiceRoomData?: {
+    id: string
+    title: string
+    coverEmoji?: string | null
+    coverImageUrl?: string | null
+    privacy?: string | null
+    status?: string | null
+    hostId?: string | null
+    maxSpeakers?: number | null
+  } | null
 }
 
 export interface GcMember {
@@ -62,6 +77,9 @@ export interface GcConversation {
   createdBy: string
   members: GcMember[]
   unread: number
+  // Permissions
+  onlyAdminsCanSendMessages?: boolean
+  onlyAdminsCanSendMedia?: boolean
 }
 
 interface GcState {
@@ -166,6 +184,18 @@ export const useGroupChatStore = create<GcState>((set, get) => ({
       ...s.messages,
       [convId]: (s.messages[convId] ?? []).map(m => {
         if (m.id !== msgId) return m
+        // Handle both add/replace and remove (reaction may have action field)
+        const incoming = reaction as any
+        if (incoming?.action === 'removed' || incoming?.removed) {
+          // Remove by userId + type
+          return {
+            ...m,
+            reactions: m.reactions.filter(
+              r => !(r.userId === incoming.userId && r.type === incoming.type)
+            )
+          }
+        }
+        // Add or replace
         const existing = m.reactions.findIndex(r => r.userId === reaction.userId)
         const reactions = existing >= 0
           ? m.reactions.map((r, i) => i === existing ? reaction : r)

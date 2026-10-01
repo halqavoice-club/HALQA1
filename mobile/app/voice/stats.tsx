@@ -7,7 +7,7 @@
 import React, { useMemo } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Image, ActivityIndicator, Dimensions,
+  Image, ActivityIndicator, Dimensions
 } from 'react-native';
 import { useQuery } from '@tanstack/react-query';
 import { useRouter, Stack } from 'expo-router';
@@ -448,3 +448,4 @@ const sc = StyleSheet.create({
   // XP hint
   hint:            { fontSize: 11, color: '#9ca3af', textAlign: 'center', paddingVertical: 8 },
 });
+

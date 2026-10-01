@@ -14,9 +14,11 @@ router.get('/:id', ...eduMember, ctrl.getGuardian);
 router.post('/',
   ...eduAdmin,
   [
-    body('email').isEmail().normalizeEmail(),
-    body('firstName').trim().notEmpty(),
-    body('lastName').trim().notEmpty()
+    // email/firstName/lastName optional when linkedUserId is provided (existing HALQA user)
+    body('email').if(body('linkedUserId').not().exists()).isEmail().normalizeEmail(),
+    body('email').if(body('linkedUserId').exists()).optional().isEmail().normalizeEmail(),
+    body('firstName').if(body('linkedUserId').not().exists()).trim().notEmpty(),
+    body('lastName').if(body('linkedUserId').not().exists()).trim().notEmpty(),
   ],
   validate,
   ctrl.createGuardian

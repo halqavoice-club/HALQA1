@@ -1,6 +1,6 @@
 /**
  * Analytics Controller
- * 
+ *
  * Handles analytics data including:
  * - Daily school statistics
  * - Daily user statistics
@@ -26,27 +26,42 @@ function handleError(res, error, fallbackMessage) {
 }
 
 // ─── Authorization helpers ────────────────────────────────────────────────────
-// P3-001 FIX: Analytics endpoints accept :schoolId and :userId as route params.
-// Without scoping guards any authenticated user could read or write another
-// user's stats or another school's stats.
+// FIND-01 FIX: School analytics endpoints now require requireSchoolMember()
+// on the route (analytics.routes.js). That middleware:
+//   1. Verifies an ACTIVE SchoolMembership exists for the authenticated user
+//   2. Sets req.schoolMembership (role + schoolId) — the authoritative source
+//   3. Sets req.schoolId
+//   4. Rejects SUPER_ADMIN without an explicit membership record (ARCH-01)
+//   5. Correctly handles MEMBER users with User.schoolId=null who hold a valid membership
 //
-// Rules:
-//   School stats  — caller must belong to that school, or be SUPER_ADMIN.
-//   User stats    — caller must be that user, or be SUPER_ADMIN.
-//   Write/mutate  — additionally require SCHOOL_ADMIN/SUPER_ADMIN for school stats,
-//                   or own-user for user stats.
+// The old assertSchoolStatsAccess() used req.user.schoolId which is the LEGACY
+// single-school field. It broke for new-architecture MEMBER users whose
+// User.schoolId is null but who have an active SchoolMembership.
+//
+// After FIND-01: school analytics controllers no longer need to check school
+// ownership themselves — requireSchoolMember() is authoritative. The helpers
+// below are kept only for the write endpoints (admin-only role check).
 
-function assertSchoolStatsAccess(req, schoolId) {
-  if (req.user.role === 'SUPER_ADMIN') return; // global admin bypass
-  if (req.user.schoolId !== schoolId) {
-    const err = new Error('Access denied to this school\'s analytics');
+/**
+ * Assert the caller has write access to school analytics.
+ * requireSchoolMember() already verified membership — this adds role check.
+ * Must be used on routes that also apply requireSchoolMember().
+ */
+function assertSchoolStatsWriteAccess(req) {
+  const effectiveRole = req.schoolMembership?.role || req.user.role;
+  if (!['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(effectiveRole)) {
+    const err = new Error('Only school admins can update school analytics');
     err.status = 403;
     throw err;
   }
 }
 
+/**
+ * User stats access guard — users can only read/write their own stats.
+ * SUPER_ADMIN may read any user's stats (platform oversight).
+ */
 function assertUserStatsAccess(req, userId) {
-  if (req.user.role === 'SUPER_ADMIN') return; // global admin bypass
+  if (req.user.role === 'SUPER_ADMIN') return; // platform admin oversight
   if (req.user.id !== userId) {
     const err = new Error('Access denied to this user\'s analytics');
     err.status = 403;
@@ -54,30 +69,15 @@ function assertUserStatsAccess(req, userId) {
   }
 }
 
-function assertSchoolStatsWriteAccess(req, schoolId) {
-  if (req.user.role === 'SUPER_ADMIN') return;
-  const effectiveRole = req.schoolMembership?.role || req.user.role;
-  if (!['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(effectiveRole)) {
-    const err = new Error('Only school admins can update school analytics');
-    err.status = 403;
-    throw err;
-  }
-  if (req.user.role !== 'SUPER_ADMIN' && req.user.schoolId !== schoolId) {
-    const err = new Error('Access denied to this school\'s analytics');
-    err.status = 403;
-    throw err;
-  }
-}
-
 /**
  * Get daily school statistics
+ * School membership verified by requireSchoolMember() on the route.
  */
 async function getDailySchoolStats(req, res) {
   try {
-    const { schoolId } = req.params;
-
-    // P3-001: scope to caller's school
-    assertSchoolStatsAccess(req, schoolId);
+    // FIND-01: req.schoolId is set by requireSchoolMember('schoolId') on the route.
+    // Any active school member may read their school's analytics.
+    const schoolId = req.schoolId;
 
     const { startDate, endDate } = req.query;
 
@@ -101,13 +101,13 @@ async function getDailySchoolStats(req, res) {
 
 /**
  * Get or create daily school stats for a specific date
+ * School membership (SCHOOL_ADMIN role) verified by requireSchoolMember + requireSchoolRole on route.
  */
 async function getOrCreateDailySchoolStats(req, res) {
   try {
-    const { schoolId, date } = req.params;
-
-    // P3-001: scope to caller's school (admin only — creates data)
-    assertSchoolStatsWriteAccess(req, schoolId);
+    // FIND-01: req.schoolId set by requireSchoolMember; role already checked by requireSchoolRole.
+    const schoolId = req.schoolId;
+    const { date } = req.params;
 
     const targetDate = new Date(date);
 
@@ -179,13 +179,15 @@ async function getOrCreateDailySchoolStats(req, res) {
 
 /**
  * Update daily school statistics
+ * School membership (SCHOOL_ADMIN role) verified by requireSchoolMember + requireSchoolRole on route.
  */
 async function updateDailySchoolStats(req, res) {
   try {
-    const { schoolId, date } = req.params;
-
-    // P3-001: only school admins and SUPER_ADMIN can mutate school stats
-    assertSchoolStatsWriteAccess(req, schoolId);
+    // FIND-01: req.schoolId set by requireSchoolMember; role already checked by requireSchoolRole.
+    // assertSchoolStatsWriteAccess is kept as belt-and-suspenders for the role check.
+    assertSchoolStatsWriteAccess(req);
+    const schoolId = req.schoolId;
+    const { date } = req.params;
 
     const { studentCount, teacherCount, classCount, attendanceRate, averageGrade, behaviorScore, totalPosts, totalMessages, totalGifts, totalCoins } = req.body;
 
@@ -441,13 +443,12 @@ async function incrementUserStat(req, res) {
 
 /**
  * Get aggregated school analytics
+ * School membership verified by requireSchoolMember() on the route.
  */
 async function getSchoolAnalytics(req, res) {
   try {
-    const { schoolId } = req.params;
-
-    // P3-001: scope to caller's school
-    assertSchoolStatsAccess(req, schoolId);
+    // FIND-01: req.schoolId set by requireSchoolMember('schoolId') on the route.
+    const schoolId = req.schoolId;
 
     const { period = '30d' } = req.query;
 
@@ -616,11 +617,18 @@ async function getUserAnalytics(req, res) {
  */
 async function trackEvent(req, res) {
   try {
-    const userId = req.user.id;
+    // Auth is optional — unauthenticated requests are silently accepted (202) and discarded.
+    // This prevents 401 noise when fired before login or after token expiry.
+    const userId = req.user?.id;
     const { event, properties } = req.body;
 
     if (!event || typeof event !== 'string') {
       return res.status(400).json({ success: false, message: 'event is required' });
+    }
+
+    // Only record stats for authenticated users — skip silently for anonymous
+    if (!userId) {
+      return res.status(202).json({ success: true });
     }
 
     // Map known frontend event names to DailyUserStats fields

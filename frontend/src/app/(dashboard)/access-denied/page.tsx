@@ -1,14 +1,19 @@
 'use client'
 
 import { useAuthStore } from '@/store/auth.store'
+import { useSchoolAccess } from '@/hooks/useSchoolAccess'
 import { getDefaultRoute, getRoleInfo } from '@/lib/role-routes'
 import { ShieldX, Home, ArrowLeft } from 'lucide-react'
 import Link from 'next/link'
 
 export default function AccessDeniedPage() {
   const { user } = useAuthStore()
-  const defaultRoute = user ? getDefaultRoute(user.role) : '/dashboard'
-  const roleInfo = user ? getRoleInfo(user.role) : null
+  const { activeRole } = useSchoolAccess()
+
+  // Show the effective role (school membership role for MEMBER users)
+  const displayRole = (user?.role === 'MEMBER' && activeRole) ? activeRole : user?.role
+  const defaultRoute = user ? getDefaultRoute(displayRole ?? user.role) : '/dashboard'
+  const roleInfo = displayRole ? getRoleInfo(displayRole) : null
 
   return (
     <div className="min-h-[60vh] flex items-center justify-center p-8">

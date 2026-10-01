@@ -8,6 +8,10 @@ const { successResponse, errorResponse } = require('../utils/response');
 
 const USER_SELECT = {
   id: true, firstName: true, lastName: true,
+  // email is included for the "add friend as student" flow — a School Admin who is
+  // already friends with a user needs their email to create the student account.
+  // This is intentional: friendship implies a trusted relationship.
+  email: true,
   avatarUrl: true, role: true, schoolId: true, bio: true
 };
 

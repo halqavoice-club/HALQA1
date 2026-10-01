@@ -71,6 +71,59 @@ async function createTeacher(req, res, next) {
     const schoolId = req.schoolId || req.user.schoolId;
     if (!schoolId) return errorResponse(res, 'School context required', 400);
 
+    // FRIEND-TEACHER-01: If a linkedUserId is provided (admin adding a social friend as teacher),
+    // the user ALREADY EXISTS on the platform. We must NOT create a new User record —
+    // instead we link the existing user to this school as a Teacher.
+    const { linkedUserId } = req.body;
+
+    if (linkedUserId) {
+      // ── PATH A: Existing HALQA user being added as a teacher ─────────────
+      const existingUser = await prisma.user.findUnique({
+        where: { id: linkedUserId, deletedAt: null },
+        select: { id: true, email: true, firstName: true, lastName: true, schoolId: true }
+      });
+      if (!existingUser) return errorResponse(res, 'Linked user not found', 404);
+
+      // Check they aren't already a teacher in this school
+      const alreadyTeacher = await prisma.teacher.findFirst({
+        where: { userId: existingUser.id, schoolId, deletedAt: null }
+      });
+      if (alreadyTeacher) {
+        return errorResponse(res, `${existingUser.firstName} is already a teacher in this school`, 409);
+      }
+
+      const teacher = await prisma.$transaction(async (tx) => {
+        // Update the existing user's schoolId if not set
+        if (!existingUser.schoolId) {
+          await tx.user.update({ where: { id: existingUser.id }, data: { schoolId } });
+        }
+
+        const t = await tx.teacher.create({
+          data: {
+            userId: existingUser.id, schoolId,
+            department: department || null,
+            specialization: specialization || null,
+            employeeId: employeeId || null,
+            hireDate: hireDate ? new Date(hireDate) : null
+          }
+        });
+
+        // Create/update SchoolMembership so the user gets TEACHER role in this school
+        await tx.schoolMembership.upsert({
+          where: { userId_schoolId: { userId: existingUser.id, schoolId } },
+          create: { userId: existingUser.id, schoolId, role: 'TEACHER', status: 'ACTIVE', joinedAt: new Date() },
+          update: { role: 'TEACHER', status: 'ACTIVE', deletedAt: null }
+        });
+
+        return t;
+      });
+
+      return successResponse(res, teacher, 'Teacher added successfully', 201);
+    }
+
+    // ── PATH B: Brand new user (manual entry) ─────────────────────────────
+    if (!email) return errorResponse(res, 'Email is required', 400);
+
     // L-1 FIX: Random temp password instead of hardcoded default.
     const crypto = require('crypto');
     const tempPassword = crypto.randomBytes(12).toString('hex');
@@ -122,18 +175,16 @@ async function createTeacher(req, res, next) {
 
 async function updateTeacher(req, res, next) {
   try {
-    const { firstName, lastName, phone, department, specialization } = req.body;
-    // C-4 FIX: Verify school ownership before updating.
+    const { department, specialization } = req.body;
+    // PERM-FIX: firstName, lastName, phone are NOT accepted here.
+    // Identity and contact fields belong to the user themselves and can only be
+    // changed via PUT /users/profile (self-service). A School Admin manages only
+    // the Teacher record (department, specialization).
     const schoolId = req.schoolId || req.user.schoolId;
     const teacher = await prisma.teacher.findFirst({
       where: { id: req.params.id, deletedAt: null, ...(schoolId && { schoolId }) }  // ARCH-01
     });
     if (!teacher) return errorResponse(res, 'Teacher not found', 404);
-
-    await prisma.user.update({
-      where: { id: teacher.userId },
-      data: { firstName, lastName, phone }
-    });
 
     const updated = await prisma.teacher.update({
       where: { id: req.params.id },

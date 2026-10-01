@@ -6,11 +6,12 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Animated,
-  Dimensions, Alert, ActivityIndicator,
+  Dimensions, Alert, ActivityIndicator
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { getSocket } from '@/lib/socket';
 import { useAuthStore } from '@/store/auth.store';
+import { usePKStore } from '@/store/pk.store';
 import api from '@/lib/api';
 
 const { width: SW } = Dimensions.get('window');
@@ -36,6 +37,7 @@ export default function PKBattleScreen() {
   const { id }   = useLocalSearchParams<{ id: string }>();
   const router   = useRouter();
   const { user } = useAuthStore();
+  const { setActiveMatch, clearMatch } = usePKStore();
 
   const [match,    setMatch]    = useState<MatchData | null>(null);
   const [loading,  setLoading]  = useState(true);
@@ -53,12 +55,16 @@ export default function PKBattleScreen() {
     api.get(`/pk/${id}`).then(r => {
       const m = r.data.data;
       setMatch(m);
+      setActiveMatch(m);       // sync to store
       setRemaining(m.durationSeconds);
       setVoteA(m.voteScoreA || 0);
       setVoteB(m.voteScoreB || 0);
     }).finally(() => setLoading(false));
 
-    return () => stopTimer();
+    return () => {
+      stopTimer();
+      clearMatch();             // clear store on unmount
+    };
   }, [id]); // eslint-disable-line
 
   // Animate score bar when scores change
@@ -390,3 +396,4 @@ const s = StyleSheet.create({
   giftDetail:      { marginTop: 12 },
   giftDetailText:  { color: '#475569', fontSize: 12, fontVariant: ['tabular-nums'] },
 });
+

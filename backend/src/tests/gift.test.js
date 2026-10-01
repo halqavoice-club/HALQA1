@@ -90,6 +90,7 @@ function happyTransaction() {
         update: jest.fn().mockResolvedValue({ id: 'txn-1', combo: 2 }),
       },
       walletTransaction:   { create: jest.fn().mockResolvedValue({}) },
+      platformRevenueEntry: { create: jest.fn().mockResolvedValue({ id: 'pre-1' }) },
       roomGiftLeaderboard: { upsert: jest.fn().mockResolvedValue({}) },
       voiceRoomMember:     { updateMany: jest.fn().mockResolvedValue({}) },
     });
@@ -132,6 +133,10 @@ describe('POST /api/v1/voice/:id/gifts', () => {
     );
     prisma.giftTransaction.findUnique.mockResolvedValue(null);
     prisma.giftTransaction.update.mockResolvedValue({ id: 'txn-1', combo: 1 });
+    // Mock aggregate for DB cap fallback (Task 7.1): Redis returns null in tests,
+    // so the DB fallback fires. Return 0 spent today so cap check always passes
+    // in existing happy-path tests. Tests that need a different value override this.
+    prisma.giftTransaction.aggregate = jest.fn().mockResolvedValue({ _sum: { coinsSpent: 0 } });
     prisma.gift.findUnique.mockResolvedValue(GIFT);
     prisma.user.findUnique.mockResolvedValue(SENDER);
     happyTransaction();

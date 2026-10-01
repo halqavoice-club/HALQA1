@@ -139,14 +139,15 @@ describe('1. Source audit: joinLiveClass PUBLIC role assignment', () => {
     expect(fn).not.toMatch(/PUBLIC.*!isPublicHost/);
   });
 
-  test('1.6 upsert create.isMuted = !(isCreator || lc.isOpenMic)', () => {
+  test('1.6 upsert create.isMuted = !(isCreator || isDelegatedHost || lc.isOpenMic) (DEL-HOST)', () => {
     const fn = getJoinFn();
-    expect(fn).toMatch(/isMuted: !\(isCreator \|\| lc\.isOpenMic\)/);
+    // DEL-HOST: delegated host also starts unmuted
+    expect(fn).toMatch(/isMuted: !\(isCreator \|\| isDelegatedHost \|\| lc\.isOpenMic\)/);
   });
 
-  test('1.7 Auto-start (isHost) uses isCreator only', () => {
+  test('1.7 Auto-start (isHost) uses isCreator OR isDelegatedHost (DEL-HOST)', () => {
     const fn = getJoinFn();
-    expect(fn).toMatch(/const isHost = isCreator/);
+    expect(fn).toMatch(/const isHost = isCreator \|\| isDelegatedHost/);
     expect(fn).not.toMatch(/isHost = isTeacher/);
     expect(fn).not.toMatch(/isHost = isStaff/);
   });
@@ -502,13 +503,17 @@ describe('10. Functional: owner operations (update/delete/start/end) denied to n
     }
   }
 
-  test('10.1 Non-creator TEACHER cannot update PUBLIC stream — assertOwner', () => {
-    // assertOwner is called from updateLiveClass
-    // Source audit confirms it calls assertOwner after rawFindLiveClass
+  test('10.1 Non-creator cannot update stream — isHostForEdit gate (DEL-HOST Gap 1 fix)', () => {
+    // Gap 1 fix: updateLiveClass now uses isHostForEdit (creator OR delegated host).
+    // assertOwner removed; field-level restrictions enforce creator-only fields.
+    // Non-creator, non-delegate is still denied — security invariant preserved.
     const idx = ctrl_src.indexOf('async function updateLiveClass');
-    const fn = ctrl_src.slice(idx, idx + 600);
-    expect(fn).toMatch(/assertOwner/);
-    expect(fn).toMatch(/OWN-01/);
+    const fn = ctrl_src.slice(idx, idx + 1500);
+    expect(fn).toMatch(/isHostForEdit/);
+    expect(fn).not.toMatch(/assertOwner\(lc,\s*req\.user\)/);
+    // Creator-only field guards still present
+    expect(fn).toMatch(/isCreatorForEdit/);
+    expect(fn).toMatch(/maxSpeakers/);
   });
 
   test('10.2 Non-creator SCHOOL_ADMIN cannot delete PUBLIC stream', () => {
@@ -517,16 +522,18 @@ describe('10. Functional: owner operations (update/delete/start/end) denied to n
     expect(fn).toMatch(/assertOwner/);
   });
 
-  test('10.3 Non-creator cannot start PUBLIC stream', () => {
+  test('10.3 Non-creator cannot start PUBLIC stream (assertHostOrDelegate — DEL-HOST)', () => {
     const idx = ctrl_src.indexOf('async function startLiveClass');
     const fn = ctrl_src.slice(idx, idx + 500);
-    expect(fn).toMatch(/assertOwner/);
+    // DEL-HOST: start/end now use assertHostOrDelegate (creator OR delegated host)
+    // This is a stronger invariant — non-creator non-delegate is still blocked
+    expect(fn).toMatch(/assertHostOrDelegate/);
   });
 
-  test('10.4 Non-creator cannot end PUBLIC stream', () => {
+  test('10.4 Non-creator cannot end PUBLIC stream (assertHostOrDelegate — DEL-HOST)', () => {
     const idx = ctrl_src.indexOf('async function endLiveClass');
     const fn = ctrl_src.slice(idx, idx + 500);
-    expect(fn).toMatch(/assertOwner/);
+    expect(fn).toMatch(/assertHostOrDelegate/);
   });
 
   test('10.5 resolveStreamStaffAccess blocks non-creator on PATCH route (PUBLIC)', () => {

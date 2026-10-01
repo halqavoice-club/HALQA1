@@ -117,6 +117,7 @@ describe('POST /api/v1/stripe/webhook — coin purchase', () => {
         update: jest.fn().mockResolvedValue({ coins: 500 }),
       },
       walletTransaction: { create: jest.fn().mockResolvedValue({ id: 'wt-1' }) },
+      platformRevenueEntry: { create: jest.fn().mockResolvedValue({ id: 'pre-1' }) },
     }));
   });
   afterAll(() => {
@@ -209,7 +210,10 @@ describe('POST /api/v1/stripe/webhook — fee payment', () => {
     process.env.NODE_ENV = 'test';
     app = buildApp();
     // Redis not ready → Redis idempotency check skipped
-    prisma.feeRecord.update.mockResolvedValue({ id: 'fee-1', status: 'PAID' });
+    // DB idempotency check (Task 8.1): findFirst returns null = not yet processed
+    if (!prisma.feeRecord) prisma.feeRecord = {};
+    prisma.feeRecord.findFirst = jest.fn().mockResolvedValue(null);
+    prisma.feeRecord.update.mockResolvedValue({ id: 'fee-1', status: 'PAID', stripeSessionId: 'cs_fee' });
   });
   afterAll(() => { delete process.env.STRIPE_SECRET_KEY; });
 

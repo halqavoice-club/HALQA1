@@ -2,17 +2,23 @@ name: HALQA CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, fix/live-class-gap-analysis]
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, fix/live-class-gap-analysis]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual trigger'
+        required: false
+        default: 'Manual CI run'
 
 jobs:
-  # ─── Backend Unit Tests ─────────────────────────────────────────────────────
+  # â”€â”€â”€ Backend Unit Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   # DO-003: Run the financial unit tests (auth/stripe/gift/wallet) on every PR.
-  # These tests mock all external deps — no real DB or Redis needed.
+  # These tests mock all external deps â€” no real DB or Redis needed.
   # They protect the most critical code paths: payment, auth, gifting.
   backend-tests:
-    name: Backend — Unit Tests
+    name: Backend â€” Unit Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -22,7 +28,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
 
@@ -47,11 +53,11 @@ jobs:
           # Sprint 7: METRICS_TOKEN required for metrics endpoint tests
           METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'
 
-  # ─── Backend Lint + Schema Validate ────────────────────────────────────────
+  # â”€â”€â”€ Backend Lint + Schema Validate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   backend:
-    name: Backend — Lint & Schema
+    name: Backend â€” Lint & Schema
     runs-on: ubuntu-latest
-    # Run in parallel with unit tests — both are fast and independent
+    # Run in parallel with unit tests â€” both are fast and independent
     needs: []
 
     steps:
@@ -61,7 +67,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
 
@@ -96,9 +102,9 @@ jobs:
           JWT_REFRESH_SECRET: 'test_refresh_secret_for_ci_only'
           PORT: '5001'
 
-  # ─── Frontend Type Check + Lint ────────────────────────────────────────────
+  # â”€â”€â”€ Frontend Type Check + Lint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   frontend:
-    name: Frontend — TypeScript & Lint
+    name: Frontend â€” TypeScript & Lint
     runs-on: ubuntu-latest
 
     steps:
@@ -131,9 +137,9 @@ jobs:
           NEXT_PUBLIC_API_URL: 'http://localhost:5000/api/v1'
           NEXT_PUBLIC_SOCKET_URL: 'http://localhost:5000'
 
-  # ─── Mobile Type Check + Lint ──────────────────────────────────────────────
+  # â”€â”€â”€ Mobile Type Check + Lint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   mobile:
-    name: Mobile — TypeScript & Lint
+    name: Mobile â€” TypeScript & Lint
     runs-on: ubuntu-latest
 
     steps:
@@ -163,12 +169,12 @@ jobs:
         run: npm test -- --ci --passWithNoTests --reporters=default
         working-directory: mobile
 
-  # ─── Backend Integration Tests ─────────────────────────────────────────────
+  # â”€â”€â”€ Backend Integration Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   # REQ-19.3, REQ-20.9: Run integration tests against a real MySQL + Redis.
   # Runs after backend lint and unit tests both pass.
   # Blocks the Docker build if any integration test fails.
   backend-integration:
-    name: Backend — Integration Tests
+    name: Backend â€” Integration Tests
     runs-on: ubuntu-latest
     needs: [backend, backend-tests]
 
@@ -205,7 +211,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
 
@@ -228,7 +234,7 @@ jobs:
             echo "Run 'npx prisma migrate dev --name fix_drift' to generate a migration for schema changes."
             exit 1
           fi
-          echo "Migration drift check passed — database schema is up to date."
+          echo "Migration drift check passed â€” database schema is up to date."
         working-directory: backend
         env:
           DATABASE_URL: 'mysql://halqa:halqa_test_pw@localhost:3306/halqa_test'
@@ -250,7 +256,7 @@ jobs:
       - name: Verify backup and restore procedure
         # Proves that mysqldump + restore works against the test DB.
         # This is the minimal bar for production restore readiness.
-        # Steps: dump → drop → recreate → restore → count tables.
+        # Steps: dump â†’ drop â†’ recreate â†’ restore â†’ count tables.
         run: |
           echo "=== Step 1: Create backup of test database ==="
           mysqldump -u halqa -phalqa_test_pw halqa_test > /tmp/halqa_test_backup.sql
@@ -273,14 +279,14 @@ jobs:
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='halqa_test' AND table_type='BASE TABLE';")
           echo "Tables restored: $TABLE_COUNT"
           if [ "$TABLE_COUNT" -lt "10" ]; then
-            echo "ERROR: Restore failed — too few tables ($TABLE_COUNT)"
+            echo "ERROR: Restore failed â€” too few tables ($TABLE_COUNT)"
             exit 1
           fi
 
-          echo "=== Backup/restore verification PASSED — $TABLE_COUNT tables restored ==="
+          echo "=== Backup/restore verification PASSED â€” $TABLE_COUNT tables restored ==="
           rm -f /tmp/halqa_test_backup.sql
 
-  # ─── Docker Build Test ─────────────────────────────────────────────────────
+  # â”€â”€â”€ Docker Build Test â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   docker:
     name: Docker Build Test
     runs-on: ubuntu-latest
@@ -303,15 +309,15 @@ jobs:
           NEXT_PUBLIC_SOCKET_URL: 'https://api.halqa.app'
           NEXT_PUBLIC_LIVEKIT_URL: 'wss://placeholder.livekit.cloud'
 
-  # ─── Playwright E2E Tests ──────────────────────────────────────────────────
+  # â”€â”€â”€ Playwright E2E Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   # Runs after the Docker build succeeds (app must build cleanly before E2E).
   # Uses a static mock backend env so tests run deterministically in CI.
   # The frontend is built in standalone mode and served with `next start`.
   e2e:
-    name: Frontend — Playwright E2E
+    name: Frontend â€” Playwright E2E
     runs-on: ubuntu-latest
     needs: [frontend, backend-integration]
-    # Only run on main or PRs to main — E2E is expensive, skip feature branches
+    # Only run on main or PRs to main â€” E2E is expensive, skip feature branches
     if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
 
     services:
@@ -347,11 +353,11 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
 
-      # ── Start backend ──────────────────────────────────────────────────────
+      # â”€â”€ Start backend â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       - name: Install backend dependencies
         run: npm ci
         working-directory: backend
@@ -385,7 +391,7 @@ jobs:
       - name: Wait for backend
         run: npx wait-on http://localhost:5000/health --timeout 30000
 
-      # ── Build and start frontend ───────────────────────────────────────────
+      # â”€â”€ Build and start frontend â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       - name: Install frontend dependencies
         run: npm ci
         working-directory: frontend
@@ -407,7 +413,7 @@ jobs:
       - name: Wait for frontend
         run: npx wait-on http://localhost:3000 --timeout 30000
 
-      # ── Run Playwright ─────────────────────────────────────────────────────
+      # â”€â”€ Run Playwright â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
         working-directory: frontend

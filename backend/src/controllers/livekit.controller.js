@@ -21,7 +21,10 @@ async function getLiveKitToken(req, res, next) {
     const userId = req.user.id;
 
     // ── Validate room ──────────────────────────────────────────────────────
-    const room = await prisma.voiceRoom.findUnique({ where: { id: roomId } });
+    const room = await prisma.voiceRoom.findUnique({
+      where: { id: roomId },
+      select: { status: true, deletedAt: true, micLocked: true }
+    });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
     // PERMANENT ROOMS: Only archived rooms (ENDED) cannot issue tokens.
     // IDLE rooms can issue tokens — joining them re-activates them to LIVE.
@@ -49,18 +52,30 @@ async function getLiveKitToken(req, res, next) {
       identity: userId,
       name: `${req.user.firstName} ${req.user.lastName}`,
       // LV-002: Reduced TTL from 8h → 1h.
-      // An 8h token lets a kicked/banned user re-connect to the LiveKit room
-      // directly using the cached token even after being kicked at the DB level.
-      // 1h is generous for any single session while limiting post-kick re-entry.
       ttl: '1h'
     });
 
-    // Everyone gets canPublish: true — mic is controlled by the frontend
-    // based on Socket.IO role events, not by token re-issuance.
+    // PH17-001 / mic-lock token gate:
+    //
+    // When the room is NOT mic-locked:
+    //   All roles get canPublish:true (original contract preserved).
+    //   SFU enforcement relies on role changes + sfuRevokePublish() at runtime.
+    //
+    // When the room IS mic-locked:
+    //   Only HOST and MODERATOR get canPublish:true.
+    //   SPEAKER and AUDIENCE get canPublish:false — the token gate prevents
+    //   a reconnecting SPEAKER from bypassing the mic-lock at the SFU level.
+    //   This closes the "reconnect gap" where a SPEAKER whose token was
+    //   issued before the lock could still publish after reconnecting.
+    const micLocked = Boolean(room.micLocked);
+    const canPublishAudio = micLocked
+      ? (role === 'HOST' || role === 'MODERATOR')          // locked: privileged only
+      : true;                                               // unlocked: all can publish
+
     at.addGrant({
       roomJoin:             true,
       room:                 roomId,
-      canPublish:           true,
+      canPublish:           canPublishAudio,
       canSubscribe:         true,
       canPublishData:       true,
       canUpdateOwnMetadata: true
@@ -149,12 +164,19 @@ async function generateToken(req, res, next) {
             return errorResponse(res, 'Access denied to this school\'s resource', 403);
           }
         } else {
-          // schoolId matches — verify membership is not suspended
+          // schoolId matches — verify membership is ACTIVE.
+          // VULN-LIVE-005 FIX: A null membership (record deleted, not just
+          // suspended) must also be rejected here. The previous condition
+          //   if (membership && membership.status !== 'ACTIVE')
+          // treated a null membership as passing (null is falsy), which
+          // allowed a user with a matching legacy user.schoolId but no active
+          // SchoolMembership record to proceed past this layer.
+          // Fix: require membership to exist AND be ACTIVE.
           const membership = await prisma.schoolMembership.findUnique({
             where: { userId_schoolId: { userId, schoolId: lc.schoolId } },
             select: { status: true }
           });
-          if (membership && membership.status !== 'ACTIVE') {
+          if (!membership || membership.status !== 'ACTIVE') {
             return errorResponse(res, 'Access denied — your school membership is not active', 403);
           }
         }

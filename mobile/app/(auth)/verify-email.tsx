@@ -1,13 +1,13 @@
-/**
+﻿/**
  * HALQA Mobile — Email Verification Screen
  * After registration, the backend sends a 6-digit OTP to the user's email.
  * The user enters it here to activate their account and log in.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  ActivityIndicator, KeyboardAvoidingView, Platform
-} from 'react-native';
+  ActivityIndicator, Platform} from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { showMessage } from 'react-native-flash-message';
 import { useAuthStore } from '@/store/auth.store';
@@ -225,3 +225,7 @@ const styles = StyleSheet.create({
   helpTitle:          { fontSize: 14, fontWeight: '700', color: '#374151', marginBottom: 4 },
   helpText:           { fontSize: 13, color: '#6b7280', lineHeight: 20 },
 });
+
+
+
+

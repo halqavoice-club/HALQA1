@@ -8,11 +8,11 @@
 import { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  ActivityIndicator, RefreshControl, Image,
+  ActivityIndicator, RefreshControl, Image
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import {
-  useQuery, useMutation, useInfiniteQuery, useQueryClient,
+  useQuery, useMutation, useInfiniteQuery, useQueryClient
 } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -244,8 +244,9 @@ export default function CommunityDetailScreen() {
         ))}
       </View>
 
-      {/* Compose tap — passes communityId so the post lands in this community */}
-      {tab === 'feed' && isMember && (
+      {/* Compose tap — passes communityId so the post lands in this community.
+          Hidden for SUPER_ADMIN — platform admins cannot create community posts. */}
+      {tab === 'feed' && isMember && community?.myRole !== 'SUPER_ADMIN_PLATFORM' && (
         <TouchableOpacity
           style={s.compose}
           onPress={() => router.push({
@@ -410,3 +411,4 @@ const s = StyleSheet.create({
                       backgroundColor: '#ede9fe', borderRadius: 10, padding: 12, marginTop: 4 },
   inviteOnlyText:   { flex: 1, fontSize: 13, color: '#4f46e5', lineHeight: 18 },
 });
+

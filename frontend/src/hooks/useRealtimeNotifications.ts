@@ -24,66 +24,120 @@ export function useRealtimeNotifications() {
   const queryClient     = useQueryClient()
 
   useEffect(() => {
-    const socket = getSocket()
-    if (!socket) return
-
-    // ── Primary event: backend notification:new ─────────────────────────────
-    // Payload: { id, userId, type, title, body, data, isRead, createdAt }
+    // ── Shared handlers ───────────────────────────────────────────────────────
     const handleNotificationNew = (data: any) => {
       if (!data?.title) return
       addNotification({
-        type:    mapType(data.type),
-        title:   data.title,
-        message: data.body ?? '',
+        type:        mapType(data.type),
+        title:       data.title,
+        message:     data.body ?? '',
         actionUrl:   resolveActionUrl(data),
         actionLabel: 'View',
       })
-      // Also invalidate the notifications query so the bell count refreshes
       queryClient.invalidateQueries({ queryKey: ['notifications'] })
       queryClient.invalidateQueries({ queryKey: ['notifications', 'unread'] })
     }
 
-    // ── Legacy event names (kept for backward compat) ───────────────────────
     const handleLegacyGrade = (data: any) => {
       addNotification({
-        type: 'success',
-        title: 'Grade Posted',
+        type: 'success', title: 'Grade Posted',
         message: `Your grade for ${data?.assignment || 'an assignment'} has been posted`,
-        actionUrl: '/grades',
-        actionLabel: 'View',
+        actionUrl: '/grades', actionLabel: 'View',
       })
     }
 
     const handleLegacyAttendance = (data: any) => {
       addNotification({
-        type: 'info',
-        title: 'Attendance Marked',
+        type: 'info', title: 'Attendance Marked',
         message: data?.status === 'present' ? 'You were marked present' : 'You were marked absent',
-        actionUrl: '/attendance',
-        actionLabel: 'View',
+        actionUrl: '/attendance', actionLabel: 'View',
       })
     }
 
     const handleLegacyAssignment = (data: any) => {
       addNotification({
-        type: 'info',
-        title: 'New Assignment',
+        type: 'info', title: 'New Assignment',
         message: data?.title || 'A new assignment has been created',
         actionUrl: data?.id ? `/assignments/${data.id}` : '/assignments',
         actionLabel: 'View',
       })
     }
 
-    socket.on('notification:new',   handleNotificationNew)
-    socket.on('grade_posted',        handleLegacyGrade)
-    socket.on('attendance_marked',   handleLegacyAttendance)
-    socket.on('assignment_created',  handleLegacyAssignment)
+    const handlePKInvitation = (data: any) => {
+      // Fire a DOM event so PKInvitationToast can show the Accept/Decline UI
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('pk:invitation:received', { detail: data }))
+      }
+      addNotification({
+        type:        'info',
+        title:       data.invitation?.sender
+          ? `⚔️ ${data.invitation.sender.firstName} challenges you!`
+          : '⚔️ PK Challenge!',
+        message:     `${Math.floor((data.invitation?.durationSeconds ?? 300) / 60)} min battle`,
+        actionUrl:   '/notifications',
+        actionLabel: 'View',
+      })
+      queryClient.invalidateQueries({ queryKey: ['notifications'] })
+    }
+
+    const handleJoinRequest = (data: any) => {
+      addNotification({
+        type:        'warning',
+        title:       `Join request — ${data?.schoolName ?? 'Your School'}`,
+        message:     `${data?.userName ?? 'A user'} wants to join as ${(data?.role ?? 'member').toLowerCase()}`,
+        actionUrl:   '/school-memberships/manage',
+        actionLabel: 'Review',
+      })
+      queryClient.invalidateQueries({ queryKey: ['school-members'] })
+    }
+
+    // ── Register listeners — works even if socket not yet ready ──────────────
+    // We retry every 300ms until we can get a socket reference, then register.
+    // Once registered, the socket's own reconnect logic re-fires 'connect'
+    // events, but the listeners survive reconnects automatically.
+    let socket = getSocket()
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let registered = false
+
+    function register(s: ReturnType<typeof getSocket>) {
+      if (!s || registered) return
+      registered = true
+      s.on('notification:new',  handleNotificationNew)
+      s.on('grade_posted',       handleLegacyGrade)
+      s.on('attendance_marked',  handleLegacyAttendance)
+      s.on('assignment_created', handleLegacyAssignment)
+      s.on('pk:invitation',      handlePKInvitation)
+      s.on('school:join_request',handleJoinRequest)
+    }
+
+    function unregister(s: ReturnType<typeof getSocket>) {
+      if (!s) return
+      s.off('notification:new',  handleNotificationNew)
+      s.off('grade_posted',       handleLegacyGrade)
+      s.off('attendance_marked',  handleLegacyAttendance)
+      s.off('assignment_created', handleLegacyAssignment)
+      s.off('pk:invitation',      handlePKInvitation)
+      s.off('school:join_request',handleJoinRequest)
+    }
+
+    if (socket) {
+      register(socket)
+    } else {
+      // Socket not ready yet — poll until it is
+      const poll = () => {
+        socket = getSocket()
+        if (socket) {
+          register(socket)
+        } else {
+          retryTimer = setTimeout(poll, 300)
+        }
+      }
+      retryTimer = setTimeout(poll, 300)
+    }
 
     return () => {
-      socket.off('notification:new',   handleNotificationNew)
-      socket.off('grade_posted',        handleLegacyGrade)
-      socket.off('attendance_marked',   handleLegacyAttendance)
-      socket.off('assignment_created',  handleLegacyAssignment)
+      if (retryTimer) clearTimeout(retryTimer)
+      unregister(socket)
     }
   }, [addNotification, queryClient])
 
@@ -105,7 +159,7 @@ function mapType(type?: string): 'info' | 'success' | 'warning' | 'error' {
   const t = type.toUpperCase()
   if (['GRADE', 'FRIEND_ACCEPTED', 'GIFT_RECEIVED', 'TIP_RECEIVED', 'NEW_SUBSCRIBER'].includes(t))
     return 'success'
-  if (['ATTENDANCE', 'BEHAVIOR', 'LIVE_CLASS_START', 'VOICE_ROOM_LIVE'].includes(t))
+  if (['ATTENDANCE', 'BEHAVIOR', 'LIVE_CLASS_START', 'VOICE_ROOM_LIVE', 'SCHOOL_JOIN_REQUEST'].includes(t))
     return 'warning'
   if (['SYSTEM'].includes(t))
     return 'error'
@@ -132,6 +186,7 @@ function resolveActionUrl(data: any): string | undefined {
     return '/creator'
   if (type === 'COMMUNITY_INVITE' || type === 'COMMUNITY_JOIN')
     return '/communities'
+  if (type === 'SCHOOL_JOIN_REQUEST') return '/school-memberships/manage'
   if (type === 'MENTION')          return '/feed'
   return '/notifications'
 }

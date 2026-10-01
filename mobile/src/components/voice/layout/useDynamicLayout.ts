@@ -8,12 +8,12 @@
  */
 
 import { useEffect, useCallback } from 'react'
-import { io, type Socket } from 'socket.io-client'
+import { getSocket } from '../../../lib/socket'
 import { useDynamicLayoutStore } from './useDynamicLayoutStore'
 import type {
   SpeakerSlot,
   LayoutMode,
-  LayoutResult,
+  LayoutResult
 } from '../../../../../src/lib/layout/layoutTypes'
 
 // ---------------------------------------------------------------------------
@@ -58,20 +58,6 @@ function mapParticipantToSlot(p: any, seatIndex = 0): SpeakerSlot {
     isOnline: true,
     connectionQuality: 'good',
   }
-}
-
-// ---------------------------------------------------------------------------
-// Module-level socket singleton
-// ---------------------------------------------------------------------------
-
-let _socket: Socket | null = null
-
-function getSocket(): Socket {
-  if (!_socket) {
-    const url = (process.env.EXPO_PUBLIC_API_URL as string | undefined) ?? ''
-    _socket = io(url, { autoConnect: false })
-  }
-  return _socket
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +114,10 @@ export function useDynamicLayout(roomId: string): UseDynamicLayoutReturn {
   // -------------------------------------------------------------------------
   useEffect(() => {
     const socket = getSocket()
-    if (!socket.connected) socket.connect()
+    // The shared socket may not be initialised yet (before login / join).
+    // If it is null we skip registration — the parent component must ensure
+    // the socket is connected before mounting SpeakerGrid.
+    if (!socket) return
 
     const onSeatChanged = ({
       userId,
@@ -209,3 +198,4 @@ export function useDynamicLayout(roomId: string): UseDynamicLayoutReturn {
     clearManual,
   }
 }
+

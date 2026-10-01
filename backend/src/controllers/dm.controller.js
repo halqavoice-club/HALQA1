@@ -19,6 +19,7 @@ const { v4: uuidv4 } = require('uuid');
 const prisma = require('../utils/prisma');
 const { getIo } = require('../sockets');
 const { successResponse, errorResponse } = require('../utils/response');
+const { sendPush } = require('../utils/push');
 
 const ALLOW_NON_FRIENDS = process.env.ALLOW_DM_NON_FRIENDS === 'true';
 const PAGE_SIZE = 30;
@@ -184,6 +185,19 @@ async function getOrStartConversation(req, res, next) {
       return errorResponse(res, 'You can only message friends', 403);
     }
 
+    // Block check — cannot start/view a conversation with a blocked user
+    try {
+      const blockRecord = await prisma.userBlock.findFirst({
+        where: {
+          OR: [
+            { blockerId: otherId, blockedId: meId },
+            { blockerId: meId, blockedId: otherId },
+          ]
+        }
+      });
+      if (blockRecord) return errorResponse(res, 'Cannot message this user', 403);
+    } catch (_) { /* userBlock table may not exist — fail open */ }
+
     const conv = await getOrCreateConversation(meId, otherId);
     return successResponse(res, { ...conv, other });
   } catch (err) { next(err); }
@@ -204,9 +218,6 @@ async function getMessages(req, res, next) {
 
     const where = {
       conversationId: convId,
-      // BUG FIX: hide messages deleted by this user based on their role (sender/receiver),
-      // not on their position in the conversation (userA/userB).
-      // A user can be sender in some messages and receiver in others within the same conversation.
       OR: [
         { senderId: meId,   deletedBySender:   false },
         { receiverId: meId, deletedByReceiver: false },
@@ -216,7 +227,11 @@ async function getMessages(req, res, next) {
 
     const messages = await prisma.directMessage.findMany({
       where,
-      include: { sender: { select: USER_SELECT } },
+      include: {
+        sender:    { select: USER_SELECT },
+        replyTo:   { include: { sender: { select: USER_SELECT } } },
+        reactions: { include: { user: { select: USER_SELECT } } },
+      },
       orderBy: { createdAt: 'desc' },
       take: Math.min(parseInt(limit), 100)
     });
@@ -229,15 +244,41 @@ async function getMessages(req, res, next) {
         where: { id: { in: ids } },
         data:  { status: 'DELIVERED', deliveredAt: new Date() }
       });
-      // Notify sender
       const io = getIo();
       if (io) {
         const senderId = undelivered[0].senderId;
-        io.to(`user:${senderId}`).emit('dm:delivered', { convId, messageIds: ids });
+        // BUG-2 FIX: Include delivery timestamp so clients can store deliveredAt
+        io.to(`user:${senderId}`).emit('dm:delivered', { convId, messageIds: ids, at: new Date().toISOString() });
       }
     }
 
-    return successResponse(res, messages.reverse());
+    // Phase 5: batch-enrich VOICE_ROOM_SHARE messages with authoritative VoiceRoom data.
+    // One query for all referenced rooms — no N+1 per message.
+    const shareMessages = messages.filter(
+      m => m.msgType === 'VOICE_ROOM_SHARE' && m.refEntityId
+    );
+    let voiceRoomMap = {};
+    if (shareMessages.length > 0) {
+      const roomIds = [...new Set(shareMessages.map(m => m.refEntityId))];
+      const rooms = await prisma.voiceRoom.findMany({
+        where: { id: { in: roomIds } },
+        select: {
+          id: true, title: true, coverEmoji: true, coverImageUrl: true,
+          privacy: true, status: true, hostId: true, maxSpeakers: true,
+        },
+      });
+      voiceRoomMap = Object.fromEntries(rooms.map(r => [r.id, r]));
+    }
+
+    // Attach voiceRoomData to each share message (null if room is unavailable — safe fallback)
+    const enriched = messages.map(m => {
+      if (m.msgType === 'VOICE_ROOM_SHARE' && m.refEntityId) {
+        return { ...m, voiceRoomData: voiceRoomMap[m.refEntityId] ?? null };
+      }
+      return m;
+    });
+
+    return successResponse(res, enriched.reverse());
   } catch (err) { next(err); }
 }
 
@@ -246,9 +287,69 @@ async function sendMessage(req, res, next) {
   try {
     const meId   = req.user.id;
     const convId = req.params.convId;
-    const { body, storyId } = req.body;
+    const {
+      body, storyId, replyToId,
+      // Phase 4 media fields
+      msgType = 'TEXT',
+      mediaUrl, mimeType, fileSize, fileName, duration, width, height, thumbnail,
+      // Phase 5: structured entity reference (VOICE_ROOM_SHARE)
+      refEntityType, refEntityId,
+    } = req.body;
 
-    if (!body?.trim()) return errorResponse(res, 'Message body required', 400);
+    // Enforce allowed message types (includes VOICE_ROOM_SHARE and LIVE_CLASS_SHARE)
+    const ALLOWED_TYPES = ['TEXT', 'IMAGE', 'VIDEO', 'GIF', 'VOICE', 'AUDIO', 'FILE', 'VOICE_ROOM_SHARE', 'LIVE_CLASS_SHARE'];
+    if (!ALLOWED_TYPES.includes(msgType)) {
+      return errorResponse(res, `Invalid msgType. Allowed: ${ALLOWED_TYPES.join(', ')}`, 400);
+    }
+
+    // ── VOICE_ROOM_SHARE: structured reference validation ─────────────────────
+    if (msgType === 'VOICE_ROOM_SHARE') {
+      if (!refEntityId || !refEntityId.trim()) {
+        return errorResponse(res, 'refEntityId is required for VOICE_ROOM_SHARE messages', 400);
+      }
+      if (refEntityType !== 'VoiceRoom') {
+        return errorResponse(res, 'refEntityType must be "VoiceRoom" for VOICE_ROOM_SHARE messages', 400);
+      }
+      const voiceRoom = await prisma.voiceRoom.findUnique({
+        where: { id: refEntityId.trim() },
+        select: { id: true, deletedAt: true },
+      });
+      if (!voiceRoom || voiceRoom.deletedAt) {
+        return errorResponse(res, 'Voice Club room not found', 404);
+      }
+      // body is optional for VOICE_ROOM_SHARE (the room card is the content)
+
+    // ── LIVE_CLASS_SHARE: live class / live stream reference validation ────────
+    } else if (msgType === 'LIVE_CLASS_SHARE') {
+      if (!refEntityId || !refEntityId.trim()) {
+        return errorResponse(res, 'refEntityId is required for LIVE_CLASS_SHARE messages', 400);
+      }
+      if (refEntityType !== 'LiveClass') {
+        return errorResponse(res, 'refEntityType must be "LiveClass" for LIVE_CLASS_SHARE messages', 400);
+      }
+      const liveClass = await prisma.$queryRawUnsafe(
+        'SELECT id FROM live_classes WHERE id = ? AND deletedAt IS NULL LIMIT 1',
+        refEntityId.trim()
+      );
+      if (!liveClass || liveClass.length === 0) {
+        return errorResponse(res, 'Live class not found', 404);
+      }
+      // body is optional for LIVE_CLASS_SHARE
+    } else {
+      // Non-share types: existing validation unchanged
+      const isMediaMsg = msgType !== 'TEXT';
+      if (!isMediaMsg && !body?.trim()) {
+        return errorResponse(res, 'Message body required', 400);
+      }
+      if (isMediaMsg && !mediaUrl) {
+        return errorResponse(res, 'mediaUrl required for media messages', 400);
+      }
+    }
+
+    // Body length limit
+    if (body && body.trim().length > 5000) {
+      return errorResponse(res, 'Message too long (max 5000 chars)', 400);
+    }
 
     const conv = await prisma.dmConversation.findUnique({ where: { id: convId } });
     if (!conv || (conv.userAId !== meId && conv.userBId !== meId)) {
@@ -257,9 +358,32 @@ async function sendMessage(req, res, next) {
 
     const receiverId = conv.userAId === meId ? conv.userBId : conv.userAId;
 
-    // Friends-only check BEFORE creating message
+    // Block check: if receiver has blocked sender (or vice versa), reject
+    let isBlocked = false;
+    try {
+      const blockRecord = await prisma.userBlock.findFirst({
+        where: {
+          OR: [
+            { blockerId: receiverId, blockedId: meId },
+            { blockerId: meId, blockedId: receiverId },
+          ]
+        }
+      });
+      isBlocked = !!blockRecord;
+    } catch (_) { /* userBlock table may not exist — fail open */ }
+    if (isBlocked) return errorResponse(res, 'Cannot send messages to this user', 403);
+
+    // Friends-only check
     if (!await areFriends(meId, receiverId)) {
       return errorResponse(res, 'You can only message friends', 403);
+    }
+
+    // Validate replyToId belongs to this conversation
+    if (replyToId) {
+      const replyMsg = await prisma.directMessage.findUnique({ where: { id: replyToId } });
+      if (!replyMsg || replyMsg.conversationId !== convId) {
+        return errorResponse(res, 'Invalid replyToId', 400);
+      }
     }
 
     const message = await prisma.directMessage.create({
@@ -268,50 +392,112 @@ async function sendMessage(req, res, next) {
         conversationId: convId,
         senderId:       meId,
         receiverId,
-        body:           body.trim(),
+        body:           body ? body.trim() : null,
+        msgType,
+        mediaUrl:       mediaUrl || null,
+        mimeType:       mimeType || null,
+        fileSize:       fileSize ? parseInt(fileSize) : null,
+        fileName:       fileName || null,
+        duration:       duration ? parseInt(duration) : null,
+        width:          width    ? parseInt(width)    : null,
+        height:         height   ? parseInt(height)   : null,
+        thumbnail:      thumbnail || null,
+        // Phase 5: store the entity reference (null for all non-share types)
+        refEntityType:  msgType === 'VOICE_ROOM_SHARE' ? 'VoiceRoom' : null,
+        refEntityId:    msgType === 'VOICE_ROOM_SHARE' ? refEntityId.trim() : null,
         status:         'SENT',
-        // Story reply context (L8 fix) — optional, null for regular DMs
         storyId:        storyId || null,
+        replyToId:      replyToId || null,
       },
       include: {
-        sender: { select: USER_SELECT },
-        story:  storyId ? { select: { id: true, type: true, mediaUrl: true, text: true, thumbnail: true, authorId: true } } : false
+        sender:    { select: USER_SELECT },
+        replyTo:   { include: { sender: { select: USER_SELECT } } },
+        reactions: true,
+        story:     storyId ? { select: { id: true, type: true, mediaUrl: true, text: true, thumbnail: true, authorId: true } } : false,
       }
     });
 
+    // Phase 5: attach authoritative VoiceRoom data for VOICE_ROOM_SHARE messages
+    let fullMessage = { ...message };
+    if (msgType === 'VOICE_ROOM_SHARE' && message.refEntityId) {
+      const roomData = await prisma.voiceRoom.findUnique({
+        where: { id: message.refEntityId },
+        select: {
+          id: true, title: true, coverEmoji: true, coverImageUrl: true,
+          privacy: true, status: true, hostId: true, maxSpeakers: true,
+        },
+      });
+      fullMessage.voiceRoomData = roomData ?? null;
+    }
+
     // Update conversation snapshot
+    const mediaPreview = {
+      IMAGE: '📷 Photo', VIDEO: '🎥 Video', GIF: '🎞️ GIF',
+      VOICE: '🎤 Voice message', AUDIO: '🎵 Audio', FILE: '📎 File',
+      // Phase 5: stable generic preview — never stores room title
+      VOICE_ROOM_SHARE: '🎙️ Voice Club',
+    };
+    const lastMessageText = body ? body.trim().slice(0, 100) : (mediaPreview[msgType] ?? '📎 Media');
     const isA = conv.userAId === meId;
     await prisma.dmConversation.update({
       where: { id: convId },
       data: {
-        lastMessage:   body.trim().slice(0, 100),
+        lastMessage:   lastMessageText,
         lastMessageAt: message.createdAt,
         lastSenderId:  meId,
-        // Increment unread for receiver
         ...(isA ? { unreadB: { increment: 1 } } : { unreadA: { increment: 1 } })
       }
     });
 
-    // Emit to receiver
+    // Emit to receiver via existing dm:message event (no new Socket.IO events)
     const io = getIo();
     if (io) {
-      io.to(`user:${receiverId}`).emit('dm:message', {
-        convId,
-        message: { ...message, sender: { id: meId, firstName: req.user.firstName, lastName: req.user.lastName, avatarUrl: req.user.avatarUrl } }
-      });
+      // Serialize createdAt to ISO string so clients always receive a string (not a Date object)
+      const msgPayload = {
+        ...fullMessage,
+        createdAt: fullMessage.createdAt instanceof Date
+          ? fullMessage.createdAt.toISOString()
+          : fullMessage.createdAt,
+        sender: { id: meId, firstName: req.user.firstName, lastName: req.user.lastName, avatarUrl: req.user.avatarUrl }
+      };
+      io.to(`user:${receiverId}`).emit('dm:message', { convId, message: msgPayload });
 
-      // Check if receiver is online — if so, mark as DELIVERED immediately
       const receiverSockets = await io.in(`user:${receiverId}`).fetchSockets();
       if (receiverSockets.length > 0) {
         await prisma.directMessage.update({
           where: { id: message.id },
           data:  { status: 'DELIVERED', deliveredAt: new Date() }
         });
-        io.to(`user:${meId}`).emit('dm:delivered', { convId, messageIds: [message.id] });
+        io.to(`user:${meId}`).emit('dm:delivered', { convId, messageIds: [message.id], at: new Date().toISOString() });
+      } else {
+        // Receiver is offline — send FCM push notification
+        try {
+          const receiver = await prisma.user.findUnique({
+            where: { id: receiverId },
+            select: { fcmToken: true, firstName: true, lastName: true }
+          });
+          if (receiver?.fcmToken) {
+            const senderName = `${req.user.firstName} ${req.user.lastName}`.trim();
+            const mediaPreviewMap = {
+              IMAGE: '📷 Photo', VIDEO: '🎥 Video', GIF: '🎞️ GIF',
+              VOICE: '🎤 Voice message', AUDIO: '🎵 Audio', FILE: '📎 File',
+              VOICE_ROOM_SHARE: '🎙️ Voice Club',
+            };
+            const msgPreview = body
+              ? (body.trim().length > 80 ? body.trim().slice(0, 80) + '…' : body.trim())
+              : (mediaPreviewMap[msgType] ?? '📎 Media');
+            await sendPush(receiver.fcmToken, {
+              title: senderName,
+              body:  msgPreview,
+              type:  'DM',
+              data:  { convId, messageId: message.id, senderId: meId },
+            });
+          }
+        } catch (_) { /* push is non-fatal */ }
       }
     }
 
-    return successResponse(res, message, 'Message sent', 201);
+    return successResponse(res, fullMessage, 'Message sent', 201);
   } catch (err) { next(err); }
 }
 
@@ -370,13 +556,38 @@ async function deleteMessage(req, res, next) {
       return errorResponse(res, 'Not authorized', 403);
     }
 
-    // Soft delete — only hide for this user
+    // Delete policy:
+    // - Sender deletes own message → "delete for everyone": hidden from BOTH sender and receiver
+    // - Receiver deletes a received message → "delete for me only": hidden only from receiver
+    const updateData = msg.senderId === meId
+      ? { deletedBySender: true, deletedByReceiver: true }  // sender: delete for everyone
+      : { deletedByReceiver: true };                         // receiver: delete for me only
+
     await prisma.directMessage.update({
       where: { id: msgId },
-      data:  msg.senderId === meId
-        ? { deletedBySender: true }
-        : { deletedByReceiver: true }
+      data: updateData,
     });
+
+    // Emit real-time delete event so all participants' UIs update immediately
+    const io = getIo();
+    if (io) {
+      // Notify the other participant's room
+      const otherId = msg.senderId === meId ? msg.receiverId : msg.senderId;
+      io.to(`user:${otherId}`).emit('dm:message_deleted', {
+        convId: msg.conversationId,
+        messageId: msgId,
+        deletedBy: meId,
+        // If sender deleted, other side should also remove it (delete for everyone)
+        forEveryone: msg.senderId === meId,
+      });
+      // Also notify the deleter's own other sessions (multi-device)
+      io.to(`user:${meId}`).emit('dm:message_deleted', {
+        convId: msg.conversationId,
+        messageId: msgId,
+        deletedBy: meId,
+        forEveryone: msg.senderId === meId,
+      });
+    }
 
     return successResponse(res, null, 'Message deleted');
   } catch (err) { next(err); }
@@ -456,7 +667,97 @@ async function getUnreadCount(req, res, next) {
   } catch (err) { next(err); }
 }
 
+// ─── POST /dm/messages/:msgId/reactions ──────────────────────────────────────
+// Toggle emoji reaction on a DM message. If already reacted with same emoji, remove it.
+async function reactToMessage(req, res, next) {
+  try {
+    const meId  = req.user.id;
+    const msgId = req.params.msgId;
+    const { emoji } = req.body;
+
+    if (!emoji) return errorResponse(res, 'Emoji required', 400);
+
+    const msg = await prisma.directMessage.findUnique({ where: { id: msgId } });
+    if (!msg) return errorResponse(res, 'Message not found', 404);
+
+    // Only conversation participants can react
+    const conv = await prisma.dmConversation.findUnique({ where: { id: msg.conversationId } });
+    if (!conv || (conv.userAId !== meId && conv.userBId !== meId)) {
+      return errorResponse(res, 'Not authorized', 403);
+    }
+
+    let existing = null;
+    let reaction = null;
+    let action   = 'added';
+
+    try {
+      existing = await prisma.dmReaction.findUnique({
+        where: { messageId_userId_emoji: { messageId: msgId, userId: meId, emoji } }
+      });
+
+      if (existing) {
+        action = 'removed';
+        await prisma.dmReaction.delete({ where: { id: existing.id } });
+      } else {
+        reaction = await prisma.dmReaction.create({
+          data: { id: uuidv4(), messageId: msgId, userId: meId, emoji },
+          include: { user: { select: USER_SELECT } }
+        });
+      }
+    } catch (dbErr) {
+      // dm_reactions table doesn't exist yet — run: npx prisma migrate deploy
+      return errorResponse(res, 'Reactions not available yet. Run: npx prisma migrate deploy', 503);
+    }
+
+    // Emit to both participants
+    const io = getIo();
+    if (io) {
+      const otherId = conv.userAId === meId ? conv.userBId : conv.userAId;
+      const payload = { convId: msg.conversationId, messageId: msgId, emoji, userId: meId, action, reaction };
+      io.to(`user:${meId}`).emit('dm:reaction', payload);
+      io.to(`user:${otherId}`).emit('dm:reaction', payload);
+    }
+
+    return successResponse(res, reaction, existing ? 'Reaction removed' : 'Reaction added');
+  } catch (err) { next(err); }
+}
+
+// ─── GET /dm/conversations/:convId/search ─────────────────────────────────────
+// Search messages within a conversation by text query.
+async function searchMessages(req, res, next) {
+  try {
+    const meId   = req.user.id;
+    const convId = req.params.convId;
+    const { q, limit = 20 } = req.query;
+
+    if (!q || q.trim().length < 1) return errorResponse(res, 'Query required', 400);
+
+    const conv = await prisma.dmConversation.findUnique({ where: { id: convId } });
+    if (!conv || (conv.userAId !== meId && conv.userBId !== meId)) {
+      return errorResponse(res, 'Conversation not found', 404);
+    }
+
+    const messages = await prisma.directMessage.findMany({
+      where: {
+        conversationId: convId,
+        body: { contains: q.trim() },
+        OR: [
+          { senderId: meId,   deletedBySender:   false },
+          { receiverId: meId, deletedByReceiver: false },
+        ],
+      },
+      include: { sender: { select: USER_SELECT } },
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(parseInt(limit), 50),
+    });
+
+    return successResponse(res, messages);
+  } catch (err) { next(err); }
+}
+
 module.exports = {
   getConversations, getOrStartConversation,
-  getMessages, sendMessage, markRead, deleteMessage, editMessage, getUnreadCount
+  getMessages, sendMessage, markRead, deleteMessage, editMessage,
+  reactToMessage, searchMessages, getUnreadCount
 };
+

@@ -295,8 +295,10 @@ describe('SEC-CRIT-003: LiveKit generic token voice room guard', () => {
     if (!prisma.schoolMembership) prisma.schoolMembership = {};
     if (!prisma.schoolMembership.findUnique) prisma.schoolMembership.findUnique = jest.fn().mockResolvedValue(null);
     if (!prisma.schoolMembership.findFirst)  prisma.schoolMembership.findFirst  = jest.fn().mockResolvedValue(null);
-    prisma.schoolMembership.findUnique.mockResolvedValue(null);
-    prisma.schoolMembership.findFirst.mockResolvedValue(null);
+    // VULN-LIVE-005 FIX: Default to ACTIVE membership so positive-path tests pass.
+    // Tests that specifically verify denial override this per-test.
+    prisma.schoolMembership.findUnique.mockResolvedValue({ status: 'ACTIVE' });
+    prisma.schoolMembership.findFirst.mockResolvedValue({ status: 'ACTIVE' });
   });
 
   test('active voice room participant gets token successfully', async () => {

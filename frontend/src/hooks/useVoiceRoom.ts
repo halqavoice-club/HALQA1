@@ -27,9 +27,16 @@ const asPrivacy  = (p: string): import('@/store/voice.store').VoiceRoomPrivacy =
 export const canModerate = (role?: string) =>
   role === VOICE_ROLES.HOST || role === VOICE_ROLES.MODERATOR
 
-/** Roles that can publish audio */
-export const canSpeak = (role?: string) =>
-  role === VOICE_ROLES.HOST || role === VOICE_ROLES.MODERATOR || role === VOICE_ROLES.SPEAKER
+/** Roles that can publish audio (HOST/MOD only when unmuted — on stage) */
+export const canSpeak = (role?: string, isMuted?: boolean) => {
+  if (role === VOICE_ROLES.SPEAKER) return true
+  if (role === VOICE_ROLES.HOST || role === VOICE_ROLES.MODERATOR) return !isMuted
+  return false
+}
+
+/** Returns true if this participant is a HOST or MODERATOR (regardless of mute state) */
+export const isHostOrMod = (role?: string) =>
+  role === VOICE_ROLES.HOST || role === VOICE_ROLES.MODERATOR
 
 export function useVoiceRoom(roomId: string | null) {
   const { user } = useAuthStore()
@@ -115,6 +122,7 @@ export function useVoiceRoom(roomId: string | null) {
       addParticipant({
         id: data.userId, userId: data.userId,
         role: asRole(data.role), isMuted: true,
+        mutedByModerator: false,
         handRaised: false, handRaisedAt: null,
         joinedAt: new Date().toISOString(), isActive: true,
         isPinned: false,
@@ -127,9 +135,14 @@ export function useVoiceRoom(roomId: string | null) {
       removeParticipant(data.userId)
     }
 
-    const onMuteChanged = (data: { roomId: string; userId: string; isMuted: boolean }) => {
+    const onMuteChanged = (data: { roomId: string; userId: string; isMuted: boolean; mutedByModerator?: boolean; seatNumber?: number | null }) => {
       if (data.roomId !== roomId) return
-      updateParticipant(data.userId, { isMuted: data.isMuted })
+      const update: Partial<import('@/store/voice.store').VoiceParticipant> = { isMuted: data.isMuted }
+      if (data.mutedByModerator !== undefined) update.mutedByModerator = data.mutedByModerator
+      if (data.seatNumber !== undefined) update.seatNumber = data.seatNumber ?? null
+      // isMuted=true + seatNumber=null = dropped to audience
+      if (data.isMuted && data.seatNumber === null) update.seatNumber = null
+      updateParticipant(data.userId, update)
     }
 
     const onHandRaised = (data: {
@@ -150,15 +163,25 @@ export function useVoiceRoom(roomId: string | null) {
       }
     }
 
-    const onRoleChanged = (data: { roomId: string; userId: string; role: string }) => {
+    const onRoleChanged = (data: { roomId: string; userId: string; role: string; seatNumber?: number | null }) => {
       if (data.roomId !== roomId) return
-      updateParticipant(data.userId, {
+      const update: Partial<import('@/store/voice.store').VoiceParticipant> = {
         role: asRole(data.role),
-        isMuted: data.role === VOICE_ROLES.AUDIENCE,
-        handRaised: false, handRaisedAt: null
-      })
+        handRaised: false,
+        handRaisedAt: null,
+        mutedByModerator: false,  // any role change clears mod-mute flag
+      }
+      if (data.seatNumber !== undefined) update.seatNumber = data.seatNumber ?? null
+      // Role → AUDIENCE always clears seatNumber
+      if (data.role === VOICE_ROLES.AUDIENCE) {
+        update.isMuted = true
+        update.seatNumber = null
+      } else if (data.role === VOICE_ROLES.SPEAKER && data.seatNumber != null) {
+        update.isMuted = false
+      }
+      updateParticipant(data.userId, update)
       if (data.userId === user?.id && data.role === VOICE_ROLES.SPEAKER) {
-        toast({ title: '🎙️ You\'re now a speaker!', description: 'Your microphone is now active' })
+        toast({ title: `🎙️ You're on stage at Seat ${data.seatNumber}!` })
       }
       if (data.userId === user?.id && data.role === VOICE_ROLES.AUDIENCE) {
         toast({ title: 'Moved to audience', description: 'You can raise your hand to speak again' })
@@ -168,14 +191,27 @@ export function useVoiceRoom(roomId: string | null) {
     // BUG FIX: voice:your_role_changed is emitted by promoteParticipant() to the
     // promoted user directly — it carries the same payload as voice:role_changed
     // but was never handled, so the promoted user's own UI never updated.
-    const onYourRoleChanged = (data: { roomId: string; role: string }) => {
+    const onYourRoleChanged = (data: { roomId: string; role: string; seatNumber?: number | null }) => {
       if (data.roomId !== roomId) return
       if (!user?.id) return
-      updateParticipant(user.id, {
+      const update: Partial<import('@/store/voice.store').VoiceParticipant> = {
         role: asRole(data.role),
-        isMuted: data.role === VOICE_ROLES.AUDIENCE,
-        handRaised: false, handRaisedAt: null
-      })
+        handRaised: false,
+        handRaisedAt: null,
+      }
+      // Apply seatNumber so the promoted user's own grid slot appears correctly
+      if (data.seatNumber !== undefined) update.seatNumber = data.seatNumber ?? null
+      // Only set isMuted for role transitions that have a definitive mute state.
+      // HOST/MODERATOR role changes must NOT override isMuted — their mute state
+      // is controlled separately via voice:mute_changed.
+      if (data.role === VOICE_ROLES.AUDIENCE) {
+        update.isMuted = true
+        update.seatNumber = null
+      } else if (data.role === VOICE_ROLES.SPEAKER) {
+        update.isMuted = false
+        // If seatNumber wasn't in the event (old server), it stays as-is
+      }
+      updateParticipant(user.id, update)
     }
     const onModeratorAssigned = (data: {
       roomId: string; userId: string; firstName: string; lastName: string
@@ -190,7 +226,8 @@ export function useVoiceRoom(roomId: string | null) {
 
     const onModeratorRemoved = (data: { roomId: string; userId: string }) => {
       if (data.roomId !== roomId) return
-      updateParticipant(data.userId, { role: VOICE_ROLES.AUDIENCE, isMuted: true })
+      // RT-FIX-8: clear seatNumber so the grid slot is freed immediately
+      updateParticipant(data.userId, { role: VOICE_ROLES.AUDIENCE, isMuted: true, seatNumber: null })
     }
 
     const onAdminTransferred = (data: {
@@ -264,6 +301,26 @@ export function useVoiceRoom(roomId: string | null) {
       if (data.roomId !== roomId) return
       toast({ title: 'You were removed', description: 'You were removed from this room.', variant: 'destructive' })
       setActiveRoom(null)
+    }
+
+    // FIX: voice:banned is emitted by banParticipant() on two channels:
+    //   1. Room-wide: voice:{roomId} → { roomId, userId } — tells others to remove the participant
+    //   2. Personal:  user:{banned}  → { roomId, reason } — tells the banned user to leave
+    // Previously this event had no listener at all — neither path was handled.
+    const onBanned = (data: { roomId: string; userId?: string; reason?: string }) => {
+      if (data.roomId !== roomId) return
+      if (data.userId && data.userId !== user?.id) {
+        // Room-wide broadcast: someone else was banned — remove them from the participant list
+        removeParticipant(data.userId)
+      } else {
+        // Personal broadcast (no userId, or userId === me): I was banned — leave
+        toast({
+          title: '⛔ You were banned from this room',
+          description: data.reason || 'You have been banned by the host.',
+          variant: 'destructive'
+        })
+        setActiveRoom(null)
+      }
     }
 
     const onHostChanged = (data: { roomId: string; newHostId: string }) => {
@@ -416,15 +473,58 @@ export function useVoiceRoom(roomId: string | null) {
 
     const onMicGrabbed = (data: {
       roomId: string; userId: string; firstName: string; lastName: string
+      avatarUrl: string | null; seatNumber?: number | null
     }) => {
       if (data.roomId !== roomId) return
       updateParticipant(data.userId, {
-        role: VOICE_ROLES.SPEAKER, isMuted: false,
-        handRaised: false, handRaisedAt: null
+        role:        VOICE_ROLES.SPEAKER,
+        isMuted:     false,
+        handRaised:  false,
+        handRaisedAt: null,
+        seatNumber:  data.seatNumber ?? null,  // ← apply the assigned seat so avatar appears in grid
       })
       if (data.userId !== user?.id) {
         toast({ title: `🎙️ ${data.firstName} ${data.lastName} grabbed the mic` })
       }
+    }
+
+    // HOST PRIORITY EVICTION: fired on the evicted user's personal channel when
+    // the room owner reclaims their stage from a full room.
+    const onMovedToAudience = (data: { roomId: string; reason: string; message: string }) => {
+      if (data.roomId !== roomId) return
+      // The role_changed + mute_changed events already update the store state.
+      // This event just shows a toast to the affected user.
+      toast({
+        title: '👑 Host reclaimed the stage',
+        description: data.message || 'The host has returned and you were moved to the audience.',
+      })
+    }
+
+    // ATOMIC STAGE STATE: After HOST priority eviction, the backend sends a
+    // full authoritative stage snapshot. Apply it to reconcile any stale state
+    // caused by out-of-order individual role_changed / mute_changed events.
+    // This prevents the "13 seats" flicker.
+    const onStageState = (data: {
+      roomId: string
+      stageParticipants: Array<{
+        userId: string; role: string; isMuted: boolean; joinedAt: string
+        isPinned: boolean; handRaised: boolean; mutedByModerator: boolean
+        seatNumber: number | null
+      }>
+      stageCount: number
+    }) => {
+      if (data.roomId !== roomId) return
+      // Apply authoritative seat state for every stage participant
+      data.stageParticipants.forEach(sp => {
+        updateParticipant(sp.userId, {
+          role: asRole(sp.role),
+          isMuted: sp.isMuted,
+          isPinned: sp.isPinned,
+          handRaised: sp.handRaised,
+          mutedByModerator: sp.mutedByModerator,
+          seatNumber: sp.seatNumber,
+        })
+      })
     }
 
     // ── FIFO queue updates ─────────────────────────────────────────────────
@@ -442,8 +542,19 @@ export function useVoiceRoom(roomId: string | null) {
       toast({ title: '❌ Request declined', description: data.message, variant: 'destructive' })
     }
 
-    const onPromotedToSpeaker = (data: { roomId: string; message: string }) => {
+    const onPromotedToSpeaker = (data: { roomId: string; message: string; seatNumber?: number | null }) => {
       if (data.roomId !== roomId) return
+      // Apply seatNumber immediately so the seat grid renders without waiting
+      // for the subsequent voice:role_changed event (which may arrive slightly later).
+      if (user?.id && data.seatNumber != null) {
+        updateParticipant(user.id, {
+          role:        VOICE_ROLES.SPEAKER,
+          isMuted:     false,
+          seatNumber:  data.seatNumber,
+          handRaised:  false,
+          handRaisedAt: null,
+        })
+      }
       toast({ title: '🎙️ You\'re on stage!', description: data.message })
     }
 
@@ -557,6 +668,7 @@ export function useVoiceRoom(roomId: string | null) {
     socket.on('voice:room_ended',         onRoomEnded)
     socket.on('voice:room_deleted',       onRoomDeleted)
     socket.on('voice:kicked',             onKicked)
+    socket.on('voice:banned',             onBanned)  // FIX: was missing — banned user UI now clears
     // voice:host_changed is never emitted by the backend.
     // Ownership transfers come via voice:admin_transferred, already handled above.
     socket.on('voice:speaker_slot_freed', onSlotFreed)
@@ -583,6 +695,8 @@ export function useVoiceRoom(roomId: string | null) {
       setActiveRoom(null)
     })
     socket.on('voice:mic_grabbed',        onMicGrabbed)
+    socket.on('voice:moved_to_audience',  onMovedToAudience)
+    socket.on('voice:stage_state',        onStageState)
     socket.on('voice:queue_updated',      onQueueUpdated)
     socket.on('voice:queue_rejected',     onQueueRejected)
     socket.on('voice:promoted_to_speaker',onPromotedToSpeaker)
@@ -619,6 +733,7 @@ export function useVoiceRoom(roomId: string | null) {
       socket.off('voice:room_ended',         onRoomEnded)
       socket.off('voice:room_deleted',       onRoomDeleted)
       socket.off('voice:kicked',             onKicked)
+      socket.off('voice:banned',             onBanned)  // FIX: cleanup added with handler above
       // voice:host_changed was never emitted — removed; ownership handled by voice:admin_transferred above
       socket.off('voice:speaker_slot_freed', onSlotFreed)
       socket.off('voice:mic_offer',          onMicOffer)
@@ -640,6 +755,8 @@ export function useVoiceRoom(roomId: string | null) {
       socket.off('voice:removed_from_room',  onRemovedFromRoom)
       socket.off('voice:blocked_from_room')
       socket.off('voice:mic_grabbed',        onMicGrabbed)
+      socket.off('voice:moved_to_audience',  onMovedToAudience)
+      socket.off('voice:stage_state',        onStageState)
       socket.off('voice:queue_updated',      onQueueUpdated)
       socket.off('voice:queue_rejected',     onQueueRejected)
       socket.off('voice:promoted_to_speaker',onPromotedToSpeaker)
@@ -693,11 +810,13 @@ export function useVoiceRoom(roomId: string | null) {
   const toggleMute = useCallback(async () => {
     if (!roomId || !myParticipant) return
     const newMuted = !myParticipant.isMuted
+    // Optimistic update — flip isMuted immediately so UI responds without waiting for socket
+    useVoiceStore.getState().updateParticipant(myParticipant.userId, { isMuted: newMuted })
     try {
       await api.patch(`/voice/${roomId}/mute`, { isMuted: newMuted })
-      // Optimistically update local store so UI reflects immediately
-      useVoiceStore.getState().updateParticipant(myParticipant.userId, { isMuted: newMuted })
     } catch {
+      // Rollback on error
+      useVoiceStore.getState().updateParticipant(myParticipant.userId, { isMuted: myParticipant.isMuted })
       toast({ title: 'Failed to toggle mute', variant: 'destructive' })
     }
   }, [roomId, myParticipant?.userId, myParticipant?.isMuted]) // eslint-disable-line
@@ -732,6 +851,18 @@ export function useVoiceRoom(roomId: string | null) {
       await api.patch(`/voice/${roomId}/promote`, { targetUserId, role })
     } catch (e: any) {
       toast({ title: e?.response?.data?.message || 'Failed to update role', variant: 'destructive' })
+    }
+  }, [roomId]) // eslint-disable-line
+
+  // Approve a queued participant (from the Hands queue) via the dedicated queue approve endpoint.
+  // This handles BOTH normal users (AUDIENCE→SPEAKER) AND moderators (MODERATOR→unmuted with seat).
+  // The PATCH /promote endpoint only handles AUDIENCE→SPEAKER and would reject MODERATOR targets.
+  const approveQueueUser = useCallback(async (targetUserId: string) => {
+    if (!roomId) return
+    try {
+      await api.post(`/voice/${roomId}/queue/approve/${targetUserId}`)
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to approve speaker', variant: 'destructive' })
     }
   }, [roomId]) // eslint-disable-line
 
@@ -949,13 +1080,32 @@ export function useVoiceRoom(roomId: string | null) {
     }
     try {
       const res = await api.post(`/voice/${roomId}/grab-mic`)
-      const { queued, position, role } = res.data.data ?? {}
+      const { queued, position, role, seatNumber, isMuted } = res.data.data ?? {}
       if (queued) {
+        // Queued because open-mic is off or stage is full
+        const activeRoom = useVoiceStore.getState().activeRoom
+        const reason = activeRoom?.isOpenMic === false
+          ? 'Raise Hand is on — the host will approve you when ready.'
+          : 'You\'ll be promoted automatically when a slot opens.'
         toast({
-          title: `✋ Stage full — you're #${position} in the queue`,
-          description: 'You\'ll be promoted automatically when a slot opens.'
+          title: `✋ You're #${position ?? '?'} in the queue`,
+          description: reason,
         })
       } else {
+        // Optimistic update — apply role + seatNumber immediately from the API
+        // response so the seat grid renders without waiting for socket round-trip.
+        // The subsequent voice:mic_grabbed / voice:role_changed / voice:stage_state
+        // events will reconcile any discrepancy.
+        const myUserId = require('@/store/auth.store').useAuthStore.getState().user?.id
+        if (myUserId && seatNumber != null) {
+          useVoiceStore.getState().updateParticipant(myUserId, {
+            role:        asRole(role ?? 'SPEAKER'),
+            isMuted:     false,
+            seatNumber:  Number(seatNumber),
+            handRaised:  false,
+            handRaisedAt: null,
+          })
+        }
         toast({ title: '🎙️ You\'re on stage!', description: 'Your mic is now active.' })
       }
     } catch (e: any) {
@@ -963,16 +1113,35 @@ export function useVoiceRoom(roomId: string | null) {
     }
   }, [roomId]) // eslint-disable-line
 
-  // Drop mic — demote self from SPEAKER back to AUDIENCE (stays in room)
+  // Drop mic — HOST/MOD go to audience (keep role, just muted); SPEAKER → AUDIENCE
   const dropMic = useCallback(async () => {
-    if (!roomId) return
+    if (!roomId || !myParticipant) return
     try {
+      // Optimistic update — immediately reflect the change in the UI
+      // HOST/MOD: set isMuted=true (they stay HOST/MOD but move to audience section)
+      // SPEAKER: set role=AUDIENCE, isMuted=true
+      const isHostOrMod = myParticipant.role === VOICE_ROLES.HOST || myParticipant.role === VOICE_ROLES.MODERATOR
+      if (isHostOrMod) {
+        useVoiceStore.getState().updateParticipant(myParticipant.userId, { isMuted: true })
+      } else {
+        useVoiceStore.getState().updateParticipant(myParticipant.userId, {
+          role: VOICE_ROLES.AUDIENCE,
+          isMuted: true,
+        })
+      }
       await api.post(`/voice/${roomId}/drop-mic`)
-      toast({ title: '🎙️ Mic dropped', description: 'You are now in the audience.' })
+      toast({ title: '⬇️ Mic ended', description: 'You are now in the audience.' })
     } catch (e: any) {
-      toast({ title: e?.response?.data?.message || 'Failed to drop mic', variant: 'destructive' })
+      // Rollback optimistic update on error
+      if (myParticipant) {
+        useVoiceStore.getState().updateParticipant(myParticipant.userId, {
+          role: myParticipant.role,
+          isMuted: myParticipant.isMuted,
+        })
+      }
+      toast({ title: e?.response?.data?.message || 'Failed to end mic', variant: 'destructive' })
     }
-  }, [roomId]) // eslint-disable-line
+  }, [roomId, myParticipant]) // eslint-disable-line
 
   // ── Send gift ────────────────────────────────────────────────────────────────
   const sendGift = useCallback(async (
@@ -1042,6 +1211,8 @@ export function useVoiceRoom(roomId: string | null) {
     sendGift, sendGiftToAll,
     // Moderator controls (HOST + MODERATOR)
     promoteUser, kickUser, banUser, unbanUser, muteUser, muteAll, unmuteAll,
+    // Queue approve — use this for Hands queue approvals (handles MODERATOR targets correctly)
+    approveQueueUser,
     // Host-only controls
     assignModerator, removeModerator, transferAdmin, endRoom,
     // Host + Mod controls

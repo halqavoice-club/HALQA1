@@ -1,15 +1,15 @@
-/**
+﻿/**
  * HALQA Mobile — Forgot Password Flow
  *
  * Step 1: Enter email → backend sends 6-digit OTP
  * Step 2: Enter OTP + new password → backend resets password
  * Step 3: Redirect to login with success message
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  ActivityIndicator, KeyboardAvoidingView, Platform, ScrollView
-} from 'react-native';
+  ActivityIndicator, Platform, ScrollView} from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { showMessage } from 'react-native-flash-message';
@@ -248,3 +248,7 @@ const styles = StyleSheet.create({
   doneTitle:    { fontSize: 26, fontWeight: '900', color: '#111827', marginBottom: 8 },
   doneSub:      { fontSize: 15, color: '#6b7280', textAlign: 'center', lineHeight: 22 },
 });
+
+
+
+

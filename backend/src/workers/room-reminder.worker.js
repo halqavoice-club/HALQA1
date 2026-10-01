@@ -41,7 +41,7 @@ function createRoomReminderWorker(connection) {
 
     // Fetch followers of the host
     const followers = await prisma.follow.findMany({
-      where:   { followingId: hostId, isActive: true },
+      where:   { followingId: hostId },
       select:  { followerId: true },
       take:    BATCH_SIZE,
     });

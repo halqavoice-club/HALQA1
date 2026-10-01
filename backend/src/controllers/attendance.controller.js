@@ -14,9 +14,12 @@ async function markAttendance(req, res, next) {
     attendanceDate.setUTCHours(0, 0, 0, 0);
 
     // Resolve the Teacher record for the authenticated user (if they are a TEACHER)
+    // Use school membership role (effectiveRole) — NOT req.user.role — so MEMBER users
+    // with a TEACHER school membership are correctly identified.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
     let teacherId = null;
-    if (req.user.role === 'TEACHER') {
-      const teacher = await prisma.teacher.findUnique({ where: { userId: req.user.id }, select: { id: true } });
+    if (effectiveRole === 'TEACHER' || effectiveRole === 'SCHOOL_ADMIN') {
+      const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id, deletedAt: null }, select: { id: true } });
       teacherId = teacher?.id ?? null;
     }
 
@@ -348,7 +351,7 @@ async function qrCheckIn(req, res, next) {
 async function getClassAttendance(req, res, next) {
   try {
     const { classId } = req.params;
-    const { date, startDate, endDate, status } = req.query;
+    const { date, startDate, endDate, month, status } = req.query;
 
     // M-2 FIX: Verify classId belongs to the caller's school.
     const schoolId = req.schoolId || req.user.schoolId;
@@ -367,6 +370,9 @@ async function getClassAttendance(req, res, next) {
       const d = new Date(date);
       d.setUTCHours(0, 0, 0, 0);
       where.date = d;
+    } else if (month) {
+      const [y, m] = month.split('-').map(Number);
+      where.date = { gte: new Date(y, m - 1, 1), lt: new Date(y, m, 1) };
     } else if (startDate && endDate) {
       where.date = {
         gte: new Date(startDate),
@@ -397,7 +403,7 @@ async function getClassAttendance(req, res, next) {
 async function getStudentAttendance(req, res, next) {
   try {
     const { studentId } = req.params;
-    const { classId, startDate, endDate, page = 1, limit = 30 } = req.query;
+    const { classId, startDate, endDate, month, page = 1, limit = 30 } = req.query;
     const { skip, ...pagination } = getPagination(page, limit);
 
     // H-4 FIX: Students can only view their own attendance records.
@@ -424,7 +430,14 @@ async function getStudentAttendance(req, res, next) {
 
     const where = { studentId };
     if (classId) where.classId = classId;
-    if (startDate && endDate) {
+    if (month) {
+      // month = 'YYYY-MM' — filter to that calendar month
+      const [y, m] = month.split('-').map(Number);
+      where.date = {
+        gte: new Date(y, m - 1, 1),
+        lt:  new Date(y, m, 1),
+      };
+    } else if (startDate && endDate) {
       where.date = { gte: new Date(startDate), lte: new Date(endDate) };
     }
 
@@ -587,7 +600,8 @@ async function getAttendanceReport(req, res, next) {
     const schoolId = (req.schoolId || req.user.schoolId);
 
     const where = {};
-    if (schoolId && req.user.role !== 'SUPER_ADMIN') where.schoolId = schoolId;
+    const effectiveRoleReport2 = req.schoolMembership?.role || req.user.role;
+    if (schoolId && effectiveRoleReport2 !== 'SUPER_ADMIN') where.schoolId = schoolId;
     if (classId) where.classId = classId;
     if (studentId) where.studentId = studentId;
     if (status) where.status = status;

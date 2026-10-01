@@ -34,8 +34,12 @@ import {
   AvatarReactionBubble,
   MIC_EMOJIS,
 } from './MicEmojiReaction'
+import { VoiceShareSheet } from './VoiceShareSheet'
+import { VoiceRoomPKPanel } from './VoiceRoomPKPanel'
+import { VoiceRoomPKBanner } from './VoiceRoomPKBanner'
+import { PKChallengeIncoming } from './PKChallengeIncoming'
 
-const MAX_SPEAKERS = 10
+const MAX_SPEAKERS = 12
 const REACTIONS = ['❤️', '😂', '😮', '👏', '🔥', '🌹', '✅', '🎉']
 
 // ─── Role badge config ────────────────────────────────────────────────────────
@@ -52,7 +56,7 @@ interface Props {
 
 // ─── Avatar circle (shared) ───────────────────────────────────────────────────
 function AvatarCircle({
-  avatarUrl, firstName, lastName, size = 64,
+  avatarUrl, firstName, lastName, size = 72,
   isSpeaking = false, isMuted = false,
   role = 'AUDIENCE', handRaised = false, badge, onClick,
 }: {
@@ -104,22 +108,21 @@ function EmptySlot({
 }: {
   index: number
   micLocked: boolean
-  seatLocked: boolean      // individually locked by host (this specific seat)
+  seatLocked: boolean
   amModerating: boolean
   onLockToggle?: (index: number) => void
 }) {
   const isLocked = micLocked || seatLocked
 
   const handleClick = () => {
-    // Only HOST/MOD can tap to lock/unlock individual seats
-    if (!amModerating || micLocked) return  // micLocked applies to all — no per-seat toggle
+    if (!amModerating || micLocked) return
     onLockToggle?.(index)
   }
 
   return (
     <div
       className="vc-avatar-wrap"
-      style={{ '--sz': '64px', cursor: amModerating && !micLocked ? 'pointer' : 'default' } as React.CSSProperties}
+      style={{ '--sz': '72px', cursor: amModerating && !micLocked ? 'pointer' : 'default' } as React.CSSProperties}
       onClick={handleClick}
       title={
         micLocked ? 'Mic locked (all seats)' :
@@ -127,19 +130,28 @@ function EmptySlot({
         amModerating ? 'Tap to lock this seat' : ''
       }
     >
-      <div className={isLocked ? 'vc-avatar-img locked' : 'vc-avatar-img open'}
+      <div
+        className={isLocked ? 'vc-avatar-img locked' : 'vc-avatar-img open'}
         style={seatLocked && !micLocked ? { outline: '2px solid #f59e0b', outlineOffset: 2 } : undefined}
       >
-        <span className="vc-lock-icon">
-          {seatLocked ? '🔒' : micLocked ? '🔒' : amModerating ? '🎤' : '🎤'}
-        </span>
-        {/* Host sees a subtle lock hint on unlocked seats */}
-        {amModerating && !isLocked && (
-          <span style={{
-            position: 'absolute', bottom: 2, right: 2, fontSize: 9,
-            background: 'rgba(0,0,0,0.4)', color: '#fff',
-            borderRadius: 4, padding: '0 3px', lineHeight: '14px',
-          }}>lock</span>
+        {isLocked ? (
+          <span className="vc-lock-icon">🔒</span>
+        ) : (
+          /* Target design: microphone SVG icon centered in slot */
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        )}
+
+        {/* "● Open" label inside the circle */}
+        {!isLocked && (
+          <span className="vc-open-label">
+            <span className="vc-open-dot" />
+            Open
+          </span>
         )}
       </div>
       <span className="vc-slot-num">{index}</span>
@@ -198,7 +210,7 @@ function SpeakerTile({
         avatarUrl={participant.user.avatarUrl}
         firstName={participant.user.firstName}
         lastName={participant.user.lastName}
-        size={64}
+        size={72}
         isSpeaking={isSpeaking}
         isMuted={participant.isMuted}
         role={participant.role}
@@ -323,6 +335,7 @@ export function VoiceRoomView({ onLeave }: Props) {
     isChatOpen, toggleChat, isHandQueueOpen, toggleHandQueue,
     speakerQueue, isWaitingListOpen, toggleWaitingList,
     wallet, isGiftPanelOpen, toggleGiftPanel,
+    registerLiveKitDisconnect, clearLiveKitDisconnect,
   } = useVoiceStore()
 
   const roomId = activeRoom?.id ?? null
@@ -352,6 +365,7 @@ export function VoiceRoomView({ onLeave }: Props) {
     toggleMicLock,
     toggleSeatLock,
     pinSpeaker,
+    approveQueueUser,
   } = useVoiceRoom(roomId)
 
   const {
@@ -364,6 +378,13 @@ export function VoiceRoomView({ onLeave }: Props) {
     enableMic,
     disableMic,
   } = useLiveKit(roomId)
+
+  // Register the LiveKit disconnect fn in the store so the join page for a
+  // different room can fully tear down this session before switching.
+  useEffect(() => {
+    registerLiveKitDisconnect(disconnect)
+    return () => clearLiveKitDisconnect()
+  }, [disconnect, registerLiveKitDisconnect, clearLiveKitDisconnect]) // eslint-disable-line
 
   const [volume, setVolume] = useState(100)
 
@@ -396,6 +417,38 @@ export function VoiceRoomView({ onLeave }: Props) {
   const dotMenuRef = useRef<HTMLDivElement>(null)
   const [participantSearch, setParticipantSearch] = useState('')
   const [profileSheet, setProfileSheet] = useState<SheetParticipant | null>(null)
+
+  // ── PK integration ────────────────────────────────────────────────────────
+  const [showPKPanel,  setShowPKPanel]  = useState(false)
+  const [activePKMatchId,  setActivePKMatchId]  = useState<string | null>(null)
+  const [activePKParticipants, setActivePKParticipants] = useState<
+    Array<{ userId: string; firstName: string; lastName: string; avatarUrl: string | null; side: 'A' | 'B' }>
+  >([])
+  const [activePKDuration, setActivePKDuration] = useState(300)
+
+  // Check for active PK in this room when joining (handles page refresh / reconnect)
+  useEffect(() => {
+    if (!roomId) return
+    api.get(`/pk/active-by-room?roomId=${roomId}`).then(r => {
+      const items = r.data?.data
+      const active = Array.isArray(items) ? items[0] : null
+      if (active?.id) {
+        setActivePKMatchId(active.id)
+        setActivePKDuration(active.durationSeconds ?? 300)
+        if (Array.isArray(active.participants)) {
+          setActivePKParticipants(
+            active.participants.map((p: any) => ({
+              userId:    p.userId,
+              firstName: p.user?.firstName ?? '',
+              lastName:  p.user?.lastName ?? '',
+              avatarUrl: p.user?.avatarUrl ?? null,
+              side:      p.side,
+            }))
+          )
+        }
+      }
+    }).catch(() => {})
+  }, [roomId]) // eslint-disable-line
   const chatEndRef = useRef<HTMLDivElement>(null)
 
   // ── Room membership (permanent member status) ─────────────────────────────
@@ -535,18 +588,75 @@ export function VoiceRoomView({ onLeave }: Props) {
     }
   }, [roomId, queryClient]) // eslint-disable-line
 
-  // When role changes to a speaking role → enable mic via Socket.IO signal.
-  // No reconnect, no new token — the LiveKit connection stays alive.
+  // ── PK in-room socket events ───────────────────────────────────────────────
+  // IMPORTANT: activePKMatchId must NOT be in the dependency array.
+  // If it were, the effect would re-register the listener every time a PK starts,
+  // causing the pk:room:started event to be missed (listener torn down mid-event).
+  // Use a ref to track the current activePKMatchId for the ended handler.
+  const activePKMatchIdRef = useRef<string | null>(null)
+  useEffect(() => { activePKMatchIdRef.current = activePKMatchId }, [activePKMatchId])
+
   useEffect(() => {
-    const role = myParticipant?.role
-    if (!roomId || !role) return
-    const isSpeaker = role === VOICE_ROLES.HOST || role === VOICE_ROLES.MODERATOR || role === VOICE_ROLES.SPEAKER
-    if (isSpeaker) {
+    if (!roomId) return
+    const socket = getSocket()
+    if (!socket) return
+
+    const onPKRoomStarted = (d: {
+      pkMatchId: string
+      durationSeconds: number
+      participants: Array<{ userId: string; side: 'A' | 'B'; user: { firstName: string; lastName: string; avatarUrl: string | null } }>
+    }) => {
+      // Dev log — remove before production
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[PK HEADER] pk:room:started received', { pkMatchId: d.pkMatchId, roomId })
+      }
+      setActivePKMatchId(d.pkMatchId)
+      setActivePKDuration(d.durationSeconds)
+      setActivePKParticipants(
+        d.participants.map(p => ({
+          userId:    p.userId,
+          firstName: p.user.firstName,
+          lastName:  p.user.lastName,
+          avatarUrl: p.user.avatarUrl,
+          side:      p.side,
+        }))
+      )
+    }
+
+    const onPKRoomEnded = (d: { pkMatchId: string }) => {
+      // Use ref so this closure always sees the latest value
+      if (d.pkMatchId === activePKMatchIdRef.current) {
+        setTimeout(() => setActivePKMatchId(null), 6500)
+      }
+    }
+
+    socket.on('pk:room:started', onPKRoomStarted)
+    socket.on('pk:room:ended',   onPKRoomEnded)
+
+    return () => {
+      socket.off('pk:room:started', onPKRoomStarted)
+      socket.off('pk:room:ended',   onPKRoomEnded)
+    }
+  }, [roomId]) // ← roomId only — activePKMatchId deliberately excluded
+
+  // Sync LiveKit mic with stage presence.
+  // HOST/MOD: on stage = unmuted (enableMic). Dropped to audience = muted (disableMic).
+  // SPEAKER: always enabled when role=SPEAKER.
+  // "Turn Off Mic" in the popup calls toggleMute() which sets isMuted=true in DB,
+  // which triggers this effect to disableMic(). HOST stays in stage grid if they
+  // want to stay on stage — they should use "Mute" (local only) for that.
+  // "End Mic" calls dropMic() which also sets isMuted=true → host moves to audience.
+  // The distinction is that "End Mic" is the intended "leave stage" action.
+  useEffect(() => {
+    if (!roomId || !myParticipant) return
+    const onStage = myParticipant.role === VOICE_ROLES.SPEAKER ||
+      ((myParticipant.role === VOICE_ROLES.HOST || myParticipant.role === VOICE_ROLES.MODERATOR) && !myParticipant.isMuted)
+    if (onStage) {
       enableMic().catch(() => {})
     } else {
       disableMic().catch(() => {})
     }
-  }, [myParticipant?.role]) // eslint-disable-line
+  }, [myParticipant?.role, myParticipant?.isMuted]) // eslint-disable-line
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -555,24 +665,56 @@ export function VoiceRoomView({ onLeave }: Props) {
   if (!activeRoom) return null
 
   const participants = activeRoom.participants.filter(p => p.isActive)
-  const speakers = participants.filter(p => p.role === 'HOST' || p.role === 'MODERATOR' || p.role === 'SPEAKER')
-  const audience = participants.filter(p => p.role === 'AUDIENCE')
+
+  // SEAT SYNC FIX: Sort participants with the same deterministic order as the backend
+  // (Prisma orderBy: [role asc, joinedAt asc]) so both clients compute identical
+  // visual slot positions regardless of socket event arrival order.
+  const ROLE_ORDER: Record<string, number> = { HOST: 0, MODERATOR: 1, SPEAKER: 2, AUDIENCE: 3 }
+  const sortedParticipants = [...participants].sort((a, b) => {
+    const roleDiff = (ROLE_ORDER[a.role] ?? 9) - (ROLE_ORDER[b.role] ?? 9)
+    if (roleDiff !== 0) return roleDiff
+    return (a.joinedAt ?? '').localeCompare(b.joinedAt ?? '')
+  })
+
+  // Speakers grid: HOST/MOD on stage = unmuted. SPEAKER always on stage.
+  // isMuted=true for HOST/MOD means they are in the audience section.
+  // ── STAGE / AUDIENCE SPLIT ───────────────────────────────────────────────
+  // On stage = has a seatNumber (authoritative from backend).
+  // In audience = active but no seatNumber.
+  const speakers = participants.filter(p => p.isActive && p.seatNumber != null)
+  const audience = sortedParticipants.filter(p =>
+    p.isActive && p.seatNumber == null
+  )
   const filteredAudience = participantSearch
     ? audience.filter(p =>
         `${p.user.firstName} ${p.user.lastName}`.toLowerCase().includes(participantSearch.toLowerCase())
       )
     : audience
-  const handQueue = audience
-    .filter(p => p.handRaised)
+  // Hand queue: participants waiting to speak (handRaised=true, not yet on stage)
+  const handQueue = participants
+    .filter(p => p.handRaised && p.seatNumber == null)
     .sort((a, b) => (a.handRaisedAt ?? '').localeCompare(b.handRaisedAt ?? ''))
 
   const isHost = myParticipant?.role === VOICE_ROLES.HOST || activeRoom.hostId === user?.id
   const amModerating = canModerate(myParticipant?.role) || activeRoom.hostId === user?.id
-  const iCanSpeak = canSpeak(myParticipant?.role)
+  const amHostOrMod = myParticipant?.role === VOICE_ROLES.HOST || myParticipant?.role === VOICE_ROLES.MODERATOR
+  const iCanSpeak = myParticipant?.seatNumber != null  // on stage = has a seat
+  const amOnStage = myParticipant?.seatNumber != null
   const myRole = myParticipant?.role || (activeRoom.hostId === user?.id ? VOICE_ROLES.HOST : VOICE_ROLES.AUDIENCE)
   const speakerCount = speakers.length
   const speakerLimitReached = speakerCount >= (activeRoom?.maxSpeakers ?? MAX_SPEAKERS)
-  const speakerSlots = Array.from({ length: MAX_SPEAKERS }, (_, i) => speakers[i] ?? null)
+  const maxSlots = activeRoom?.maxSpeakers ?? MAX_SPEAKERS
+
+  // ── AUTHORITATIVE SEAT LAYOUT ────────────────────────────────────────────
+  // Seats are rendered directly from participant.seatNumber (1–12).
+  // No client-side ordering algorithm — the backend is the single source of truth.
+  const speakerSlots: Array<typeof participants[number] | null> = Array.from(
+    { length: maxSlots },
+    (_, i) => {
+      const seatNum = i + 1 // index 0 = Seat 1, index 11 = Seat 12
+      return participants.find(p => p.isActive && p.seatNumber === seatNum) ?? null
+    }
+  )
   const isSpeaking = (uid: string) => activeSpeakers.has(uid) || !!speakingUsers[uid]
 
   const handleLeave = async () => {
@@ -595,13 +737,18 @@ export function VoiceRoomView({ onLeave }: Props) {
     setSendingMsg(false)
   }
 
-  const handlePromote = (uid: string) => {
-    if (!speakerLimitReached) promoteUser(uid, 'SPEAKER')
-  }
+          const handlePromote = (uid: string) => {
+            // Use the queue approve endpoint — correctly handles both AUDIENCE→SPEAKER
+            // AND MODERATOR→unmuted-on-stage (PATCH /promote rejects MODERATOR targets).
+            approveQueueUser(uid)
+          }
 
   const handleReaction = (emoji: string) => {
     broadcastReaction(emoji)
     setShowEmojis(false)
+    // Show locally immediately — backend uses socket.to() which excludes the sender,
+    // so the sender would never see their own reaction without this.
+    useVoiceStore.getState().addReaction({ userId: user?.id ?? '', emoji, id: Date.now() + Math.random() })
   }
 
   return (
@@ -609,6 +756,34 @@ export function VoiceRoomView({ onLeave }: Props) {
 
       {/* Mic pass offer modal (shown to receiver) */}
       {roomId && <MicPassModal roomId={roomId} />}
+
+      {/* PK Panel — bottom sheet to challenge a speaker or enter matchmaking */}
+      {roomId && user && (
+        <VoiceRoomPKPanel
+          open={showPKPanel}
+          onClose={() => setShowPKPanel(false)}
+          roomId={roomId}
+          speakers={speakers}
+          myUserId={user.id}
+        />
+      )}
+
+      {/* PK live score banner — shown when a PK is active in this room */}
+      <AnimatePresence>
+        {activePKMatchId && (
+          <VoiceRoomPKBanner
+            pkMatchId={activePKMatchId}
+            participants={activePKParticipants}
+            durationSeconds={activePKDuration}
+            onDismiss={() => setActivePKMatchId(null)}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* PK challenge incoming — shown to the challenged speaker inside the room */}
+      {user && (
+        <PKChallengeIncoming myUserId={user.id} />
+      )}
 
       {/* User profile sheet — shown when any avatar is tapped */}
       <UserProfileSheet
@@ -738,24 +913,26 @@ export function VoiceRoomView({ onLeave }: Props) {
             // Each emoji gets a unique random path so they don't stack
             const startX  = Math.random() * 60 - 10   // 0 → 50px from right edge
             const driftX  = Math.random() * 50 - 25   // drift left or right while rising
-            const size    = 26 + Math.random() * 16   // 26–42px
-            const dur     = 2.2 + Math.random() * 1.2 // 2.2–3.4s
-            const rot     = Math.random() * 30 - 15   // slight tilt
+            const size    = 28 + Math.random() * 10   // 28–38px — consistent, not too wild
+            const dur     = 2.4 + Math.random() * 0.8 // 2.4–3.2s
+            const rot     = Math.random() * 16 - 8    // ±8° subtle natural tilt
             return (
               <motion.div
                 key={r.id}
                 className="vc-float-emoji"
                 style={{ fontSize: size, right: startX }}
-                initial={{ opacity: 0, y: 0, x: 0, scale: 0.3, rotate: 0 }}
+                initial={{ opacity: 0, y: 0, x: 0, scale: 0.6, rotate: 0 }}
                 animate={{
-                  opacity: [0, 1, 1, 1, 0],
-                  y:       [0, -60, -120, -180, -240],
-                  x:       [0, driftX * 0.3, driftX * 0.7, driftX, driftX * 1.1],
-                  scale:   [0.3, 1.2, 1.0, 0.95, 0.7],
-                  rotate:  [0, rot * 0.5, rot, rot * 0.7, rot * 0.3],
+                  // Phase 8: improved pop-settle — starts at 0.6, overshoots to 1.1,
+                  // settles to 1.0, then gently shrinks while fading at the end.
+                  opacity: [0, 1, 1, 1, 0.6, 0],
+                  y:       [0, -30, -90, -160, -200, -240],
+                  x:       [0, driftX * 0.2, driftX * 0.5, driftX * 0.8, driftX, driftX * 1.05],
+                  scale:   [0.6, 1.1, 1.0, 0.95, 0.9, 0.75],
+                  rotate:  [0, rot * 0.4, rot, rot * 0.8, rot * 0.5, rot * 0.2],
                 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: dur, ease: 'easeOut', times: [0, 0.15, 0.4, 0.75, 1] }}
+                exit={{ opacity: 0, scale: 0.5, transition: { duration: 0.15 } }}
+                transition={{ duration: dur, ease: [0.25, 0.46, 0.45, 0.94], times: [0, 0.1, 0.3, 0.6, 0.82, 1] }}
               >
                 {r.emoji}
               </motion.div>
@@ -828,11 +1005,14 @@ export function VoiceRoomView({ onLeave }: Props) {
           )}
           <div className="vc-header-text">
             <h2 className="vc-title">{activeRoom.title}</h2>
-            {activeRoom.topic && <p className="vc-topic">{activeRoom.topic}</p>}
+            {/* "● Live Room" subtitle — matches target design */}
+            <div className="vc-live-subtitle">
+              <span className="vc-live-subtitle-dot" />
+              {activeRoom.status === 'LIVE' ? 'Live Room' : activeRoom.status === 'IDLE' ? 'Idle' : activeRoom.status}
+            </div>
           </div>
         </div>
         <div className="vc-header-right">
-          <span className="vc-member-count">👥 {participants.length}</span>
           {isDisconnected && !micError && (
             <button className="vc-reconnect-btn" onClick={() => connect()} title="Reconnect audio">🔄</button>
           )}
@@ -842,27 +1022,21 @@ export function VoiceRoomView({ onLeave }: Props) {
             isReconnecting ? 'connecting'  :
             isConnecting   ? 'connecting'  : 'off'
           )} />
-          {/* Auto-member badge — shown when member record exists */}
+          {/* Member badge */}
           {isMember && !isBanned && (
             <span
               title={`Member${memberLevelMeta ? ' · ' + memberLevelMeta.label : ''}`}
-              style={{ padding: '3px 7px', borderRadius: 14, border: '1px solid #22c55e',
-                background: '#f0fdf4', fontSize: 10, fontWeight: 700, color: '#22c55e',
-                flexShrink: 0, whiteSpace: 'nowrap',
+              style={{ padding: '3px 10px', borderRadius: 20, border: '1.5px solid #22c55e',
+                background: '#f0fdf4', fontSize: 11, fontWeight: 700, color: '#22c55e',
+                flexShrink: 0, whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 3,
               }}
             >
-              {memberLevelMeta?.emoji ?? '⭐'} Member
-            </span>
-          )}
-          {/* Room full indicator (only shown when capacity reached and not a member) */}
-          {!isMember && displayCount >= displayMaxCount && (
-            <span style={{ padding: '3px 7px', borderRadius: 14, fontSize: 9, fontWeight: 700,
-              color: '#94a3b8', background: '#f1f5f9', flexShrink: 0 }}>
-              🔒 Full
+              {memberLevelMeta?.emoji ?? '⭐'} {memberLevelMeta?.label ?? 'Member'}
             </span>
           )}
           {/* Room level badge */}
-          <span style={{ fontSize: 9, fontWeight: 800, padding: '2px 5px', borderRadius: 8, background: '#ede9fe', color: '#7c3aed', flexShrink: 0 }}>
+          <span style={{ fontSize: 11, fontWeight: 800, padding: '3px 10px', borderRadius: 20,
+            background: '#f5f3ff', color: '#5b21b6', border: '1px solid #ddd6fe', flexShrink: 0 }}>
             Lv{activeRoom.roomLevel ?? 1}
           </span>
           <button className="vc-settings-btn" onClick={() => setShowDotMenu(v => !v)} title="Room options">⋮</button>
@@ -917,8 +1091,12 @@ export function VoiceRoomView({ onLeave }: Props) {
                   >
                     <span style={{ fontSize: 18, width: 24, textAlign: 'center' }}>🎙️</span>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: '#1e293b' }}>Open Mic</div>
-                      <div style={{ fontSize: 11, color: '#94a3b8' }}>{activeRoom.isOpenMic ? 'ON — tap to turn off' : 'OFF — tap to turn on'}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: '#1e293b' }}>Free Stage</div>
+                      <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                        {activeRoom.isOpenMic
+                          ? 'ON — anyone can take a seat freely'
+                          : 'OFF — approval required to join stage'}
+                      </div>
                     </div>
                     <span style={{
                       fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
@@ -1045,23 +1223,28 @@ export function VoiceRoomView({ onLeave }: Props) {
 
       {/* Stage bar */}
       <div className="vc-stage-bar">
-        <span className="vc-stage-label">🎙️ On Stage</span>
+        {/* "🎙️ ON STAGE 12" */}
+        <div className="vc-stage-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          </svg>
+          ON STAGE
+          <span className="vc-stage-label-count">{speakerCount}</span>
+        </div>
         <div className="vc-stage-bar-right">
-          {/* Room level badge */}
-          <span style={{
-            fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 10,
-            background: 'linear-gradient(135deg, #7c3aed22, #db277722)',
-            color: '#7c3aed', border: '1px solid #7c3aed33',
-          }}>
-            Lv{activeRoom.roomLevel ?? 1} · {((ROOM_LEVEL_CAPACITY[activeRoom.roomLevel ?? 1]) ?? 500).toLocaleString()} members
+          {/* 👑 Lv1 · 500 members */}
+          <span className="vc-level-members-pill">
+            👑 Lv{activeRoom.roomLevel ?? 1} · {((ROOM_LEVEL_CAPACITY[activeRoom.roomLevel ?? 1]) ?? 500).toLocaleString()} members
           </span>
-          <span className={cn('vc-stage-count', speakerLimitReached && 'full')}>
-            {speakerCount} / {MAX_SPEAKERS}{speakerLimitReached && ' · Full'}
+          {/* 👥 1 / 10 */}
+          <span className={cn('vc-participants-pill', speakerLimitReached && 'full')}>
+            👥 {speakerCount} / {activeRoom?.maxSpeakers ?? MAX_SPEAKERS}
           </span>
         </div>
       </div>
 
-      {/* Speakers grid 5x2 */}
+      {/* Speakers grid 4×N */}
       <div className="vc-speakers-grid">
         {speakerSlots.map((p, i) =>
           p ? (
@@ -1091,7 +1274,6 @@ export function VoiceRoomView({ onLeave }: Props) {
               amModerating={amModerating}
               onLockToggle={(seatIdx) => {
                 const isSeatLocked = (activeRoom.lockedSeats ?? []).includes(i)
-                // Confirm before locking/unlocking
                 const action = isSeatLocked ? 'unlock' : 'lock'
                 if (window.confirm(`${isSeatLocked ? '🔓 Unlock' : '🔒 Lock'} Seat ${seatIdx}?\n\n${isSeatLocked ? 'This seat can be occupied again.' : 'Nobody can take this seat until you unlock it.'}`)) {
                   toggleSeatLock(i)
@@ -1104,7 +1286,13 @@ export function VoiceRoomView({ onLeave }: Props) {
 
       {/* Audience header */}
       <div className="vc-audience-header">
-        <span className="vc-audience-label">Audience · {audience.length}</span>
+        <span className="vc-audience-label">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }}>
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+          </svg>
+          AUDIENCE · {audience.length}
+        </span>
         <div className="vc-audience-header-right">
           {amModerating && handQueue.length > 0 && (
             <button className="vc-hand-badge" onClick={toggleHandQueue}>
@@ -1268,12 +1456,11 @@ export function VoiceRoomView({ onLeave }: Props) {
                           : <span>{p.user.firstName[0]}</span>}
                       </div>
                       <span className="vc-hand-name">{p.user.firstName} {p.user.lastName}</span>
-                      <button
-                        className={cn('vc-approve-btn', speakerLimitReached && 'disabled')}
+                    <button
+                        className="vc-approve-btn"
                         onClick={() => handlePromote(p.userId)}
-                        disabled={speakerLimitReached}
                       >
-                        {speakerLimitReached ? '🔒 Full' : '✅ Approve'}
+                        ✅ Approve
                       </button>
                     </div>
                   ))
@@ -1337,34 +1524,14 @@ export function VoiceRoomView({ onLeave }: Props) {
         )}
       </AnimatePresence>
 
-      {/* Invite modal */}
-      <AnimatePresence>
-        {showInvite && (
-          <motion.div className="vc-invite-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowInvite(false)}>
-            <motion.div className="vc-invite-card" initial={{ scale: 0.85, y: 40 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.85, y: 40 }} onClick={e => e.stopPropagation()}>
-              <h3 className="vc-invite-title">🎁 Invite to Room</h3>
-              <p className="vc-invite-desc">Share this link — anyone with it can join directly</p>
-              <div className="vc-invite-link">
-                <span style={{ fontSize: 11, color: '#6b7280', wordBreak: 'break-all' }}>
-                  {typeof window !== 'undefined'
-                    ? `${window.location.origin}/voice-club/${activeRoom.id}`
-                    : `/voice-club/${activeRoom.id}`}
-                </span>
-                <button
-                  onClick={() => {
-                    if (typeof window !== 'undefined') {
-                      navigator.clipboard.writeText(`${window.location.origin}/voice-club/${activeRoom.id}`)
-                    }
-                  }}
-                >
-                  📋 Copy
-                </button>
-              </div>
-              <button className="vc-invite-close" onClick={() => setShowInvite(false)}>Close</button>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {/* Invite / Share sheet */}
+      {showInvite && activeRoom && (
+        <VoiceShareSheet
+          roomId={activeRoom.id}
+          roomTitle={activeRoom.title}
+          onClose={() => setShowInvite(false)}
+        />
+      )}
 
       {/* ── Mic Context Popup Menu — rendered OUTSIDE bottom bar to escape overflow:hidden ── */}
       <AnimatePresence>
@@ -1407,11 +1574,17 @@ export function VoiceRoomView({ onLeave }: Props) {
 
               <div className="mic-menu-divider" />
 
-              {/* Turn Off Mic */}
+              {/* Turn On / Turn Off Mic — LOCAL ONLY — stays on stage */}
               <button className="mic-menu-item" onClick={async () => {
                 setShowMicMenu(false)
-                await toggleMic().catch(() => {})
-                await toggleMute().catch(() => {})
+                // LOCAL mic toggle only — does NOT call backend, does NOT move HOST to audience.
+                // HOST remains visible in the speakers grid with muted badge.
+                // Use "End Mic" (below) to actually leave the stage.
+                if (isMicEnabled) {
+                  await disableMic().catch(() => {})
+                } else {
+                  await enableMic().catch(() => {})
+                }
               }}>
                 <span className="mic-menu-icon">
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -1456,7 +1629,7 @@ export function VoiceRoomView({ onLeave }: Props) {
 
               <div className="mic-menu-divider" />
 
-              {/* End Mic — danger red */}
+              {/* End Mic — drops stage / moves to audience */}
               <button className="mic-menu-item mic-menu-item--danger" onClick={() => { setShowMicMenu(false); dropMic() }}>
                 <span className="mic-menu-icon">
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
@@ -1484,7 +1657,6 @@ export function VoiceRoomView({ onLeave }: Props) {
         background: 'inherit',
       }}>
 
-        {/* Shared style for all bar buttons */}
         {/* Mic control — context-aware per role */}
         {iCanSpeak ? (
           myParticipant?.role === VOICE_ROLES.SPEAKER ? (
@@ -1499,34 +1671,46 @@ export function VoiceRoomView({ onLeave }: Props) {
               <span className="vc-bar-label">Mic</span>
             </button>
           ) : (
+            // ── HOST/MOD on stage: same popup menu as SPEAKER (matches screenshot)
             <button
+              ref={micBtnRef}
               className={cn('vc-bar-btn', isMicEnabled ? 'active-mic' : '')}
               style={{ flex: '1 1 0', minWidth: 44 }}
-              onClick={async () => {
-                // If muted by moderator, self cannot unmute — show a hint instead
-                if (myParticipant?.mutedByModerator && myParticipant.isMuted) {
-                  return // button is visually locked; tooltip explains why
-                }
-                toggleMic().catch(() => {})
-                toggleMute().catch(() => {})
+              onClick={() => {
+                if (myParticipant?.mutedByModerator && myParticipant.isMuted) return
+                setShowMicMenu(v => !v)
               }}
               title={myParticipant?.mutedByModerator && myParticipant?.isMuted
-                ? '🔒 Muted by moderator — only a host/mod can unmute you'
-                : undefined}
+                ? '🔒 Muted by moderator'
+                : 'Mic options'}
             >
               <span className="vc-bar-icon">
-                {myParticipant?.mutedByModerator && myParticipant?.isMuted
-                  ? '🔒'
-                  : isMicEnabled ? '🎙️' : '🔇'}
+                {myParticipant?.mutedByModerator && myParticipant?.isMuted ? '🔒' : isMicEnabled ? '🎙️' : '🔇'}
               </span>
               <span className="vc-bar-label">
-                {myParticipant?.mutedByModerator && myParticipant?.isMuted
-                  ? 'Mod Muted'
-                  : isMicEnabled ? 'Mute' : 'Unmute'}
+                {myParticipant?.mutedByModerator && myParticipant?.isMuted ? 'Mod Muted' : 'Mic'}
               </span>
             </button>
           )
-        ) : speakerLimitReached ? (
+        ) : amHostOrMod ? (
+          // ── HOST/MOD in audience — "Take Stage" button
+          <button
+            className={cn('vc-bar-btn', 'active-mic')}
+            style={{ flex: '1 1 0', minWidth: 44 }}
+            onClick={() => {
+              if (activeRoom.micLocked) {
+                return
+              }
+              grabMic()
+            }}
+            disabled={activeRoom.micLocked ?? false}
+            title={activeRoom.micLocked ? '🔒 Mic locked' : 'Take Stage'}
+          >
+            <span className="vc-bar-icon">{activeRoom.micLocked ? '🔒' : '🎤'}</span>
+            <span className="vc-bar-label">{activeRoom.micLocked ? 'Locked' : 'Go Live'}</span>
+          </button>
+        ) : speakerLimitReached || !activeRoom.isOpenMic ? (
+          // Stage full OR Free Stage is OFF → must queue / raise hand for HOST/MOD approval
           <button
             className={cn('vc-bar-btn', myParticipant?.handRaised ? 'active-hand' : '')}
             style={{ flex: '1 1 0', minWidth: 44, opacity: activeRoom.micLocked ? 0.5 : 1 }}
@@ -1534,17 +1718,30 @@ export function VoiceRoomView({ onLeave }: Props) {
             onClick={() => {
               if (activeRoom.micLocked) return
               if (myParticipant?.handRaised) { if (!isWaitingListOpen) toggleWaitingList() }
-              else { grabMic() }
+              else { grabMic() }  // grabs instantly if seat open + isOpenMic, else enqueues
             }}
+            title={
+              activeRoom.micLocked    ? '🔒 Mic locked by host' :
+              myParticipant?.handRaised ? 'View your queue position' :
+              speakerLimitReached       ? 'Stage full — join the waiting queue' :
+              'Raise hand — wait for host/mod approval'
+            }
           >
             <span className="vc-bar-icon">
-              {activeRoom.micLocked ? '🔒' : myParticipant?.handRaised ? '✋' : '🔒'}
+              {activeRoom.micLocked ? '🔒' : myParticipant?.handRaised ? '✋' : '🙋'}
             </span>
             <span className="vc-bar-label">
-              {activeRoom.micLocked ? 'Locked' : myParticipant?.handRaised ? 'Waiting' : 'Stage Full'}
+              {activeRoom.micLocked
+                ? 'Locked'
+                : myParticipant?.handRaised
+                  ? 'Waiting'
+                  : speakerLimitReached
+                    ? 'Stage Full'
+                    : 'Raise Hand'}
             </span>
           </button>
         ) : (
+          // Free Stage is ON and seat available → instant take-mic, no approval needed
           <button
             className={cn('vc-bar-btn', activeRoom.micLocked ? '' : (myParticipant?.handRaised ? 'active-hand' : 'active-mic'))}
             style={{ flex: '1 1 0', minWidth: 44, opacity: activeRoom.micLocked ? 0.5 : 1 }}
@@ -1554,7 +1751,11 @@ export function VoiceRoomView({ onLeave }: Props) {
               grabMic()
             }}
             disabled={activeRoom.micLocked ?? false}
-            title={activeRoom.micLocked ? '🔒 Mic locked by host' : myParticipant?.handRaised ? 'View waiting list' : 'Take Mic'}
+            title={
+              activeRoom.micLocked       ? '🔒 Mic locked by host' :
+              myParticipant?.handRaised  ? 'View waiting list' :
+              'Free Stage — take a seat directly, no approval needed'
+            }
           >
             <span className="vc-bar-icon">
               {activeRoom.micLocked ? '🔒' : myParticipant?.handRaised ? '✋' : '🎙️'}
@@ -1614,6 +1815,22 @@ export function VoiceRoomView({ onLeave }: Props) {
             </span>
           )}
         </button>
+
+        {/* ⚔️ PK button — visible to the room host only */}
+        {isHost && (
+          <button
+            className={cn('vc-bar-btn', activePKMatchId && 'active-emoji')}
+            style={{ flex: '1 1 0', minWidth: 44 }}
+            onClick={() => setShowPKPanel(true)}
+            title="PK Battle"
+          >
+            <span className="vc-bar-icon">⚔️</span>
+            <span className="vc-bar-label">PK</span>
+            {activePKMatchId && (
+              <span className="vc-bar-badge" style={{ background: '#ef4444' }}>LIVE</span>
+            )}
+          </button>
+        )}
 
         <button className="vc-bar-btn leave" style={{ flex: '1 1 0', minWidth: 44 }} onClick={handleLeave}>
           <span className="vc-bar-icon">📵</span>

@@ -36,6 +36,7 @@ import { useGiftEngine, useIsLowEndDevice } from '@/hooks/useGiftEngine'
 import { createLiveClassAdapter } from '@/lib/giftAdapter'
 import { AnimatePresence } from 'framer-motion'
 import { EditLiveClassModal } from './EditLiveClassModal'
+import { LiveClassShareSheet } from './LiveClassShareSheet'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 // LCParticipant is imported from LiveClassHostControls to keep a single source of truth.
@@ -51,12 +52,12 @@ interface LiveClass {
   whiteboardEnabled: boolean
   isOpenMic: boolean
   screenShareEnabled: boolean
-  maxParticipants: number | null  // null = unlimited (public streams default)
   duration: number | null; scheduledAt: string | null
   recordingUrl: string | null
-  // hostUserId — set for PUBLIC streams; the creator's userId
-  // used to grant host controls to normal users (MEMBER role) who own the stream
+  // hostUserId — the creator's userId (permanent; never changes)
   hostUserId: string | null
+  // delegatedHostId — optional current operational host (SCHOOL streams only)
+  delegatedHostId?: string | null
   class?: { id: string; name: string } | null
   teacher?: { id: string; user: { id: string; firstName: string; lastName: string; avatarUrl?: string | null } } | null
   hostUser?: { id: string; firstName: string; lastName: string; avatarUrl?: string | null } | null
@@ -112,11 +113,12 @@ function detachAllAudio(onCount?: (n: number) => void) {
 // Uses useRef + useEffect to attach/detach remote video tracks.
 // The <video> element is always in the DOM (never conditionally rendered) so
 // videoElRef.current is guaranteed non-null when the effect runs.
-function RemoteVideoTile({ p, isSpeaking, track, onClick }: {
+function RemoteVideoTile({ p, isSpeaking, track, onClick, onContextMenu }: {
   p: LCParticipant
   isSpeaking: boolean
   track: RemoteVideoTrack | null
   onClick?: (e: React.MouseEvent) => void
+  onContextMenu?: (e: React.MouseEvent) => void
 }) {
   const videoElRef = useRef<HTMLVideoElement | null>(null)
 
@@ -143,6 +145,7 @@ function RemoteVideoTile({ p, isSpeaking, track, onClick }: {
         isSpeaking && 'ring-2 ring-green-400'
       )}
       onClick={onClick}
+      onContextMenu={onContextMenu}
     >
       {/* Always render <video> so videoElRef is always populated when effect runs.
           Visibility is controlled by CSS — avatar shown on top when no track. */}
@@ -366,6 +369,58 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   // so the useEffect(room, videoOn) in LocalVideoTile runs with a non-null room.
   const [roomConnected,  setRoomConnected]  = useState<Room | null>(null)
 
+  // ── Full Screen presentation mode ─────────────────────────────────────────
+  // LAYOUT-ONLY STATE — this controls how the existing 1–20 speaker grid is
+  // visually presented. It NEVER changes participant roles, stage permissions,
+  // LiveKit connections, microphone state, or any backend state.
+  const roomContainerRef = useRef<HTMLDivElement>(null)
+  const [isFullscreen,        setIsFullscreen]        = useState(false)
+  // showFsControls: tap-to-reveal in fullscreen. Auto-hides after 4 seconds.
+  const [showFsControls,      setShowFsControls]      = useState(true)
+  const fsHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Sync isFullscreen with the browser Fullscreen API (Esc key / F11 sets this to false)
+  useEffect(() => {
+    const onFsChange = () => {
+      const isFsNow = !!document.fullscreenElement
+      setIsFullscreen(isFsNow)
+      if (isFsNow) {
+        setShowFsControls(true)
+        // Start auto-hide timer
+        if (fsHideTimerRef.current) clearTimeout(fsHideTimerRef.current)
+        fsHideTimerRef.current = setTimeout(() => setShowFsControls(false), 4000)
+      } else {
+        if (fsHideTimerRef.current) { clearTimeout(fsHideTimerRef.current); fsHideTimerRef.current = null }
+        setShowFsControls(true)
+      }
+    }
+    document.addEventListener('fullscreenchange', onFsChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange)
+      if (fsHideTimerRef.current) clearTimeout(fsHideTimerRef.current)
+    }
+  }, [])
+
+  const toggleFullscreen = useCallback(() => {
+    if (!roomContainerRef.current) return
+    if (!document.fullscreenElement) {
+      roomContainerRef.current.requestFullscreen({ navigationUI: 'hide' }).catch(() => {
+        // Browser fullscreen API unavailable (iOS Safari) — fall back to CSS-only fullscreen
+        setIsFullscreen(prev => !prev)
+      })
+    } else {
+      document.exitFullscreen()
+    }
+  }, [])
+
+  // Tap fullscreen overlay to show controls temporarily
+  const handleFsTap = useCallback(() => {
+    if (!isFullscreen) return
+    setShowFsControls(true)
+    if (fsHideTimerRef.current) clearTimeout(fsHideTimerRef.current)
+    fsHideTimerRef.current = setTimeout(() => setShowFsControls(false), 4000)
+  }, [isFullscreen])
+
   // ── Remote video tracks — keyed by participant identity (userId) ──────────
   const [remoteVideoTracks, setRemoteVideoTracks] = useState<Map<string, RemoteVideoTrack>>(new Map())
   const [screenTrack,       setScreenTrack]       = useState<RemoteVideoTrack | null>(null)
@@ -396,6 +451,21 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   // Open mic mode (all students can publish freely)
   const [isOpenMic,        setIsOpenMic]        = useState(false)
 
+  // ── Spotlight / individual participant maximize ────────────────────────────
+  // PRESENTATION ONLY — local UI state. Does NOT change LiveKit connections,
+  // speaker slots, roles, maxSpeakers, or any backend state.
+  // Each viewer independently selects their own primary participant.
+  const [selectedParticipantId, setSelectedParticipantId] = useState<string | null>(null)
+
+  // Auto-clear spotlight when the selected participant leaves or is removed
+  useEffect(() => {
+    if (!selectedParticipantId) return
+    const still = stageParticipants.find(p => p.userId === selectedParticipantId)
+    if (!still) setSelectedParticipantId(null)
+  // stageParticipants is recomputed from participants — this safely tracks leaves
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [participants, selectedParticipantId])
+
   // ── New feature state ─────────────────────────────────────────────────────
   // Sidebar tab (extended)
   const [isRecording,      setIsRecording]      = useState(false)
@@ -413,6 +483,14 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   const [videoPage,        setVideoPage]        = useState(0)
   // Mobile sidebar visibility
   const [showSidebar,      setShowSidebar]      = useState(false)
+  // SPRINT-4: Follow state — keyed by userId, tracks follow for any participant.
+  // Placed here (before any early returns) to satisfy Rules of Hooks.
+  const [followMap,     setFollowMap]     = useState<Record<string, boolean>>({})
+  const [followLoading, setFollowLoading] = useState<Record<string, boolean>>({})
+  // SPRINT-1: real-time viewer count for this room (PUBLIC streams)
+  const [liveViewerCount, setLiveViewerCount] = useState<number | null>(null)
+  // Share sheet
+  const [showShareSheet, setShowShareSheet] = useState(false)
 
   const chatEndRef = useRef<HTMLDivElement>(null)
 
@@ -471,12 +549,22 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
   // ── isCreator / isHost / canManage — MUST come after lc is declared ─────────
   // isCreator: we created this live class (hostUserId matches our userId).
+  // This is ownership — used for assignment UI and list page ownership only.
   const isCreator = !!lc && !!user && lc.hostUserId === user.id
 
-  // isHost: server assigned us HOST role (authoritative), OR we are the creator
-  // (needed pre-join and for PUBLIC streams before participant data loads).
+  // DEL-HOST: isDelegatedHost — SCHOOL streams only.
+  // Server state (lc.delegatedHostId) is authoritative. We also check
+  // myParticipantRole === 'HOST' as the session role (assigned by joinLiveClass).
+  const isDelegatedHost =
+    !!lc && !!user &&
+    lc.streamType === 'SCHOOL' &&
+    lc.delegatedHostId != null &&
+    lc.delegatedHostId === user.id
+
+  // isHost: server assigned HOST role (authoritative via participant record),
+  // OR we are the creator, OR we are the delegated host.
   // NEVER derived from global User.role — that leaks cross-school admin access.
-  const isHost = myParticipantRole === 'HOST' || isCreator
+  const isHost = myParticipantRole === 'HOST' || isCreator || isDelegatedHost
 
   // canManage: HOST or MODERATOR — can mute/kick/approve hands/run polls.
   const canManage = isHost || isModerator
@@ -563,14 +651,9 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     const onSpeak    = (d: any) => setActiveSpeakers(prev => { const n = new Set(prev); d.speaking ? n.add(d.userId) : n.delete(d.userId); return n })
     const onVideo    = (d: any) => setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, isVideoOn: d.isVideoOn } : p))
     const onReaction = (d: any) => spawnEmoji(d.emoji, d.firstName || '')
-    const onCanSpeak = () => {
-      toast({ title: '🎙 You can speak now!' })
-      // DO NOT call setMicrophoneEnabled here.
-      // grant_mic triggers a full LiveKit reconnect with a canPublish:true token.
-      // setMicrophoneEnabled on the old canPublish:false token is silently rejected
-      // by the SFU anyway, but calling it causes confusing mic state flips.
-      // After reconnect, the host auto-enables mic in connectLiveKit (line ~985).
-    }
+    // liveclass:you_can_speak — DEAD EVENT (backend never emits this name).
+    // The backend emits liveclass:grant_mic instead. Removed to avoid confusion.
+    // If you see this comment in 2027+, check if the backend was updated to emit it.
     const onOpenMicChanged = (d: any) => {
       setIsOpenMic(d.isOpenMic)
       if (d.isOpenMic) {
@@ -646,14 +729,22 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     socket.on('liveclass:user_joined',     onJoined)
     socket.on('liveclass:user_left',       onLeft)
     socket.on('liveclass:mute_changed',    onMute)
+    // SPRINT-1: real-time viewer count for PUBLIC streams
+    const onViewerCount = (d: any) => { if (d.liveClassId === id) setLiveViewerCount(d.count) }
+    socket.on('liveclass:viewer_count', onViewerCount)
     socket.on('liveclass:mute_all',        onMuteAll)
     // New: unmute all
     socket.on('liveclass:unmute_all',      () => setParticipants(prev => prev.map(p => p.role !== 'HOST' ? { ...p, isMuted: false } : p)))
     socket.on('liveclass:hand_raised',     onHand)
     socket.on('liveclass:hand_lowered',    onHandLow)
-    // Hand approved: lower hand + unmute for the approved user; non-host clients update their own state
+    // Hand approved: lower hand + unmute + update speakerSlot for the approved user
     socket.on('liveclass:hand_approved',   (d: any) => {
-      setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, handRaised: false, isMuted: false } : p))
+      setParticipants(prev => prev.map(p =>
+        p.userId === d.userId
+          // H-3 FIX: include speakerSlot from event payload so speaker grid updates
+          ? { ...p, handRaised: false, isMuted: false, ...(typeof d.speakerSlot === 'number' ? { speakerSlot: d.speakerSlot } : {}) }
+          : p
+      ))
     })
     // Hand rejected: lower hand for the rejected user across all clients
     socket.on('liveclass:hand_rejected',   (d: any) => {
@@ -677,7 +768,8 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     socket.on('liveclass:speaking',        onSpeak)
     socket.on('liveclass:video_changed',   onVideo)
     socket.on('liveclass:reaction',        onReaction)
-    socket.on('liveclass:you_can_speak',   onCanSpeak)
+    // liveclass:you_can_speak removed — backend never emits this event name.
+    // The authoritative event is liveclass:grant_mic (handled below).
     socket.on('liveclass:open_mic_changed', onOpenMicChanged)
     socket.on('liveclass:viewmode_changed',  onViewModeChanged)
     socket.on('liveclass:recording_started', onRecordingStarted)
@@ -686,15 +778,8 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     socket.on('liveclass:draw',              onDraw)
     socket.on('liveclass:poll',              onPoll)
 
-    // Moderator promotion/demotion events
-    socket.on('liveclass:moderator_promoted', (d: any) => {
-      setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, role: 'MODERATOR' as const } : p))
-      if (d.userId === user?.id) toast({ title: '⭐ You have been made a moderator' })
-    })
-    socket.on('liveclass:moderator_demoted', (d: any) => {
-      setParticipants(prev => prev.map(p => p.userId === d.userId ? { ...p, role: 'STUDENT' as const } : p))
-      if (d.userId === user?.id) toast({ title: 'Your moderator role has been removed' })
-    })
+    // liveclass:moderator_promoted / liveclass:moderator_demoted — DEAD EVENTS.
+    // No backend endpoint emits these. Removed to avoid misleading state mutations.
 
     // MIC-02: Host approved this user to speak (or open mic was enabled).
     // The backend has set isMuted=false in DB, so the NEW token will have
@@ -742,32 +827,72 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     socket.on('liveclass:speaker_added',   onSpeakerAdded)
     socket.on('liveclass:speaker_removed', onSpeakerRemoved)
 
-    // LS-GAP-003 FIX: Host transfer events
-    const onHostTransferred = (d: any) => {
-      if (d.liveClassId !== id) return
-      // Update participant roles immediately in local state
-      setParticipants(prev => prev.map(p => {
-        if (p.userId === d.newHostId)  return { ...p, role: 'HOST'    as const }
-        if (p.userId === d.prevHostId) return { ...p, role: 'STUDENT' as const }
-        return p
-      }))
-      toast({
-        title: d.newHostId === user?.id
-          ? '👑 You are now the host!'
-          : `👑 ${d.newHostName || 'A participant'} is now the host`,
-      })
-    }
-    const onRoleChanged = (d: any) => {
+    // H-4 FIX: Demotion events — host demoted a speaker (broadcast to room)
+    const onSpeakerDemoted = (d: any) => {
       if (d.liveClassId !== id) return
       setParticipants(prev => prev.map(p =>
-        p.userId === d.userId ? { ...p, role: d.role as LCParticipant['role'] } : p
+        p.userId === d.userId ? { ...p, isMuted: true, speakerSlot: null } : p
       ))
     }
-    socket.on('liveclass:host_transferred', onHostTransferred)
-    socket.on('liveclass:role_changed',     onRoleChanged)
-    socket.on('liveclass:you_are_host',     () => {
-      toast({ title: '👑 You are now the host of this stream!' })
-    })
+    socket.on('liveclass:speaker_demoted', onSpeakerDemoted)
+
+    // H-4 FIX: You were demoted — private event to the demoted user's socket room
+    const onYouWereDemoted = (d: any) => {
+      if (d.liveClassId !== id) return
+      setParticipants(prev => prev.map(p =>
+        p.userId === user?.id ? { ...p, isMuted: true, speakerSlot: null } : p
+      ))
+      toast({ title: '⬇️ You have been moved to the audience' })
+    }
+    socket.on('liveclass:you_were_demoted', onYouWereDemoted)
+
+    // liveclass:host_transferred, liveclass:role_changed, liveclass:you_are_host —
+    // DEAD EVENTS: no backend endpoint for host transfer or role change exists.
+    // These listeners are removed to avoid misleading state mutations from phantom events.
+    // If a backend host-transfer feature is implemented in future, re-add these handlers.
+
+    // DEL-HOST: delegated host assignment/revocation events
+    const onHostAssigned = (d: any) => {
+      if (d.liveClassId !== id) return
+      // Update the lc cache so isDelegatedHost recomputes correctly
+      queryClient.setQueryData(['live-class', id], (old: LiveClass | undefined) => {
+        if (!old) return old
+        return { ...old, delegatedHostId: d.delegatedHostId ?? null }
+      })
+      // Also invalidate to get full fresh data from server
+      queryClient.invalidateQueries({ queryKey: ['live-class', id] })
+      // If this user was just assigned, refresh participant role
+      if (d.delegatedHostId === user?.id) {
+        toast({ title: '🎙 You are now the delegated host' })
+        setParticipants(prev => prev.map(p =>
+          p.userId === user?.id ? { ...p, role: 'HOST' as const } : p
+        ))
+      }
+    }
+    const onHostRevoked = (d: any) => {
+      if (d.liveClassId !== id) return
+      queryClient.setQueryData(['live-class', id], (old: LiveClass | undefined) => {
+        if (!old) return old
+        return { ...old, delegatedHostId: null }
+      })
+      queryClient.invalidateQueries({ queryKey: ['live-class', id] })
+    }
+    const onYourHostRevoked = (d: any) => {
+      if (d.liveClassId !== id) return
+      // My delegation was revoked — revert participant role in local state
+      queryClient.setQueryData(['live-class', id], (old: LiveClass | undefined) => {
+        if (!old) return old
+        return { ...old, delegatedHostId: null }
+      })
+      queryClient.invalidateQueries({ queryKey: ['live-class', id] })
+      setParticipants(prev => prev.map(p =>
+        p.userId === user?.id ? { ...p, role: 'MODERATOR' as const } : p
+      ))
+      toast({ title: '⚠️ Your delegated host role has been revoked', variant: 'destructive' })
+    }
+    socket.on('liveclass:host_assigned',      onHostAssigned)
+    socket.on('liveclass:host_revoked',       onHostRevoked)
+    socket.on('liveclass:your_host_revoked',  onYourHostRevoked)
 
     return () => {
       socket.emit('liveclass:leave_room', id)
@@ -790,7 +915,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       socket.off('liveclass:speaking',        onSpeak)
       socket.off('liveclass:video_changed',   onVideo)
       socket.off('liveclass:reaction',        onReaction)
-      socket.off('liveclass:you_can_speak',   onCanSpeak)
+      // liveclass:you_can_speak — not registered (dead event removed)
       socket.off('liveclass:open_mic_changed', onOpenMicChanged)
       socket.off('liveclass:viewmode_changed',  onViewModeChanged)
       socket.off('liveclass:recording_started', onRecordingStarted)
@@ -798,15 +923,18 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       socket.off('liveclass:quran_position',    onQuranPosition)
       socket.off('liveclass:draw',              onDraw)
       socket.off('liveclass:poll',              onPoll)
-      socket.off('liveclass:moderator_promoted')
-      socket.off('liveclass:moderator_demoted')
+      // moderator_promoted, moderator_demoted — not registered (no backend endpoint)
       socket.off('liveclass:grant_mic',         onGrantMic)
       socket.off('liveclass:revoke_mic',        onRevokeMic)
       socket.off('liveclass:speaker_added',     onSpeakerAdded)
       socket.off('liveclass:speaker_removed',   onSpeakerRemoved)
-      socket.off('liveclass:host_transferred',  onHostTransferred)
-      socket.off('liveclass:role_changed',      onRoleChanged)
-      socket.off('liveclass:you_are_host')
+      socket.off('liveclass:speaker_demoted',   onSpeakerDemoted)
+      socket.off('liveclass:you_were_demoted',  onYouWereDemoted)
+      // host_transferred, role_changed, you_are_host — not registered (no backend endpoint)
+      socket.off('liveclass:host_assigned',     onHostAssigned)
+      socket.off('liveclass:host_revoked',      onHostRevoked)
+      socket.off('liveclass:your_host_revoked', onYourHostRevoked)
+      socket.off('liveclass:viewer_count', onViewerCount)
     }
   }, [id, queryClient, router, toast, spawnEmoji])
 
@@ -1107,6 +1235,19 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
+  // ── Auto-join for the creator after immediate/permanent start ───────────────
+  // When the host navigates here directly after "Go Live Now", the stream is
+  // already LIVE. Skip the lobby and join automatically so they land straight
+  // in the room with mic/camera active.
+  // Guard: only fires once (joined=false), only for the creator/host, only when LIVE.
+  useEffect(() => {
+    if (!lc || joined || joinMutation.isPending) return
+    if (lc.status !== 'LIVE') return
+    if (!isCreator) return
+    joinMutation.mutate()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lc?.id, lc?.status, isCreator])
+
   // ── Controls ────────────────────────────────────────────────────────────────
   const toggleMic = async () => {
     const room = roomRef.current; if (!room || !user?.id) return
@@ -1333,24 +1474,27 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     setParticipants(prev => prev.filter(p => p.userId !== uid))
   }
 
-  // ── Moderator promotion — only the creator can do this ───────────────────
-  const promoteToModerator = async (uid: string) => {
-    try {
-      await api.post('/live-classes/' + id + '/moderator/' + uid)
-      setParticipants(prev => prev.map(p => p.userId === uid ? { ...p, role: 'MODERATOR' as const } : p))
-      toast({ title: '⭐ Participant promoted to moderator' })
-    } catch (e: any) {
-      toast({ title: e?.response?.data?.message || 'Failed to promote', variant: 'destructive' })
-    }
+  // ── Moderator promotion — NOT IMPLEMENTED (no backend endpoint exists) ──────
+  // PARITY-NOTE: The backend has no POST /moderator/:uid or DELETE /moderator/:uid
+  // endpoint. These UI handlers intentionally surface a "not available" message
+  // rather than silently failing or calling a non-existent route.
+  const promoteToModerator = async (_uid: string) => {
+    toast({ title: 'Moderator promotion is not available in this version', variant: 'destructive' })
   }
 
-  const demoteModerator = async (uid: string) => {
+  const demoteModerator = async (_uid: string) => {
+    toast({ title: 'Moderator demotion is not available in this version', variant: 'destructive' })
+  }
+
+  // DEL-HOST: Assign a delegated operational host — CREATOR ONLY.
+  // Calls PATCH /live-classes/:id/host. Only wired to the UI when isCreator is true.
+  const assignDelegatedHost = async (userId: string) => {
     try {
-      await api.delete('/live-classes/' + id + '/moderator/' + uid)
-      setParticipants(prev => prev.map(p => p.userId === uid ? { ...p, role: 'STUDENT' as const } : p))
-      toast({ title: 'Moderator role removed' })
+      await api.patch('/live-classes/' + id + '/host', { userId })
+      toast({ title: '✅ Delegated host assigned' })
+      queryClient.invalidateQueries({ queryKey: ['live-class', id] })
     } catch (e: any) {
-      toast({ title: e?.response?.data?.message || 'Failed to demote', variant: 'destructive' })
+      toast({ title: e?.response?.data?.message || 'Failed to assign delegated host', variant: 'destructive' })
     }
   }
 
@@ -1493,6 +1637,55 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     setParticipantPopup({ participant: p, x: rect.left, y: rect.top })
   }
 
+  // ── SPRINT-4: Follow + Share hooks — must be before early returns ─────────
+  // hostUserId is derived from lc (useQuery result). lc may be null on first
+  // render, but these hooks are always called unconditionally per Rules of Hooks.
+
+  // Load initial follow state for the host on mount
+  useEffect(() => {
+    const hId = lc ? ((lc as any).hostUserId ?? lc.teacher?.user?.id ?? null) : null
+    const own  = hId === user?.id
+    if (!hId || own) return
+    api.get(`/social/counts/${hId}`)
+      .then(r => {
+        const following = r.data?.data?.isFollowing ?? false
+        setFollowMap(prev => ({ ...prev, [hId]: following }))
+      })
+      .catch(() => {})
+  }, [lc, user?.id])
+
+  const handleShare = useCallback(() => {
+    // Open the rich share sheet (DM / Group / Community / Feed / Copy)
+    setShowShareSheet(true)
+  }, [])
+
+  const handleFollowUser = useCallback(async (targetUserId: string) => {
+    if (!targetUserId || targetUserId === user?.id) return
+    setFollowLoading(prev => ({ ...prev, [targetUserId]: true }))
+    const currentlyFollowing = followMap[targetUserId] ?? false
+    try {
+      if (currentlyFollowing) {
+        await api.delete(`/social/follow/${targetUserId}`)
+        setFollowMap(prev => ({ ...prev, [targetUserId]: false }))
+        toast({ title: 'Unfollowed' })
+      } else {
+        await api.post(`/social/follow/${targetUserId}`)
+        setFollowMap(prev => ({ ...prev, [targetUserId]: true }))
+        toast({ title: '✅ Following!' })
+      }
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed', variant: 'destructive' })
+    } finally {
+      setFollowLoading(prev => ({ ...prev, [targetUserId]: false }))
+    }
+  }, [followMap, user?.id, toast])
+
+  const handleFollowHost = useCallback(async () => {
+    const hId = lc ? ((lc as any).hostUserId ?? lc.teacher?.user?.id ?? null) : null
+    if (!hId) return
+    await handleFollowUser(hId)
+  }, [lc, handleFollowUser])
+
   // ── Render guards ───────────────────────────────────────────────────────────
   if (isLoading) return (
     <div className="flex items-center justify-center h-64">
@@ -1504,6 +1697,19 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   const myParticipant = participants.find(p => p.userId === user?.id)
   const isConnected   = connState === ConnectionState.Connected
   const iAmSharing    = screenOn && screenSharer === roomRef.current?.localParticipant?.identity
+
+  // ── SPRINT-4: Share + Follow state (all stream types) ────────────────────
+  const isPublicStream = lc?.streamType === 'PUBLIC'
+  // hostUserId is set for PUBLIC streams; for SCHOOL streams use teacher.user.id
+  const hostUserId = lc ? ((lc as any).hostUserId ?? lc.teacher?.user?.id ?? null) : null
+  const isOwnStream = hostUserId === user?.id
+
+  // followMap: tracks follow state for any participant the viewer has toggled.
+  // Keyed by userId. Initialised from API on mount (host) and lazily on popup open.
+  // (State declared above early returns — see useState block)
+  // handleShare, handleFollowUser, handleFollowHost declared before early returns.
+  // Convenience aliases for the host (used in the header buttons)
+  const isFollowing   = hostUserId ? (followMap[hostUserId] ?? false) : false
 
   // ── Dynamic video grid layout (matches AUTO_GRID from LayoutEngine) ────────
   // 1        → full-width (Teacher spotlight)
@@ -1521,8 +1727,11 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   const stageParticipants = participants.filter(p =>
     p.role === 'HOST' || p.role === 'MODERATOR' || (p as any).speakerSlot != null
   )
+  // Participants with a raised hand are excluded from the audience list —
+  // they already appear in the "Raised hands" waiting queue above.
+  // This prevents the same person appearing in two places at once.
   const audienceParticipants = participants.filter(p =>
-    p.role !== 'HOST' && p.role !== 'MODERATOR' && (p as any).speakerSlot == null
+    p.role !== 'HOST' && p.role !== 'MODERATOR' && (p as any).speakerSlot == null && !p.handRaised
   )
 
   const totalVideoPages = Math.ceil(Math.max(stageParticipants.length, 1) / PAGE_SIZE)
@@ -1543,7 +1752,22 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               'grid-cols-2 sm:grid-cols-4'
 
   return (
-    <div className="flex flex-col h-[calc(100vh-64px)] bg-gray-950 text-white overflow-hidden relative">
+    <div
+      ref={roomContainerRef}
+      className={cn(
+        'flex flex-col bg-gray-950 text-white overflow-hidden relative',
+        // Normal mode: fill the main content area.
+        // On desktop: subtract the 64px dashboard header.
+        // On mobile: the layout strips padding and hides the bottom nav,
+        // so we use 100dvh (dynamic viewport height) which accounts for
+        // browser chrome (address bar) automatically. Falls back to 100vh.
+        !isFullscreen && 'h-[100dvh] md:h-[calc(100vh-64px)]',
+        // CSS-only fullscreen fallback (when Browser Fullscreen API is unavailable e.g. iOS Safari)
+        // When the browser fullscreen API IS used, the element naturally fills the viewport.
+        isFullscreen && !document.fullscreenElement && 'fixed inset-0 z-50',
+      )}
+      onClick={handleFsTap}
+    >
 
       {/* ── Gift animations — fixed overlay, z-index 500+, never interrupts AV ── */}
       <LiveClassGiftOverlay isLowEnd={isLowEnd} />
@@ -1567,6 +1791,18 @@ export function LiveClassRoomPage({ id }: { id: string }) {
             lc={{ id: lc.id, title: lc.title, description: lc.description ?? null, coverImageUrl: (lc as any).coverImageUrl ?? null, status: lc.status }}
             onClose={() => setShowEditModal(false)}
             onUpdated={() => queryClient.invalidateQueries({ queryKey: ['live-class', id] })}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* ── Share sheet — DM / Group / Community / Feed / Copy ────────────── */}
+      <AnimatePresence>
+        {showShareSheet && lc && (
+          <LiveClassShareSheet
+            liveClassId={id}
+            title={lc.title}
+            streamType={lc.streamType}
+            onClose={() => setShowShareSheet(false)}
           />
         )}
       </AnimatePresence>
@@ -1632,6 +1868,57 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
             {/* Actions */}
             <div className="space-y-1">
+              {/* Spotlight / primary — available to HOST only for this Live */}
+              {participantPopup.participant.userId !== user?.id && isHost && (
+                <button
+                  onClick={() => {
+                    setSelectedParticipantId(prev =>
+                      prev === participantPopup.participant.userId
+                        ? null
+                        : participantPopup.participant.userId
+                    )
+                    setParticipantPopup(null)
+                  }}
+                  className={cn(
+                    'w-full text-left text-xs px-3 py-2 rounded-lg transition-colors flex items-center gap-2',
+                    selectedParticipantId === participantPopup.participant.userId
+                      ? 'text-indigo-300 hover:text-white hover:bg-gray-700 font-semibold'
+                      : 'text-indigo-400 hover:text-indigo-300 hover:bg-gray-700',
+                  )}
+                >
+                  <span className="text-[13px]">
+                    {selectedParticipantId === participantPopup.participant.userId ? '⊠' : '⊡'}
+                  </span>
+                  {selectedParticipantId === participantPopup.participant.userId
+                    ? 'Remove spotlight (back to grid)'
+                    : 'Spotlight (make primary video)'}
+                </button>
+              )}
+              {/* Follow / Unfollow — available for any participant who isn't yourself */}
+              {participantPopup.participant.userId !== user?.id && (
+                <button
+                  onClick={async () => {
+                    await handleFollowUser(participantPopup.participant.userId)
+                  }}
+                  disabled={followLoading[participantPopup.participant.userId] ?? false}
+                  className={cn(
+                    'w-full text-left text-xs px-3 py-2 rounded-lg transition-colors flex items-center gap-2',
+                    (followMap[participantPopup.participant.userId] ?? false)
+                      ? 'text-green-400 hover:text-green-300 hover:bg-gray-700'
+                      : 'text-indigo-400 hover:text-indigo-300 hover:bg-gray-700',
+                    (followLoading[participantPopup.participant.userId] ?? false) && 'opacity-60 cursor-not-allowed',
+                  )}
+                >
+                  {(followLoading[participantPopup.participant.userId] ?? false) ? (
+                    <span className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                  ) : (
+                    <span className="text-[13px]">
+                      {(followMap[participantPopup.participant.userId] ?? false) ? '✓' : '+'}
+                    </span>
+                  )}
+                  {(followMap[participantPopup.participant.userId] ?? false) ? 'Following' : 'Follow'}
+                </button>
+              )}
               <button
                 onClick={() => openDm(participantPopup.participant)}
                 className="w-full text-left text-xs text-gray-300 hover:text-white hover:bg-gray-700 px-3 py-2 rounded-lg transition-colors flex items-center gap-2"
@@ -1751,7 +2038,12 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       )}
 
       {/* ── Header ──────────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800 flex-shrink-0">
+      <div className={cn(
+        'flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800 flex-shrink-0',
+        // Fullscreen: overlay at top with gradient for readability, z-index above video
+        isFullscreen && 'absolute top-0 left-0 right-0 z-20 bg-gradient-to-b from-black/80 to-transparent border-b-0 transition-opacity duration-300',
+        isFullscreen && !showFsControls && 'opacity-0 pointer-events-none',
+      )}>
         <div className="flex items-center gap-3">
           <button onClick={() => router.push('/live-class')} className="p-1.5 rounded-lg hover:bg-gray-800" aria-label="Back to live classes">
             <ChevronLeft className="w-5 h-5 text-gray-400" />
@@ -1838,7 +2130,17 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               <span className="w-1.5 h-1.5 bg-red-500 rounded-full" /> REC
             </span>
           )}
-          <span className="text-xs text-gray-400">{participants.length} in class</span>
+          {/* SPRINT-1: live viewer count for PUBLIC streams; static count for SCHOOL */}
+          <span className="text-xs text-gray-400 flex items-center gap-1">
+            {isPublicStream && liveViewerCount !== null ? (
+              <>
+                <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
+                {liveViewerCount} watching
+              </>
+            ) : (
+              <>{participants.length} in class</>
+            )}
+          </span>
           {isHost && lc.status === 'SCHEDULED' && (
             <Button size="sm" className="bg-red-600 hover:bg-red-700 gap-1 text-xs h-7" onClick={handleStart}>
               <Play className="w-3 h-3" /> Start
@@ -1849,12 +2151,67 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               <Square className="w-3 h-3" /> End
             </Button>
           )}
+          {/* ── Share button — available for all stream types (opens rich share sheet) ─── */}
+          {lc && (
+            <button
+              onClick={handleShare}
+              title="Share"
+              aria-label="Share stream"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 hover:text-white transition-colors flex-shrink-0"
+            >
+              <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 fill-none stroke-current" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+              </svg>
+              <span className="hidden sm:inline">Share</span>
+            </button>
+          )}
+          {/* ── SPRINT-4: Follow host button — hide for own stream ─ */}
+          {!isOwnStream && hostUserId && (
+            <button
+              onClick={handleFollowHost}
+              disabled={followLoading[hostUserId] ?? false}
+              title={isFollowing ? 'Unfollow host' : 'Follow host'}
+              aria-label={isFollowing ? 'Unfollow host' : 'Follow host'}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex-shrink-0',
+                isFollowing
+                  ? 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                  : 'bg-red-600 hover:bg-red-700 text-white',
+                (followLoading[hostUserId] ?? false) && 'opacity-60 cursor-not-allowed',
+              )}
+            >
+              {(followLoading[hostUserId] ?? false) ? (
+                <span className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+              ) : isFollowing ? (
+                <span>✓</span>
+              ) : (
+                <span>+</span>
+              )}
+              <span className="hidden sm:inline">{isFollowing ? 'Following' : 'Follow'}</span>
+            </button>
+          )}
+          {/* ── Full Screen toggle button ────────────────────────────────── */}
+          {joined && (
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleFullscreen() }}
+              title={isFullscreen ? 'Exit full screen' : 'Full screen'}
+              aria-label={isFullscreen ? 'Exit full screen' : 'Enter full screen'}
+              className="w-8 h-8 rounded-lg bg-gray-800 hover:bg-gray-700 flex items-center justify-center transition-colors flex-shrink-0"
+            >
+              {isFullscreen ? <Minimize2 className="w-4 h-4 text-gray-300" /> : <Maximize2 className="w-4 h-4 text-gray-400" />}
+            </button>
+          )}
         </div>
       </div>
 
       {/* ── Status bar ──────────────────────────────────────────────────────── */}
       {joined && (
-        <div className="flex items-center gap-3 px-4 py-1.5 bg-gray-950 border-b border-gray-800/60 text-[11px] flex-shrink-0 overflow-x-auto">
+        <div className={cn(
+          'hidden md:flex items-center gap-3 px-4 py-1.5 bg-gray-950 border-b border-gray-800/60 text-[11px] flex-shrink-0 overflow-x-auto scrollbar-none',
+          // Fullscreen: hide status bar to maximize immersive space
+          isFullscreen && 'hidden',
+        )}>
           <span className="flex items-center gap-1.5 shrink-0">
             <span className={cn('w-2 h-2 rounded-full',
               connState === ConnectionState.Connected    && 'bg-green-500',
@@ -1926,8 +2283,41 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       )}
 
       {/* ── Body ────────────────────────────────────────────────────────────── */}
-      <div className="flex flex-1 overflow-hidden">
-        <div className="flex-1 flex flex-col overflow-hidden">
+      <div className={cn(
+        'flex flex-1 overflow-hidden',
+        // Fullscreen: fill entire container (header/controls are overlaid)
+        isFullscreen && 'absolute inset-0',
+      )}>
+        <div className={cn(
+          'flex-1 flex flex-col overflow-hidden relative',
+          // Fullscreen: fill the entire container — header and controls are absolute overlays
+          isFullscreen && 'w-full',
+        )}>
+
+          {/* ── Persistent fullscreen toggle — pinned bottom-right of video area ──
+               Visible for any joined participant in all view states.
+               The header button fades in fullscreen; this one is always reachable.
+               In fullscreen it respects showFsControls (auto-hides with other controls). */}
+          {joined && (
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleFullscreen() }}
+              title={isFullscreen ? 'Exit full screen' : 'Full screen'}
+              aria-label={isFullscreen ? 'Exit full screen (Esc)' : 'Enter full screen'}
+              className={cn(
+                'absolute bottom-4 right-4 z-30 w-9 h-9 rounded-xl flex items-center justify-center transition-all duration-200',
+                'bg-black/50 hover:bg-black/70 border border-white/20 hover:border-white/40',
+                'backdrop-blur-sm shadow-lg',
+                // In fullscreen: hide with other controls when overlay fades
+                isFullscreen && !showFsControls && 'opacity-0 pointer-events-none',
+                isFullscreen && showFsControls && 'opacity-100',
+              )}
+            >
+              {isFullscreen
+                ? <Minimize2 className="w-4 h-4 text-white" />
+                : <Maximize2 className="w-4 h-4 text-white/80" />
+              }
+            </button>
+          )}
 
           {/* Pre-join lobby */}
           {!joined ? (
@@ -1936,7 +2326,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               {(lc as any).coverImageUrl && (
                 <div className="w-full max-w-xs rounded-2xl overflow-hidden aspect-video bg-gray-800">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={(lc as any).coverImageUrl} alt={lc.title} className="w-full h-full object-cover" />
+                  <img src={getAvatarUrl((lc as any).coverImageUrl)} alt={lc.title} className="w-full h-full object-cover" />
                 </div>
               )}
               {!(lc as any).coverImageUrl && (
@@ -1986,24 +2376,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                     {lc.streamType === 'PUBLIC' ? 'This stream has ended' : 'This class has ended'}
                   </p>
                 )}
-                {/* Capacity warning — only shown when a positive cap is set */}
-                {lc.status === 'LIVE' && !isHost && lc.maxParticipants != null && lc.maxParticipants > 0 && (() => {
-                  const active = lc._count?.participants ?? participants.length
-                  const max    = lc.maxParticipants
-                  const pct    = active / max
-                  const label  = lc.streamType === 'PUBLIC' ? 'viewers' : 'participants'
-                  if (pct >= 1) return (
-                    <p className="text-red-400 text-sm mt-2 font-semibold">
-                      🚫 {lc.streamType === 'PUBLIC' ? 'Stream' : 'Class'} is full ({active}/{max} {label})
-                    </p>
-                  )
-                  if (pct >= 0.9) return (
-                    <p className="text-orange-400 text-sm mt-2">
-                      ⚠️ Almost full — {max - active} spot{max - active !== 1 ? 's' : ''} left
-                    </p>
-                  )
-                  return null
-                })()}
+                {/* Capacity limit removed — streams are unlimited */}
               </div>
               {lc.status !== 'ENDED' && lc.status !== 'CANCELLED' && (
                 <Button className="bg-indigo-600 hover:bg-indigo-700 gap-2 px-8"
@@ -2110,49 +2483,32 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                 </div>
               </div>
 
-              {/* Participant video grid — on-stage speakers only */}
-              <div className={'grid gap-2 ' + videoCols}>
-                {/* Always show the current user's own tile first IF they are on stage.
-                    Audience members do not appear in the stage grid. */}
-                {(() => {
-                  const meInGrid = pagedParticipants.find(p => p.userId === user?.id)
-                  const meOnStage = stageParticipants.find(p => p.userId === user?.id)
-                  if (!meInGrid && meOnStage) {
-                    // On stage but not in current page — still show in synthetic tile
-                    const meSynth = meOnStage || {
-                      id: user?.id ?? '',
-                      userId: user?.id ?? '',
-                      role: 'HOST' as const,
-                      isMuted: !micOn,
-                      isVideoOn: videoOn,
-                      handRaised: false,
-                      user: {
-                        id: user?.id ?? '',
-                        firstName: user?.firstName ?? '',
-                        lastName: user?.lastName ?? '',
-                        avatarUrl: user?.avatarUrl ?? null,
-                      }
-                    }
-                    return (
-                      <div key="me-fallback">
-                        <LocalVideoTile
-                          p={meSynth as any}
-                          isSpeaking={activeSpeakers.has(user?.id ?? '')}
-                          videoRef={localVideoRef}
-                          videoOn={videoOn}
-                          room={roomConnected}
-                        />
-                      </div>
-                    )
-                  }
-                  // Not on stage — no tile for me in stage grid (audience view)
-                  return null
-                })()}
-                {pagedParticipants.map(p => {
+              {/* Participant video grid — on-stage speakers only
+                  ── SPOTLIGHT MODE: if selectedParticipantId is set, shows one
+                     primary tile + horizontal secondary strip.
+                  ── GRID MODE: flat auto-sizing grid (existing behavior).
+                  Single click on any tile → opens participant popup (original behavior).
+                  Popup includes "Spotlight" action for the Host.
+                  Primary tile has a dedicated "✕ Back to grid" button for the Host. */}
+              {selectedParticipantId && stageParticipants.find(p => p.userId === selectedParticipantId) ? (() => {
+                // ── SPOTLIGHT LAYOUT ─────────────────────────────────────────
+                const primary = stageParticipants.find(p => p.userId === selectedParticipantId)!
+                const secondaries = stageParticipants.filter(p => p.userId !== selectedParticipantId)
+
+                const renderTile = (p: LCParticipant, isLarge: boolean) => {
                   const isMe = p.userId === user?.id
-                  if (isMe) {
-                    return (
-                      <div key={p.userId} className="relative">
+                  const track = isMe ? null : (remoteVideoTracks.get(p.userId) ?? null)
+                  const isSelected = p.userId === selectedParticipantId
+                  return (
+                    <div
+                      key={p.userId}
+                      className={cn(
+                        'relative rounded-xl overflow-hidden bg-gray-800 flex-shrink-0 cursor-pointer',
+                        isLarge ? 'aspect-video w-full' : 'aspect-video w-36',
+                        isSelected && 'ring-2 ring-indigo-400',
+                      )}
+                    >
+                      {isMe ? (
                         <LocalVideoTile
                           p={p}
                           isSpeaking={activeSpeakers.has(p.userId)}
@@ -2160,29 +2516,129 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                           videoOn={videoOn}
                           room={roomConnected}
                         />
-                      </div>
-                    )
-                  }
-                  // Remote participant — get their video track from state
-                  const remoteTrack = remoteVideoTracks.get(p.userId) ?? null
-                  return (
-                    <div key={p.userId} className="relative">
-                      <RemoteVideoTile
-                        p={p}
-                        isSpeaking={activeSpeakers.has(p.userId)}
-                        track={remoteTrack}
-                        onClick={(e) => handleParticipantClick(p, e)}
-                      />
-                      {canManage && p.userId !== user?.id && p.handRaised && (
-                        <button onClick={() => approveHand(p.userId)}
-                          className="absolute top-1 right-1 bg-green-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">
+                      ) : (
+                        <RemoteVideoTile
+                          p={p}
+                          isSpeaking={activeSpeakers.has(p.userId)}
+                          track={track}
+                          onClick={isMe ? undefined : (e) => handleParticipantClick(p, e)}
+                        />
+                      )}
+                      {/* Host-only "✕ Back to grid" button on the primary (selected) tile.
+                          This is the ONLY way to deselect — clicking the tile opens the popup. */}
+                      {isSelected && isLarge && isHost && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setSelectedParticipantId(null)
+                          }}
+                          className="absolute top-2 right-2 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-bold px-2 py-0.5 rounded-full transition-colors z-10"
+                          title="Return to normal grid"
+                          aria-label="Return to normal grid"
+                        >
+                          ✕ Grid
+                        </button>
+                      )}
+                      {/* Hand-raise approve badge (canManage only) */}
+                      {canManage && !isMe && p.handRaised && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); approveHand(p.userId) }}
+                          className="absolute top-1 right-1 bg-green-500 text-white text-xs font-bold px-2 py-0.5 rounded-full"
+                        >
                           Allow
                         </button>
                       )}
                     </div>
                   )
-                })}
-              </div>
+                }
+
+                return (
+                  <div className="flex flex-col gap-2">
+                    {/* Primary — large tile. Popup opens on click (includes Spotlight/deselect action for host). */}
+                    {renderTile(primary, true)}
+                    {/* Secondary strip — horizontal scroll */}
+                    {secondaries.length > 0 && (
+                      <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-thin scrollbar-thumb-gray-700">
+                        {secondaries.map(p => renderTile(p, false))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })() : (
+                // ── GRID MODE (existing behavior — original single click opens popup) ──
+                <div className={'grid gap-2 ' + videoCols}>
+                  {/* Always show the current user's own tile first IF they are on stage.
+                      Audience members do not appear in the stage grid. */}
+                  {(() => {
+                    const meInGrid = pagedParticipants.find(p => p.userId === user?.id)
+                    const meOnStage = stageParticipants.find(p => p.userId === user?.id)
+                    if (!meInGrid && meOnStage) {
+                      // On stage but not in current page — still show in synthetic tile
+                      const meSynth = meOnStage || {
+                        id: user?.id ?? '',
+                        userId: user?.id ?? '',
+                        role: 'HOST' as const,
+                        isMuted: !micOn,
+                        isVideoOn: videoOn,
+                        handRaised: false,
+                        user: {
+                          id: user?.id ?? '',
+                          firstName: user?.firstName ?? '',
+                          lastName: user?.lastName ?? '',
+                          avatarUrl: user?.avatarUrl ?? null,
+                        }
+                      }
+                      return (
+                        <div key="me-fallback">
+                          <LocalVideoTile
+                            p={meSynth as any}
+                            isSpeaking={activeSpeakers.has(user?.id ?? '')}
+                            videoRef={localVideoRef}
+                            videoOn={videoOn}
+                            room={roomConnected}
+                          />
+                        </div>
+                      )
+                    }
+                    // Not on stage — no tile for me in stage grid (audience view)
+                    return null
+                  })()}
+                  {pagedParticipants.map(p => {
+                    const isMe = p.userId === user?.id
+                    if (isMe) {
+                      return (
+                        <div key={p.userId} className="relative">
+                          <LocalVideoTile
+                            p={p}
+                            isSpeaking={activeSpeakers.has(p.userId)}
+                            videoRef={localVideoRef}
+                            videoOn={videoOn}
+                            room={roomConnected}
+                          />
+                        </div>
+                      )
+                    }
+                    // Remote participant — single click opens the participant popup (original behavior)
+                    const remoteTrack = remoteVideoTracks.get(p.userId) ?? null
+                    return (
+                      <div key={p.userId} className="relative">
+                        <RemoteVideoTile
+                          p={p}
+                          isSpeaking={activeSpeakers.has(p.userId)}
+                          track={remoteTrack}
+                          onClick={(e) => handleParticipantClick(p, e)}
+                        />
+                        {canManage && p.userId !== user?.id && p.handRaised && (
+                          <button onClick={() => approveHand(p.userId)}
+                            className="absolute top-1 right-1 bg-green-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">
+                            Allow
+                          </button>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
 
               {/* Video grid pagination — shown when 17+ participants */}
               {totalVideoPages > 1 && (
@@ -2237,24 +2693,31 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                 </div>
               )}
 
-              {/* Audience count — participants watching but not on stage */}
+              {/* Audience grid — avatar circles with name, unlimited scroll, 5 columns */}
               {audienceParticipants.length > 0 && (
                 <div className="p-3 bg-gray-900/50 border border-gray-800 rounded-xl">
-                  <p className="text-xs font-bold text-gray-400 mb-1.5">
+                  <p className="text-xs font-bold text-gray-400 mb-2">
                     👥 Audience ({audienceParticipants.length})
                   </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {audienceParticipants.slice(0, 20).map(p => (
-                      <div key={p.userId} className="flex items-center gap-1 bg-gray-800 rounded-full px-2 py-0.5">
-                        <span className="text-[10px] text-gray-400">
-                          {p.user.firstName} {p.user.lastName}
-                          {p.handRaised ? ' ✋' : ''}
-                        </span>
-                      </div>
-                    ))}
-                    {audienceParticipants.length > 20 && (
-                      <span className="text-[10px] text-gray-600 px-2 py-0.5">+{audienceParticipants.length - 20} more</span>
-                    )}
+                  <div className="grid grid-cols-5 gap-x-2 gap-y-3">
+                    {audienceParticipants.map(p => {
+                      const avatarSrc = getAvatarUrl(p.user.avatarUrl)
+                      const initials = `${p.user.firstName?.[0] ?? ''}${p.user.lastName?.[0] ?? ''}`.toUpperCase()
+                      const displayName = `${p.user.firstName} ${p.user.lastName}`.trim()
+                      return (
+                        <div key={p.userId} className="flex flex-col items-center gap-1 min-w-0">
+                          <div className="w-12 h-12 rounded-full overflow-hidden bg-indigo-900 flex items-center justify-center font-bold text-indigo-300 text-sm flex-shrink-0 ring-1 ring-gray-700">
+                            {avatarSrc
+                              ? <img src={avatarSrc} alt={displayName} className="w-full h-full object-cover" />
+                              : <span>{initials}</span>
+                            }
+                          </div>
+                          <span className="text-[9px] text-gray-400 text-center leading-tight w-full truncate px-0.5">
+                            {displayName}
+                          </span>
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               )}
@@ -2385,21 +2848,31 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                 </div>
               )}
 
-              {/* Audience count in audio mode */}
+              {/* Audience grid in audio mode — avatar circles, unlimited scroll, 5 columns */}
               {audienceParticipants.length > 0 && (
                 <div className="mt-3 p-3 bg-gray-900/50 border border-gray-800 rounded-xl">
-                  <p className="text-xs font-bold text-gray-400 mb-1.5">
+                  <p className="text-xs font-bold text-gray-400 mb-2">
                     👥 Audience ({audienceParticipants.length})
                   </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {audienceParticipants.slice(0, 20).map(p => (
-                      <span key={p.userId} className="text-[10px] text-gray-500 bg-gray-800 rounded-full px-2 py-0.5">
-                        {p.user.firstName} {p.user.lastName}{p.handRaised ? ' ✋' : ''}
-                      </span>
-                    ))}
-                    {audienceParticipants.length > 20 && (
-                      <span className="text-[10px] text-gray-600 px-2 py-0.5">+{audienceParticipants.length - 20} more</span>
-                    )}
+                  <div className="grid grid-cols-5 gap-x-2 gap-y-3">
+                    {audienceParticipants.map(p => {
+                      const avatarSrc = getAvatarUrl(p.user.avatarUrl)
+                      const initials = `${p.user.firstName?.[0] ?? ''}${p.user.lastName?.[0] ?? ''}`.toUpperCase()
+                      const displayName = `${p.user.firstName} ${p.user.lastName}`.trim()
+                      return (
+                        <div key={p.userId} className="flex flex-col items-center gap-1 min-w-0">
+                          <div className="w-12 h-12 rounded-full overflow-hidden bg-indigo-900 flex items-center justify-center font-bold text-indigo-300 text-sm flex-shrink-0 ring-1 ring-gray-700">
+                            {avatarSrc
+                              ? <img src={avatarSrc} alt={displayName} className="w-full h-full object-cover" />
+                              : <span>{initials}</span>
+                            }
+                          </div>
+                          <span className="text-[9px] text-gray-400 text-center leading-tight w-full truncate px-0.5">
+                            {displayName}
+                          </span>
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               )}
@@ -2432,7 +2905,12 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
           {/* ── Controls bar ──────────────────────────────────────────────── */}
           {joined && (
-            <div className="relative flex-shrink-0 bg-gray-900 border-t border-gray-800">
+            <div className={cn(
+              'relative flex-shrink-0 bg-gray-900 border-t border-gray-800',
+              // Fullscreen: overlay at bottom with gradient, slides in/out with controls
+              isFullscreen && 'absolute bottom-0 left-0 right-0 z-20 bg-gradient-to-t from-black/90 to-transparent border-t-0 transition-opacity duration-300',
+              isFullscreen && !showFsControls && 'opacity-0 pointer-events-none',
+            )}>
               {/* Emoji picker — rendered above the bar, escapes overflow-hidden via position fixed */}
               {showEmojiPicker && (
                 <div
@@ -2449,8 +2927,10 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                 </div>
               )}
 
-              {/* Single scrollable row — no wrapping, buttons never jump positions */}
-              <div className="flex items-center justify-center gap-2 px-3 py-3 overflow-x-auto scrollbar-none">
+              {/* Single scrollable row — smaller on mobile to prevent overflow.
+                  Use justify-start + min-w-max so overflow-x-auto can scroll to ALL buttons.
+                  justify-center clips the left side when content is wider than the viewport. */}
+              <div className="flex items-center justify-start gap-1 sm:gap-2 px-2 sm:px-3 py-2 sm:py-3 overflow-x-auto scrollbar-none min-w-0 w-full [&>*]:flex-shrink-0">
 
                 {/* ── Reconnect button — shown when disconnected ──────────── */}
                 {!isConnected && (
@@ -2458,13 +2938,15 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                     onClick={() => connectLiveKitRef.current?.()}
                     title="Reconnect to LiveKit"
                     aria-label="Reconnect to LiveKit"
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-yellow-600 hover:bg-yellow-500 text-white text-xs font-bold transition-colors flex-shrink-0"
+                    className="flex items-center gap-1.5 px-2 sm:px-3 py-2 rounded-xl bg-yellow-600 hover:bg-yellow-500 text-white text-xs font-bold transition-colors flex-shrink-0"
                   >
-                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <svg className="w-4 h-4 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                     </svg>
-                    {connState === 'connecting' || connState === 'reconnecting' ? 'Connecting…' : 'Reconnect'}
+                    <span className="hidden sm:inline">
+                      {connState === 'connecting' || connState === 'reconnecting' ? 'Connecting…' : 'Reconnect'}
+                    </span>
                   </button>
                 )}
 
@@ -2480,7 +2962,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                         onClick={raiseHand}
                         title="Raise hand to speak"
                         aria-label="Raise hand to request microphone"
-                        className="w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors bg-yellow-600 hover:bg-yellow-700 text-xl"
+                        className="w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors bg-yellow-600 hover:bg-yellow-700 text-lg sm:text-xl"
                       >
                         ✋
                       </button>
@@ -2492,11 +2974,11 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                       title={micOn ? 'Mute' : 'Unmute'}
                       aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}
                       className={cn(
-                        'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
+                        'w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
                         micOn ? 'bg-gray-700 hover:bg-gray-600' : 'bg-red-600 hover:bg-red-700',
                       )}
                     >
-                      {micOn ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
+                      {micOn ? <Mic className="w-4 h-4 sm:w-5 sm:h-5" /> : <MicOff className="w-4 h-4 sm:w-5 sm:h-5" />}
                     </button>
                   )
                 })()}
@@ -2509,12 +2991,12 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                     aria-label={videoOn ? 'Stop camera' : 'Start camera'}
                     disabled={!isConnected}
                     className={cn(
-                      'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
+                      'w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
                       videoOn ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-700 hover:bg-gray-600',
                       !isConnected && 'opacity-40 cursor-not-allowed',
                     )}
                   >
-                    {videoOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+                    {videoOn ? <Video className="w-4 h-4 sm:w-5 sm:h-5" /> : <VideoOff className="w-4 h-4 sm:w-5 sm:h-5" />}
                   </button>
                 )}
 
@@ -2527,33 +3009,15 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                       onClick={dropMic}
                       title="Drop mic — return to audience"
                       aria-label="Drop mic — return to audience"
-                      className="w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors bg-orange-600 hover:bg-orange-700 text-sm font-bold"
+                      className="w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors bg-orange-600 hover:bg-orange-700 text-sm font-bold"
                     >
                       📴
                     </button>
                   )
                 })()}
 
-                {/* View mode toggle — HOST only. Participants follow the host-broadcast viewMode. */}
-                {isHost && (
-                  <button
-                    onClick={() => {
-                      const next: ViewMode = viewMode === 'video' ? 'audio' : 'video'
-                      setViewMode(next)
-                      const socket = getSocket()
-                      if (socket) socket.emit('liveclass:viewmode_changed', { liveClassId: id, viewMode: next })
-                      toast({ title: next === 'audio' ? '🔇 Switched to audio-only view' : '📹 Switched to video view' })
-                    }}
-                    title={viewMode === 'video' ? 'Switch to audio only' : 'Switch to video'}
-                    aria-label={viewMode === 'video' ? 'Switch to audio only' : 'Switch to video'}
-                    className={cn(
-                      'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
-                      viewMode === 'audio' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-700 hover:bg-gray-600',
-                    )}
-                  >
-                    {viewMode === 'audio' ? <Radio className="w-5 h-5" /> : <LayoutGrid className="w-5 h-5" />}
-                  </button>
-                )}
+                {/* View mode toggle — HOST only. Removed from bottom bar (available in header).
+                    Keeping this comment as a marker; button has been moved to the header. */}
 
                 {/* Screen share — video mode, host always + students when enabled.
                     PLAT-02 FIX: Only render when navigator.mediaDevices?.getDisplayMedia
@@ -2571,11 +3035,11 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                     title={iAmSharing ? 'Stop sharing' : 'Share screen'}
                     aria-label={iAmSharing ? 'Stop screen share' : 'Share screen'}
                     className={cn(
-                      'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
+                      'w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
                       iAmSharing ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-700 hover:bg-gray-600',
                     )}
                   >
-                    {iAmSharing ? <MonitorOff className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
+                    {iAmSharing ? <MonitorOff className="w-4 h-4 sm:w-5 sm:h-5" /> : <Monitor className="w-4 h-4 sm:w-5 sm:h-5" />}
                   </button>
                 )}
 
@@ -2588,13 +3052,38 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                     title={myParticipant?.handRaised ? 'Lower hand' : 'Raise hand'}
                     aria-label={myParticipant?.handRaised ? 'Lower hand' : 'Raise hand'}
                     className={cn(
-                      'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
+                      'w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
                       myParticipant?.handRaised ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-gray-700 hover:bg-gray-600',
                     )}
                   >
-                    <Hand className="w-5 h-5" />
+                    <Hand className="w-4 h-4 sm:w-5 sm:h-5" />
                   </button>
                 )}
+
+                {/* Hand queue — HOST/MODERATOR only. Shows raised hand count badge.
+                    Opens the participants panel filtered to raised hands so host can
+                    quickly approve/reject without navigating the full participant list. */}
+                {canManage && lc.handRaiseEnabled && (() => {
+                  const raisedCount = participants.filter(p => p.handRaised).length
+                  return (
+                    <button
+                      onClick={() => { setTab('participants'); setShowSidebar(true) }}
+                      title={raisedCount > 0 ? `${raisedCount} raised hand${raisedCount > 1 ? 's' : ''} — click to review` : 'No raised hands'}
+                      aria-label={`Hand queue — ${raisedCount} raised`}
+                      className={cn(
+                        'relative w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
+                        raisedCount > 0 ? 'bg-yellow-500 hover:bg-yellow-600 animate-pulse' : 'bg-gray-700 hover:bg-gray-600',
+                      )}
+                    >
+                      <Hand className="w-4 h-4 sm:w-5 sm:h-5" />
+                      {raisedCount > 0 && (
+                        <span className="absolute -top-1 -right-1 min-w-[16px] h-4 bg-red-500 text-white text-[9px] font-black rounded-full flex items-center justify-center px-0.5 leading-none">
+                          {raisedCount > 9 ? '9+' : raisedCount}
+                        </span>
+                      )}
+                    </button>
+                  )
+                })()}
 
                 {/* Emoji reactions */}
                 <button
@@ -2602,11 +3091,11 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   title="React"
                   aria-label="Send emoji reaction"
                   className={cn(
-                    'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
+                    'w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
                     showEmojiPicker ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-700 hover:bg-gray-600',
                   )}
                 >
-                  <Smile className="w-5 h-5" />
+                  <Smile className="w-4 h-4 sm:w-5 sm:h-5" />
                 </button>
 
                 {/* Gift button — opens universal gift panel */}
@@ -2615,7 +3104,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   title="Send a gift"
                   aria-label="Send a gift"
                   className={cn(
-                    'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
+                    'w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
                     isGiftPanelOpen ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-gray-700 hover:bg-gray-600',
                   )}
                 >
@@ -2627,9 +3116,9 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   onClick={() => { setTab('chat'); setShowSidebar(true) }}
                   title="Chat"
                   aria-label="Open chat"
-                  className="w-12 h-12 rounded-full flex-shrink-0 bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors"
+                  className="w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors"
                 >
-                  <MessageSquare className="w-5 h-5" />
+                  <MessageSquare className="w-4 h-4 sm:w-5 sm:h-5" />
                 </button>
 
                 {/* Participants — mobile only (desktop sidebar always visible) */}
@@ -2637,9 +3126,9 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   onClick={() => { setTab('participants'); setShowSidebar(true) }}
                   title="Participants"
                   aria-label="Open participants"
-                  className="md:hidden w-12 h-12 rounded-full flex-shrink-0 bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors"
+                  className="md:hidden w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors"
                 >
-                  <Users className="w-5 h-5" />
+                  <Users className="w-4 h-4 sm:w-5 sm:h-5" />
                 </button>
 
                 {/* Whiteboard — students and moderators can view, when enabled */}
@@ -2649,11 +3138,11 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                     title={activePanel === 'whiteboard' ? 'Close whiteboard' : 'View whiteboard'}
                     aria-label={activePanel === 'whiteboard' ? 'Close whiteboard' : 'Open whiteboard'}
                     className={cn(
-                      'w-12 h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
+                      'w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 flex items-center justify-center transition-colors',
                       activePanel === 'whiteboard' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-gray-700 hover:bg-gray-600',
                     )}
                   >
-                    <PenLine className="w-5 h-5" />
+                    <PenLine className="w-4 h-4 sm:w-5 sm:h-5" />
                   </button>
                 )}
 
@@ -2662,9 +3151,9 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   onClick={handleLeave}
                   title="Leave class"
                   aria-label="Leave class"
-                  className="w-12 h-12 rounded-full flex-shrink-0 bg-red-600 hover:bg-red-700 flex items-center justify-center transition-colors"
+                  className="w-10 h-10 sm:w-12 sm:h-12 rounded-full flex-shrink-0 bg-red-600 hover:bg-red-700 flex items-center justify-center transition-colors"
                 >
-                  <PhoneOff className="w-5 h-5" />
+                  <PhoneOff className="w-4 h-4 sm:w-5 sm:h-5" />
                 </button>
 
               </div>
@@ -2672,16 +3161,97 @@ export function LiveClassRoomPage({ id }: { id: string }) {
           )}
         </div>
 
+        {/* ── Full Screen info overlay (bottom-left, TikTok style) ─────── */}
+        {isFullscreen && joined && lc && (
+          <div className={cn(
+            'absolute bottom-20 left-4 z-10 max-w-[60%] transition-opacity duration-300 pointer-events-none',
+            !showFsControls && 'opacity-0',
+          )}>
+            {/* Host name + stream type */}
+            <div className="flex items-center gap-2 mb-1">
+              {(() => {
+                const hostUser = lc.teacher?.user ?? (lc as any).hostUser
+                if (!hostUser) return null
+                const hostName = `${hostUser.firstName} ${hostUser.lastName}`.trim()
+                const avatar   = hostUser.avatarUrl ?? null
+                const initials = hostName.split(' ').map((n: string) => n[0]).slice(0,2).join('').toUpperCase()
+                return (
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-6 h-6 rounded-full overflow-hidden bg-indigo-900 flex items-center justify-center text-[9px] font-bold text-indigo-300 flex-shrink-0">
+                      {avatar ? <img src={avatar} alt={hostName} className="w-full h-full object-cover" /> : initials}
+                    </div>
+                    <span className="text-white text-sm font-bold drop-shadow-md truncate">{hostName}</span>
+                  </div>
+                )
+              })()}
+              {lc.status === 'LIVE' && (
+                <span className="flex items-center gap-1 text-[10px] font-bold text-red-400 bg-black/40 px-1.5 py-0.5 rounded-full">
+                  <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" /> LIVE
+                </span>
+              )}
+            </div>
+            {/* Title */}
+            <p className="text-white/90 text-xs font-medium drop-shadow-md truncate">{lc.title}</p>
+            {/* Participant count */}
+            <p className="text-white/60 text-[10px] mt-0.5">
+              👥 {participants.length} {lc.streamType === 'PUBLIC' ? 'viewers' : 'participants'}
+              {activeSpeakers.size > 0 && ` · 🗣 ${activeSpeakers.size} speaking`}
+            </p>
+          </div>
+        )}
+
+        {/* ── Full Screen right-side action strip (TikTok style) ────────── */}
+        {isFullscreen && joined && (
+          <div className={cn(
+            'absolute bottom-20 right-4 z-10 flex flex-col gap-3 items-center transition-opacity duration-300',
+            !showFsControls && 'opacity-0 pointer-events-none',
+          )}>
+            {/* Gift */}
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleGiftPanel() }}
+              className="flex flex-col items-center gap-0.5 text-white"
+              aria-label="Send a gift"
+            >
+              <span className="w-10 h-10 rounded-full bg-black/50 flex items-center justify-center text-xl">🎁</span>
+              <span className="text-[10px] text-white/70">Gift</span>
+            </button>
+            {/* Chat */}
+            <button
+              onClick={(e) => { e.stopPropagation(); setTab('chat'); setShowSidebar(true); toggleFullscreen() }}
+              className="flex flex-col items-center gap-0.5 text-white"
+              aria-label="Open chat"
+            >
+              <span className="w-10 h-10 rounded-full bg-black/50 flex items-center justify-center">
+                <MessageSquare className="w-5 h-5" />
+              </span>
+              <span className="text-[10px] text-white/70">Chat</span>
+            </button>
+            {/* Reactions */}
+            <button
+              onClick={(e) => { e.stopPropagation(); setShowEmojiPicker(v => !v) }}
+              className="flex flex-col items-center gap-0.5 text-white"
+              aria-label="Send reaction"
+            >
+              <span className="w-10 h-10 rounded-full bg-black/50 flex items-center justify-center">
+                <Smile className="w-5 h-5" />
+              </span>
+              <span className="text-[10px] text-white/70">React</span>
+            </button>
+          </div>
+        )}
+
         {/* ── Sidebar ─────────────────────────────────────────────────────── */}
         {joined && (
           <div className={cn(
             'flex flex-col bg-gray-900 border-l border-gray-800 flex-shrink-0',
-            // Desktop: always visible as fixed sidebar
+            // Desktop: always visible as fixed sidebar (hidden in fullscreen)
             'md:w-72 md:relative md:flex',
             // Mobile: full-screen overlay, toggled by showSidebar
             showSidebar
               ? 'fixed inset-0 z-20 w-full'
               : 'hidden md:flex',
+            // Fullscreen: always hidden — sidebar not shown in immersive mode
+            isFullscreen && '!hidden',
           )}>
             <div className="flex border-b border-gray-800 overflow-x-auto">
               {/* Mobile close button */}
@@ -2737,6 +3307,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   isRecording,
                   screenShareEnabled: lc.screenShareEnabled !== false,
                   viewMode,
+                  maxSpeakers:        (lc as any).maxSpeakers ?? 20,
                 }}
                 activeSpeakers={activeSpeakers}
                 currentUserId={user?.id}
@@ -2771,18 +3342,19 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   if (socket) socket.emit('liveclass:viewmode_changed', { liveClassId: id, viewMode: mode })
                   toast({ title: mode === 'audio' ? '🔇 Switched to audio-only view' : '📹 Switched to video view' })
                 }}
+                onSetMaxSpeakers={async (n) => {
+                  try {
+                    await api.patch('/live-classes/' + id, { maxSpeakers: n })
+                    toast({ title: `🎙 Max speakers set to ${n}` })
+                    queryClient.invalidateQueries({ queryKey: ['live-class', id] })
+                  } catch (e: any) {
+                    toast({ title: e?.response?.data?.message || 'Failed to update', variant: 'destructive' })
+                  }
+                }}
                 onEdit={isHost ? () => setShowEditModal(true) : undefined}
                 onPromoteModerator={isHost ? promoteToModerator : undefined}
                 onDemoteModerator={isHost ? demoteModerator : undefined}
-                onTransferHost={isHost ? async (userId: string) => {
-                  if (!confirm('Transfer host to this participant? You will become a regular participant.')) return
-                  try {
-                    await api.post(`/live-classes/${id}/transfer/${userId}`)
-                    toast({ title: 'Host transferred successfully' })
-                  } catch (e: any) {
-                    toast({ title: e?.response?.data?.message || 'Failed to transfer host', variant: 'destructive' })
-                  }
-                } : undefined}
+                onTransferHost={isCreator ? assignDelegatedHost : undefined}
               />
               </div>
             )}

@@ -21,6 +21,7 @@ import { resolveMediaUrl } from '@/lib/media'
 import { filterMentionCandidates, type UserSummary } from '@/lib/mentionUtils'
 import { cn } from '@/lib/utils'
 import api from '@/lib/api'
+import Link from 'next/link'
 import {
   Image, Globe, Users, Lock, School, ChevronDown,
   Loader2, X, Smile, MapPin, Link2,
@@ -60,6 +61,10 @@ export function PostComposer({
   const queryClient = useQueryClient()
   const fileRef     = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // SA-COMPOSER-01: SUPER_ADMIN = Platform Administration ONLY.
+  // Platform admins must not create social content.
+  if (user?.role === 'SUPER_ADMIN') return null
 
   const [body,        setBody]        = useState('')
   const [visibility,  setVisibility]  = useState('PUBLIC')
@@ -180,9 +185,7 @@ export function PostComposer({
       try {
         const form = new FormData()
         form.append('file', f)
-        const r = await api.post('/upload', form, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-          // Track per-file upload progress (future enhancement hook)
+        const r = await api.post('/upload', form, {          // Track per-file upload progress (future enhancement hook)
           timeout: 120_000, // 2 min for large videos
         })
         const uploaded = r.data.data
@@ -254,10 +257,11 @@ export function PostComposer({
   return (
     <div className={cn('bg-white rounded-2xl border border-gray-100 shadow-sm', compact ? 'p-3' : 'p-4')}>
       <div className="flex gap-3">
-        {/* Avatar */}
-        <div className="w-10 h-10 rounded-full overflow-hidden bg-indigo-100 flex-shrink-0 flex items-center justify-center text-sm font-bold text-indigo-600">
+        {/* Avatar — click to view your own profile */}
+        <Link href={`/social/profile/${user?.id}`} title="View my profile"
+          className="w-10 h-10 rounded-full overflow-hidden bg-indigo-100 flex-shrink-0 flex items-center justify-center text-sm font-bold text-indigo-600 hover:ring-2 hover:ring-indigo-400 hover:ring-offset-1 transition-all">
           {avatarSrc ? <img src={avatarSrc} alt="" className="w-full h-full object-cover" /> : initials}
-        </div>
+        </Link>
 
         <div className="flex-1 min-w-0">
           {/* Textarea */}

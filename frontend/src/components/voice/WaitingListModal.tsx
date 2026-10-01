@@ -91,7 +91,11 @@ export function WaitingListModal({
   isLoading = false,
 }: Props) {
   const { user } = useAuthStore()
-  const { speakerQueue, isWaitingListOpen, toggleWaitingList } = useVoiceStore()
+  const { speakerQueue, isWaitingListOpen, toggleWaitingList, activeRoom } = useVoiceStore()
+  const isOpenMic = activeRoom?.isOpenMic ?? false
+  // Stage is full when all maxSpeakers seats are occupied
+  const speakers = activeRoom?.participants.filter(p => p.isActive && p.seatNumber != null) ?? []
+  const stageFull = speakers.length >= (activeRoom?.maxSpeakers ?? 12)
 
   const myPosition = isInQueue
     ? speakerQueue.findIndex(u => u.userId === user?.id) + 1
@@ -142,7 +146,9 @@ export function WaitingListModal({
             {/* Header */}
             <div className="wl-header">
               <div className="wl-header-left">
-                <h2 className="wl-title">Waiting List</h2>
+                <h2 className="wl-title">
+                  {isOpenMic && !stageFull ? 'Take Seat' : 'Waiting Queue'}
+                </h2>
                 <span className="wl-subtitle">
                   {totalCount} Member{totalCount !== 1 ? 's' : ''}
                 </span>
@@ -174,7 +180,13 @@ export function WaitingListModal({
                 <div className="wl-empty">
                   <span className="wl-empty-icon">✋</span>
                   <p className="wl-empty-text">No one is waiting yet</p>
-                  <p className="wl-empty-sub">Be the first to raise your hand</p>
+                  <p className="wl-empty-sub">
+                    {isOpenMic && !stageFull
+                      ? 'Tap "Take Mic" to join the stage directly'
+                      : isOpenMic
+                        ? 'Stage is full — be the first to queue for the next seat'
+                        : 'Be the first to raise your hand'}
+                  </p>
                 </div>
               ) : (
                 speakerQueue.map((u, i) => (
@@ -199,8 +211,12 @@ export function WaitingListModal({
                   <span className="wl-btn-spinner" />
                 ) : isInQueue ? (
                   '✕  Cancel waiting'
-                ) : (
+                ) : isOpenMic && stageFull ? (
+                  '✋  Join Queue'
+                ) : isOpenMic ? (
                   '🎙️  Take Mic'
+                ) : (
+                  '✋  Raise Hand'
                 )}
               </button>
             </div>

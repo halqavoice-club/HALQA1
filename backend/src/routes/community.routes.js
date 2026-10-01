@@ -16,6 +16,17 @@ const createLimit = rateLimit({
   message: { success: false, message: 'Too many communities created, slow down' }
 });
 
+// COMM-P3-003 FIX: Rate limit community updates.
+// updateCommunity emits community:updated to ALL room subscribers on every call.
+// An ADMIN in a tight PATCH loop could flood all members' sockets.
+// Limit: 20 updates per 10 minutes per user — generous for legitimate use,
+// blocks sustained socket-flooding abuse.
+const patchLimit = rateLimit({
+  windowMs: 10 * 60 * 1000, max: 20,
+  keyGenerator: req => req.user?.id || req.ip,
+  message: { success: false, message: 'Too many community updates, slow down' }
+});
+
 // Rate limit invite creation: 20 per admin per hour
 const inviteLimit = rateLimit({
   windowMs: 60 * 60 * 1000, max: 20,
@@ -24,6 +35,20 @@ const inviteLimit = rateLimit({
 });
 
 router.use(authenticate);
+
+// ─── SUPER_ADMIN content-action guard ────────────────────────────────────────
+// SUPER_ADMIN = Platform Administration ONLY.
+// Cannot create/join communities as a content participant.
+// SUPER_ADMIN CAN delete communities (platform-level emergency removal — see community.controller.js).
+function denyIfSuperAdmin(req, res, next) {
+  if (req.user?.role === 'SUPER_ADMIN') {
+    return res.status(403).json({
+      success: false,
+      message: 'Platform administrators cannot create or join communities. Use the admin panel to manage content.'
+    });
+  }
+  return next();
+}
 
 // ── Discovery ─────────────────────────────────────────────────────────────────
 router.get('/',      ctrl.listCommunities);
@@ -35,6 +60,7 @@ router.post('/invites/:token/decline', ctrl.declineInvite);
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 router.post('/',
+  denyIfSuperAdmin,   // SA-COMM-01: SUPER_ADMIN cannot create communities
   createLimit,
   [
     body('name').trim().notEmpty().isLength({ max: 120 }),
@@ -50,6 +76,7 @@ router.post('/',
 router.get('/:idOrSlug',    ctrl.getCommunity);
 
 router.patch('/:idOrSlug',
+  patchLimit,
   [
     body('name').optional().trim().notEmpty().isLength({ max: 120 }),
     body('privacy').optional().isIn(['PUBLIC','PRIVATE','INVITE_ONLY']),
@@ -63,6 +90,7 @@ router.delete('/:idOrSlug', ctrl.deleteCommunity);
 
 // ── Membership ────────────────────────────────────────────────────────────────
 router.post('/:idOrSlug/join',
+  denyIfSuperAdmin,   // SA-COMM-02: SUPER_ADMIN cannot join communities as participant
   [body('message').optional().isString().isLength({ max: 500 })],
   validate,
   ctrl.joinCommunity

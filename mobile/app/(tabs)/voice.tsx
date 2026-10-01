@@ -6,7 +6,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  TextInput, ActivityIndicator, Image, RefreshControl, Alert,
+  TextInput, ActivityIndicator, Image, RefreshControl, Alert
 } from 'react-native';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'expo-router';
@@ -18,6 +18,7 @@ import { useDebounce } from '@/hooks/useDebounce';
 import { getAvatarUrl } from '@/lib/avatar';
 import { useAuthStore } from '@/store/auth.store';
 import { useVoiceStore } from '@/store/voice.store';
+import { showMessage } from 'react-native-flash-message';
 
 interface VoiceRoom {
   id: string; title: string; description: string | null;
@@ -135,6 +136,16 @@ export default function VoiceClubScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const debouncedSearch = useDebounce(search, 350);
 
+  // Conflict dialog state — shown when user tries to join while active in another room
+  const [conflictInfo, setConflictInfo] = useState<{
+    targetRoom: VoiceRoom;
+    activeRoomId: string;
+    activeRoomTitle: string;
+    activeRoomEmoji: string;
+    activeRoomTopic: string | null;
+  } | null>(null);
+  const [leavingConflict, setLeavingConflict] = useState(false);
+
   const { data: rooms = [], isLoading, refetch } = useQuery<VoiceRoom[]>({
     queryKey: ['voice-rooms-mobile', privacyFilter],
     queryFn: () => api.get('/voice', {
@@ -229,9 +240,78 @@ export default function VoiceClubScreen() {
       });
       router.push({ pathname: '/voice/[id]', params: { id: room.id } } as any);
     } catch (e: any) {
-      alert(e?.response?.data?.message ?? 'Failed to join');
-    } finally { setJoiningId(null); }
+      const code = e?.response?.data?.errors?.code;
+      if (code === 'VOICE_ROOM_ALREADY_ACTIVE') {
+        // Show native conflict dialog identifying the active room B.
+        // The conflict data lives under response.data.errors (not response.data directly).
+        setConflictInfo({
+          targetRoom:      room,
+          activeRoomId:    e?.response?.data?.errors?.activeRoomId    ?? '',
+          activeRoomTitle: e?.response?.data?.errors?.activeRoomTitle ?? 'another room',
+          activeRoomEmoji: e?.response?.data?.errors?.activeRoomEmoji ?? '🎙️',
+          activeRoomTopic: e?.response?.data?.errors?.activeRoomTopic ?? null,
+        });
+        return;
+      }
+      showMessage({
+        message: e?.response?.data?.message ?? 'Failed to join room',
+        type: 'danger',
+      });
+    } finally {
+      setJoiningId(null);
+    }
   }, [router, activeRoomId, setActiveRoom]);
+
+  // Leave room B then join room A — triggered from the conflict Alert
+  const handleLeaveAndJoin = useCallback(async (info: NonNullable<typeof conflictInfo>) => {
+    setConflictInfo(null);
+    setLeavingConflict(true);
+    setJoiningId(info.targetRoom.id);
+    try {
+      // Leave room B on the server
+      await api.post(`/voice/${info.activeRoomId}/leave`);
+    } catch {
+      // Proceed even if already gone (stale session)
+    }
+    // Emit Socket.IO leave for room B
+    const socket = getSocket();
+    if (socket) socket.emit('voice:leave_room', info.activeRoomId);
+    // Clear Zustand active-room state for B
+    clearActiveRoom?.();
+    setLeavingConflict(false);
+
+    // Now join room A
+    try {
+      await api.post(`/voice/${info.targetRoom.id}/join`);
+      setActiveRoom({
+        id:              info.targetRoom.id,
+        title:           info.targetRoom.title,
+        status:          info.targetRoom.status as any,
+        privacy:         info.targetRoom.privacy as any,
+        coverEmoji:      info.targetRoom.coverEmoji,
+        coverImageUrl:   info.targetRoom.coverImageUrl,
+        topic:           info.targetRoom.topic,
+        hostId:          info.targetRoom.host?.id ?? '',
+        isOpenMic:       info.targetRoom.isOpenMic ?? false,
+        micLocked:       false,
+        lockedSeats:     [],
+        commentsEnabled: true,
+        slowMode:        false,
+        messageType:     'all',
+        reactionsEnabled: true,
+        roomLevel:       1,
+        schoolId:        null,
+      });
+      router.push({ pathname: '/voice/[id]', params: { id: info.targetRoom.id } } as any);
+    } catch (e: any) {
+      showMessage({
+        message: e?.response?.data?.message ?? 'Failed to join room',
+        type: 'danger',
+      });
+    } finally {
+      setJoiningId(null);
+    }
+  }, [router, setActiveRoom, clearActiveRoom]);
 
   const handleDelete = useCallback((room: VoiceRoom) => {
     Alert.alert('Delete Room', `Delete "${room.title}"? This cannot be undone.`, [
@@ -248,6 +328,26 @@ export default function VoiceClubScreen() {
       }},
     ]);
   }, [queryClient]);
+
+  // Show the conflict Alert whenever conflictInfo is set
+  useEffect(() => {
+    if (!conflictInfo) return;
+    const { activeRoomEmoji, activeRoomTitle, activeRoomTopic } = conflictInfo;
+    const subtitle = activeRoomTopic ? `"${activeRoomTitle}" · ${activeRoomTopic}` : `"${activeRoomTitle}"`;
+    Alert.alert(
+      `${activeRoomEmoji} You're already in a room`,
+      `You are currently in ${subtitle}.\n\nLeave that Voice Club to join this one?`,
+      [
+        { text: 'Cancel', style: 'cancel', onPress: () => setConflictInfo(null) },
+        {
+          text: 'Leave & Join',
+          style: 'destructive',
+          onPress: () => handleLeaveAndJoin(conflictInfo),
+        },
+      ],
+      { cancelable: true, onDismiss: () => setConflictInfo(null) }
+    );
+  }, [conflictInfo]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -455,3 +555,4 @@ const s = StyleSheet.create({
   activeRoomDot:    { width: 7, height: 7, borderRadius: 4, backgroundColor: '#fff' },
   activeRoomTxt:    { flex: 1, color: '#fff', fontSize: 12, fontWeight: '700' },
 });
+

@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
+import { useRouter } from 'next/navigation'
 import api from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -13,7 +14,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { useToast } from '@/components/ui/use-toast'
 import {
   Plus, School, Settings, Globe, Loader2, GraduationCap,
-  UserCheck, CheckCircle2, Clock, Users, Search, ArrowRight
+  UserCheck, CheckCircle2, Clock, Users, Search, ArrowRight,
+  ChevronRight
 } from 'lucide-react'
 import { ErrorState } from '@/components/ui/error-state'
 import { format } from 'date-fns'
@@ -21,6 +23,7 @@ import Link from 'next/link'
 import { useAuthStore } from '@/store/auth.store'
 import { useEducationRole } from '@/hooks/useEducationRole'
 import { useSchoolAccess } from '@/hooks/useSchoolAccess'
+import { useSchoolStore } from '@/store/school.store'
 import { getFileUrl } from '@/lib/avatar'
 
 const SCHOOL_TYPES = ['school', 'academy', 'college', 'daycare', 'camp', 'sports']
@@ -52,6 +55,8 @@ export default function SchoolsPage() {
   const { fetchMe } = useAuthStore()
   const isSuperAdmin = user?.role === 'SUPER_ADMIN'
   const { memberships } = useSchoolAccess()
+  const { setActiveSchoolId } = useSchoolStore()
+  const router = useRouter()
 
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState('')
@@ -129,14 +134,18 @@ export default function SchoolsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" asChild>
-            <Link href="/school-memberships/create">
-              <Plus className="w-3.5 h-3.5 mr-1" /> Create School
-            </Link>
-          </Button>
+          {/* Regular users create a school and become its SCHOOL_ADMIN.
+              SUPER_ADMIN uses the admin panel (/admin/schools) instead — not this flow. */}
+          {!isSuperAdmin && (
+            <Button variant="outline" size="sm" asChild>
+              <Link href="/school-memberships/create">
+                <Plus className="w-3.5 h-3.5 mr-1" /> Create School
+              </Link>
+            </Button>
+          )}
           {isSuperAdmin && (
             <Button onClick={() => setShowCreate(true)} className="bg-halqa-700 hover:bg-halqa-800 gap-2" size="sm">
-              <Plus className="w-4 h-4" /> Add (Admin)
+              <Plus className="w-4 h-4" /> Add School (Admin)
             </Button>
           )}
         </div>
@@ -155,25 +164,30 @@ export default function SchoolsPage() {
         </div>
       )}
 
-      {/* My schools quick panel */}
+      {/* My schools quick panel — clickable to switch context */}
       {memberships.length > 0 && (
         <div>
           <h2 className="text-sm font-semibold text-gray-600 uppercase tracking-wide mb-3">My Schools</h2>
           <div className="flex flex-wrap gap-2">
             {memberships.map(m => (
-              <div key={m.schoolId} className="flex items-center gap-2 bg-white border border-gray-200 rounded-xl px-3 py-2 shadow-sm">
+              <button
+                key={m.schoolId}
+                onClick={() => { setActiveSchoolId(m.schoolId); router.push('/education') }}
+                className="flex items-center gap-2 bg-white border border-gray-200 hover:border-halqa-400 hover:bg-halqa-50 rounded-xl px-3 py-2 shadow-sm transition-all group"
+              >
                 {m.school.logoUrl
                   ? <img src={getFileUrl(m.school.logoUrl)} alt="" className="w-6 h-6 rounded object-contain" />
                   : <School className="w-4 h-4 text-gray-400" />
                 }
-                <span className="text-sm font-medium text-gray-900">{m.school.name}</span>
+                <span className="text-sm font-medium text-gray-900 group-hover:text-halqa-700">{m.school.name}</span>
                 <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${ROLE_COLORS[m.role] || 'bg-gray-100 text-gray-600'}`}>
                   {m.role.replace(/_/g, ' ')}
                 </span>
                 <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${m.status === 'ACTIVE' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
                   {m.status}
                 </span>
-              </div>
+                <ChevronRight className="w-3.5 h-3.5 text-gray-300 group-hover:text-halqa-500" />
+              </button>
             ))}
           </div>
         </div>
@@ -266,10 +280,12 @@ export default function SchoolsPage() {
 
                   <div className="mt-4 flex gap-2">
                     {isActive ? (
-                      <Button variant="outline" size="sm" className="flex-1 text-xs gap-1" asChild>
-                        <Link href="/dashboard">
-                          <GraduationCap className="w-3 h-3" /> Go to Dashboard
-                        </Link>
+                      <Button
+                        variant="outline" size="sm"
+                        className="flex-1 text-xs gap-1"
+                        onClick={() => { setActiveSchoolId(school.id); router.push('/education') }}
+                      >
+                        <GraduationCap className="w-3 h-3" /> Open Dashboard
                       </Button>
                     ) : isPending ? (
                       <div className="flex-1 text-center text-xs text-yellow-600 py-1.5 bg-yellow-50 rounded-lg">

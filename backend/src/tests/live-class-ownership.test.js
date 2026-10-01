@@ -60,19 +60,18 @@ describe('OWN-01-A source audit: PUBLIC stream HOST assignment', () => {
     expect(fn).toMatch(/isEffectivelyStaff.*MODERATOR|MODERATOR.*isEffectivelyStaff/s);
   });
 
-  test('isHost (auto-start) uses isCreator only', () => {
+  test('isHost (auto-start) uses isCreator OR isDelegatedHost', () => {
     const joinIdx = src.indexOf('async function joinLiveClass');
     const fn = src.slice(joinIdx, joinIdx + 8000);
-    expect(fn).toMatch(/const isHost = isCreator/);
+    // DEL-HOST: auto-start now triggered by creator OR delegated host
+    expect(fn).toMatch(/const isHost = isCreator \|\| isDelegatedHost/);
   });
 
-  test('upsert isMuted uses isCreator not isEffectivelyStaff', () => {
+  test('upsert isMuted respects delegated host (isCreator || isDelegatedHost)', () => {
     const joinIdx = src.indexOf('async function joinLiveClass');
     const fn = src.slice(joinIdx, joinIdx + 6000);
-    // Check the specific upsert isMuted pattern directly
-    expect(fn).toMatch(/isMuted: !\(isCreator/);
-    // Specifically checks the !(isCreator || lc.isOpenMic) pattern
-    expect(fn).toMatch(/isCreator \|\| lc\.isOpenMic/);
+    // DEL-HOST: delegated host also starts unmuted
+    expect(fn).toMatch(/isMuted: !\(isCreator \|\| isDelegatedHost/);
   });
 });
 
@@ -102,11 +101,14 @@ describe('OWN-01-B source audit: ownership guard on mutations', () => {
     expect(fn).not.toMatch(/streamType === 'PUBLIC'/);
   });
 
-  test('updateLiveClass calls assertOwner', () => {
+  test('updateLiveClass uses isHostForEdit gate (DEL-HOST: creator or delegated host — Gap 1 fix)', () => {
     const idx = src.indexOf('async function updateLiveClass');
-    const fn = src.slice(idx, idx + 600);
-    expect(fn).toMatch(/assertOwner/);
-    expect(fn).toMatch(/OWN-01/);
+    const fn = src.slice(idx, idx + 1500);
+    // Gap 1 fix: assertOwner removed; isHostForEdit gates both creator and delegated host.
+    // Creator-only structural fields (maxSpeakers, isRecorded) are still enforced below.
+    expect(fn).toMatch(/isHostForEdit/);
+    expect(fn).not.toMatch(/assertOwner\(lc,\s*req\.user\)/); // assertOwner removed from updateLiveClass
+    // deleteLiveClass still uses assertOwner (structural delete remains creator-only)
   });
 
   test('deleteLiveClass calls assertOwner', () => {
@@ -116,17 +118,17 @@ describe('OWN-01-B source audit: ownership guard on mutations', () => {
     expect(fn).toMatch(/OWN-01/);
   });
 
-  test('startLiveClass calls assertOwner', () => {
+  test('startLiveClass calls assertHostOrDelegate (DEL-HOST: creator or delegated host can start)', () => {
     const idx = src.indexOf('async function startLiveClass');
-    const fn = src.slice(idx, idx + 500);
-    expect(fn).toMatch(/assertOwner/);
+    const fn = src.slice(idx, idx + 600);
+    expect(fn).toMatch(/assertHostOrDelegate/);
     expect(fn).toMatch(/OWN-01/);
   });
 
-  test('endLiveClass calls assertOwner', () => {
+  test('endLiveClass calls assertHostOrDelegate (DEL-HOST: creator or delegated host can end)', () => {
     const idx = src.indexOf('async function endLiveClass');
     const fn = src.slice(idx, idx + 500);
-    expect(fn).toMatch(/assertOwner/);
+    expect(fn).toMatch(/assertHostOrDelegate/);
     expect(fn).toMatch(/OWN-01/);
   });
 });

@@ -97,6 +97,19 @@ async function run() {
     console.log('[OK] host_user_id already exists');
   }
 
+  // Step 6b: Make maxParticipants nullable (unlimited viewers — no cap for public streams)
+  const maxParticipantsCol = cols.find(c => c.Field === 'maxParticipants');
+  if (maxParticipantsCol && maxParticipantsCol.Null === 'NO') {
+    console.log('[FIX] Making maxParticipants nullable (no default cap)...');
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE `live_classes` MODIFY COLUMN `maxParticipants` INT NULL'
+    );
+    console.log('[OK] maxParticipants is now nullable');
+    fixes.push('maxParticipants nullable');
+  } else {
+    console.log('[OK] maxParticipants already nullable');
+  }
+
   // Step 7: Add indexes if missing
   const indexResult = await prisma.$queryRawUnsafe(
     "SHOW INDEX FROM `live_classes`"
@@ -144,23 +157,25 @@ async function run() {
     console.log('\nMigration record:', migRecord[0]);
   }
 
-  // Step 10: Quick creation test
-  console.log('\n--- Quick creation test ---');
+  // Step 10: Quick creation test (raw SQL — same path as the controller)
+  console.log('\n--- Quick creation test (raw SQL) ---');
   try {
+    const { v4: uuidv4 } = require('uuid');
     const host = await prisma.user.findFirst({ where: { deletedAt: null, status: 'ACTIVE' }, select: { id: true } });
-    const lc = await prisma.liveClass.create({
-      data: {
-        streamType: 'PUBLIC',
-        hostUserId: host.id,
-        schoolId: null, classId: null, teacherId: null,
-        title: '_test_', status: 'SCHEDULED',
-        chatEnabled: true, handRaiseEnabled: true,
-        whiteboardEnabled: true, quranPanelEnabled: false,
-        isOpenMic: true, screenShareEnabled: true, maxParticipants: 100,
-      }
-    });
-    console.log('[OK] Test creation succeeded:', lc.id);
-    await prisma.liveClass.delete({ where: { id: lc.id } });
+    const testId = uuidv4();
+    const now = new Date().toISOString().slice(0, 23).replace('T', ' ');
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO live_classes (id, stream_type, host_user_id, schoolId, classId, teacherId, title, description, scheduledAt, duration, status, chatEnabled, handRaiseEnabled, whiteboardEnabled, quranPanelEnabled, isOpenMic, screenShareEnabled, maxParticipants, isRecorded, createdAt, updatedAt)
+       VALUES (?, 'PUBLIC', ?, NULL, NULL, NULL, '_test_', NULL, NULL, NULL, 'SCHEDULED', 1, 1, 1, 0, 1, 1, NULL, 0, ?, ?)`,
+      testId, host.id, now, now
+    );
+    const rows = await prisma.$queryRawUnsafe('SELECT id, maxParticipants FROM live_classes WHERE id = ?', testId);
+    if (rows[0].maxParticipants === null) {
+      console.log('[OK] Test creation succeeded — maxParticipants correctly stored as NULL:', testId);
+    } else {
+      console.log('[WARN] maxParticipants not null:', rows[0].maxParticipants);
+    }
+    await prisma.$executeRawUnsafe('DELETE FROM live_classes WHERE id = ?', testId);
     console.log('[OK] Test record cleaned up');
   } catch (e) {
     console.error('[FAIL] Test creation still failing:', e.message.split('\n')[0]);

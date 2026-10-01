@@ -61,6 +61,10 @@ const next = jest.fn();
 const LC = {
   id: 'class-1', schoolId: 'school-a', status: 'LIVE',
   livekitRoomName: 'liveclass-class-1', chatEnabled: true, quranPanelEnabled: false,
+  // OWN-06–OWN-07: hostUserId must match the test user ('teacher-1') so assertOwner passes.
+  hostUserId: 'teacher-1', host_user_id: 'teacher-1',
+  streamType: 'SCHOOL', stream_type: 'SCHOOL',
+  recordingStartedAt: new Date(), isOpenMic: false,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -364,7 +368,12 @@ describe('P2-03 Gift endpoint school isolation (checkLiveClassSchool middleware)
     expect(nextFn).not.toHaveBeenCalled();
   });
 
-  test('SUPER_ADMIN bypasses school isolation', async () => {
+  test('SUPER_ADMIN cross-school is denied 403 (ARCH-02: no SUPER_ADMIN bypass in checkLiveClassSchool)', async () => {
+    // ARCH-02 FIX: The production checkLiveClassSchool middleware in live-class.routes.js
+    // no longer contains a SUPER_ADMIN exemption for SCHOOL streams.
+    // Platform admins are not automatically enrolled in school-private sessions.
+    // This test reflects the corrected production behavior:
+    //   if (lc.schoolId !== userSchoolId) → 403, regardless of SUPER_ADMIN role.
     prisma.liveClass.findFirst.mockResolvedValue({ schoolId: 'school-x' });
 
     const req = { params: { id: 'class-1' }, user: { id: 'su', role: 'SUPER_ADMIN', schoolId: null } };
@@ -373,14 +382,16 @@ describe('P2-03 Gift endpoint school isolation (checkLiveClassSchool middleware)
 
     const lc = await prisma.liveClass.findFirst({ where: { id: req.params.id, deletedAt: null }, select: { schoolId: true } });
     if (!lc) { res.status(404); return; }
-    if (req.user.role !== 'SUPER_ADMIN' && lc.schoolId !== req.user.schoolId) {
+    // Production logic (no SUPER_ADMIN exemption): school isolation applies to all roles
+    const userSchoolId = req.schoolMembership?.schoolId || req.schoolId || req.user.schoolId;
+    if (lc.schoolId !== userSchoolId) {
       res.status(403).json({ success: false, message: 'Access denied' });
     } else {
       nextFn();
     }
 
-    expect(nextFn).toHaveBeenCalled();
-    expect(res.status).not.toHaveBeenCalledWith(403);
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(nextFn).not.toHaveBeenCalled();
   });
 
   test('non-existent live class returns 404', async () => {

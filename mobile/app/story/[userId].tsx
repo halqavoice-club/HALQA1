@@ -6,7 +6,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, Image, StyleSheet, TouchableOpacity,
   ActivityIndicator, Dimensions, GestureResponderEvent,
-  Animated,
+  Animated
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
@@ -235,3 +235,4 @@ const styles = StyleSheet.create({
   footer: { position: 'absolute', bottom: 32, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
   viewsText: { color: 'rgba(255,255,255,0.7)', fontSize: 13 },
 });
+

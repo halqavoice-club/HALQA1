@@ -81,6 +81,10 @@ const LC_SAME_SCHOOL = {
   livekitRoomName: 'liveclass-class-1', duration: null,
   chatEnabled: true, quranPanelEnabled: false, isOpenMic: false,
   recordingStartedAt: null, coverImageUrl: null,
+  // OWN-02–OWN-10: hostUserId matches the default makeReq user ('user-1')
+  // so assertOwner passes in tests that call mutating endpoints as the creator.
+  hostUserId: 'user-1', host_user_id: 'user-1',
+  streamType: 'SCHOOL', stream_type: 'SCHOOL',
 };
 
 const LC_OTHER_SCHOOL = {
@@ -262,7 +266,10 @@ describe('P0-05 BUG-01: LiveKit SFU eviction on kick', () => {
 
   test('kickParticipant: calls RoomServiceClient.removeParticipant with correct args', async () => {
     prisma.liveClass.findFirst.mockResolvedValue(LC_SAME_SCHOOL);
-    prisma.liveClassParticipant.findFirst.mockResolvedValue({ id: 'p-1', isActive: true });
+    // assertOwnerOrModerator queries first (caller), then kickParticipant queries target
+    prisma.liveClassParticipant.findFirst
+      .mockResolvedValueOnce({ id: 'p-caller', role: 'HOST', isActive: true })  // assertOwnerOrModerator
+      .mockResolvedValueOnce({ id: 'p-1', isActive: true });                    // target participant
     prisma.liveClassParticipant.update.mockResolvedValue({});
 
     const mockRemove = jest.fn().mockResolvedValue({});
@@ -280,7 +287,9 @@ describe('P0-05 BUG-01: LiveKit SFU eviction on kick', () => {
 
   test('kickParticipant: LiveKit failure does not corrupt DB state (best-effort)', async () => {
     prisma.liveClass.findFirst.mockResolvedValue(LC_SAME_SCHOOL);
-    prisma.liveClassParticipant.findFirst.mockResolvedValue({ id: 'p-1', isActive: true });
+    prisma.liveClassParticipant.findFirst
+      .mockResolvedValueOnce({ id: 'p-caller', role: 'HOST', isActive: true })  // assertOwnerOrModerator
+      .mockResolvedValueOnce({ id: 'p-1', isActive: true });                    // target participant
     prisma.liveClassParticipant.update.mockResolvedValue({});
 
     // LiveKit throws — must not propagate to the response
@@ -303,7 +312,9 @@ describe('P0-05 BUG-01: LiveKit SFU eviction on kick', () => {
   test('kickParticipant: no LiveKit call when livekitRoomName is null', async () => {
     const lcNoRoom = { ...LC_SAME_SCHOOL, livekitRoomName: null };
     prisma.liveClass.findFirst.mockResolvedValue(lcNoRoom);
-    prisma.liveClassParticipant.findFirst.mockResolvedValue({ id: 'p-1', isActive: true });
+    prisma.liveClassParticipant.findFirst
+      .mockResolvedValueOnce({ id: 'p-caller', role: 'HOST', isActive: true })  // assertOwnerOrModerator
+      .mockResolvedValueOnce({ id: 'p-1', isActive: true });                    // target participant
     prisma.liveClassParticipant.update.mockResolvedValue({});
 
     const mockRemove = jest.fn().mockResolvedValue({});
@@ -418,7 +429,13 @@ describe('P0-02 BUG-03 + P0-03 RT-02: Socket identity must be socket.userId', ()
 // ─────────────────────────────────────────────────────────────────────────────
 describe('P0-04 RT-05: Unauthorized socket room join denied', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    // P8C FIX: use resetAllMocks (not clearAllMocks) to flush any leftover
+    // mockResolvedValueOnce queue entries from P0-05 tests that run earlier
+    // in this file. clearAllMocks only resets call counts; it does not clear
+    // the Once queue, so a prior test's unconsumed mockResolvedValueOnce
+    // would leak into liveClassParticipant.findFirst here and return a
+    // truthy value even when the test sets mockResolvedValue(null).
+    jest.resetAllMocks();
   });
 
   test('liveclass:join_room: non-participant is NOT added to socket room', async () => {

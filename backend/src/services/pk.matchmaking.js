@@ -94,12 +94,36 @@ async function joinQueue(userId, opts = {}) {
 }
 
 // ─── LEAVE QUEUE ──────────────────────────────────────────────────────────────
-async function leaveQueue(userId, type = 'ONE_V_ONE') {
+async function leaveQueue(userId, type) {
   if (!isRedisReady()) return;
   const redis = getRedis();
   const pipe  = redis.pipeline();
+
+  // Always remove the user's personal entry key regardless of type
   pipe.del(entryKey(userId));
-  pipe.zrem(queueKey(type), userId);
+
+  // BUG-002 FIX: When no type is provided by the caller, read the actual type
+  // from the stored entry so we remove from the correct sorted set.
+  // If the entry is already gone (expired or never set), fall back to
+  // removing from all known queue types to guarantee no stale membership.
+  let queueType = type;
+  try {
+    const entryRaw = await redis.get(entryKey(userId));
+    if (entryRaw) {
+      const entry = JSON.parse(entryRaw);
+      queueType = entry.type || type || 'ONE_V_ONE';
+    }
+  } catch {}
+
+  if (queueType) {
+    pipe.zrem(queueKey(queueType), userId);
+  } else {
+    // Safety net: remove from all queue types to prevent phantom entries
+    for (const t of ['ONE_V_ONE', 'ROOM_V_ROOM', 'TEAM_V_TEAM', 'CLUB_V_CLUB']) {
+      pipe.zrem(queueKey(t), userId);
+    }
+  }
+
   await pipe.exec();
 
   prisma.pKMatchmakingQueue.updateMany({
@@ -170,12 +194,27 @@ async function attemptMatch(userId, type) {
     pipe.zrem(queueKey(type), opponent.userId);
     await pipe.exec();
 
-    // Create match
+    // Create match — detect active voice rooms for both users so the banner appears
+    const [senderRoom, opponentRoom] = await Promise.all([
+      prisma.voiceParticipant.findFirst({
+        where: { userId, isActive: true },
+        select: { roomId: true },
+        orderBy: { joinedAt: 'desc' },
+      }),
+      prisma.voiceParticipant.findFirst({
+        where: { userId: opponent.userId, isActive: true },
+        select: { roomId: true },
+        orderBy: { joinedAt: 'desc' },
+      }),
+    ]);
+
     const { match } = await createMatch({
       type:            entry.type,
       sideAUserId:     userId,
       sideBUserId:     opponent.userId,
       durationSeconds: entry.durationSeconds,
+      roomIdA:         senderRoom?.roomId   || null,
+      roomIdB:         opponentRoom?.roomId || null,
       idempotencyKey:  `mm:${[userId, opponent.userId].sort().join(':')}:${now}`,
     });
 

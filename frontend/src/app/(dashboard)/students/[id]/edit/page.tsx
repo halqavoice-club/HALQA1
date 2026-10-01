@@ -11,22 +11,27 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Textarea } from '@/components/ui/textarea'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useToast } from '@/components/ui/use-toast'
 import { ArrowLeft, Save, Loader2 } from 'lucide-react'
 import Link from 'next/link'
 import { useUnsavedChanges } from '@/hooks/useUnsavedChanges'
 
+/**
+ * Student Edit Page
+ *
+ * A School Admin may only edit school-specific student fields:
+ *   - Student ID (school-assigned identifier)
+ *   - Grade Level / Level
+ *
+ * All personal information (name, email, phone, date of birth, gender)
+ * belongs to the student and can only be changed by the student
+ * via their own profile settings.
+ */
+
 const schema = z.object({
-  firstName: z.string().min(1, 'Required'),
-  lastName: z.string().min(1, 'Required'),
-  phone: z.string().optional(),
-  dateOfBirth: z.string().optional(),
-  gender: z.string().optional(),
+  studentId:  z.string().min(1, 'Required'),
   gradeLevel: z.string().optional(),
-  medicalNotes: z.string().optional(),
 })
 type Form = z.infer<typeof schema>
 
@@ -41,20 +46,15 @@ export default function EditStudentPage() {
     queryFn: () => api.get(`/students/${id}`).then(r => r.data.data)
   })
 
-  const { register, handleSubmit, setValue, reset, formState: { errors, isDirty } } = useForm<Form>({
+  const { register, handleSubmit, reset, formState: { errors, isDirty } } = useForm<Form>({
     resolver: zodResolver(schema)
   })
 
   useEffect(() => {
     if (student) {
       reset({
-        firstName: student.user?.firstName || '',
-        lastName: student.user?.lastName || '',
-        phone: student.user?.phone || '',
-        dateOfBirth: student.user?.dateOfBirth ? student.user.dateOfBirth.split('T')[0] : '',
-        gender: student.user?.gender || '',
+        studentId:  student.studentId || '',
         gradeLevel: student.gradeLevel || '',
-        medicalNotes: student.medicalNotes || ''
       })
     }
   }, [student, reset])
@@ -72,14 +72,14 @@ export default function EditStudentPage() {
   useUnsavedChanges(isDirty && !mutation.isSuccess)
 
   if (isLoading) return (
-    <div className="space-y-4 max-w-2xl">
+    <div className="space-y-4 max-w-md">
       <Skeleton className="h-8 w-48" />
-      <Skeleton className="h-64 rounded-xl" />
+      <Skeleton className="h-40 rounded-xl" />
     </div>
   )
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="max-w-md space-y-6">
       <div className="flex items-center gap-3">
         <Link href={`/students/${id}`} className="text-gray-500 hover:text-gray-700">
           <ArrowLeft className="w-5 h-5" />
@@ -95,60 +95,55 @@ export default function EditStudentPage() {
       <form onSubmit={handleSubmit(d => mutation.mutate(d))} className="space-y-4">
         <Card className="border-0 shadow-sm">
           <CardHeader className="pb-3">
-            <CardTitle className="text-base font-semibold">Personal Information</CardTitle>
+            <CardTitle className="text-base font-semibold">School Details</CardTitle>
+            <p className="text-xs text-gray-400 mt-0.5">
+              Only school-specific fields can be edited here. Personal information is managed by the student.
+            </p>
           </CardHeader>
-          <CardContent className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <CardContent className="space-y-4">
             <div>
-              <Label>First Name *</Label>
-              <Input className="mt-1" {...register('firstName')} />
-              {errors.firstName && <p className="text-xs text-red-500 mt-1">{errors.firstName.message}</p>}
+              <Label>Student ID *</Label>
+              <Input
+                className="mt-1"
+                placeholder="e.g. STU-001"
+                {...register('studentId')}
+              />
+              {errors.studentId && (
+                <p className="text-xs text-red-500 mt-1">{errors.studentId.message}</p>
+              )}
+              <p className="text-xs text-gray-400 mt-1">
+                School-assigned ID used for attendance and records
+              </p>
             </div>
-            <div>
-              <Label>Last Name *</Label>
-              <Input className="mt-1" {...register('lastName')} />
-              {errors.lastName && <p className="text-xs text-red-500 mt-1">{errors.lastName.message}</p>}
-            </div>
-            <div>
-              <Label>Phone</Label>
-              <Input className="mt-1" {...register('phone')} />
-            </div>
-            <div>
-              <Label>Date of Birth</Label>
-              <Input type="date" className="mt-1" {...register('dateOfBirth')} />
-            </div>
+
             <div>
               <Label>Grade Level / Level</Label>
-              <Input className="mt-1" placeholder="e.g., Grade 5, Beginner, Level 2" {...register('gradeLevel')} />
+              <Input
+                className="mt-1"
+                placeholder="e.g., Grade 5, Beginner, Level 2"
+                {...register('gradeLevel')}
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                Academic level or grade in your school system
+              </p>
             </div>
-            <div>
-              <Label>Gender</Label>
-              <Select onValueChange={v => setValue('gender', v)} defaultValue={student?.user?.gender || ''}>
-                <SelectTrigger className="mt-1"><SelectValue placeholder="Select gender" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="male">Male</SelectItem>
-                  <SelectItem value="female">Female</SelectItem>
-                  <SelectItem value="other">Other</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="border-0 shadow-sm">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base font-semibold">Medical & Emergency</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Label>Medical Notes</Label>
-            <Textarea className="mt-1" placeholder="Any medical conditions, allergies, or special needs..." {...register('medicalNotes')} />
           </CardContent>
         </Card>
 
         <div className="flex gap-3">
-          <Button type="submit" className="bg-halqa-700 hover:bg-halqa-800 gap-2" disabled={mutation.isPending}>
-            {mutation.isPending ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : <><Save className="w-4 h-4" /> Save Changes</>}
+          <Button
+            type="submit"
+            className="bg-halqa-700 hover:bg-halqa-800 gap-2"
+            disabled={mutation.isPending}
+          >
+            {mutation.isPending
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</>
+              : <><Save className="w-4 h-4" /> Save Changes</>
+            }
           </Button>
-          <Link href={`/students/${id}`}><Button type="button" variant="outline">Cancel</Button></Link>
+          <Link href={`/students/${id}`}>
+            <Button type="button" variant="outline">Cancel</Button>
+          </Link>
         </div>
       </form>
     </div>

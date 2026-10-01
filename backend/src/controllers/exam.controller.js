@@ -12,28 +12,99 @@ const logger = require('../utils/logger');
 
 /**
  * Create a new exam submission
+ *
+ * FIND-02 FIX: schoolId, classId, gradeId, teacherId and studentId must be
+ * server-controlled — never trusted from req.body for authorization.
+ *
+ * Authorization chain:
+ *   1. requireSchoolMember() → sets req.schoolId (authoritative school context)
+ *   2. Resolve authenticated student record for req.schoolId
+ *   3. Validate classId belongs to req.schoolId
+ *   4. Validate gradeId (if supplied) belongs to req.schoolId via classId
+ *   5. Ignore body.schoolId, body.studentId, body.teacherId
+ *   6. Create submission using server-derived values only
  */
 async function createExamSubmission(req, res) {
   try {
-    const { schoolId, classId, gradeId, studentId, teacherId, title, answers, attachments } = req.body;
-    const userId = req.user.id;
+    // FIND-02: use req.schoolId (set by requireSchoolMember middleware) not req.body.schoolId
+    const schoolId = req.schoolId;
+    const userId   = req.user.id;
+
+    if (!schoolId) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VAL_002', message: 'School context required', statusCode: 400 }
+      });
+    }
+
+    // Extract only safe client fields — authorization fields are server-resolved
+    const { classId, gradeId, title, answers, attachments } = req.body;
+
+    // Validate required fields
+    if (!classId) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VAL_002', message: 'classId is required', statusCode: 400 }
+      });
+    }
+
+    // FIND-02: Verify classId belongs to the authenticated user's school.
+    // Prevents a School A student from submitting to a School B class using a valid School B ID.
+    const cls = await prisma.class.findFirst({
+      where: { id: classId, schoolId, deletedAt: null },
+      select: { id: true }
+    });
+    if (!cls) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'AUTH_002', message: 'Class not found in your school', statusCode: 403 }
+      });
+    }
+
+    // FIND-02: Verify gradeId (if supplied) belongs to the same school via its class.
+    if (gradeId) {
+      const grade = await prisma.grade.findFirst({
+        where: { id: gradeId, classId, deletedAt: null },
+        select: { id: true }
+      });
+      if (!grade) {
+        return res.status(403).json({
+          success: false,
+          error: { code: 'AUTH_002', message: 'Grade not found in this class', statusCode: 403 }
+        });
+      }
+    }
+
+    // FIND-02: Resolve the Student record for the authenticated user in this school.
+    // body.studentId is ignored — a student cannot submit on behalf of another student.
+    const student = await prisma.student.findFirst({
+      where: { userId, schoolId, deletedAt: null },
+      select: { id: true }
+    });
+    if (!student) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'AUTH_002', message: 'Student profile not found in your school', statusCode: 403 }
+      });
+    }
 
     const submission = await prisma.examSubmission.create({
       data: {
-        schoolId,
-        classId,
-        gradeId,
-        studentId: studentId || userId,
-        teacherId,
+        // FIND-02: all authorization-sensitive fields are server-derived
+        schoolId,                  // from requireSchoolMember, not req.body
+        classId,                   // validated to belong to schoolId above
+        gradeId:   gradeId || null, // validated to belong to classId above
+        studentId: student.id,     // from authenticated user's own student record
+        teacherId: null,           // not accepted from client; set by grading endpoints
         title,
-        answers: answers || {},
+        answers:     answers     || {},
         attachments: attachments || [],
         status: 'DRAFT'
       }
     });
 
-    logger.info(`Exam submission created: ${submission.id} by student ${submission.studentId}`);
-    
+    logger.info(`Exam submission created: ${submission.id} by student ${student.id}`);
+
     res.status(201).json({
       success: true,
       data: submission
@@ -42,11 +113,7 @@ async function createExamSubmission(req, res) {
     logger.error('Failed to create exam submission:', error);
     res.status(500).json({
       success: false,
-      error:({
-        code: 'INT_001',
-        message: 'Failed to create exam submission',
-        statusCode: 500
-      })
+      error: { code: 'INT_001', message: 'Failed to create exam submission', statusCode: 500 }
     });
   }
 }

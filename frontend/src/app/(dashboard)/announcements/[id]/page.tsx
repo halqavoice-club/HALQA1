@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useSchoolAccess } from '@/hooks/useSchoolAccess'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { ArrowLeft, Pin, Calendar, Users, Trash2, Megaphone } from 'lucide-react'
 import Link from 'next/link'
@@ -19,6 +20,7 @@ export default function AnnouncementDetailPage() {
   const { id } = useParams<{ id: string }>()
   const router = useRouter()
   const { user } = useAuthStore()
+  const { activeRole } = useSchoolAccess()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
@@ -40,7 +42,9 @@ export default function AnnouncementDetailPage() {
     onError: () => toast({ title: 'Delete failed', variant: 'destructive' })
   })
 
-  const canDelete = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  // SA-ANN-03: SUPER_ADMIN is a platform role — not a school-scoped teacher/admin.
+  // Deleting announcements is a school-scoped action.
+  const canDelete = ['SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '') || ['SCHOOL_ADMIN','TEACHER'].includes(activeRole || '')
 
   if (isLoading) {
     return (

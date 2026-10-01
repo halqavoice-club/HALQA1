@@ -8,14 +8,23 @@ import { canAccessRoute, getDefaultRoute } from '@/lib/role-routes'
 
 // Pages that should never trigger an access-denied redirect
 const ALWAYS_ALLOWED = [
-  '/dashboard', '/access-denied', '/profile', '/notifications', '/settings/blocked',
+  '/dashboard', '/access-denied', '/profile', '/notifications', '/settings',
+  '/settings/blocked',
   // School pages — all authenticated users can view their own school info
   '/schools',
-  // Education onboarding pages — accessible without school membership
+  // Education hub and school switcher — accessible to any authenticated user
+  '/education', '/school-memberships',
+  // Education onboarding — accessible without school membership
   '/schools/join', '/school-memberships/create',
+  // Social features — all authenticated users can access these regardless of role
+  '/live-class', '/live-stream', '/voice-club', '/feed', '/explore',
+  '/communities', '/dm', '/group-chat', '/messages', '/social',
+  '/creator', '/wallet', '/leaderboard',
 ]
 
 /**
+ * useRoleAccess.ts
+ *
  * Hook that enforces role-based access control for the Social platform.
  *
  * ARCHITECTURE NOTE:
@@ -32,15 +41,30 @@ const ALWAYS_ALLOWED = [
  *
  * NOTE: Hiding a route client-side is NOT authorization. The backend always
  * re-validates school membership and role server-side on every API call.
+ *
+ * TIMING FIX:
+ * ───────────
+ * schoolMemberships are loaded asynchronously via fetchMe() in the layout.
+ * During the brief loading window activeRole is null even though the user
+ * has a school membership. We must NOT redirect while memberships are still
+ * loading — defer the check until memberships are available.
  */
 export function useRoleAccess() {
-  const { user, isAuthenticated } = useAuthStore()
-  const { activeRole } = useSchoolAccess()
+  const { user, isAuthenticated, isLoading } = useAuthStore()
+  const { activeRole, memberships } = useSchoolAccess()
   const pathname = usePathname()
   const router = useRouter()
 
+  // Whether memberships have been loaded yet.
+  // fetchMe() is called in the layout on mount — until it resolves,
+  // user.schoolMemberships may be undefined/empty. We treat this as "loading"
+  // to avoid premature access-denied redirects.
+  const membershipsLoaded = Array.isArray(user?.schoolMemberships)
+
   useEffect(() => {
     if (!isAuthenticated || !user) return
+    if (isLoading) return                           // auth still restoring
+    if (!membershipsLoaded) return                  // memberships not yet fetched
 
     // Never block these pages
     if (ALWAYS_ALLOWED.some(p => pathname === p || pathname.startsWith(p + '/'))) return
@@ -55,11 +79,19 @@ export function useRoleAccess() {
       effectiveRole = activeRole
     }
 
+    // MEMBER users with ANY active school membership: grant access to all education
+    // routes. The backend enforces the exact school-scoped permission on every call.
+    // We only block education routes for MEMBER users with NO school at all.
+    if (user.role === 'MEMBER' && memberships.length > 0 && !activeRole) {
+      // Memberships exist but activeSchoolId not yet set — don't block
+      return
+    }
+
     // Check if user can access current route based on effective role
     if (!canAccessRoute(effectiveRole, pathname)) {
       router.replace('/access-denied')
     }
-  }, [pathname, user, isAuthenticated, activeRole, router])
+  }, [pathname, user, isAuthenticated, isLoading, activeRole, memberships, membershipsLoaded, router])
 
   // Resolve effective role for external use
   const effectiveRole = (user?.role === 'MEMBER' && activeRole) ? activeRole : user?.role

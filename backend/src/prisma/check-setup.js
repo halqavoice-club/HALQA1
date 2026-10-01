@@ -76,7 +76,7 @@ async function run() {
 
   // ── 3. Required packages ──────────────────────────────────────────────────
   console.log('\n📦 Packages');
-  const required = ['express', 'bcryptjs', 'jsonwebtoken', 'multer', 'xlsx', 'pdfkit', 'socket.io', 'nodemailer', 'uuid', 'winston'];
+  const required = ['express', 'bcryptjs', 'jsonwebtoken', 'multer', 'exceljs', 'pdfkit', 'socket.io', 'nodemailer', 'uuid', 'winston'];
   let allOk = true;
   for (const pkg of required) {
     try { require(pkg); }

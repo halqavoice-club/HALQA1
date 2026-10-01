@@ -82,6 +82,25 @@ function resolveSchoolId(req) {
   );
 }
 
+// ─── Resolve schoolId, falling back to first active membership ───────────────
+// Used when schoolId is not present in request params/headers and user.schoolId
+// is null (newer users who joined via membership only, not the legacy school flow).
+async function resolveSchoolIdWithMembershipFallback(req) {
+  const fromRequest = resolveSchoolId(req);
+  if (fromRequest) return fromRequest;
+
+  // Last resort: pick the user's first active school membership
+  if (req.user?.id) {
+    const firstMembership = await prisma.schoolMembership.findFirst({
+      where: { userId: req.user.id, status: 'ACTIVE', deletedAt: null },
+      select: { schoolId: true },
+      orderBy: { joinedAt: 'asc' }
+    });
+    return firstMembership?.schoolId || null;
+  }
+  return null;
+}
+
 // ─── Load membership record ───────────────────────────────────────────────────
 async function loadMembership(userId, schoolId) {
   // Try cache first
@@ -110,18 +129,47 @@ async function loadMembership(userId, schoolId) {
  *
  * Must be used after authenticate().
  *
- * Legacy compatibility: SUPER_ADMIN users with no SchoolMembership record
- * but with user.role === 'SUPER_ADMIN' are allowed through (they have global
- * platform-admin access until fully migrated to school memberships).
+ * ARCH-01: SchoolMembership is the authoritative source for school-scoped
+ * authorization. SUPER_ADMIN does NOT receive an implicit school-membership
+ * bypass — they must hold an explicit SchoolMembership record for the target
+ * school just like any other user. To access a specific school's data,
+ * provision a SCHOOL_ADMIN membership via the school creation or invitation flow.
+ *
+ * New-architecture MEMBER users (User.schoolId = null) are correctly handled:
+ * the middleware resolves their school context from SchoolMembership, NOT from
+ * the legacy User.schoolId field. A MEMBER with an ACTIVE SchoolMembership for
+ * School A will pass this check even when User.schoolId is null.
  */
 function requireSchoolMember(schoolIdParam) {
   return async (req, res, next) => {
     try {
       if (!req.user) return errorResponse(res, 'Authentication required', 401);
 
-      const schoolId = schoolIdParam
-        ? (req.params[schoolIdParam] || req.headers['x-school-id'] || req.body?.[schoolIdParam] || req.query?.[schoolIdParam] || req.user?.schoolId)
-        : resolveSchoolId(req);
+      // SA-SCHOOL-DATA-001 FIX: SUPER_ADMIN = PLATFORM ADMIN ONLY.
+      // SUPER_ADMIN must NOT receive school-scoped authorization under any
+      // circumstances — even if legacy SchoolMembership records exist for
+      // this user in the database.
+      //
+      // This guard runs before any SchoolMembership lookup so that stale
+      // or test-created SA memberships cannot grant school authority.
+      // The application security boundary must hold regardless of DB state.
+      if (req.user.role === 'SUPER_ADMIN') {
+        return errorResponse(
+          res,
+          'Platform administrators do not have school-scoped access. Use the platform admin panel.',
+          403
+        );
+      }
+
+      let schoolId;
+      if (schoolIdParam) {
+        schoolId = req.params[schoolIdParam] || req.headers['x-school-id'] || req.body?.[schoolIdParam] || req.query?.[schoolIdParam] || req.user?.schoolId;
+      } else {
+        // Use the membership-aware fallback so users whose User.schoolId is null
+        // (joined via school membership without the legacy schoolId field being set)
+        // still get a valid school context resolved from their active membership.
+        schoolId = await resolveSchoolIdWithMembershipFallback(req);
+      }
 
       if (!schoolId) {
         return errorResponse(res, 'School context required', 400);
@@ -282,5 +330,6 @@ module.exports = {
   getSchoolMemberships,
   invalidateMembershipCache,
   resolveSchoolId,
+  resolveSchoolIdWithMembershipFallback,
   loadMembership
 };

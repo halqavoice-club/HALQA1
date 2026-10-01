@@ -605,11 +605,12 @@ export default function GradesPage() {
       {/* Filters */}
       <div className="flex gap-3 flex-wrap">
         <div className="w-56">
-          <Select value={selectedClassId} onValueChange={v => { setSelectedClassId(v); setStudentFilter('all') }}>
+          <Select value={selectedClassId || '__none__'} onValueChange={v => { if (v !== '__none__') { setSelectedClassId(v); setStudentFilter('all') } }}>
             <SelectTrigger>
               <SelectValue placeholder="Select a class..." />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value="__none__">Select a class…</SelectItem>
               {classes.map(c => (
                 <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
               ))}
@@ -647,11 +648,12 @@ export default function GradesPage() {
             <form onSubmit={handleAddGrade} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               <div className="space-y-1">
                 <Label>Student</Label>
-                <Select value={form.studentId} onValueChange={v => setForm(f => ({ ...f, studentId: v }))}>
+                <Select value={form.studentId || '__none__'} onValueChange={v => setForm(f => ({ ...f, studentId: v === '__none__' ? '' : v }))}>
                   <SelectTrigger>
                     <SelectValue placeholder="Select student..." />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="__none__">Select a student…</SelectItem>
                     {enrollments.map(({ student }) => (
                       <SelectItem key={student.id} value={student.id}>
                         {student.user?.firstName} {student.user?.lastName}

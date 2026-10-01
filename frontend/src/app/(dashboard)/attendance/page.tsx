@@ -3,12 +3,13 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { addDays, subDays, format, isToday } from 'date-fns'
 import api from '@/lib/api'
+import { getAvatarUrl } from '@/lib/avatar'
 import { useAuthStore } from '@/store/auth.store'
 import { useEducationRole } from '@/hooks/useEducationRole'
 import { useAttendanceStore, AttendanceStatus } from '@/store/attendance.store'
 import { useAttendanceSync } from '@/hooks/useAttendanceSync'
 import { getSocket } from '@/lib/socket'
-import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 import { useToast } from '@/components/ui/use-toast'
@@ -85,6 +86,7 @@ function StudentRow({ student, index, isSelected, onSelect, onLongPress, debounc
         {isSelected ? <Check className="w-3.5 h-3.5" /> : index + 1}
       </button>
       <Avatar className="w-10 h-10 flex-shrink-0">
+        <AvatarImage src={getAvatarUrl(student.user?.avatarUrl)} />
         <AvatarFallback className={cn('text-sm font-bold', cfg.bg, cfg.text)}>
           {student.user?.firstName?.[0]}{student.user?.lastName?.[0]}
         </AvatarFallback>
@@ -111,7 +113,7 @@ export default function AttendancePage() {
 
   // Route each role to the correct view â€” no conditional hook calls
   if (isStudent)   return <StudentAttendanceView />
-  if (user?.role === 'GUARDIAN')  return <GuardianAttendanceView />
+  if (isGuardian)                  return <GuardianAttendanceView />
 
   return <TeacherAttendancePage />
 }

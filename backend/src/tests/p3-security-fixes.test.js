@@ -167,6 +167,12 @@ describe('P3-001: Analytics endpoint authorization', () => {
   test('School member can GET their own school\'s stats', async () => {
     asUser('user-a', 'MEMBER', 'ACTIVE', 'school-x');
     prisma.dailySchoolStats = { findMany: jest.fn().mockResolvedValue([]) };
+    // P8C FIX: requireSchoolMember('schoolId') calls prisma.schoolMembership.findFirst.
+    // The beforeEach default is null (no membership), which correctly returns 403 for
+    // cross-school tests. For same-school tests we must provide an active membership.
+    prisma.schoolMembership.findFirst.mockResolvedValue({
+      id: 'mem-1', userId: 'user-a', schoolId: 'school-x', role: 'MEMBER', status: 'ACTIVE'
+    });
 
     const res = await request(analyticsApp)
       .get('/api/v1/analytics/schools/school-x/daily-stats')
@@ -202,24 +208,31 @@ describe('P3-001: Analytics endpoint authorization', () => {
     expect(res.status).toBe(403);
   });
 
-  test('SUPER_ADMIN can GET any school\'s stats', async () => {
+  test('SUPER_ADMIN cannot GET school stats without SchoolMembership (ARCH-01)', async () => {
     asUser('sa-user', 'SUPER_ADMIN', 'ACTIVE', null);
-    prisma.dailySchoolStats = { findMany: jest.fn().mockResolvedValue([]) };
 
+    // P8C FIX (Category B — stale expectation): requireSchoolMember() explicitly
+    // blocks SUPER_ADMIN unconditionally (SA-SCHOOL-DATA-001 / ARCH-01).
+    // SUPER_ADMIN is a platform-only role and has no school-scoped access
+    // regardless of any SchoolMembership record in the DB.
+    // The previous test expected 200 (the old behavior before ARCH-01).
+    // Correct behavior: 403.
     const res = await request(analyticsApp)
       .get('/api/v1/analytics/schools/school-y/daily-stats')
       .set('Authorization', tok('sa-user'));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
   });
 
-  test('SUPER_ADMIN can GET any school\'s analytics', async () => {
+  test('SUPER_ADMIN cannot GET school analytics without SchoolMembership (ARCH-01)', async () => {
     asUser('sa-user', 'SUPER_ADMIN', 'ACTIVE', null);
-    prisma.dailySchoolStats = { findMany: jest.fn().mockResolvedValue([]) };
 
+    // P8C FIX (Category B — stale expectation): same as above — requireSchoolMember()
+    // hard-blocks SUPER_ADMIN on all school-scoped routes (SA-SCHOOL-DATA-001 / ARCH-01).
+    // Correct behavior: 403.
     const res = await request(analyticsApp)
       .get('/api/v1/analytics/schools/school-y/analytics')
       .set('Authorization', tok('sa-user'));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
   });
 
   // Source verification
@@ -230,8 +243,12 @@ describe('P3-001: Analytics endpoint authorization', () => {
     expect(src).toMatch(/assertSchoolStatsAccess/);
     expect(src).toMatch(/assertUserStatsAccess/);
     expect(src).toMatch(/assertSchoolStatsWriteAccess/);
-    // All functions must call the guards
-    expect(src).toMatch(/getDailySchoolStats[\s\S]{0,300}assertSchoolStatsAccess/);
+    // P8C FIX: FIND-01 moved school-isolation to route-level requireSchoolMember()
+    // middleware. getDailySchoolStats no longer calls assertSchoolStatsAccess directly
+    // (it was redundant with the route middleware). The write guard assertSchoolStatsWriteAccess
+    // is still present and called by updateDailySchoolStats. assertUserStatsAccess is still
+    // called by getDailyUserStats. Update the source checks to match the current architecture.
+    expect(src).toMatch(/updateDailySchoolStats[\s\S]{0,300}assertSchoolStatsWriteAccess/);
     expect(src).toMatch(/getDailyUserStats[\s\S]{0,300}assertUserStatsAccess/);
   });
 

@@ -52,36 +52,47 @@ interface RoleConfig {
 // they are controlled by SchoolMembership, not global role.
 const SOCIAL_ROUTES = [
   '/dashboard',
-  '/feed', '/explore', '/communities', '/voice-club', '/live-class',
+  '/feed', '/explore', '/communities', '/voice-club', '/live-class', '/live-stream',
   '/dm', '/group-chat', '/messages', '/social',
   '/creator', '/wallet', '/marketplace',
   '/notifications', '/profile', '/settings',
   '/access-denied',
+  '/school-memberships', // school switcher — all authenticated users
+  '/education',          // Education hub — all users with school membership
+  '/my-id-card',         // Own student ID card — students only (page handles its own guard)
 ]
 
 export const ROLE_CONFIG: Record<UserRole, RoleConfig> = {
   // ── New Social-only users ──────────────────────────────────────────────────
   MEMBER: {
-    defaultRoute: '/dashboard',
+    defaultRoute: '/feed',
     label: 'Member',
     color: 'bg-blue-100 text-blue-700',
-    // Social routes only — Education routes require SchoolMembership
+    // ALL routes are potentially accessible — education routes are gated by school
+    // membership on the backend. The frontend only guards against routes that are
+    // truly off-limits for users with NO school at all (handled in useRoleAccess
+    // by checking memberships.length before blocking).
     allowedRoutes: [
       ...SOCIAL_ROUTES,
-      '/leaderboard',  // public leaderboard is a social feature
-      '/schools',      // "My School" — shows school membership cards for members with schools
-    ],
-    restrictedRoutes: [
-      // Education routes — MEMBER users see "Join a School" prompt instead
+      '/leaderboard',
+      '/schools',
+      '/school-memberships',
+      '/education',
+      // Education routes — accessible when user has a school membership.
+      // Backend enforces school membership + role on every API call.
       '/students', '/teachers', '/guardians', '/classes',
       '/attendance', '/grades', '/behavior', '/activities',
       '/fees', '/terms', '/reports', '/schedule',
       '/audio', '/notes', '/library',
-      '/import', '/audit',
       '/assignments', '/exams', '/certificates',
-      '/analytics', '/users',
-      // Platform admin routes — MEMBER users cannot access
+      '/analytics', '/leaderboard',
+      '/announcements', '/calendar',
+    ],
+    restrictedRoutes: [
+      // Platform admin routes — MEMBER users cannot access these ever
       '/admin',
+      // Import/audit require SCHOOL_ADMIN — but these are also protected by backend
+      '/import', '/audit', '/users',
     ]
   },
 
@@ -90,15 +101,56 @@ export const ROLE_CONFIG: Record<UserRole, RoleConfig> = {
   // Education routes are visible based on school membership (sidebar handles this).
 
   SUPER_ADMIN: {
-    defaultRoute: '/dashboard',
+    defaultRoute: '/admin',
     label: 'Super Admin',
     color: 'bg-red-100 text-red-700',
-    allowedRoutes: ['*'],
-    restrictedRoutes: []
+    // SA-ROUTE-01: SUPER_ADMIN = Platform Administration ONLY.
+    // Can access admin panel + read-only social pages (feed, explore — for moderation oversight).
+    // CANNOT access social content creation pages or school education pages.
+    allowedRoutes: [
+      '/dashboard',
+      '/admin',          // Platform admin panel (all sub-pages)
+      '/profile',        // Own profile view
+      '/settings',       // Account settings
+      '/notifications',  // Notification inbox (receives report alerts)
+      '/access-denied',
+      '/schools',        // School list (read — for admin overview)
+      // Read-only social oversight (no creation UI shown — blocked in components)
+      '/feed',
+      '/explore',
+      '/communities',
+      '/voice-club',
+      '/live-class',
+      '/live-stream',  // Public live streams — SA can view for moderation
+    ],
+    restrictedRoutes: [
+      // Social content creation — SUPER_ADMIN must not post/comment/react
+      '/create-post',
+      '/reels',          // Content creation surface
+      // Social participation features
+      '/dm',
+      '/group-chat',
+      '/messages',
+      '/social',
+      '/creator',
+      '/wallet',
+      '/marketplace',
+      '/leaderboard',
+      // School education features — SUPER_ADMIN has no school membership context
+      '/students', '/teachers', '/guardians', '/classes',
+      '/attendance', '/grades', '/behavior', '/activities',
+      '/fees', '/terms', '/reports', '/schedule',
+      '/audio', '/notes', '/library',
+      '/import', '/audit',
+      '/assignments', '/exams', '/certificates',
+      '/analytics', '/users',
+      '/announcements', '/calendar',
+      // School membership switcher — SUPER_ADMIN uses /admin/schools instead
+    ]
   },
 
   SCHOOL_ADMIN: {
-    defaultRoute: '/dashboard',
+    defaultRoute: '/feed',
     label: 'School Admin',
     color: 'bg-purple-100 text-purple-700',
     allowedRoutes: ['*'],
@@ -106,7 +158,7 @@ export const ROLE_CONFIG: Record<UserRole, RoleConfig> = {
   },
 
   TEACHER: {
-    defaultRoute: '/dashboard',
+    defaultRoute: '/feed',
     label: 'Teacher (Ustaaz)',
     color: 'bg-green-100 text-green-700',
     // Full social access + relevant education routes
@@ -117,7 +169,9 @@ export const ROLE_CONFIG: Record<UserRole, RoleConfig> = {
       '/announcements', '/calendar', '/schedule', '/notes',
       '/audio', '/live-class', '/library',
       '/reports', '/assignments', '/exams', '/leaderboard',
-      '/schools',  // "My School" page
+      '/schools',            // "My School" page
+      '/school-memberships', // school switcher
+      '/education',          // Education hub
     ],
     restrictedRoutes: [
       '/users', '/audit', '/import', '/fees',
@@ -128,7 +182,7 @@ export const ROLE_CONFIG: Record<UserRole, RoleConfig> = {
   },
 
   STUDENT: {
-    defaultRoute: '/dashboard',
+    defaultRoute: '/feed',
     label: 'Student',
     color: 'bg-blue-100 text-blue-700',
     // Full social access + student education routes
@@ -139,19 +193,24 @@ export const ROLE_CONFIG: Record<UserRole, RoleConfig> = {
       '/audio', '/live-class',
       '/library',
       '/assignments', '/exams', '/leaderboard',
-      '/schools',  // "My School" page
+      '/schools',       // "My School" page
+      '/school-memberships', // school switcher
+      '/education',     // Education hub
+      '/my-id-card',    // Own student ID card
+      '/students',      // View own student profile
+      '/schedule',      // Class schedule
     ],
     restrictedRoutes: [
       '/students/new',
       '/teachers', '/guardians', '/classes',
       '/users', '/audit', '/import', '/fees',
-      '/terms', '/settings', '/reports',
-      '/activities', '/schedule'
+      '/terms', '/reports',
+      '/activities',
     ]
   },
 
   GUARDIAN: {
-    defaultRoute: '/dashboard',
+    defaultRoute: '/feed',
     label: 'Guardian / Parent',
     color: 'bg-orange-100 text-orange-700',
     // Full social access + guardian education routes
@@ -160,19 +219,22 @@ export const ROLE_CONFIG: Record<UserRole, RoleConfig> = {
       '/dashboard', '/announcements', '/attendance', '/grades',
       '/calendar', '/live-class',
       '/leaderboard',
-      '/schools',  // "My School" page
+      '/schools',            // "My School" page
+      '/school-memberships', // school switcher
+      '/education',          // Education hub
+      '/students',           // View linked student profiles + their ID cards
     ],
     restrictedRoutes: [
       '/students/new', '/teachers', '/classes',
       '/behavior',
       '/users', '/audit', '/import',
-      '/fees', '/terms', '/settings', '/reports',
-      '/audio', '/activities', '/schedule', '/notes'
+      '/fees', '/terms', '/reports',
+      '/audio', '/activities', '/notes'
     ]
   },
 
   REPRESENTATIVE: {
-    defaultRoute: '/dashboard',
+    defaultRoute: '/feed',
     label: 'Representative',
     // NOTE: REPRESENTATIVE is a legacy role with no defined Education domain meaning.
     // It behaves like MEMBER (Social-only access). If you need school-scoped

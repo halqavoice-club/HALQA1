@@ -58,9 +58,11 @@ beforeEach(() => {
   if (!prisma.schoolMembership.findFirst) {
     prisma.schoolMembership.findFirst = jest.fn();
   }
-  // Default: no SchoolMembership record found — fall back to legacy user.schoolId
-  prisma.schoolMembership.findUnique = jest.fn().mockResolvedValue(null);
-  prisma.schoolMembership.findFirst  = jest.fn().mockResolvedValue(null);
+  // VULN-LIVE-005 FIX: Default to ACTIVE membership so positive-path tests
+  // (same-school user with active membership) pass the new null-rejection check.
+  // Tests that specifically exercise the denied case override this per-test.
+  prisma.schoolMembership.findUnique = jest.fn().mockResolvedValue({ status: 'ACTIVE' });
+  prisma.schoolMembership.findFirst  = jest.fn().mockResolvedValue({ status: 'ACTIVE' });
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -85,6 +87,11 @@ const LC_LIVE = {
   id: 'class-1', schoolId: 'school-a', status: 'LIVE', classId: 'cls-1',
   livekitRoomName: 'liveclass-class-1', chatEnabled: true, isOpenMic: false,
   maxParticipants: 100, duration: null,
+  // OWN-02–OWN-10: hostUserId must be set so assertOwner passes for the creator.
+  // Tests that call mutating endpoints use user.id: 'teacher-1' (the host).
+  hostUserId: 'teacher-1', host_user_id: 'teacher-1',
+  streamType: 'SCHOOL', stream_type: 'SCHOOL',
+  quranPanelEnabled: true, recordingStartedAt: new Date(),
 };
 const STUDENT_RECORD   = { id: 'student-1', userId: 'student-user' };
 const ENROLLED_RECORD  = { id: 'enroll-1', studentId: 'student-1', classId: 'cls-1', isActive: true };
@@ -126,6 +133,9 @@ describe('Task 1: Generic LiveKit token (generateToken) guards liveclass-* rooms
 
   test('liveclass-* roomId: cross-school user is denied 403', async () => {
     prisma.liveClass.findFirst.mockResolvedValue(LC_LIVE); // schoolId: school-a
+    // Cross-school: user-x is in school-b, class is in school-a.
+    // legacyMatch = false → membership lookup for school-a returns null (not a member).
+    prisma.schoolMembership.findUnique.mockResolvedValue(null);
     const req = makeReq({ body: { roomId: 'liveclass-class-1' }, user: { id: 'user-x', role: 'STUDENT', schoolId: 'school-b', firstName: 'X', lastName: 'X' } });
     const res = makeRes();
     await livekitCtrl.generateToken(req, res, next);
@@ -182,13 +192,18 @@ describe('Task 1: Generic LiveKit token (generateToken) guards liveclass-* rooms
 // Task 2: socket school:join authorization
 // ─────────────────────────────────────────────────────────────────────────────
 describe('Task 2: socket school:join validates school membership', () => {
-  // Test the guard logic directly (simulating the socket handler)
+  // Test the guard logic directly (simulating the fixed socket handler)
+  // F-06 FIX: Updated to reflect the corrected handler logic:
+  //   1. SUPER_ADMIN is denied unconditionally — platform role ≠ school membership
+  //   2. Non-SA users must match JWT schoolId exactly
 
   function runSchoolJoin(socketUserSchoolId, socketUserRole, requestedSchoolId) {
     const joined = [];
-    // Simulate the fixed handler:
+    // Simulate the corrected handler:
     if (!requestedSchoolId) return joined;
-    if (socketUserRole !== 'SUPER_ADMIN' && socketUserSchoolId !== requestedSchoolId) return joined;
+    // F-06 FIX: SUPER_ADMIN is denied regardless of schoolId
+    if (socketUserRole === 'SUPER_ADMIN') return joined;
+    if (socketUserSchoolId !== requestedSchoolId) return joined;
     joined.push(requestedSchoolId);
     return joined;
   }
@@ -203,14 +218,22 @@ describe('Task 2: socket school:join validates school membership', () => {
     expect(result).toHaveLength(0);
   });
 
-  test('SUPER_ADMIN can join any school room', () => {
+  // F-06 FIX: SUPER_ADMIN must NOT join school socket rooms
+  test('SUPER_ADMIN with different school is denied (F-06)', () => {
     const result = runSchoolJoin('school-a', 'SUPER_ADMIN', 'school-b');
-    expect(result).toContain('school-b');
+    expect(result).toHaveLength(0);
   });
 
-  test('SUPER_ADMIN with null schoolId can join any school room', () => {
+  // F-06 FIX: SUPER_ADMIN with matching legacy schoolId is still denied
+  test('SUPER_ADMIN with matching legacy schoolId is denied (F-06)', () => {
+    const result = runSchoolJoin('school-a', 'SUPER_ADMIN', 'school-a');
+    expect(result).toHaveLength(0);
+  });
+
+  // F-06 FIX: SUPER_ADMIN with null schoolId is denied
+  test('SUPER_ADMIN with null schoolId is denied (F-06)', () => {
     const result = runSchoolJoin(null, 'SUPER_ADMIN', 'school-x');
-    expect(result).toContain('school-x');
+    expect(result).toHaveLength(0);
   });
 
   test('missing schoolId is silently rejected', () => {
@@ -538,7 +561,12 @@ describe('E2E attack scenarios', () => {
     const { isRedisReady } = require('../utils/redis');
     isRedisReady.mockReturnValue(true);
     prisma.liveClass.findFirst.mockResolvedValue(LC_LIVE);
-    const req = makeReq({ body: { event: { type: 'snapshot', dataUrl: 'x'.repeat(200_001) } } });
+    // OWN-07: broadcastDraw now requires the caller to be the creator (assertOwner).
+    // Use user.id: 'teacher-1' which matches LC_LIVE.hostUserId.
+    const req = makeReq({
+      body: { event: { type: 'snapshot', dataUrl: 'x'.repeat(200_001) } },
+      user: { id: 'teacher-1', role: 'TEACHER', schoolId: 'school-a', firstName: 'T', lastName: 'T' },
+    });
     const res = makeRes();
     await ctrl.broadcastDraw(req, res, next);
     expect(res.status).toHaveBeenCalledWith(413);

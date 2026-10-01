@@ -6,17 +6,31 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  TextInput, Modal, Pressable, ActivityIndicator, RefreshControl,
+  TextInput, Modal, Pressable, ActivityIndicator, RefreshControl, Image
 } from 'react-native';
 import { useRouter, Stack } from 'expo-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { showMessage } from 'react-native-flash-message';
+import { getAvatarUrl } from '@/src/lib/avatar';
 import { formatDistanceToNow } from 'date-fns';
 import api from '@/lib/api';
 import { getSocket } from '@/lib/socket';
 import { useAuthStore } from '@/store/auth.store';
+
+// ── Skeleton row for loading state ─────────────────────────────────────────
+function SkeletonRow() {
+  return (
+    <View style={styles.row}>
+      <View style={[styles.avatarWrap, { backgroundColor: '#e5e7eb' }]} />
+      <View style={{ flex: 1, gap: 8 }}>
+        <View style={{ height: 13, borderRadius: 6, backgroundColor: '#e5e7eb', width: '60%' }} />
+        <View style={{ height: 11, borderRadius: 6, backgroundColor: '#f3f4f6', width: '80%' }} />
+      </View>
+    </View>
+  );
+}
 
 interface GcConversation {
   id: string;
@@ -33,15 +47,22 @@ interface GcConversation {
 function privacyEmoji(p: string) {
   if (p === 'PUBLIC') return '🌐';
   if (p === 'PRIVATE') return '🔒';
+  if (p === 'SCHOOL_ONLY') return '🏫';
+  if (p === 'CLASS_ONLY') return '📚';
   return '#';
 }
 
 function GroupRow({ item, onPress }: { item: GcConversation; onPress: () => void }) {
   const initials = item.name.split(' ').map(w => w[0] ?? '').join('').toUpperCase().slice(0, 2);
+  const avatarSrc = getAvatarUrl(item.avatarUrl);
   return (
     <TouchableOpacity style={styles.row} onPress={onPress} activeOpacity={0.7}>
       <View style={styles.avatarWrap}>
-        <Text style={styles.avatarText}>{initials}</Text>
+        {avatarSrc ? (
+          <Image source={{ uri: avatarSrc }} style={{ width: 48, height: 48, borderRadius: 24 }} />
+        ) : (
+          <Text style={styles.avatarText}>{initials}</Text>
+        )}
         {(item.unread ?? 0) > 0 && (
           <View style={styles.badge}>
             <Text style={styles.badgeText}>{(item.unread ?? 0) > 99 ? '99+' : item.unread}</Text>
@@ -71,11 +92,14 @@ export default function GroupChatListScreen() {
   const router = useRouter();
   const qc = useQueryClient();
   const { user } = useAuthStore();
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN';
   const [search, setSearch] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
-  const [privacy, setPrivacy] = useState<'PRIVATE' | 'PUBLIC'>('PRIVATE');
+  const [privacy, setPrivacy] = useState<'PRIVATE' | 'PUBLIC' | 'SCHOOL_ONLY' | 'CLASS_ONLY'>('PRIVATE');
+  const [newAvatarUrl, setNewAvatarUrl] = useState<string | null>(null);
+  const [newAvatarUploading, setNewAvatarUploading] = useState(false);
   const [unreads, setUnreads] = useState<Record<string, number>>({});
 
   const { data, isLoading, refetch } = useQuery({
@@ -93,7 +117,7 @@ export default function GroupChatListScreen() {
     ? conversations.filter(c => c.name.toLowerCase().includes(search.toLowerCase()))
     : conversations;
 
-  // Real-time: increment unread on incoming message
+  // Real-time: increment unread + update last message preview on incoming message
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return;
@@ -103,24 +127,64 @@ export default function GroupChatListScreen() {
     const onMsg = (msg: any) => {
       if (msg.senderId === user?.id) return;
       setUnreads(prev => ({ ...prev, [msg.conversationId]: (prev[msg.conversationId] ?? 0) + 1 }));
+      // Refresh list so lastMessage + lastMessageAt update
+      qc.invalidateQueries({ queryKey: ['group-conversations'] });
+    };
+    const onRead = () => {
+      qc.invalidateQueries({ queryKey: ['group-conversations'] });
+    };
+    // BUG-13 FIX: Refresh conversation list when name/avatar/settings change.
+    const onSettingsUpdated = () => {
       qc.invalidateQueries({ queryKey: ['group-conversations'] });
     };
     socket.on('group:message', onMsg);
-    return () => { socket.off('group:message', onMsg); };
-  }, [conversations.length, user?.id]); // eslint-disable-line
+    socket.on('group:read', onRead);
+    socket.on('group:settings_updated', onSettingsUpdated);
+    socket.on('group:permissions_updated', onSettingsUpdated);
+    return () => {
+      socket.off('group:message', onMsg);
+      socket.off('group:read', onRead);
+      socket.off('group:settings_updated', onSettingsUpdated);
+      socket.off('group:permissions_updated', onSettingsUpdated);
+    };
+    // BUG-12 FIX: key on conversation IDs string, not just length, so ID-only changes trigger re-join.
+  }, [conversations.map(c => c.id).join(','), user?.id]); // eslint-disable-line
 
   const createMutation = useMutation({
     mutationFn: () => api.post('/group-chat/conversations', {
       name: newName.trim(), description: newDesc.trim() || undefined, privacy,
+      avatarUrl: newAvatarUrl || undefined,
     }),
     onSuccess: (r) => {
       setShowCreate(false);
-      setNewName(''); setNewDesc(''); setPrivacy('PRIVATE');
+      setNewName(''); setNewDesc(''); setPrivacy('PRIVATE'); setNewAvatarUrl(null);
       qc.invalidateQueries({ queryKey: ['group-conversations'] });
       router.push(`/group-chat/${r.data.data.id}` as any);
     },
     onError: () => showMessage({ message: 'Failed to create group', type: 'danger' }),
   });
+
+  const handlePickCreateAvatar = async () => {
+    try {
+      const ImagePicker = await import('expo-image-picker');
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) { showMessage({ message: 'Permission required', type: 'warning' }); return; }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true, aspect: [1, 1], quality: 0.8,
+      });
+      if (result.canceled || !result.assets?.[0]) return;
+      const asset = result.assets[0];
+      setNewAvatarUploading(true);
+      const form = new FormData();
+      form.append('file', { uri: asset.uri, name: asset.fileName ?? `avatar-${Date.now()}.jpg`, type: asset.mimeType ?? 'image/jpeg' } as any);
+      const res = await api.post('/upload', form, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const url: string = res.data?.data?.url;
+      if (url) setNewAvatarUrl(url);
+    } catch (e: any) {
+      if (!e?.message?.includes('cancel')) showMessage({ message: 'Failed to upload', type: 'danger' });
+    } finally { setNewAvatarUploading(false); }
+  };
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -132,9 +196,12 @@ export default function GroupChatListScreen() {
           <Ionicons name="chevron-back" size={24} color="#374151" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Groups</Text>
-        <TouchableOpacity onPress={() => setShowCreate(true)} style={styles.newBtn}>
-          <Ionicons name="add" size={22} color="#fff" />
-        </TouchableOpacity>
+        {!isSuperAdmin && (
+          <TouchableOpacity onPress={() => setShowCreate(true)} style={styles.newBtn}>
+            <Ionicons name="add" size={22} color="#fff" />
+          </TouchableOpacity>
+        )}
+        {isSuperAdmin && <View style={{ width: 32 }} />}
       </View>
 
       {/* Search */}
@@ -147,7 +214,9 @@ export default function GroupChatListScreen() {
 
       {/* List */}
       {isLoading ? (
-        <View style={styles.center}><ActivityIndicator color="#4f46e5" /></View>
+        <View>
+          {[...Array(6)].map((_, i) => <SkeletonRow key={i} />)}
+        </View>
       ) : (
         <FlatList
           data={filtered}
@@ -155,6 +224,12 @@ export default function GroupChatListScreen() {
           renderItem={({ item }) => (
             <GroupRow item={item} onPress={() => {
               setUnreads(prev => ({ ...prev, [item.id]: 0 }));
+              // Mark read via API (fire-and-forget)
+              api.get(`/group-chat/conversations/${item.id}/messages`, { params: { limit: 20 } })
+                .then(r => {
+                  const ids: string[] = (r.data.data ?? []).map((m: any) => m.id);
+                  if (ids.length) api.post(`/group-chat/conversations/${item.id}/read`, { messageIds: ids }).catch(() => {});
+                }).catch(() => {});
               router.push(`/group-chat/${item.id}` as any);
             }} />
           )}
@@ -163,7 +238,7 @@ export default function GroupChatListScreen() {
             <View style={styles.emptyWrap}>
               <Ionicons name="people-outline" size={48} color="#d1d5db" />
               <Text style={styles.emptyTitle}>{search ? 'No groups found' : 'No groups yet'}</Text>
-              {!search && (
+              {!search && !isSuperAdmin && (
                 <TouchableOpacity style={styles.emptyBtn} onPress={() => setShowCreate(true)}>
                   <Text style={styles.emptyBtnText}>Create your first group</Text>
                 </TouchableOpacity>
@@ -174,8 +249,8 @@ export default function GroupChatListScreen() {
         />
       )}
 
-      {/* Create modal */}
-      <Modal visible={showCreate} animationType="slide" presentationStyle="formSheet" onRequestClose={() => setShowCreate(false)}>
+      {/* Create modal — only for non-SUPER_ADMIN users */}
+      <Modal visible={showCreate && !isSuperAdmin} animationType="slide" presentationStyle="formSheet" onRequestClose={() => setShowCreate(false)}>
         <SafeAreaView style={styles.modal}>
           <View style={styles.modalHeader}>
             <TouchableOpacity onPress={() => setShowCreate(false)}>
@@ -186,9 +261,22 @@ export default function GroupChatListScreen() {
           </View>
 
           <View style={styles.modalBody}>
-            <View style={styles.modalAvatar}>
-              <Ionicons name="people" size={32} color="#8b5cf6" />
-            </View>
+            {/* Tappable avatar for create */}
+            <TouchableOpacity onPress={handlePickCreateAvatar} disabled={newAvatarUploading}
+              style={{ alignSelf: 'center', marginBottom: 8 }}>
+              <View style={[styles.modalAvatar, { overflow: 'hidden' }]}>
+                {newAvatarUploading ? (
+                  <ActivityIndicator color="#8b5cf6" />
+                ) : newAvatarUrl ? (
+                  <Image source={{ uri: getAvatarUrl(newAvatarUrl) ?? undefined }} style={{ width: 64, height: 64, borderRadius: 32 }} />
+                ) : (
+                  <Ionicons name="camera" size={28} color="#8b5cf6" />
+                )}
+              </View>
+              <Text style={{ fontSize: 10, color: '#9ca3af', textAlign: 'center', marginTop: 4 }}>
+                {newAvatarUploading ? 'Uploading…' : 'Add photo'}
+              </Text>
+            </TouchableOpacity>
             <TextInput value={newName} onChangeText={setNewName} placeholder="Group name *"
               placeholderTextColor="#9ca3af" style={styles.modalInput} />
             <TextInput value={newDesc} onChangeText={setNewDesc} placeholder="Description (optional)"
@@ -196,13 +284,16 @@ export default function GroupChatListScreen() {
               multiline textAlignVertical="top" />
 
             <View style={styles.privacyRow}>
-              {(['PRIVATE', 'PUBLIC'] as const).map(p => (
+              {(['PRIVATE', 'PUBLIC', 'SCHOOL_ONLY', 'CLASS_ONLY'] as const).map(p => (
                 <TouchableOpacity key={p} style={[styles.privacyBtn, privacy === p && styles.privacyBtnActive]}
                   onPress={() => setPrivacy(p)}>
-                  <Ionicons name={p === 'PRIVATE' ? 'lock-closed' : 'globe'} size={14}
-                    color={privacy === p ? '#fff' : '#6b7280'} />
+                  <Ionicons
+                    name={p === 'PRIVATE' ? 'lock-closed' : p === 'PUBLIC' ? 'globe' : p === 'SCHOOL_ONLY' ? 'school' : 'book'}
+                    size={14}
+                    color={privacy === p ? '#fff' : '#6b7280'}
+                  />
                   <Text style={[styles.privacyText, privacy === p && { color: '#fff' }]}>
-                    {p === 'PRIVATE' ? 'Private' : 'Public'}
+                    {p === 'PRIVATE' ? 'Private' : p === 'PUBLIC' ? 'Public' : p === 'SCHOOL_ONLY' ? 'School' : 'Class'}
                   </Text>
                 </TouchableOpacity>
               ))}
@@ -259,3 +350,4 @@ const styles = StyleSheet.create({
   createBtnDisabled: { backgroundColor: '#c7d2fe' },
   createBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
 });
+

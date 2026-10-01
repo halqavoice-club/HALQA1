@@ -6,6 +6,7 @@ const { authLimiter, refreshLimiter, otpLimiter } = require('../middleware/rateL
 const { strictLimiter } = require('../middleware/rateLimiter.user');
 const { strictDeviceLimiter } = require('../middleware/rateLimiter.device');
 const { trackSession, validateSession, enforceSessionLimit, getSessions, terminateSession, terminateAllSessions } = require('../middleware/session.middleware');
+const { csrfProtect } = require('../middleware/csrf');
 const ctrl = require('../controllers/auth.controller');
 
 /**
@@ -53,10 +54,12 @@ router.post('/login',
   ctrl.login
 );
 
-// SECURITY FIX: refreshLimiter added — previously this endpoint had NO rate limit.
-// An attacker with a stolen refresh token could hammer it indefinitely.
-router.post('/refresh', refreshLimiter, ctrl.refreshToken);
-router.post('/logout', authenticate, ctrl.logout);
+// S4: CSRF Origin check on cookie-consuming endpoints (refresh + logout).
+// The refreshToken cookie is httpOnly — JS can't read it, but the browser
+// sends it automatically on cross-origin requests (sameSite=strict mitigates
+// most cases, but Origin header check adds defense-in-depth).
+router.post('/refresh', csrfProtect, refreshLimiter, ctrl.refreshToken);
+router.post('/logout',  csrfProtect, authenticate,  ctrl.logout);
 
 router.post('/verify-email',
   otpLimiter,

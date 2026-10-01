@@ -76,7 +76,8 @@ export default function GuardiansPage() {
         <>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {guardians.map((guardian: any) => (
-              <Card key={guardian.id} className="border-0 shadow-sm hover:shadow-md transition-all group">
+              <Link key={guardian.id} href={`/guardians/${guardian.id}`}>
+              <Card className="border-0 shadow-sm hover:shadow-md transition-all group cursor-pointer">
                 <CardContent className="p-4">
                   <div className="flex items-start gap-3">
                     <Avatar className="w-11 h-11 flex-shrink-0">
@@ -86,7 +87,7 @@ export default function GuardiansPage() {
                     </Avatar>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between">
-                        <p className="font-semibold text-gray-900 truncate">
+                        <p className="font-semibold text-gray-900 truncate group-hover:text-halqa-700 transition-colors">
                           {guardian.user?.firstName} {guardian.user?.lastName}
                         </p>
                         <Badge variant="outline" className="text-xs capitalize ml-2 flex-shrink-0">
@@ -129,6 +130,7 @@ export default function GuardiansPage() {
                   </div>
                 </CardContent>
               </Card>
+              </Link>
             ))}
           </div>
 

@@ -87,9 +87,7 @@ export default function ProfilePage() {
       const formData = new FormData()
       formData.append('avatar', file)
 
-      const res = await api.post('/users/avatar', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      })
+      const res = await api.post('/users/avatar', formData)
 
       const updatedUser = res.data.data
       if (user) setUser({ ...user, avatarUrl: updatedUser.avatarUrl })

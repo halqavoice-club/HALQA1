@@ -19,7 +19,7 @@ jest.mock('expo-secure-store', () => {
 import {
   getSyncBackoffSeconds,
   onSyncSuccess,
-  onSyncFailed,
+  onSyncFailed
 } from '../lib/backgroundSync'
 
 const SecureStore = require('expo-secure-store')
@@ -86,3 +86,4 @@ describe('onSyncSuccess()', () => {
     )
   })
 })
+

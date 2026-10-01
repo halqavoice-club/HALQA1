@@ -163,3 +163,61 @@ describe('VC-GAP-004: fetchSockets retained for read-only purposes only', () => 
     expect(ctx).toMatch(/\.disconnect\(true\)/);
   });
 });
+
+// One-room-at-a-time enforcement — REJECT, not auto-evict
+// Product rule: user joining a second room gets 409 VOICE_ROOM_ALREADY_ACTIVE.
+// Room A remains completely untouched: no seat clear, no eviction, no Socket.IO leave.
+describe('One-room-at-a-time: joinRoom REJECTS second room (does NOT evict from first)', () => {
+  const src = fs.readFileSync(VOICE_CTRL, 'utf8');
+  const joinFn = extractFn(src, 'joinRoom', 'leaveRoom');
+
+  // Extract only the executable { } block, ignoring comments describing what we DON'T do
+  function extractEnforcementCodeBlock(fn) {
+    const markerIdx = fn.indexOf('ONE-ROOM-AT-A-TIME');
+    if (markerIdx === -1) return '';
+    const braceStart = fn.indexOf('{', markerIdx);
+    if (braceStart === -1) return '';
+    let depth = 0, i = braceStart;
+    while (i < fn.length) {
+      if (fn[i] === '{') depth++;
+      else if (fn[i] === '}') { depth--; if (depth === 0) return fn.slice(braceStart, i + 1); }
+      i++;
+    }
+    return fn.slice(braceStart, braceStart + 800);
+  }
+  const codeBlock = extractEnforcementCodeBlock(joinFn);
+
+  test('joinRoom queries other active rooms for the user (different roomId)', () => {
+    expect(joinFn).toMatch(/otherActiveRooms/);
+    expect(joinFn).toMatch(/roomId.*not.*roomId|not.*roomId/);
+  });
+
+  test('joinRoom returns 409 VOICE_ROOM_ALREADY_ACTIVE when user is in a different active room', () => {
+    expect(codeBlock).toMatch(/409/);
+    expect(codeBlock).toMatch(/VOICE_ROOM_ALREADY_ACTIVE/);
+  });
+
+  test('joinRoom does NOT update/deactivate the other room participant', () => {
+    expect(codeBlock).not.toMatch(/prisma\.\w+\.update\s*\(/);
+  });
+
+  test('joinRoom does NOT emit socket events in enforcement block', () => {
+    expect(codeBlock).not.toMatch(/\.emit\s*\(/);
+  });
+
+  test('joinRoom does NOT call socketsLeave in enforcement block', () => {
+    expect(codeBlock).not.toMatch(/\.socketsLeave\s*\(/);
+  });
+
+  test('joinRoom does NOT call autoPromoteNext in enforcement block', () => {
+    expect(codeBlock).not.toMatch(/autoPromoteNext\s*\(/);
+  });
+
+  test('VoiceRoomMember is NOT modified — permanent membership preserved', () => {
+    expect(codeBlock).not.toMatch(/prisma\.voiceRoomMember\.(update|delete|create)/);
+  });
+
+  test('rejection message tells user to leave the existing room first', () => {
+    expect(codeBlock).toMatch(/Leave|leave/);
+  });
+});

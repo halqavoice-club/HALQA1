@@ -1,11 +1,11 @@
-/**
+﻿/**
  * HALQA Mobile — Create Voice Room Screen
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  SafeAreaView, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform
-} from 'react-native';
+  SafeAreaView, ScrollView, ActivityIndicator, Platform} from 'react-native';
 import { useRouter, Stack } from 'expo-router';
 import { showMessage } from 'react-native-flash-message';
 import api from '@/lib/api';
@@ -171,3 +171,7 @@ const styles = StyleSheet.create({
   createBtnDisabled:{ opacity: 0.7 },
   createBtnText:    { color: '#fff', fontSize: 16, fontWeight: '800' },
 });
+
+
+
+

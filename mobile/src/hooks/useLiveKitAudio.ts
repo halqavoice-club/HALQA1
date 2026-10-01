@@ -26,7 +26,15 @@ export interface LiveKitAudioState {
   connected:    boolean;
   micEnabled:   boolean;
   quality:      NetworkQuality;
-  connect:      (url: string, token: string, startMuted?: boolean, roomId?: string) => Promise<void>;
+  /**
+   * Connect to a LiveKit room.
+   * @param tokenFetcher  Optional async callback that returns a fresh token.
+   *                      PH19-002 FIX: When provided, auto-reconnect calls this
+   *                      instead of reusing the stale cached token, so a kicked/
+   *                      demoted user cannot re-enter after their DB state changed.
+   *                      Falls back to cached token when not provided (network blip).
+   */
+  connect:      (url: string, token: string, startMuted?: boolean, roomId?: string, tokenFetcher?: () => Promise<string>) => Promise<void>;
   disconnect:   (reason?: DisconnectReason) => void;
   toggleMic:    () => Promise<void>;
   enableMic:    () => Promise<void>;
@@ -61,6 +69,11 @@ export function useLiveKitAudio(): LiveKitAudioState {
   const lastTokenRef        = useRef<string>('');
   const lastStartMutedRef   = useRef<boolean>(true);
   const lastRoomIdRef       = useRef<string>('');   // FIX-12: for speaking indicator
+  // PH19-002 FIX: store the caller's token fetcher so auto-reconnect can
+  // request a fresh token rather than reusing the stale cached one.
+  // A kicked/demoted user would be re-denied at the backend when fetching
+  // a new token, preventing stale-credential re-entry into the SFU.
+  const tokenFetcherRef     = useRef<(() => Promise<string>) | null>(null);
   const reconnectCountRef   = useRef<number>(0);
   const reconnectTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isUnmountedRef      = useRef<boolean>(false);
@@ -125,8 +138,7 @@ export function useLiveKitAudio(): LiveKitAudioState {
   }
 
   // ─── Core connect ─────────────────────────────────────────────────────────
-  const connect = useCallback(async (url: string, token: string, startMuted = true, roomId?: string) => {
-    if (!LiveKitModule) {
+  const connect = useCallback(async (url: string, token: string, startMuted = true, roomId?: string, tokenFetcher?: () => Promise<string>) => {    if (!LiveKitModule) {
       showMessage({
         message: '📱 Audio needs native build',
         description: 'Run "eas build" or "expo run:android" for live audio.',
@@ -144,6 +156,8 @@ export function useLiveKitAudio(): LiveKitAudioState {
     lastTokenRef.current      = token;
     lastStartMutedRef.current = startMuted;
     if (roomId) lastRoomIdRef.current = roomId;
+    // PH19-002 FIX: store tokenFetcher for fresh-token auto-reconnect
+    if (tokenFetcher) tokenFetcherRef.current = tokenFetcher;
 
     isConnectingRef.current = true;
     clearReconnectTimer();
@@ -178,10 +192,28 @@ export function useLiveKitAudio(): LiveKitAudioState {
         if (!isUserInitiated && reconnectCountRef.current < MAX_RECONNECT_ATTEMPTS) {
           const delay = BASE_RETRY_DELAY_MS * Math.pow(2, reconnectCountRef.current);
           reconnectCountRef.current += 1;
-          reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = setTimeout(async () => {
             isConnectingRef.current = false;
             if (!isUnmountedRef.current) {
-              connect(lastUrlRef.current, lastTokenRef.current, lastStartMutedRef.current);
+              // PH19-002 FIX: fetch a fresh token before reconnecting.
+              // Reusing the cached token lets a kicked/demoted/banned user
+              // re-enter the SFU without backend authorization re-check.
+              // If tokenFetcherRef is set, call it to get a current token;
+              // the backend will reject the request if the user was kicked/banned.
+              // Fall back to the cached token only when no fetcher was provided
+              // (e.g. a plain network blip with no authorization change).
+              let reconnectToken = lastTokenRef.current;
+              if (tokenFetcherRef.current) {
+                try {
+                  reconnectToken = await tokenFetcherRef.current();
+                  lastTokenRef.current = reconnectToken; // update cache with fresh token
+                } catch {
+                  // fetcher failed (kicked/banned → 403) — do not reconnect
+                  reconnectCountRef.current = MAX_RECONNECT_ATTEMPTS; // halt retries
+                  return;
+                }
+              }
+              connect(lastUrlRef.current, reconnectToken, lastStartMutedRef.current);
             }
           }, delay);
         }
@@ -234,9 +266,26 @@ export function useLiveKitAudio(): LiveKitAudioState {
         if (isTransient && reconnectCountRef.current < MAX_RECONNECT_ATTEMPTS) {
           const delay = BASE_RETRY_DELAY_MS * Math.pow(2, reconnectCountRef.current);
           reconnectCountRef.current += 1;
-          reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = setTimeout(async () => {
             isConnectingRef.current = false;
-            connect(lastUrlRef.current, lastTokenRef.current, lastStartMutedRef.current);
+            if (!isUnmountedRef.current) {
+              // PH19-002 FIX: use fresh token on catch-block retry too.
+              // A connection error during room.connect() may happen immediately
+              // after a kick/ban — fetching a fresh token lets the backend
+              // deny the reconnect if authorization has changed.
+              let retryToken = lastTokenRef.current;
+              if (tokenFetcherRef.current) {
+                try {
+                  retryToken = await tokenFetcherRef.current();
+                  lastTokenRef.current = retryToken;
+                } catch {
+                  // 403/401 — stop retrying
+                  reconnectCountRef.current = MAX_RECONNECT_ATTEMPTS;
+                  return;
+                }
+              }
+              connect(lastUrlRef.current, retryToken, lastStartMutedRef.current);
+            }
           }, delay);
         } else {
           showMessage({
@@ -252,12 +301,28 @@ export function useLiveKitAudio(): LiveKitAudioState {
   }, [quality]); // eslint-disable-line
 
   // ─── Force reconnect (Phase 7) ────────────────────────────────────────────
+  // PH19-002 FIX: fetch a fresh token before reconnecting.
+  // The force-reconnect path is triggered by background resume (AppState).
+  // A kicked/banned/demoted user who backgrounds and re-foregrounds the app
+  // must be denied at the backend when they attempt to get a new token.
   const reconnect = useCallback(async () => {
-    if (!lastUrlRef.current || !lastTokenRef.current) return;
+    if (!lastUrlRef.current) return;
     reconnectCountRef.current = 0;
     isConnectingRef.current   = false;
     clearReconnectTimer();
-    await connect(lastUrlRef.current, lastTokenRef.current, lastStartMutedRef.current);
+
+    let freshToken = lastTokenRef.current;
+    if (tokenFetcherRef.current) {
+      try {
+        freshToken = await tokenFetcherRef.current();
+        lastTokenRef.current = freshToken;
+      } catch {
+        // 403/401 from backend — user is no longer authorized, do not reconnect
+        return;
+      }
+    }
+    if (!freshToken) return; // no token available at all — give up
+    await connect(lastUrlRef.current, freshToken, lastStartMutedRef.current);
   }, [connect]);
 
   // ─── Disconnect ───────────────────────────────────────────────────────────
@@ -276,6 +341,11 @@ export function useLiveKitAudio(): LiveKitAudioState {
   // ─── Mic controls ─────────────────────────────────────────────────────────
   const enableMic = useCallback(async () => {
     if (!roomRef.current) return;
+    // MIC-02: Guard against publishing when the SFU token has canPublish:false.
+    // Without this, a student without a speakerSlot could call enableMic() and
+    // silently fail at the SFU, or succeed if the token was not yet restricted.
+    const perms = roomRef.current.localParticipant?.permissions;
+    if (perms && perms.canPublish === false) return;
     try {
       const pubOpts = buildPublishOptions(quality);
       await roomRef.current.localParticipant.setMicrophoneEnabled(true, pubOpts);

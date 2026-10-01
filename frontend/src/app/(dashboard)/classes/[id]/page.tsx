@@ -35,7 +35,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Breadcrumb } from '@/components/ui/breadcrumb'
 import {
   ArrowLeft, Users, UserCheck, BookOpen, ClipboardCheck,
-  Edit, Trash2, Plus, X, Search, UserPlus, Loader2, GraduationCap,
+  Edit, Trash2, Plus, X, Search, UserPlus, Loader2, GraduationCap, Star,
 } from 'lucide-react'
 import Link from 'next/link'
 
@@ -247,8 +247,20 @@ export default function ClassDetailPage() {
 
       {/* Title */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">{cls.name}</h1>
+        <div className="flex items-center gap-2 flex-wrap">
+          <h1 className="text-2xl font-bold text-gray-900">{cls.name}</h1>
+          {cls.isDefault && (
+            <Badge className="bg-amber-100 text-amber-700 border-0 gap-1 text-xs">
+              <Star className="w-3 h-3" /> Default Class
+            </Badge>
+          )}
+        </div>
         {cls.description && <p className="text-gray-500 text-sm mt-1">{cls.description}</p>}
+        {cls.isDefault && (
+          <p className="text-xs text-amber-600 mt-1">
+            New students joining the school are automatically enrolled here.
+          </p>
+        )}
       </div>
 
       {/* Stats */}

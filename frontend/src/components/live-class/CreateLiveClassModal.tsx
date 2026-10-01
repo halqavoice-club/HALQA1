@@ -38,7 +38,8 @@ const schema = z.object({
   description:        z.string().optional(),
   scheduledAt:        z.string().optional(),
   duration:           z.number().int().min(1).max(480).nullable().optional(),
-  // maxParticipants removed — streams are unlimited
+  // maxSpeakers: max simultaneous speakers on stage (school classes)
+  maxSpeakers:        z.number().int().min(1).max(50).optional(),
   chatEnabled:        z.boolean().default(true),
   handRaiseEnabled:   z.boolean().default(true),
   quranPanelEnabled:  z.boolean().default(false),
@@ -101,7 +102,10 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                               // datetime-local gives "2026-08-28T14:00" — convert to full ISO
                               ? new Date(data.scheduledAt).toISOString()
                               : undefined,
-        // maxParticipants removed — unlimited
+        // maxSpeakers: only send for school streams
+        ...(data.streamType === 'SCHOOL' && data.maxSpeakers != null
+          ? { maxSpeakers: data.maxSpeakers }
+          : {}),
         chatEnabled:        data.chatEnabled,
         handRaiseEnabled:   data.handRaiseEnabled,
         quranPanelEnabled:  data.quranPanelEnabled,
@@ -404,6 +408,35 @@ export function CreateLiveClassModal({ onClose, onCreated }: Props) {
                       {...register('duration', { valueAsNumber: true })}
                     />
                     {errors.duration && <p className="text-xs text-red-500 mt-1">{errors.duration.message}</p>}
+                  </div>
+                )}
+
+                {/* Max speakers on stage — school streams only */}
+                {streamMode === 'SCHOOL' && (
+                  <div>
+                    <Label>Max Speakers on Stage</Label>
+                    <p className="text-xs text-gray-500 mb-1">How many students can speak simultaneously (default: 20)</p>
+                    <div className="flex flex-wrap gap-2 mt-1">
+                      {[2, 4, 6, 8, 10, 20].map(n => {
+                        const current = watch('maxSpeakers')
+                        return (
+                          <button
+                            key={n}
+                            type="button"
+                            onClick={() => setValue('maxSpeakers', n)}
+                            className={cn(
+                              'px-3 py-1.5 rounded-lg text-sm font-semibold border-2 transition-all',
+                              (current === n || (current == null && n === 20))
+                                ? 'border-indigo-600 bg-indigo-50 text-indigo-700'
+                                : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300'
+                            )}
+                          >
+                            {n}
+                          </button>
+                        )
+                      })}
+                    </div>
+                    {errors.maxSpeakers && <p className="text-xs text-red-500 mt-1">{errors.maxSpeakers.message}</p>}
                   </div>
                 )}
 

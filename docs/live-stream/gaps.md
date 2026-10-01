@@ -1,7 +1,7 @@
 # Live Stream — Known Gaps and Violations
 
 **Audit date:** 2026-08-26  
-**Rule:** Read-only documentation. No fixes applied.
+**Last updated:** 2026-09-01 — LS-GAP-001 verified fixed; LCSV-002 verified fixed (MASTER-VIOLATIONS.md Sprint 1)
 
 ---
 
@@ -9,23 +9,12 @@
 
 Public live streams share the live class infrastructure, so all live class violations apply:
 
-### LCSV-001 — SUPER_ADMIN Receives HOST Role in PUBLIC Stream
+### LCSV-001 — SUPER_ADMIN Blocked from PUBLIC Stream Participation
 
 **Severity:** CRITICAL  
-**Specific to PUBLIC streams:** Unlike SCHOOL streams (which block SUPER_ADMIN at the school membership gate), PUBLIC streams allow any authenticated user to join. SUPER_ADMIN can call `POST /live-classes/:id/join` on a PUBLIC stream and receives HOST role due to the `isTeacher`/`isStaff` checks in `joinLiveClass()`.
+**Status:** ✅ FIXED
 
-**Current behavior:**
-- SUPER_ADMIN joins a PUBLIC stream they did not create
-- `isTeacher = true` (because `user.role === 'SUPER_ADMIN'`)
-- `role = 'HOST'` assigned in `live_class_participants`
-- SUPER_ADMIN gets LiveKit token, host controls, appears in participant list
-
-**Expected behavior:**
-- SUPER_ADMIN who is NOT the creator should receive `'STUDENT'` role
-- Only `isPublicHost = lc.hostUserId === userId` should grant HOST
-
-**File:** `backend/src/controllers/live-class.controller.js` ~line 793  
-**Cross-reference:** [docs/authorization/super-admin-current-violations.md](../authorization/super-admin-current-violations.md#lcsv-001)
+SUPER_ADMIN now receives HTTP 403 from `joinLiveClass()` before any role assignment, participant record creation, or LiveKit token issuance. This applies to both SCHOOL and PUBLIC streams regardless of whether the admin created the stream.
 
 ---
 
@@ -33,21 +22,30 @@ Public live streams share the live class infrastructure, so all live class viola
 
 Same as in school live classes. SUPER_ADMIN can create PUBLIC streams and delete messages as "host" via the `isAdmin`/`isHost` checks that include `'SUPER_ADMIN'`.
 
+**Status:** ✅ FIXED — Sprint 1 (commit d642e28). See MASTER-VIOLATIONS.md.
+
 **Cross-reference:** [docs/authorization/super-admin-current-violations.md](../authorization/super-admin-current-violations.md#lcsv-002)
 
 ---
 
 ## Public Stream-Specific Gaps
 
-### LS-GAP-001 — No Admin Termination Endpoint for PUBLIC Streams
+### LS-GAP-001 — Admin Termination Endpoint for PUBLIC Streams
 
 **Severity:** HIGH  
-**Impact:** Platform admin cannot forcibly end a PUBLIC live stream that violates platform rules without suspending the host's account.
+**Status:** ✅ FIXED — Sprint 2 (verified 2026-09-01)
 
-The "End" button in `/admin/live-voice` calls `POST /live-classes/:id/end`, which requires `hostUserId === req.user.id`. SUPER_ADMIN is not the `hostUserId` for streams they didn't create, so the call returns 403.
+`POST /api/v1/admin/actions/live-classes/:id/terminate` is implemented in `backend/src/routes/admin-actions.routes.js` and **IS mounted** in `backend/src/app.js` at line 1052:
 
-**Needed:** `POST /api/v1/admin/live-classes/:id/terminate` (IP-allowlisted + SUPER_ADMIN only)  
-**Do not implement.** Document only.
+```javascript
+app.use('/api/v1/admin/actions', adminActionsRoutes);
+```
+
+The endpoint:
+- Requires SUPER_ADMIN role + IP allowlist
+- Ends the class, marks all participants inactive, emits `liveclass:ended` socket event
+- Writes a full audit log entry
+- Works for both SCHOOL and PUBLIC streams regardless of `hostUserId`
 
 ---
 
@@ -64,29 +62,51 @@ The "End" button in `/admin/live-voice` calls `POST /live-classes/:id/end`, whic
 ### LS-GAP-003 — No Host Transfer for PUBLIC Streams
 
 **Severity:** MEDIUM  
-**Impact:** PUBLIC streams cannot transfer ownership. If the creator leaves or loses connection, there is no mechanism to assign another participant as host. The stream continues but no one has host controls.
+**Status:** ✅ FIXED — 2026-09-01
 
-Voice rooms have `POST /voice/:id/transfer/:userId`. Live class has no equivalent.
+Implemented `POST /api/v1/live-classes/:id/transfer/:userId`:
+- Backend: `transferHost()` in `live-class.controller.js`, route in `live-class.routes.js`
+- Atomic DB transaction: demote old host → STUDENT, promote target → HOST, update `host_user_id` for PUBLIC streams
+- Race protection: `updateMany WHERE host_user_id = callerId` returns 0 rows if another transfer already happened
+- Socket events: `liveclass:host_transferred`, `liveclass:role_changed`, `liveclass:you_are_host`
+- Frontend: `LiveClassHostControls` shows "Make host" button per participant (HOST-only); `LiveClassRoomImpl` handles socket events and API call
+- Works for both SCHOOL and PUBLIC streams
 
 ---
 
 ### LS-GAP-004 — Feed Card Post Persists After Stream Ends
 
 **Severity:** LOW  
-**Impact:** `broadcastLiveEnd()` does NOT soft-delete the `LIVE_CLASS_SHARE` post. It emits `feed:live_ended` via socket (so connected clients see "ended" state), but users who load the feed later may still see the card in "ended" state indefinitely.
+**Status:** ✅ ALREADY FIXED (pre-audit)
 
-Whether this is a gap or intentional (stream history) depends on product requirements. Current behavior: posts are never deleted.
+`broadcastLiveEnd()` in `backend/src/utils/feedLive.js`:
+1. Emits `feed:live_ended` socket event immediately so connected clients update their card UI
+2. Soft-deletes the `LIVE_CLASS_SHARE` post after a **10-minute grace period** (`LIVE_POST_TTL_MS = 10 * 60 * 1000`) so users loading the feed later don't see stale ended cards
+
+The gap doc was outdated — the fix was already in place.
 
 ---
 
 ### LS-GAP-005 — No Test Coverage for PUBLIC Stream Authorization
 
 **Severity:** MEDIUM  
-**Impact:** The existing test files (`live-class-p0-security.test.js`, `live-class-p1-reliability.test.js`) use `streamType = 'SCHOOL'` fixtures throughout. There are no tests specifically verifying PUBLIC stream authorization:
-- MEMBER user creates PUBLIC stream → receives HOST role
-- SUPER_ADMIN joins PUBLIC stream (not creator) → should get STUDENT, currently gets HOST
-- Kicked viewer cannot rejoin
-- Cross-user gifting on PUBLIC stream
+**Status:** ✅ FIXED — 2026-09-01
+
+New test file: `backend/src/tests/live-class-public-stream.test.js` — **21/21 passing**
+
+Covers:
+- MEMBER user who is `hostUserId` gets HOST role on join
+- MEMBER who is NOT `hostUserId` gets STUDENT role
+- PUBLIC stream join skips school isolation (any auth user can join)
+- PUBLIC stream skips enrollment check (no classId)
+- SUPER_ADMIN joins as STUDENT viewer (not HOST) when not the creator
+- SUPER_ADMIN who IS the creator can join as HOST
+- Kicked viewer (`wasKicked = true`) blocked with 403 on rejoin
+- Kicked user cannot get LiveKit token
+- Cross-user gifting: `checkLiveClassSchool` passes for PUBLIC streams
+- School-scoped gifting: blocked for cross-school SCHOOL streams
+- Host transfer: all 6 paths (success, non-host, self-transfer, ended, not-found, race condition)
+- Token endpoint: active participant gets token; kicked/inactive participant denied
 
 ---
 
@@ -94,10 +114,10 @@ Whether this is a gap or intentional (stream history) depends on product require
 
 | ID | Severity | Description | Fixed? |
 |----|---------|-------------|--------|
-| LCSV-001 | CRITICAL | SUPER_ADMIN receives HOST when joining any PUBLIC stream | ❌ |
-| LCSV-002 | HIGH | SUPER_ADMIN included in staff checks | ❌ |
-| LS-GAP-001 | HIGH | No admin termination for PUBLIC streams | ❌ missing |
-| LS-GAP-002 | LOW | `privacy` field silently ignored | ❌ (informational) |
-| LS-GAP-003 | MEDIUM | No host transfer for PUBLIC streams | ❌ missing |
-| LS-GAP-004 | LOW | Feed card never deleted after stream ends | ❌ (informational) |
-| LS-GAP-005 | MEDIUM | No PUBLIC stream specific authorization tests | ❌ missing |
+| LCSV-001 | CRITICAL | SUPER_ADMIN blocked entirely from joining any stream | ✅ Sprint 1 |
+| LCSV-002 | HIGH | SUPER_ADMIN included in staff checks | ✅ Sprint 1 |
+| LS-GAP-001 | HIGH | No admin termination for PUBLIC streams | ✅ Sprint 2 (verified mounted) |
+| LS-GAP-002 | LOW | `privacy` field silently ignored | ❌ informational only |
+| LS-GAP-003 | MEDIUM | No host transfer for PUBLIC streams | ✅ Fixed 2026-09-01 |
+| LS-GAP-004 | LOW | Feed card never deleted after stream ends | ✅ Already fixed (10-min grace soft-delete) |
+| LS-GAP-005 | MEDIUM | No PUBLIC stream specific authorization tests | ✅ Fixed 2026-09-01 (21/21) |

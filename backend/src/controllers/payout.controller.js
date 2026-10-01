@@ -5,9 +5,9 @@
  * Hosts earn diamonds by receiving gifts during live sessions.
  * This controller handles their payout requests to withdraw earnings.
  *
- * Economy:
- *   1 diamond = $0.005 (0.5 cents)
- *   Minimum payout: 2,000 diamonds ($10)
+ * Economy (see backend/src/services/economy.config.js for authoritative values):
+ *   1 diamond = $0.005 (0.5 cents)  [DIAMOND_TO_USD]
+ *   Minimum payout: 2,000 diamonds ($10)  [PAYOUT_MIN_DIAMONDS]
  *   Platform processes payouts manually via Stripe Transfer or bank transfer.
  *   Status flow: PENDING → APPROVED → PROCESSING → COMPLETED | REJECTED
  *
@@ -22,10 +22,69 @@
 const prisma = require('../utils/prisma');
 const { successResponse, errorResponse, paginatedResponse, getPagination } = require('../utils/response');
 const logger = require('../utils/logger');
+const { PAYOUT_MIN_DIAMONDS, toUsd } = require('../services/economy.config');
+const { encrypt, decrypt, maskAccountDetails, isEncrypted } = require('../utils/encryption');
 
-const DIAMOND_TO_USD  = 0.005;    // 1 diamond = $0.005
-const MIN_PAYOUT_DIAMONDS = 2000; // minimum withdrawal amount
-const MIN_PAYOUT_USD  = MIN_PAYOUT_DIAMONDS * DIAMOND_TO_USD; // $10
+// Convenience alias so the rest of this file reads naturally
+const MIN_PAYOUT_DIAMONDS = PAYOUT_MIN_DIAMONDS;
+
+// ─── Startup guard: block payout creation if encryption key is missing ─────────
+// We check at module load time so a misconfigured deployment fails fast rather
+// than storing plaintext on the first real payout request.
+let _encryptionReady = false;
+try {
+  // Attempt a trivial encrypt to validate the key is usable
+  encrypt('halqa_payout_key_check');
+  _encryptionReady = true;
+} catch (err) {
+  logger.error(
+    '[payout] PAYOUT_ENCRYPTION_KEY is missing or invalid — payout requests will be BLOCKED until the key is set. ' +
+    `Error: ${err.message}`
+  );
+}
+
+// ─── GET /wallet/payout/info ─────────────────────────────────────────────────
+/**
+ * Returns server-calculated payout eligibility and economy rates.
+ * Replaces the deprecated GET /api/v1/creators/me/payout-info.
+ * All values are calculated server-side — frontend must NEVER hardcode these.
+ */
+async function getPayoutInfo(req, res) {
+  try {
+    const wallet = await prisma.wallet.findUnique({
+      where:  { userId: req.user.id },
+      select: { diamonds: true, totalEarned: true }
+    });
+
+    const diamonds = wallet?.diamonds ?? 0;
+    const usdValue = toUsd(diamonds);
+    const canRequest = diamonds >= MIN_PAYOUT_DIAMONDS;
+
+    // Check for existing pending request
+    const pendingRequest = await prisma.payoutRequest.findFirst({
+      where:   { userId: req.user.id, status: { in: ['PENDING', 'APPROVED', 'PROCESSING'] } },
+      select:  { id: true, status: true, diamonds: true, usdAmount: true, createdAt: true }
+    });
+
+    return successResponse(res, {
+      diamonds,
+      usdValue:          usdValue.toFixed(2),
+      minPayoutDiamonds: MIN_PAYOUT_DIAMONDS,
+      minPayoutUsd:      toUsd(MIN_PAYOUT_DIAMONDS).toFixed(2),
+      diamondToUsd:      require('../services/economy.config').DIAMOND_TO_USD,
+      platformSharePercent: require('../services/economy.config').PLATFORM_SHARE_PERCENT,
+      canRequest,
+      totalEarned:       wallet?.totalEarned ?? 0,
+      pendingRequest:    pendingRequest || null,
+      message: canRequest
+        ? `You can withdraw $${usdValue.toFixed(2)}`
+        : `Minimum ${MIN_PAYOUT_DIAMONDS} diamonds required. You have ${diamonds}.`
+    });
+  } catch (err) {
+    logger.error('[payout:info]', err.message);
+    return errorResponse(res, err.message, 500);
+  }
+}
 
 // ─── GET /wallet/payout/history ──────────────────────────────────────────────
 async function getPayoutHistory(req, res) {
@@ -43,7 +102,14 @@ async function getPayoutHistory(req, res) {
       prisma.payoutRequest.count({ where: { userId: req.user.id } })
     ]);
 
-    return paginatedResponse(res, requests, { page: pagination.page, limit: pagination.limit, total });
+    // Fully redact accountDetails from user-facing response —
+    // users must not receive their own stored (encrypted) account details back.
+    const redacted = requests.map(r => {
+      const { accountDetails: _stripped, ...rest } = r;
+      return { ...rest, accountDetails: {} };
+    });
+
+    return paginatedResponse(res, redacted, { page: pagination.page, limit: pagination.limit, total });
   } catch (err) {
     logger.error('[payout:history]', err.message);
     return errorResponse(res, err.message, 500);
@@ -60,6 +126,12 @@ async function getPayoutHistory(req, res) {
  */
 async function requestPayout(req, res) {
   try {
+    // ── Encryption guard ──────────────────────────────────────────────────
+    if (!_encryptionReady) {
+      logger.error('[payout:request] Blocked: PAYOUT_ENCRYPTION_KEY is not configured');
+      return errorResponse(res, 'Payout service is temporarily unavailable. Please contact support.', 503);
+    }
+
     const { diamonds, method, accountDetails } = req.body;
     const userId = req.user.id;
 
@@ -68,7 +140,7 @@ async function requestPayout(req, res) {
     if (isNaN(diamondAmount) || diamondAmount < MIN_PAYOUT_DIAMONDS) {
       return errorResponse(
         res,
-        `Minimum payout is ${MIN_PAYOUT_DIAMONDS} diamonds ($${MIN_PAYOUT_USD.toFixed(2)})`,
+        `Minimum payout is ${MIN_PAYOUT_DIAMONDS} diamonds ($${toUsd(MIN_PAYOUT_DIAMONDS).toFixed(2)})`,
         400
       );
     }
@@ -86,30 +158,47 @@ async function requestPayout(req, res) {
       return errorResponse(res, 'You already have a pending payout request. Wait for it to complete.', 400);
     }
 
-    // ── Atomic: check balance and deduct diamonds ──────────────────────────
+    // ── Atomic: check balance, deduct diamonds, create payout, write ledger ──────
+    // Three operations in one transaction:
+    //   1. Optimistic-lock wallet update (WHERE diamonds >= amount) — race-safe
+    //   2. PayoutRequest.create — the payout record
+    //   3. WalletTransaction.create type=PAYOUT — the auditable ledger entry
+    //
+    // If two concurrent requests race here, only one can win the optimistic lock.
+    // The loser gets P2025 (record not found) → rolls back → returns 402.
     let payoutRequest;
     try {
       const result = await prisma.$transaction(async (tx) => {
-        const wallet = await tx.wallet.findUnique({ where: { userId } });
-        if (!wallet || wallet.diamonds < diamondAmount) {
-          throw new Error(`INSUFFICIENT_DIAMONDS:${wallet?.diamonds ?? 0}:${diamondAmount}`);
-        }
-
+        // 1. Optimistic-lock deduction: only succeeds if diamonds >= diamondAmount
+        //    P2025 is thrown if no row matches (insufficient balance under concurrency)
         const updatedWallet = await tx.wallet.update({
-          where: { userId },
+          where: { userId, diamonds: { gte: diamondAmount } },
           data:  { diamonds: { decrement: diamondAmount } }
         });
 
-        const usdAmount = diamondAmount * DIAMOND_TO_USD;
+        const usdAmount = toUsd(diamondAmount);
 
+        // 2. Create the payout request record
         const request = await tx.payoutRequest.create({
           data: {
             userId,
             diamonds:       diamondAmount,
             usdAmount,
             method,
-            accountDetails: JSON.stringify(accountDetails || {}),
+            accountDetails: encrypt(JSON.stringify(accountDetails || {})),
             status:         'PENDING',
+          }
+        });
+
+        // 3. Write PAYOUT ledger entry — fatal (no .catch)
+        //    diamonds is negative: diamonds are being reserved/deducted
+        await tx.walletTransaction.create({
+          data: {
+            userId,
+            type:        'PAYOUT',
+            coins:       0,
+            diamonds:    -diamondAmount,
+            description: `Payout request ${request.id}: ${diamondAmount} diamonds reserved`,
           }
         });
 
@@ -118,6 +207,18 @@ async function requestPayout(req, res) {
 
       payoutRequest = result.request;
     } catch (txErr) {
+      // P2025 = optimistic lock miss (insufficient diamonds at commit time)
+      if (txErr.code === 'P2025' || txErr.message?.includes('Record to update not found')) {
+        const currentWallet = await prisma.wallet.findUnique({
+          where:  { userId },
+          select: { diamonds: true }
+        });
+        return errorResponse(
+          res,
+          `Insufficient diamonds. You have ${currentWallet?.diamonds ?? 0}, requested ${diamondAmount}`,
+          402
+        );
+      }
       if (txErr.message?.startsWith('INSUFFICIENT_DIAMONDS:')) {
         const [, have, need] = txErr.message.split(':');
         return errorResponse(
@@ -156,7 +257,7 @@ async function cancelPayout(req, res) {
       return errorResponse(res, `Cannot cancel a ${request.status} payout request`, 400);
     }
 
-    // Refund diamonds atomically
+    // Refund diamonds atomically with PAYOUT_REVERSAL ledger entry
     await prisma.$transaction([
       prisma.payoutRequest.update({
         where: { id },
@@ -165,6 +266,15 @@ async function cancelPayout(req, res) {
       prisma.wallet.update({
         where: { userId },
         data:  { diamonds: { increment: request.diamonds } }
+      }),
+      prisma.walletTransaction.create({
+        data: {
+          userId,
+          type:        'PAYOUT_REVERSAL',
+          coins:       0,
+          diamonds:    +request.diamonds,
+          description: `Payout request ${id} cancelled by user — diamonds restored`,
+        }
       })
     ]);
 
@@ -194,7 +304,25 @@ async function listPayoutsAdmin(req, res) {
       prisma.payoutRequest.count({ where: { status } })
     ]);
 
-    return paginatedResponse(res, requests, { page: pagination.page, limit: pagination.limit, total });
+    // Decrypt and mask accountDetails for admin — never return full account numbers
+    const masked = requests.map(r => {
+      let accountSummary = { accountHolder: '', accountLast4: '****' };
+      try {
+        const raw = r.accountDetails;
+        if (raw) {
+          // Support both legacy plaintext JSON and new encrypted format
+          const decrypted = isEncrypted(raw) ? decrypt(raw) : raw;
+          accountSummary = maskAccountDetails(decrypted);
+        }
+      } catch (err) {
+        logger.warn(`[payout:admin] Could not decrypt accountDetails for payout ${r.id}: ${err.message}`);
+      }
+      // Return record with masked summary, never raw accountDetails
+      const { accountDetails: _stripped, ...rest } = r;
+      return { ...rest, accountSummary };
+    });
+
+    return paginatedResponse(res, masked, { page: pagination.page, limit: pagination.limit, total });
   } catch (err) {
     return errorResponse(res, err.message, 500);
   }
@@ -229,7 +357,7 @@ async function processPayoutAdmin(req, res) {
     const statusMap = { approve: 'APPROVED', reject: 'REJECTED', complete: 'COMPLETED' };
     const newStatus = statusMap[action];
 
-    // If rejecting, refund diamonds
+    // If rejecting, refund diamonds with PAYOUT_REVERSAL ledger entry
     if (action === 'reject') {
       await prisma.$transaction([
         prisma.payoutRequest.update({
@@ -239,6 +367,15 @@ async function processPayoutAdmin(req, res) {
         prisma.wallet.update({
           where: { userId: request.userId },
           data:  { diamonds: { increment: request.diamonds } }
+        }),
+        prisma.walletTransaction.create({
+          data: {
+            userId:      request.userId,
+            type:        'PAYOUT_REVERSAL',
+            coins:       0,
+            diamonds:    +request.diamonds,
+            description: `Payout request ${id} rejected by admin ${req.user.id}${adminNote ? ': ' + adminNote.substring(0, 80) : ''} — diamonds restored`,
+          }
         })
       ]);
     } else {
@@ -262,6 +399,7 @@ async function processPayoutAdmin(req, res) {
 }
 
 module.exports = {
+  getPayoutInfo,
   getPayoutHistory,
   requestPayout,
   cancelPayout,

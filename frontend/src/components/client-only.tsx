@@ -7,23 +7,28 @@ export function ClientOnly({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
-    // Rehydrate Zustand store from localStorage on client mount
-    useAuthStore.persist.rehydrate()
+    async function init() {
+      // Rehydrate Zustand store from localStorage on client mount
+      useAuthStore.persist.rehydrate()
 
-    // After rehydration, restore the Authorization header on the axios instance
-    // so that requests fired before Zustand syncs still carry the token.
-    const stored = localStorage.getItem('halqa-auth')
-    if (stored) {
-      try {
-        const { state } = JSON.parse(stored)
-        if (state?.accessToken) {
-          const api = require('@/lib/api').default
-          api.defaults.headers.common['Authorization'] = `Bearer ${state.accessToken}`
+      // After rehydration, silently refresh the access token using the
+      // httpOnly refresh cookie. This restores the in-memory token after
+      // a page reload. We AWAIT this so the token is set before we render
+      // any UI that fires API requests.
+      // (FE-001: access tokens must never be stored in localStorage)
+      const { isAuthenticated, refreshToken } = useAuthStore.getState()
+      if (isAuthenticated) {
+        try {
+          await refreshToken()
+        } catch {
+          // If refresh fails the user will be redirected to login inside refreshToken()
         }
-      } catch {}
+      }
+
+      setMounted(true)
     }
 
-    setMounted(true)
+    init()
   }, [])
 
   if (!mounted) {

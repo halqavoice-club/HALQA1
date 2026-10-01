@@ -26,15 +26,14 @@ export function assertHttps(url: string): void {
   }
 
   if (__DEV__) {
-    // Allow localhost and loopback in dev mode
-    const localhostPattern = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/;
-    if (localhostPattern.test(url)) {
+    // Allow localhost, loopback, and LAN IPs in dev mode
+    const devPattern = /^http:\/\/(localhost|127\.0\.0\.1|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(:\d+)?(\/|$)/;
+    if (devPattern.test(url)) {
       return;
     }
     throw new Error(
       `[assertHttps] Insecure URL blocked in __DEV__ mode: "${url}". ` +
-        'Only http://localhost and http://127.0.0.1 are allowed in development. ' +
-        'Other http:// targets must use https://.'
+        'Only http://localhost, loopback, or LAN IPs are allowed in development.'
     );
   }
 
@@ -83,7 +82,11 @@ export function applyURLOverride(apiUrl: string) {
 const api = axios.create({
   baseURL: _baseURL,
   timeout: 30000,
-  headers: { 'Content-Type': 'application/json' },
+  // Note: Content-Type is NOT set globally here.
+  // For JSON requests (default), axios sets 'application/json' automatically.
+  // For FormData requests (file uploads), React Native's FormData sets
+  // 'multipart/form-data; boundary=...' automatically when Content-Type is unset.
+  // Setting it globally to application/json breaks all file uploads.
 });
 
 // ─── Token storage ────────────────────────────────────────────────────────────
@@ -111,6 +114,20 @@ function processQueue(error: unknown, token: string | null = null) {
 // ─── Request interceptor ─────────────────────────────────────────────────────
 api.interceptors.request.use(config => {
   if (_accessToken) config.headers.Authorization = `Bearer ${_accessToken}`;
+
+  // Attach active school context so the backend resolveSchoolId() picks it up
+  // without needing schoolId in params/body. This is required for education
+  // endpoints that use requireSchoolMember() middleware.
+  try {
+    const { useSchoolStore } = require('@/store/school.store');
+    const activeSchoolId = useSchoolStore.getState().activeSchoolId;
+    if (activeSchoolId) {
+      config.headers['x-school-id'] = activeSchoolId;
+    }
+  } catch {
+    // School store not yet loaded — skip header
+  }
+
   return config;
 });
 
@@ -120,8 +137,12 @@ api.interceptors.response.use(
   async error => {
     const original = error.config;
 
-    // Skip refresh loop for /auth/refresh itself to avoid infinite recursion
-    if (original?.url?.includes('/auth/refresh')) {
+    // Skip refresh loop for auth endpoints to avoid infinite recursion
+    if (
+      original?.url?.includes('/auth/refresh') ||
+      original?.url?.includes('/auth/logout') ||
+      original?.url?.includes('/users/fcm-token')
+    ) {
       return Promise.reject(error);
     }
 

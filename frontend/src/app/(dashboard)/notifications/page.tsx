@@ -1,7 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useRouter } from 'next/navigation'
 import api from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -22,6 +23,15 @@ const TYPE_CONFIG: Record<string, { color: string; icon: React.ElementType; labe
   ANNOUNCEMENT: { color: 'bg-purple-100 text-purple-700', icon: Megaphone,    label: 'Announcement' },
   REMINDER:     { color: 'bg-orange-100 text-orange-700', icon: Clock,        label: 'Reminder' },
   SYSTEM:       { color: 'bg-gray-100 text-gray-700',   icon: Settings,       label: 'System' },
+  // PK types
+  PK_INVITATION: { color: 'bg-indigo-100 text-indigo-700', icon: Bell, label: 'PK Challenge' },
+  PK_ACCEPTED:   { color: 'bg-green-100 text-green-700',   icon: Bell, label: 'PK Accepted' },
+  PK_RESULT:     { color: 'bg-amber-100 text-amber-700',   icon: Bell, label: 'PK Result' },
+  PK_STARTING:   { color: 'bg-indigo-100 text-indigo-700', icon: Bell, label: 'PK Starting' },
+  PK_ACHIEVEMENT:{ color: 'bg-yellow-100 text-yellow-700', icon: Star, label: 'Achievement' },
+  PK_MISSION:    { color: 'bg-blue-100 text-blue-700',     icon: Bell, label: 'Mission' },
+  PK_TOURNAMENT: { color: 'bg-purple-100 text-purple-700', icon: Bell, label: 'Tournament' },
+  PK_SEASON:     { color: 'bg-rose-100 text-rose-700',     icon: Bell, label: 'Season' },
 }
 
 function formatTime(date: string) {
@@ -32,9 +42,12 @@ function formatTime(date: string) {
 }
 
 export default function NotificationsPage() {
+  const router = useRouter()
   const queryClient = useQueryClient()
   const [typeFilter, setTypeFilter] = useState('')
   const [showUnreadOnly, setShowUnreadOnly] = useState(false)
+  // Track per-notification action loading state
+  const [pkActionLoading, setPkActionLoading] = useState<Record<string, 'accepting' | 'declining' | null>>({})
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['notifications'],
@@ -57,6 +70,46 @@ export default function NotificationsPage() {
       queryClient.invalidateQueries({ queryKey: ['notifications', 'unread'] })
     }
   })
+
+  // Accept a PK invitation from the notification card
+  const handlePKAccept = useCallback(async (notif: any) => {
+    const invitationId = notif.data?.invitationId
+    if (!invitationId) return
+    setPkActionLoading(prev => ({ ...prev, [notif.id]: 'accepting' }))
+    try {
+      const res = await api.post(`/pk/invitations/${invitationId}/accept`)
+      const pkMatchId = res.data.data?.match?.id
+      markReadMutation.mutate(notif.id)
+      if (pkMatchId) router.push(`/voice-club/pk/${pkMatchId}`)
+    } catch {
+      /* invitation may have expired — silently mark read */
+      markReadMutation.mutate(notif.id)
+    } finally {
+      setPkActionLoading(prev => ({ ...prev, [notif.id]: null }))
+    }
+  }, [router, markReadMutation])
+
+  // Decline a PK invitation from the notification card
+  const handlePKDecline = useCallback(async (notif: any) => {
+    const invitationId = notif.data?.invitationId
+    if (!invitationId) return
+    setPkActionLoading(prev => ({ ...prev, [notif.id]: 'declining' }))
+    try {
+      await api.post(`/pk/invitations/${invitationId}/reject`)
+      markReadMutation.mutate(notif.id)
+    } catch {
+      markReadMutation.mutate(notif.id)
+    } finally {
+      setPkActionLoading(prev => ({ ...prev, [notif.id]: null }))
+    }
+  }, [markReadMutation])
+
+  // Navigate to PK battle page from PK_ACCEPTED / PK_RESULT / PK_STARTING notifications
+  const handlePKNavigate = useCallback((notif: any) => {
+    const pkMatchId = notif.data?.pkMatchId
+    if (!notif.isRead) markReadMutation.mutate(notif.id)
+    if (pkMatchId) router.push(`/voice-club/pk/${pkMatchId}`)
+  }, [router, markReadMutation])
 
   const allNotifications: any[] = data?.data || []
   const unread = allNotifications.filter(n => !n.isRead).length
@@ -173,13 +226,20 @@ export default function NotificationsPage() {
                 {items.map((notif: any) => {
                   const cfg = TYPE_CONFIG[notif.type] || TYPE_CONFIG.SYSTEM
                   const Icon = cfg.icon
+                  const isPKInvitation = notif.type === 'PK_INVITATION'
+                  const isPKNavigable  = ['PK_ACCEPTED', 'PK_RESULT', 'PK_STARTING'].includes(notif.type)
+                  const pkAction = pkActionLoading[notif.id]
+
                   return (
                     <Card
                       key={notif.id}
-                      className={`border-0 shadow-sm cursor-pointer transition-all hover:shadow-md ${
+                      className={`border-0 shadow-sm transition-all hover:shadow-md ${
                         !notif.isRead ? 'bg-blue-50/40 border-l-2 border-l-halqa-400' : ''
-                      }`}
-                      onClick={() => !notif.isRead && markReadMutation.mutate(notif.id)}
+                      } ${isPKNavigable ? 'cursor-pointer' : ''}`}
+                      onClick={() => {
+                        if (isPKNavigable) { handlePKNavigate(notif); return }
+                        if (!notif.isRead && !isPKInvitation) markReadMutation.mutate(notif.id)
+                      }}
                     >
                       <CardContent className="p-4">
                         <div className="flex items-start gap-3">
@@ -201,6 +261,36 @@ export default function NotificationsPage() {
                               </div>
                             </div>
                             <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{notif.body}</p>
+
+                            {/* ── PK INVITATION: Accept / Decline buttons ── */}
+                            {isPKInvitation && notif.data?.invitationId && (
+                              <div className="flex gap-2 mt-3">
+                                <button
+                                  onClick={e => { e.stopPropagation(); handlePKDecline(notif) }}
+                                  disabled={!!pkAction}
+                                  className="flex-1 py-1.5 rounded-lg text-xs font-semibold border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition-all"
+                                >
+                                  {pkAction === 'declining' ? '…' : '✕ Decline'}
+                                </button>
+                                <button
+                                  onClick={e => { e.stopPropagation(); handlePKAccept(notif) }}
+                                  disabled={!!pkAction}
+                                  className="flex-1 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-all"
+                                >
+                                  {pkAction === 'accepting' ? '⏳ Joining…' : '⚔️ Accept'}
+                                </button>
+                              </div>
+                            )}
+
+                            {/* ── PK_ACCEPTED / PK_RESULT: Watch button ── */}
+                            {isPKNavigable && notif.data?.pkMatchId && (
+                              <div className="mt-2">
+                                <span className="text-xs text-indigo-600 font-semibold">
+                                  Tap to view battle →
+                                </span>
+                              </div>
+                            )}
+
                             <div className="flex items-center gap-2 mt-2">
                               <Badge className={`text-xs ${cfg.color}`}>{cfg.label}</Badge>
                               {notif.isRead && (

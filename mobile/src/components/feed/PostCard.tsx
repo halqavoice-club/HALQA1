@@ -1,4 +1,4 @@
-/**
+﻿/**
  * HALQA Mobile — PostCard v2
  * Fixes all audit gaps:
  *  - Full media grid (all 4 layouts, +N overlay, video play icon)
@@ -10,21 +10,24 @@
  *  - Pinned indicator
  *  - REPOST / QUOTE banners
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Image,
   Pressable, Modal, TextInput,
-  KeyboardAvoidingView, Platform, ActivityIndicator,
-  Dimensions, Alert, Share,
-} from 'react-native';
+  Platform, ActivityIndicator,
+  Dimensions, Alert, Share} from 'react-native';
 import { useMutation, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { formatDistanceToNow } from 'date-fns';
 import { useRouter } from 'expo-router';
 import { showMessage } from 'react-native-flash-message';
+import ImageViewing from 'react-native-image-viewing';
 import api, { getBaseURL } from '@/lib/api';
 import { getAvatarUrl, getAvatarInitials, avatarColor } from '@/lib/avatar';
 import { useAuthStore } from '@/store/auth.store';
+import { PollCard } from './PollCard';
+import { LinkPreviewCard } from './LinkPreviewCard';
 
 // Social API helpers (inline to avoid extra lib dep on mobile)
 const socialApi = {
@@ -53,6 +56,13 @@ export interface Post {
   _count: { reactions: number; comments: number };
   shareCount?: number; viewCount?: number; createdAt: string;
   isFollowing?: boolean;
+  // Poll
+  pollData?: any | null;
+  // Link preview
+  linkUrl?: string | null;
+  linkTitle?: string | null;
+  linkDescription?: string | null;
+  linkImage?: string | null;
 }
 
 interface Props { post: Post; onNavigateToDetail?: () => void }
@@ -287,6 +297,9 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
   const [showReactions, setShowReactions]         = useState(false);
   const [commentsOpen,  setCommentsOpen]           = useState(false);
   const [showShare,     setShowShare]              = useState(false);
+  // Media lightbox viewer (react-native-image-viewing)
+  const [mediaViewerIndex,   setMediaViewerIndex]   = useState(0);
+  const [mediaViewerVisible, setMediaViewerVisible] = useState(false);
   // Local counters — update immediately on tap (optimistic)
   const [viewCount,          setViewCount]          = useState(post.viewCount ?? 0);
   const [localMyReaction,    setLocalMyReaction]    = useState<ReactionType | undefined>(
@@ -591,10 +604,45 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
         <MediaGrid
           media={post.media}
           onPress={(i) => {
-            // navigate to detail on media tap
-            if (onNavigateToDetail) onNavigateToDetail();
-            else router.push(`/post/${post.id}` as any);
+            // Images → lightbox; videos → navigate to post detail
+            const clickedMedia = post.media[i];
+            if (clickedMedia?.type === 'VIDEO') {
+              if (onNavigateToDetail) onNavigateToDetail();
+              else router.push(`/post/${post.id}` as any);
+            } else {
+              setMediaViewerIndex(i);
+              setMediaViewerVisible(true);
+            }
           }}
+        />
+      )}
+
+      {/* Full-screen image viewer */}
+      {post.media?.length > 0 && (
+        <ImageViewing
+          images={post.media
+            .filter(m => m.type !== 'VIDEO')
+            .map(m => ({ uri: resolveUrl(m.url) }))}
+          imageIndex={mediaViewerIndex}
+          visible={mediaViewerVisible}
+          onRequestClose={() => setMediaViewerVisible(false)}
+          swipeToCloseEnabled
+          doubleTapToZoomEnabled
+        />
+      )}
+
+      {/* Poll (if post has poll data) */}
+      {post.pollData && (
+        <PollCard postId={post.id} pollData={post.pollData} isOwn={isOwn} />
+      )}
+
+      {/* Link preview (if no media and post has scraped link) */}
+      {!post.media?.length && post.linkUrl && post.linkTitle && (
+        <LinkPreviewCard
+          linkUrl={post.linkUrl}
+          linkTitle={post.linkTitle}
+          linkDescription={post.linkDescription}
+          linkImage={post.linkImage}
         />
       )}
 
@@ -838,3 +886,8 @@ const s = StyleSheet.create({
   commentInput:      { flex: 1, backgroundColor: '#f3f4f6', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 8, fontSize: 13, maxHeight: 80, color: '#374151' },
   sendBtn:           { width: 34, height: 34, borderRadius: 17, backgroundColor: '#4f46e5', justifyContent: 'center', alignItems: 'center' },
 });
+
+
+
+
+

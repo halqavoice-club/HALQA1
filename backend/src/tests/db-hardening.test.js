@@ -178,10 +178,11 @@ describe('Database Hardening — Role Write Path Regression Tests', () => {
       const fs = require('fs');
       const path = require('path');
       const src = fs.readFileSync(path.join(__dirname, '../routes/user.routes.js'), 'utf8');
-      // Find status update block — use 1500 chars to cover P1-001 validation code
-      // added before the prisma.user.update call
+      // Find status update block — use 2500 chars to cover the SOCIAL-STATUS-01
+      // cross-school verification code added between the comment marker and
+      // the prisma.user.update call (P8C FIX: was 1500, now 2500).
       const statusIdx = src.indexOf("PUT /users/:id/status");
-      const statusBlock = src.substring(statusIdx, statusIdx + 1500);
+      const statusBlock = src.substring(statusIdx, statusIdx + 2500);
       expect(statusBlock).toMatch(/data:\s*\{\s*status\s*\}/);
       expect(statusBlock).not.toMatch(/role/);
     });
@@ -215,7 +216,10 @@ describe('Database Hardening — Role Write Path Regression Tests', () => {
       const path = require('path');
       const src = fs.readFileSync(path.join(__dirname, '../controllers/teacher.controller.js'), 'utf8');
       const createIdx = src.indexOf("async function createTeacher");
-      const createBlock = src.substring(createIdx, createIdx + 1000);
+      // P8C FIX: window widened from 1000→3000 chars. The FRIEND-TEACHER-01
+      // linked-user code path was added before the direct creation path, pushing
+      // the hardcoded role:'TEACHER' assignment beyond the original 1000-char window.
+      const createBlock = src.substring(createIdx, createIdx + 3000);
       // Must hardcode TEACHER
       expect(createBlock).toMatch(/role:\s*'TEACHER'/);
       // Must not spread req.body
@@ -227,7 +231,10 @@ describe('Database Hardening — Role Write Path Regression Tests', () => {
       const path = require('path');
       const src = fs.readFileSync(path.join(__dirname, '../controllers/guardian.controller.js'), 'utf8');
       const createIdx = src.indexOf("async function createGuardian");
-      const createBlock = src.substring(createIdx, createIdx + 800);
+      // P8C FIX: window widened from 800→2500 chars. The FRIEND-GUARDIAN-01
+      // linked-user code path was added before the direct creation path, pushing
+      // the hardcoded role:'GUARDIAN' assignment beyond the original 800-char window.
+      const createBlock = src.substring(createIdx, createIdx + 2500);
       expect(createBlock).toMatch(/role:\s*'GUARDIAN'/);
       expect(createBlock).not.toMatch(/req\.body\.role/);
     });

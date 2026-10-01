@@ -20,7 +20,7 @@ import type {
   DynamicLayoutState,
   LayoutMode,
   LayoutResult,
-  SpeakerSlot,
+  SpeakerSlot
 } from '../../../../../src/lib/layout/layoutTypes';
 
 // ---------------------------------------------------------------------------
@@ -296,3 +296,4 @@ function _applyPatch(
   });
   set({ speakers, layout });
 }
+

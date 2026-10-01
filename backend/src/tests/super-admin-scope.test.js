@@ -771,7 +771,11 @@ describe('SVSV-001 FIX: feed:join:school does NOT have SUPER_ADMIN bypass', () =
     expect(handlerCode).toMatch(/socket\.userSchoolId\s*!==\s*schoolId/);
   });
 
-  test('SVSV-001: school:join handler still has no SUPER_ADMIN bypass (SA-FIX-10 regression)', () => {
+  test('SVSV-001: school:join handler has no SUPER_ADMIN bypass and explicitly denies SA (F-06 fix)', () => {
+    // F-06 FIX: The old bypass pattern was `if (userRole !== 'SUPER_ADMIN') reject`.
+    // That was removed (SA-FIX-10). The new pattern is `if (userRole === 'SUPER_ADMIN') return`
+    // which explicitly DENIES SA — a stronger security posture than merely removing the bypass.
+    // This test now validates the denial pattern rather than the absence of the string.
     const src = fs.readFileSync(
       path.join(__dirname, '../app.js'),
       'utf8'
@@ -779,6 +783,14 @@ describe('SVSV-001 FIX: feed:join:school does NOT have SUPER_ADMIN bypass', () =
     const handlerMatch = src.match(/socket\.on\('school:join'[\s\S]*?\}\);/);
     expect(handlerMatch).not.toBeNull();
     const handlerCode = handlerMatch[0];
-    expect(handlerCode).not.toMatch(/SUPER_ADMIN/);
+
+    // Must NOT have the old bypass (SUPER_ADMIN allowed through with !== check)
+    expect(handlerCode).not.toMatch(/userRole\s*!==\s*['"]SUPER_ADMIN['"]/);
+
+    // F-06 FIX: Must have the new explicit denial (=== check that returns early)
+    expect(handlerCode).toMatch(/userRole\s*===\s*['"]SUPER_ADMIN['"]/);
+
+    // Must still have the schoolId ownership check for normal users
+    expect(handlerCode).toMatch(/socket\.userSchoolId\s*!==\s*schoolId/);
   });
 });

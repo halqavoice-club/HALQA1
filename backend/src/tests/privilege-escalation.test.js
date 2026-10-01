@@ -207,6 +207,8 @@ describe('Privilege Escalation Security Tests — SUPER_ADMIN Protection', () =>
         const txResult = await fn({
           school:           { create: jest.fn().mockResolvedValue(createdSchool) },
           schoolMembership: { create: jest.fn().mockResolvedValue(createdMembership) },
+          // class.create is called by the route to set up the default class
+          class:            { create: jest.fn().mockResolvedValue({ id: 'cls-default', name: 'General', schoolId: 'school-new' }) },
           user:             {
             findUnique: jest.fn().mockResolvedValue({ schoolId: null, role: 'MEMBER' }),
             update:     jest.fn().mockImplementation(({ data }) => {
@@ -251,6 +253,8 @@ describe('Privilege Escalation Security Tests — SUPER_ADMIN Protection', () =>
               return Promise.resolve({ id: 'mem-1', ...data });
             })
           },
+          // class.create is called by the route to set up the default class
+          class:            { create: jest.fn().mockResolvedValue({ id: 'cls-default', name: 'General', schoolId: 'school-new' }) },
           user: {
             findUnique: jest.fn().mockResolvedValue({ schoolId: null, role: 'MEMBER' }),
             update:     jest.fn().mockResolvedValue({ ...MEMBER_USER, schoolId: 'school-new' })

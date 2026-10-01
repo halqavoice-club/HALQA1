@@ -4,7 +4,7 @@ const { authenticate } = require('../middleware/auth.middleware');
 const { eduMember, eduStaff } = require('../middleware/educationAuth');
 const prisma = require('../utils/prisma');
 const { successResponse } = require('../utils/response');
-const XLSX = require('xlsx');
+const { buildWorkbook } = require('../utils/excel');
 
 router.use(authenticate);
 
@@ -33,10 +33,7 @@ router.get('/attendance', ...eduStaff, async (req, res, next) => {
         'Status': r.status, 'Check In': r.checkInTime?.toISOString() || '',
         'Check Out': r.checkOutTime?.toISOString() || '', 'Notes': r.notes || ''
       }));
-      const ws = XLSX.utils.json_to_sheet(data);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
-      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      const buffer = await buildWorkbook(data, 'Attendance');
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename=attendance-report.xlsx');
       return res.send(buffer);
@@ -72,10 +69,7 @@ router.get('/grades', ...eduStaff, async (req, res, next) => {
         'Letter Grade': g.letterGrade,
         'Date': g.gradedAt.toISOString().split('T')[0]
       }));
-      const ws = XLSX.utils.json_to_sheet(data);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Grades');
-      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      const buffer = await buildWorkbook(data, 'Grades');
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename=grades-report.xlsx');
       return res.send(buffer);
@@ -108,10 +102,7 @@ router.get('/behavior', ...eduStaff, async (req, res, next) => {
         'Type': l.type, 'Category': l.category, 'Points': l.points,
         'Description': l.description || '', 'Date': l.date.toISOString().split('T')[0]
       }));
-      const ws = XLSX.utils.json_to_sheet(data);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Behavior');
-      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      const buffer = await buildWorkbook(data, 'Behavior');
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename=behavior-report.xlsx');
       return res.send(buffer);

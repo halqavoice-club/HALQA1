@@ -30,7 +30,7 @@ import Animated, {
   withSpring,
   withTiming,
   withSequence,
-  Easing,
+  Easing
 } from 'react-native-reanimated';
 
 // ---------------------------------------------------------------------------
@@ -163,3 +163,4 @@ export const SpeakingRing = React.memo(function SpeakingRing({
 });
 
 SpeakingRing.displayName = 'SpeakingRing';
+

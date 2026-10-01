@@ -6,17 +6,19 @@ let queues  = {};
 let workers = {};
 
 const QUEUE_NAMES = {
-  EMAIL:              'email',
-  NOTIFICATIONS:      'notifications',
-  REPORTS:            'reports',
-  ATTENDANCE_ALERTS:  'attendance-alerts',
-  CLEANUP:            'cleanup',
-  STORAGE_CLEANUP:    'storage-cleanup',
-  SOCIAL_CLEANUP:     'social-cleanup',
-  VIEW_AGGREGATION:   'view-aggregation',
-  AUDIT_ARCHIVE:      'audit-archive',
-  POST_SCHEDULER:     'post-scheduler',
-  ROOM_REMINDERS:     'room-reminders',   // Send push notifications for scheduled rooms
+  EMAIL:                'email',
+  NOTIFICATIONS:        'notifications',
+  REPORTS:              'reports',
+  ATTENDANCE_ALERTS:    'attendance-alerts',
+  CLEANUP:              'cleanup',
+  STORAGE_CLEANUP:      'storage-cleanup',
+  SOCIAL_CLEANUP:       'social-cleanup',
+  VIEW_AGGREGATION:     'view-aggregation',
+  AUDIT_ARCHIVE:        'audit-archive',
+  POST_SCHEDULER:       'post-scheduler',
+  ROOM_REMINDERS:       'room-reminders',         // Push notifications for scheduled voice rooms
+  LIVE_CLASS_AUTOEND:   'live-class-autoend',     // Sprint 3: durable auto-end for duration-limited classes
+  ECONOMY_RECONCILIATION: 'economy-reconciliation', // Task 12.2: daily wallet/ledger balance check
 };
 
 /**
@@ -89,6 +91,9 @@ function startWorkers() {
     createStorageWorker,
     createPostSchedulerWorker,
     createRoomReminderWorker,
+    createLiveClassAutoEndWorker,
+    createEconomyReconciliationWorker,
+    createVoiceStaleSessionWorker,
   } = require('../workers');
 
   workers.email          = createEmailWorker(connection);
@@ -98,6 +103,14 @@ function startWorkers() {
   workers.storageCleanup = createStorageWorker(connection);
   workers.postScheduler  = createPostSchedulerWorker(connection);
   workers.roomReminders  = createRoomReminderWorker(connection);
+  workers.liveClassAutoEnd = createLiveClassAutoEndWorker(connection);
+
+  // Economy reconciliation — read-only daily wallet/ledger balance check
+  workers.economyReconciliation = createEconomyReconciliationWorker(connection);
+
+  // Voice stale-session worker — marks orphaned voiceParticipant records inactive
+  // every 10 minutes, preventing stale isActive=true records from blocking joins.
+  workers.voiceStaleSession = createVoiceStaleSessionWorker(connection);
 
   logger.info('[queue] Core workers started from src/workers/');
 
@@ -424,6 +437,25 @@ async function scheduleCleanup() {
     repeat: { pattern: '0 4 * * 0' },  // cron: 04:00 every Sunday
     jobId:  'orphaned-gift-check',
   });
+
+  // Economy reconciliation — daily wallet/ledger balance check (Task 12.2)
+  // Read-only: computes expected wallet.coins from SUM(wallet_transactions.coins)
+  // and reports discrepancies. No automatic corrections applied.
+  // Runs at 02:00 UTC daily (after the social-cleanup and audit-archive windows).
+  const reconciliationQueue = createQueue(QUEUE_NAMES.ECONOMY_RECONCILIATION);
+  await reconciliationQueue.add('economy-reconciliation', {}, {
+    repeat: { pattern: '0 2 * * *' },  // cron: 02:00 UTC daily
+    jobId:  'economy-reconciliation',
+  });
+
+  // Voice stale-session sweep — marks orphaned voiceParticipant records inactive.
+  // Runs every 10 minutes. Protects against browser crash, force-close, server
+  // restart, and iOS background termination leaving isActive=true permanently.
+  const voiceStaleQueue = createQueue('voice-stale-session');
+  await voiceStaleQueue.add('voice-stale-sweep', {}, {
+    repeat: { every: 10 * 60 * 1000 }, // every 10 minutes
+    jobId:  'voice-stale-sweep',
+  });
 }
 
 /**
@@ -484,6 +516,85 @@ async function cancelRoomReminder(roomId) {
   }
 }
 
+// ─── Live Class Auto-End BullMQ helpers (Sprint 3) ──────────────────────────
+// Replaces the in-process setTimeout approach (autoEndTimers Map in controller)
+// with a durable BullMQ delayed job that survives server restarts.
+
+/**
+ * Schedule a BullMQ delayed job to auto-end a live class when its duration elapses.
+ * @param {string} liveClassId
+ * @param {Date|string} startedAt  – when the class started
+ * @param {number} durationMinutes – class duration in minutes
+ */
+async function scheduleLiveClassAutoEnd(liveClassId, startedAt, durationMinutes) {
+  try {
+    const queue   = createQueue(QUEUE_NAMES.LIVE_CLASS_AUTOEND);
+    const elapsed = Date.now() - new Date(startedAt).getTime();
+    const delay   = Math.max(0, durationMinutes * 60_000 - elapsed);
+
+    await queue.add(
+      'autoend',
+      { liveClassId },
+      {
+        delay,
+        jobId:    'autoend:' + liveClassId,   // one job per class — deduped
+        attempts: 2,
+        backoff:  { type: 'fixed', delay: 15_000 },
+      }
+    );
+    logger.info('[queue] Live class auto-end scheduled for ' + liveClassId + ' in ' + Math.round(delay / 1000) + 's');
+  } catch (err) {
+    // Non-fatal: class will still end via manual endLiveClass or admin terminate
+    logger.warn('[queue] Failed to schedule live class auto-end for ' + liveClassId + ': ' + err.message);
+  }
+}
+
+/**
+ * Cancel a previously scheduled auto-end job (called on manual end / delete).
+ * @param {string} liveClassId
+ */
+async function cancelLiveClassAutoEnd(liveClassId) {
+  try {
+    const queue = createQueue(QUEUE_NAMES.LIVE_CLASS_AUTOEND);
+    await queue.remove('autoend:' + liveClassId);
+    logger.debug('[queue] Live class auto-end cancelled for ' + liveClassId);
+  } catch (err) {
+    logger.warn('[queue] Failed to cancel live class auto-end for ' + liveClassId + ': ' + err.message);
+  }
+}
+
+/**
+ * On server startup, re-schedule auto-end jobs for any LIVE classes that have
+ * a duration set and whose auto-end hasn't fired yet.
+ * Called once from app.js after workers are started.
+ */
+async function rehydrateLiveClassAutoEndJobs() {
+  try {
+    const prisma = require('../utils/prisma');
+    // Raw SQL — works even before prisma generate is run for new columns
+    const rows = await prisma.$queryRawUnsafe(
+      'SELECT id, startedAt, duration FROM live_classes WHERE status = ? AND duration IS NOT NULL AND deletedAt IS NULL',
+      'LIVE'
+    );
+    if (!rows || rows.length === 0) return;
+
+    for (const row of rows) {
+      if (!row.startedAt || !row.duration) continue;
+      const durationMs = Number(row.duration) * 60_000;
+      const elapsedMs  = Date.now() - new Date(row.startedAt).getTime();
+      if (elapsedMs >= durationMs) {
+        // Already overdue — fire immediately via a 0-delay job
+        await scheduleLiveClassAutoEnd(row.id, row.startedAt, Number(row.duration));
+      } else {
+        await scheduleLiveClassAutoEnd(row.id, row.startedAt, Number(row.duration));
+      }
+    }
+    logger.info('[queue] Rehydrated ' + rows.length + ' live class auto-end job(s) on startup');
+  } catch (err) {
+    logger.warn('[queue] Failed to rehydrate live class auto-end jobs: ' + err.message);
+  }
+}
+
 module.exports = {
   QUEUE_NAMES,
   createQueue,
@@ -495,6 +606,9 @@ module.exports = {
   queueStorageCleanup,
   scheduleRoomReminder,
   cancelRoomReminder,
+  scheduleLiveClassAutoEnd,
+  cancelLiveClassAutoEnd,
+  rehydrateLiveClassAutoEndJobs,
   startWorkers,
   scheduleCleanup
 };

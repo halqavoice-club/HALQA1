@@ -1,8 +1,8 @@
+﻿import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, Modal,
-  KeyboardAvoidingView, Platform, ScrollView, ActivityIndicator,
-} from 'react-native';
+  Platform, ScrollView, ActivityIndicator} from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { showMessage } from 'react-native-flash-message';
 import * as SecureStore from 'expo-secure-store';
@@ -44,7 +44,13 @@ export default function LoginScreen() {
       await login(email.trim(), password);
       const token = getAccessToken();
       if (token) initSocket(token);
-      router.replace('/(tabs)/feed');
+      // Check mustChangePassword after login
+      const { mustChangePassword } = useAuthStore.getState();
+      if (mustChangePassword) {
+        router.replace('/(auth)/change-password' as any);
+      } else {
+        router.replace('/(tabs)/feed');
+      }
     } catch (err: any) {
       let msg = 'Login failed. Check your credentials.';
       if (err?.response?.data?.message) {
@@ -126,7 +132,7 @@ export default function LoginScreen() {
 
       <KeyboardAvoidingView
         style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           {/* Logo */}
@@ -244,3 +250,7 @@ const styles = StyleSheet.create({
   modalSave:    { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10, backgroundColor: '#4f46e5' },
   modalSaveText:{ color: '#fff', fontWeight: '700' },
 });
+
+
+
+

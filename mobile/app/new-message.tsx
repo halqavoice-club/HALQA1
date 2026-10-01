@@ -28,7 +28,7 @@ export default function NewMessageScreen() {
   const handleStart = async (userId: string) => {
     setStarting(userId);
     try {
-      const res = await api.get(`/dm/conversations/${userId}`);
+    const res = await api.get(`/dm/conversations/${userId}/with`);
       const conv = res.data.data;
       router.replace({ pathname: '/dm/[id]', params: { id: conv.id } } as any);
     } catch (err: any) {

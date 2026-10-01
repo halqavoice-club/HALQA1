@@ -669,6 +669,11 @@ describe('Regression: rejectHand, getHandQueue unaffected', () => {
   beforeEach(() => { jest.clearAllMocks(); stubFindLiveClass(makeLc()); });
 
   test('rejectHand still works (lowers hand, no stage change)', async () => {
+    // P8C FIX: rejectHand() verifies caller is HOST or MODERATOR via participant
+    // record (F-07 fix). The beforeEach resets all mocks, so findFirst returns
+    // undefined by default. We must provide a HOST caller mock so the
+    // authorization check passes and the function reaches the queue/hand updates.
+    prisma.liveClassParticipant.findFirst.mockResolvedValue({ role: 'HOST', id: 'caller' });
     prisma.liveClassHandQueue.updateMany.mockResolvedValue({});
     prisma.liveClassParticipant.updateMany.mockResolvedValue({});
     const req = makeReq({ params: { id: 'lc-1', userId: 'u1' } });

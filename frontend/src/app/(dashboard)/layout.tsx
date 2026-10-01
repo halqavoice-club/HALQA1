@@ -21,6 +21,8 @@ import { NotificationCenter } from '@/components/notification-center'
 import { useNotificationStore } from '@/store/notifications.store'
 import { useKeyboardShortcuts, commonShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useAnalytics } from '@/lib/analytics'
+import { useVoiceStore } from '@/store/voice.store'
+import { PKInvitationToast } from '@/components/pk/PKInvitationToast'
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return <ClientOnly><DashboardContent>{children}</DashboardContent></ClientOnly>
@@ -36,6 +38,17 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
   useGroupChatSocket()
   useRealtimeNotifications()
   const { trackPageView } = useAnalytics()
+
+  // FIX: When a voice room is active, suppress mobile nav bottom padding
+  // so the voice room's bottom bar (gift, mic, hand-raise) is not pushed
+  // off-screen by the 64px dashboard mobile navigation padding.
+  const activeVoiceRoom = useVoiceStore(s => s.activeRoom)
+  const isInVoiceRoom = !!activeVoiceRoom
+
+  // FIX: Same treatment for live class rooms — /live-class/[id] has its own
+  // full-height layout with a bottom controls bar that must not be clipped by
+  // the bottom nav padding or the mobile-content-bottom padding.
+  const isInLiveClass = /^\/live-class\/[^/]+/.test(pathname ?? '')
 
   const notifications = useNotificationStore((state) => state.notifications)
   const markAsRead = useNotificationStore((state) => state.markAsRead)
@@ -98,17 +111,22 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
 
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) && (
-          <Header>
-            <NotificationCenter
-              notifications={notifications}
-              onMarkAsRead={markAsRead}
-              onMarkAllAsRead={markAllAsRead}
-              onDelete={deleteNotification}
-              onClearAll={clearAll}
-            />
-          </Header>
+          // Hide the desktop header on mobile when inside a live class room.
+          // The live class room has its own full-height layout with a built-in header.
+          // On desktop (md+) the header is always shown.
+          <div className={isInLiveClass ? 'hidden md:block' : undefined}>
+            <Header>
+              <NotificationCenter
+                notifications={notifications}
+                onMarkAsRead={markAsRead}
+                onMarkAllAsRead={markAllAsRead}
+                onDelete={deleteNotification}
+                onClearAll={clearAll}
+              />
+            </Header>
+          </div>
         )}
-        <main className={`flex-1 overflow-y-auto ${!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) ? 'p-4 md:p-6 pb-20 md:pb-6' : ''}`}>
+        <main className={`flex-1 overflow-y-auto ${!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) ? isInLiveClass ? 'p-0 overflow-hidden' : `p-4 md:p-6 ${(isInVoiceRoom) ? 'pb-0' : 'mobile-content-bottom'} md:pb-6 mobile-content-top md:pt-4` : ''}`}>
           <ErrorBoundary>
             {children}
           </ErrorBoundary>
@@ -119,7 +137,9 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
       <SessionTimeout />
       <NotificationPermissionBanner />
       <OfflineBanner />
-      {!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) && <FloatingActionButton />}
+      {!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) && !isInLiveClass && <FloatingActionButton />}
+      {/* Global PK challenge toast — shows accept/decline popup for incoming PK invitations */}
+      <PKInvitationToast />
     </div>
   )
 }

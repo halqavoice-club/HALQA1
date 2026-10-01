@@ -1,13 +1,13 @@
-/**
+﻿/**
  * HALQA Mobile — QR Check-in
  * Students: show own QR code (from API or generated)
  * Teachers/Admins: manual entry OR camera scan → mark attendance
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
-  ActivityIndicator, Image, ScrollView, KeyboardAvoidingView, Platform,
-} from 'react-native';
+  ActivityIndicator, Image, ScrollView, Platform} from 'react-native';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -15,6 +15,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { showMessage } from 'react-native-flash-message';
 import api from '@/lib/api';
 import { useAuthStore } from '@/store/auth.store';
+import { useSchoolStore } from '@/store/school.store';
 import { avatarUrl } from '@/lib/avatar';
 
 // Build QR code image URL using free qrserver.com API
@@ -25,6 +26,7 @@ function qrUrl(value: string, size = 200) {
 
 // ─── Student View — show own QR ───────────────────────────────────────────────
 function StudentQRView() {
+  const router = useRouter();
   const { data: profile, isLoading } = useQuery({
     queryKey: ['my-profile-qr'],
     queryFn: () => api.get('/auth/me').then(r => r.data.data),
@@ -68,6 +70,17 @@ function StudentQRView() {
         </View>
       )}
 
+      {/* View full ID Card */}
+      <TouchableOpacity
+        style={sq.idCardBtn}
+        onPress={() => router.push('/student-id-card' as any)}
+        activeOpacity={0.8}
+      >
+        <Ionicons name="card-outline" size={18} color="#4f46e5" />
+        <Text style={sq.idCardBtnText}>View Full ID Card</Text>
+        <Ionicons name="chevron-forward" size={16} color="#4f46e5" />
+      </TouchableOpacity>
+
       {/* How to use */}
       <View style={sq.howCard}>
         <Text style={sq.howTitle}>How to use</Text>
@@ -94,6 +107,9 @@ const sq = StyleSheet.create({
   noQrCard:       { alignItems: 'center', backgroundColor: '#fff', borderRadius: 20, padding: 32, gap: 8, width: '100%', borderWidth: 1, borderColor: '#f1f5f9' },
   noQrTitle:      { fontSize: 16, fontWeight: '700', color: '#374151', marginTop: 8 },
   noQrSub:        { fontSize: 13, color: '#9ca3af' },
+  // View ID Card button — navigates to the full student-id-card screen
+  idCardBtn:      { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#eef2ff', borderRadius: 14, paddingHorizontal: 18, paddingVertical: 13, width: '100%', borderWidth: 1, borderColor: '#c7d2fe' },
+  idCardBtnText:  { flex: 1, fontSize: 14, fontWeight: '700', color: '#4f46e5' },
   howCard:        { backgroundColor: '#ede9fe', borderRadius: 16, padding: 16, width: '100%', gap: 4 },
   howTitle:       { fontSize: 13, fontWeight: '700', color: '#4338ca', marginBottom: 4 },
   howStep:        { fontSize: 12, color: '#5b21b6' },
@@ -238,7 +254,11 @@ const tv = StyleSheet.create({
 export default function QrCheckinScreen() {
   const router = useRouter();
   const { user } = useAuthStore();
-  const isStudent = user?.role === 'STUDENT';
+  // Use school membership role so new-arch MEMBER users with STUDENT membership
+  // see their own QR code, while TEACHER/SCHOOL_ADMIN see the check-in tool.
+  const activeMembership = useSchoolStore(s => s.getActiveMembership());
+  const effectiveRole = activeMembership?.role ?? user?.role;
+  const isStudent = effectiveRole === 'STUDENT';
 
   return (
     <>
@@ -260,3 +280,8 @@ export default function QrCheckinScreen() {
     </>
   );
 }
+
+
+
+
+

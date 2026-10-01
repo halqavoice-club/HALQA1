@@ -36,9 +36,7 @@ export default function ImportPage() {
     mutationFn: (file: File) => {
       const form = new FormData()
       form.append('file', file)
-      return api.post(`/import/${importType}`, form, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      })
+      return api.post(`/import/${importType}`, form)
     },
     onSuccess: (res) => {
       setResult(res.data.data)

@@ -1,14 +1,14 @@
-/**
+﻿/**
  * HALQA Mobile — Post Detail Screen v2
  * Full post + infinite-scroll comments with correct API shape.
  * Comments use the same GET /posts/:id/comments endpoint as web.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import { useState, useRef, useCallback } from 'react';
 import {
   View, Text, Image, StyleSheet, FlatList, TouchableOpacity,
-  TextInput, KeyboardAvoidingView, Platform, ActivityIndicator,
-  RefreshControl, Alert,
-} from 'react-native';
+  TextInput, Platform, ActivityIndicator,
+  RefreshControl, Alert} from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { useQuery, useMutation, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
@@ -359,3 +359,8 @@ const st = StyleSheet.create({
   input:         { flex: 1, backgroundColor: '#f3f4f6', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 8, maxHeight: 100, fontSize: 14, color: '#374151' },
   sendBtn:       { width: 36, height: 36, borderRadius: 18, backgroundColor: '#4f46e5', alignItems: 'center', justifyContent: 'center' },
 });
+
+
+
+
+

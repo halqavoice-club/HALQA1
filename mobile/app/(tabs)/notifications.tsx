@@ -6,7 +6,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import {
   View, Text, FlatList, StyleSheet, TouchableOpacity,
-  ActivityIndicator, RefreshControl, ScrollView,
+  ActivityIndicator, RefreshControl, ScrollView
 } from 'react-native';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
@@ -15,6 +15,7 @@ import { useRouter } from 'expo-router';
 import { formatDistanceToNow, isToday, isYesterday, format } from 'date-fns';
 import api from '@/lib/api';
 import { getSocket } from '@/lib/socket';
+import { useNotificationsStore } from '@/store/notifications.store';
 
 type Notification = {
   id: string; type: string; title: string; body: string;
@@ -97,6 +98,9 @@ export default function NotificationsScreen() {
   const [typeFilter, setTypeFilter] = useState('');
   const [unreadOnly, setUnreadOnly] = useState(false);
 
+  // Import notifications store for badge count sync
+  const { setUnreadCount, markAllRead: clearBadge } = useNotificationsStore();
+
   const { data: all = [], isLoading, refetch, isRefetching } = useQuery<Notification[]>({
     queryKey: ['notifications'],
     queryFn: () => api.get('/notifications', { params: { limit: 100 } }).then(r => {
@@ -118,7 +122,10 @@ export default function NotificationsScreen() {
 
   const markAll = useMutation({
     mutationFn: () => api.patch('/notifications/read-all').catch(() => api.put('/notifications/read-all')),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['notifications'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notifications'] });
+      clearBadge(); // clear store badge count
+    },
   });
 
   const markOne = useMutation({
@@ -127,6 +134,11 @@ export default function NotificationsScreen() {
   });
 
   const unreadCount = useMemo(() => all.filter(n => !n.isRead).length, [all]);
+
+  // Sync unread count to store (for tab badge)
+  useEffect(() => {
+    setUnreadCount(unreadCount);
+  }, [unreadCount]); // eslint-disable-line
 
   // Types that actually appear in data
   const presentTypes = useMemo(() => {
@@ -298,3 +310,4 @@ const n = StyleSheet.create({
   emptyTitle:    { fontSize: 15, color: '#94a3b8', marginTop: 12 },
   clearFilters:  { fontSize: 13, color: '#6366f1', fontWeight: '600', marginTop: 4 },
 });
+

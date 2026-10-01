@@ -3,9 +3,21 @@
  * 
  * Defines the GraphQL schema for the API.
  * Includes types, queries, mutations, and subscriptions.
+ *
+ * Phase 7B: Replaced require('apollo-server-express') with graphql's built-in parse.
+ * graphql is already a direct dependency — no new package needed.
+ * The schema string is passed directly; makeExecutableSchema in server.js accepts
+ * both parsed DocumentNode and plain string typeDefs.
  */
 
-const { gql } = require('apollo-server-express');
+// graphql is a direct HALQA dependency (graphql@16.14.2)
+const { parse } = require('graphql');
+
+// gql-compatible helper using graphql's own parse
+function gql(strings, ...values) {
+  const str = strings.reduce((acc, s, i) => acc + s + (values[i] || ''), '');
+  return parse(str);
+}
 
 const typeDefs = gql`
   # Scalars

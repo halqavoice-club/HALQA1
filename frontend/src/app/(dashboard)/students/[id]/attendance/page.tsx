@@ -122,7 +122,7 @@ export default function StudentAttendanceReportPage() {
   // ── Queries ──
   const { data: summaryData, isLoading: loadingSummary } = useQuery({
     queryKey: ['student-report-summary', id, dateRange],
-    queryFn: () => api.get(`/reports/student/${id}`, {
+    queryFn: () => api.get(`/student-reports/student/${id}`, {
       params: {
         startDate: dateRange.start || undefined,
         endDate: dateRange.end || undefined
@@ -132,7 +132,7 @@ export default function StudentAttendanceReportPage() {
 
   const { data: historyData, isLoading: loadingHistory } = useQuery({
     queryKey: ['student-report-history', id, historyPage, statusFilter, dateRange],
-    queryFn: () => api.get(`/reports/student/${id}/history`, {
+    queryFn: () => api.get(`/student-reports/student/${id}/history`, {
       params: {
         page: historyPage, limit: 20,
         status: statusFilter || undefined,
@@ -144,7 +144,7 @@ export default function StudentAttendanceReportPage() {
 
   const { data: calendarData, isLoading: loadingCalendar } = useQuery({
     queryKey: ['student-report-calendar', id, monthStr],
-    queryFn: () => api.get(`/reports/student/${id}/calendar`, {
+    queryFn: () => api.get(`/student-reports/student/${id}/calendar`, {
       params: { month: monthStr }
     }).then(r => r.data.data)
   })
@@ -152,7 +152,7 @@ export default function StudentAttendanceReportPage() {
   // Trend data (weekly + monthly using raw MySQL queries)
   const { data: trendData } = useQuery({
     queryKey: ['student-report-trend', id],
-    queryFn: () => api.get(`/reports/student/${id}/trend`).then(r => r.data.data)
+    queryFn: () => api.get(`/student-reports/student/${id}/trend`).then(r => r.data.data)
   })
 
   // ── Export ──
@@ -164,7 +164,7 @@ export default function StudentAttendanceReportPage() {
       if (dateRange.end) params.endDate = dateRange.end
       const ext = type === 'excel' ? 'xlsx' : type
       const sid = summaryData?.student?.studentId || id
-      await downloadFile(`/reports/student/${id}/export/${type}`, params, `attendance-${sid}-${Date.now()}.${ext}`)
+      await downloadFile(`/student-reports/student/${id}/export/${type}`, params, `attendance-${sid}-${Date.now()}.${ext}`)
       toast({ title: `${type.toUpperCase()} exported successfully` })
     } catch {
       toast({ title: 'Export failed', variant: 'destructive' })

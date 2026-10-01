@@ -1,14 +1,14 @@
-/**
+﻿/**
  * HALQA Mobile — Library Screen
  * Students: see their issued books with due dates and overdue warnings.
  * Teachers/Admins: browse book catalog, search, issue to students, mark returns.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   TextInput, ActivityIndicator, RefreshControl, Modal,
-  Alert, ScrollView, KeyboardAvoidingView, Platform,
-} from 'react-native';
+  Alert, ScrollView, Platform} from 'react-native';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -251,7 +251,9 @@ function AdminView() {
 export default function LibraryScreen() {
   const router = useRouter();
   const { user } = useAuthStore();
-  const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role ?? '');
+  // SA-EDU-03: SUPER_ADMIN is a platform role — not a school-scoped teacher/admin.
+  // Library admin access belongs to SCHOOL_ADMIN and TEACHER (school membership roles).
+  const isAdmin = ['SCHOOL_ADMIN', 'TEACHER'].includes(user?.role ?? '');
 
   return (
     <>
@@ -316,3 +318,8 @@ const lb = StyleSheet.create({
   confirmBtnDisabled: { backgroundColor: '#c7d2fe' },
   confirmTxt:       { color: '#fff', fontWeight: '800', fontSize: 14 },
 });
+
+
+
+
+

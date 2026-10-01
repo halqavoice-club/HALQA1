@@ -207,8 +207,27 @@ async function createPost(req, res, next) {
       originalPostId, quotedBody, refEntityType, refEntityId, communityId,
       isExclusive, tierRequired, location } = req.body;
 
-    if (!body?.trim() && !media.length && type !== 'REPOST' && type !== 'POLL') {
+    if (!body?.trim() && !media.length && type !== 'REPOST' && type !== 'POLL'
+        && type !== 'LIVE_ROOM_SHARE' && type !== 'LIVE_CLASS_SHARE') {
       return errorResponse(res, 'Post body or media required', 400);
+    }
+
+    // BUG-006 FIX: Validate the referenced VoiceRoom before creating a LIVE_ROOM_SHARE post.
+    // Prevents creating posts for deleted, ended, or non-existent rooms.
+    // Only applies to LIVE_ROOM_SHARE — does not affect TEXT or any other post type.
+    if (type === 'LIVE_ROOM_SHARE') {
+      if (!refEntityId) {
+        return errorResponse(res, 'refEntityId is required for LIVE_ROOM_SHARE posts', 400);
+      }
+      const voiceRoom = await prisma.voiceRoom.findUnique({
+        where: { id: refEntityId },
+        select: { id: true, status: true, deletedAt: true, privacy: true },
+      });
+      if (!voiceRoom || voiceRoom.deletedAt) {
+        return errorResponse(res, 'Voice Club room not found', 404);
+      }
+      // ENDED rooms can still be shared (recipient sees it ended on the card).
+      // Banned/blocked rooms have no explicit status — deletedAt covers that.
     }
 
     const post = await prisma.post.create({

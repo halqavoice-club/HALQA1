@@ -184,6 +184,7 @@ function FeedContent() {
     setShowNew(false)
     clearIncoming()
     queryClient.invalidateQueries({ queryKey: ['feed'] })
+    queryClient.invalidateQueries({ queryKey: ['feed-following'] })
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }, [clearIncoming, queryClient])
 
@@ -265,6 +266,17 @@ function FeedContent() {
           {/* Composer */}
           <PostComposer />
 
+          {/* "New posts" banner — same as For You tab */}
+          {showNew && incomingPosts.length > 0 && (
+            <button
+              onClick={handleShowNew}
+              className="w-full flex items-center justify-center gap-2 py-2.5 bg-indigo-600 text-white text-sm font-semibold rounded-xl hover:bg-indigo-700 transition-colors animate-in slide-in-from-top-2 duration-200"
+            >
+              <ArrowUp className="w-4 h-4" />
+              {incomingPosts.length} new post{incomingPosts.length > 1 ? 's' : ''} — tap to refresh
+            </button>
+          )}
+
           {/* Skeletons */}
           {isLoadingFollowing && (
             <div className="space-y-4">
@@ -285,7 +297,7 @@ function FeedContent() {
           )}
 
           {/* Empty state */}
-          {!isLoadingFollowing && !isErrorFollowing && followingPosts.length === 0 && (
+          {!isLoadingFollowing && !isErrorFollowing && followingPosts.length === 0 && incomingPosts.length === 0 && (
             <div className="text-center py-16 text-gray-400">
               <Users className="w-12 h-12 mx-auto mb-3 opacity-30" />
               <p className="font-medium text-gray-500">No posts from people you follow yet</p>

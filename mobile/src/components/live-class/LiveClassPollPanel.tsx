@@ -6,7 +6,7 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, TextInput,
-  ScrollView, StyleSheet, ActivityIndicator,
+  ScrollView, StyleSheet, ActivityIndicator
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { showMessage } from 'react-native-flash-message';
@@ -329,3 +329,4 @@ const pp = StyleSheet.create({
   emptyTitle:    { color: '#9ca3af', fontSize: 16, fontWeight: '700' },
   emptySub:      { color: '#6b7280', fontSize: 13, textAlign: 'center' },
 });
+

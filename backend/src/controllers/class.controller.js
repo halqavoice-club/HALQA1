@@ -85,7 +85,7 @@ async function createClass(req, res, next) {
     // Explicit field extraction prevents mass assignment
     const {
       name, description, gradeLevel, room, capacity,
-      schedule, termId, isActive
+      schedule, termId, isActive, isDefault
     } = req.body;
 
     const cls = await prisma.class.create({
@@ -99,6 +99,7 @@ async function createClass(req, res, next) {
         schedule:     schedule     || null,
         termId:       termId       || null,
         isActive:     isActive !== undefined ? Boolean(isActive) : true,
+        isDefault:    false, // manually-created classes are never the default; only auto-created ones are
       }
     });
     return successResponse(res, cls, 'Class created', 201);

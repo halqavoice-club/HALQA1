@@ -6,11 +6,11 @@
  * Uses PanResponder for touch input — no additional packages needed.
  */
 import React, {
-  useState, useCallback, useRef, useImperativeHandle, forwardRef,
+  useState, useCallback, useRef, useImperativeHandle, forwardRef
 } from 'react';
 import {
   View, PanResponder, StyleSheet, TouchableOpacity,
-  Text, ScrollView,
+  Text, ScrollView
 } from 'react-native';
 import Svg, { Path, G } from 'react-native-svg';
 import { Ionicons } from '@expo/vector-icons';
@@ -292,3 +292,4 @@ const wb = StyleSheet.create({
   actionRow:       { flexDirection: 'row', gap: 8 },
   actionBtn:       { width: 36, height: 36, borderRadius: 8, backgroundColor: '#111827', alignItems: 'center', justifyContent: 'center' },
 });
+

@@ -40,7 +40,7 @@ import { getStoredJSON, setStoredJSON, deleteStoredItem } from '../lib/storage'
 import {
   queueOfflineAction,
   syncPendingActions,
-  OfflineAction,
+  OfflineAction
 } from '../lib/offline'
 
 const PENDING_KEY = 'halqa_pending_actions'
@@ -163,3 +163,4 @@ describe('syncPendingActions()', () => {
     expect(result).toBe(false)
   })
 })
+

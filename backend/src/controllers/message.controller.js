@@ -164,6 +164,17 @@ async function getMessage(req, res, next) {
 
     if (!message) return errorResponse(res, 'Message not found', 404);
 
+    // MSG-P2-001 FIX: Verify the requesting user is authorized to access this message.
+    // Only the sender and direct recipients may read a school message.
+    // Any other authenticated user who knows the message UUID is denied.
+    // Using 404 (not 403) to avoid confirming the existence of a message the caller
+    // is not party to — consistent with the existing "Message not found" response above.
+    const isSender    = message.senderId === req.user.id;
+    const isRecipient = message.recipients.some(r => r.recipientId === req.user.id);
+    if (!isSender && !isRecipient) {
+      return errorResponse(res, 'Message not found', 404);
+    }
+
     // Mark as read if recipient
     const recipientRecord = message.recipients.find(r => r.recipientId === req.user.id);
     if (recipientRecord && recipientRecord.status !== 'READ') {
