@@ -50,6 +50,8 @@ const fcMessage = (senderIds: string[]) => fc.record({
   mediaUrl:       fc.constant(null),
   mimeType:       fc.constant(null),
   fileSize:       fc.constant(null),
+  fileName:       fc.constant(null),
+  duration:       fc.constant(null),
   replyToId:      fc.constant(null),
   replyTo:        fc.constant(null),
   reactions:      fc.constant([]),
@@ -127,6 +129,7 @@ describe("P2 — resolveReadReceipt: 'read' iff every member (excl sender) is in
             id: 'msg1', conversationId: 'c1', senderId,
             sender: { id: senderId, firstName: 'U', lastName: 'T', avatarUrl: null },
             type: 'TEXT', body: 'hi', mediaUrl: null, mimeType: null, fileSize: null,
+            fileName: null, duration: null,
             replyToId: null, replyTo: null, reactions: [], deletedAt: null,
             readBy: [...others], createdAt: new Date().toISOString(),
           }
@@ -150,6 +153,7 @@ describe("P2 — resolveReadReceipt: 'read' iff every member (excl sender) is in
             id: 'msg1', conversationId: 'c1', senderId,
             sender: { id: senderId, firstName: 'U', lastName: 'T', avatarUrl: null },
             type: 'TEXT', body: 'hi', mediaUrl: null, mimeType: null, fileSize: null,
+            fileName: null, duration: null,
             replyToId: null, replyTo: null, reactions: [], deletedAt: null,
             readBy: partial, createdAt: new Date().toISOString(),
           }
@@ -172,6 +176,7 @@ describe("P2 — resolveReadReceipt: 'read' iff every member (excl sender) is in
             id: 'msg1', conversationId: 'c1', senderId: memberIds[0],
             sender: { id: memberIds[0], firstName: 'U', lastName: 'T', avatarUrl: null },
             type: 'TEXT', body: 'hi', mediaUrl: null, mimeType: null, fileSize: null,
+            fileName: null, duration: null,
             replyToId: null, replyTo: null, reactions: [], deletedAt: null,
             readBy: [], createdAt: new Date().toISOString(),
           }
