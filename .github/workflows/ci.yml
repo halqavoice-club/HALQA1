@@ -82,18 +82,25 @@ jobs:
           DATABASE_URL: 'mysql://root:password@localhost:3306/halqa_test'
 
       - name: Check for syntax errors
-        run: node -e "
-          const files = require('fs').readdirSync('./src', { recursive: true })
-            .filter(f => f.endsWith('.js'))
-            .map(f => './src/' + f);
-          let ok = 0, fail = 0;
-          files.forEach(f => {
-            try { require(f); ok++; }
-            catch(e) { if (!e.message.includes('Cannot find module')) { console.error('FAIL:', f, e.message); fail++; } else ok++; }
-          });
-          console.log('Syntax check:', ok, 'OK,', fail, 'FAIL');
-          if (fail > 0) process.exit(1);
-        "
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            function walk(dir) {
+              return fs.readdirSync(dir).flatMap(f => {
+                const full = path.join(dir, f);
+                return fs.statSync(full).isDirectory() ? walk(full) : [full];
+              });
+            }
+            const files = walk('./src').filter(f => f.endsWith('.js'));
+            let ok = 0, fail = 0;
+            files.forEach(f => {
+              try { require(f); ok++; }
+              catch(e) { if (!e.message.includes('Cannot find module')) { console.error('FAIL:', f, e.message); fail++; } else ok++; }
+            });
+            console.log('Syntax check:', ok, 'OK,', fail, 'FAIL');
+            if (fail > 0) process.exit(1);
+          "
         working-directory: backend
         env:
           NODE_ENV: test
