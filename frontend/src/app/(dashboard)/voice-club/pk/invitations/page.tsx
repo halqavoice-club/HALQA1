@@ -81,8 +81,9 @@ export default function PKInvitationsPage() {
     const socket = getSocket()
     if (!socket) return
     const onNew      = () => { refetch() }
-    const onCancelled = (d: { invitationId: string }) => {
-      setInvitations(prev => prev.filter(i => i.id !== d.invitationId))
+    const onCancelled = (_d: { invitationId: string }) => {
+      // Refetch to get updated list — server is source of truth
+      refetch()
     }
     socket.on('pk:invitation', onNew)
     socket.on('pk:cancelled',  onCancelled)

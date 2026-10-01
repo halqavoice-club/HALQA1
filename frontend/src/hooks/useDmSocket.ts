@@ -53,7 +53,7 @@ export function useDmSocket() {
         incrementUnread(convId)
         toast({
           title:       `💬 ${message.sender.firstName} ${message.sender.lastName}`,
-          description: message.body.slice(0, 60) + (message.body.length > 60 ? '…' : ''),
+          description: (message.body ?? '').slice(0, 60) + ((message.body?.length ?? 0) > 60 ? '…' : ''),
         })
       }
     }

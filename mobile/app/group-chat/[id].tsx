@@ -901,6 +901,7 @@ export default function GroupChatThreadScreen() {
           onClearReply={() => setReplyTo(null)}
           onCancelEdit={() => setEditingMsg(null)}
         />
+      </KeyboardAvoidingView>
 
       {/* ── Long-press action sheet ── */}
       <Modal visible={!!selected} transparent animationType="fade"

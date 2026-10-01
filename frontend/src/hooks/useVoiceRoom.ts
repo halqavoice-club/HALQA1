@@ -126,6 +126,7 @@ export function useVoiceRoom(roomId: string | null) {
         handRaised: false, handRaisedAt: null,
         joinedAt: new Date().toISOString(), isActive: true,
         isPinned: false,
+        seatNumber: null,
         user: { id: data.userId, firstName: data.firstName, lastName: data.lastName, avatarUrl: data.avatarUrl }
       })
     }
