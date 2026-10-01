@@ -1178,6 +1178,15 @@ export default function VoiceRoomScreen() {
 
     socket.emit('voice:join_room', id);
 
+    // PH24C-005 FIX: Re-join the socket room after a reconnect.
+    // When the socket disconnects and reconnects (network blip, token refresh,
+    // app foreground), the socket no longer belongs to voice:${id}.
+    // Without this handler, Phase 24B guards (socket.rooms.has(...)) silently
+    // drop all voice events (reactions, speaking, role changes) after reconnect.
+    // Matches web useVoiceRoom.ts: socket.on('connect', onReconnect).
+    const onReconnect = () => { socket.emit('voice:join_room', id); };
+    socket.on('connect', onReconnect);
+
     // Real-time gift animation
     const onGift = (payload: any) => {
       const giftData = gifts.find(g => g.id === payload.gift?.id) || payload.gift;
@@ -1642,6 +1651,8 @@ export default function VoiceRoomScreen() {
 
     return () => {
       socket.emit('voice:leave_room', id);
+      // PH24C-005: remove the reconnect handler so it doesn't fire after unmount
+      socket.off('connect', onReconnect);
       socket.off('voice:gift_sent',    onGift);
       socket.off('voice:premium_gift', onGift);
       socket.off('voice:message',      onMsg);
