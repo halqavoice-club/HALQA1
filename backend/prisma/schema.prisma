@@ -1285,6 +1285,13 @@ model VoiceParticipant {
   joinedAt     DateTime             @default(now())
   leftAt       DateTime?
   isActive     Boolean              @default(true)
+  // PH24C-003: session-scoped kick protection — same pattern as LiveClassParticipant.wasKicked.
+  // Set to true by kickParticipant(); checked in joinRoom() same-room reconnect path.
+  // A kicked user's next joinRoom() call to the same room is rejected with 403.
+  // Reset: the host can call unbanParticipant (or a future dedicated unkick endpoint)
+  //        to allow re-entry. wasKicked is never reset automatically within the session.
+  // Default: false — fully backward-compatible with all existing participant records.
+  wasKicked    Boolean              @default(false)
   createdAt    DateTime             @default(now())
   updatedAt    DateTime             @updatedAt
 
