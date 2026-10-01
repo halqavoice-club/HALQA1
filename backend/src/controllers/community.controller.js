@@ -266,14 +266,18 @@ async function joinCommunity(req, res, next) {
       return successResponse(res, { role: 'MEMBER' }, 'Joined community');
     }
 
-    // Check if user is banned
-    const banned = await isUserBanned(community.id, req.user.id);
-    if (banned) return errorResponse(res, 'You are not allowed to join this community', 403);
-
+    // COMM-P3-001 FIX: check existing membership BEFORE ban check.
+    // An active member who happens to also have a ban record (edge case: ban applied
+    // without cleanup) should receive the idempotent "Already a member" response,
+    // not a confusing 403. Ban enforcement is only relevant for non-members trying to join.
     const existing = await prisma.communityMember.findUnique({
       where: { communityId_userId: { communityId: community.id, userId: req.user.id } }
     });
     if (existing) return successResponse(res, { role: existing.role }, 'Already a member');
+
+    // Check if user is banned (applies to non-members only at this point)
+    const banned = await isUserBanned(community.id, req.user.id);
+    if (banned) return errorResponse(res, 'You are not allowed to join this community', 403);
 
     // PRIVATE: create a join request instead of immediately joining
     if (community.privacy === 'PRIVATE') {
@@ -387,6 +391,9 @@ async function leaveCommunity(req, res, next) {
 }
 
 // ─── GET MEMBERS ──────────────────────────────────────────────────────────────
+// COMM-P2-002 FIX: Enforce privacy boundary on member list.
+// Non-members may not enumerate PRIVATE or INVITE_ONLY community members.
+// PUBLIC community member lists remain open to any authenticated user.
 async function getMembers(req, res, next) {
   try {
     const { idOrSlug } = req.params;
@@ -394,6 +401,13 @@ async function getMembers(req, res, next) {
       where: { deletedAt: null, OR: [{ id: idOrSlug }, { slug: idOrSlug }] }
     });
     if (!community) return errorResponse(res, 'Community not found', 404);
+
+    // COMM-P2-002 FIX: restricted communities require membership to view member list.
+    // OWNER/ADMIN/MODERATOR are always members so they pass this check transparently.
+    const myRole = await getMemberRole(community.id, req.user.id);
+    if ((community.privacy === 'PRIVATE' || community.privacy === 'INVITE_ONLY') && !myRole) {
+      return errorResponse(res, 'Not authorized to view members of this community', 403);
+    }
 
     const { page = 1, limit = 50, role } = req.query;
     const { skip } = getPagination(page, limit);
@@ -460,6 +474,23 @@ async function updateMemberRole(req, res, next) {
 }
 
 // ─── KICK MEMBER ─────────────────────────────────────────────────────────────
+// COMM-P2-001 FIX: Enforce role hierarchy so lower roles cannot kick higher roles.
+//
+// Hierarchy (high → low): OWNER > ADMIN > MODERATOR > MEMBER
+//
+//   OWNER     → may kick ADMIN, MODERATOR, MEMBER
+//   ADMIN     → may kick MODERATOR, MEMBER   (NOT ADMIN, NOT OWNER)
+//   MODERATOR → may kick MEMBER only         (NOT MODERATOR, ADMIN, OWNER)
+//   MEMBER    → not allowed to kick (blocked by role check above)
+//
+// Previously the only guard was `target.role === 'OWNER'`, which allowed a
+// MODERATOR to kick an ADMIN — a privilege escalation path.
+const KICK_HIERARCHY = {
+  OWNER:     ['ADMIN', 'MODERATOR', 'MEMBER'],
+  ADMIN:     ['MODERATOR', 'MEMBER'],
+  MODERATOR: ['MEMBER'],
+};
+
 async function kickMember(req, res, next) {
   try {
     const { idOrSlug, userId } = req.params;
@@ -475,7 +506,12 @@ async function kickMember(req, res, next) {
       where: { communityId_userId: { communityId: community.id, userId } }
     });
     if (!target) return errorResponse(res, 'Member not found', 404);
-    if (target.role === 'OWNER') return errorResponse(res, 'Cannot remove owner', 400);
+
+    // COMM-P2-001 FIX: hierarchy check — caller must outrank the target
+    const allowedTargets = KICK_HIERARCHY[myRole] || [];
+    if (!allowedTargets.includes(target.role)) {
+      return errorResponse(res, 'Not authorized to remove this member', 403);
+    }
 
     await prisma.$transaction([
       prisma.communityMember.delete({
@@ -623,7 +659,9 @@ async function getCommunityFeed(req, res, next) {
     if (!community) return errorResponse(res, 'Community not found', 404);
 
     const myRole = community.members[0]?.role || null;
-    if (community.privacy === 'PRIVATE' && !myRole) {
+    // COMM-P2-003 FIX: INVITE_ONLY communities are access-restricted, same as PRIVATE.
+    // Previously only PRIVATE was guarded — INVITE_ONLY non-members could read all posts.
+    if ((community.privacy === 'PRIVATE' || community.privacy === 'INVITE_ONLY') && !myRole) {
       return errorResponse(res, 'Join community to view posts', 403);
     }
 
@@ -896,7 +934,9 @@ async function getCommunityMedia(req, res, next) {
     if (!community) return errorResponse(res, 'Community not found', 404);
 
     const myRole = community.members[0]?.role || null;
-    if (community.privacy === 'PRIVATE' && !myRole) {
+    // COMM-P2-003 FIX: INVITE_ONLY communities are access-restricted, same as PRIVATE.
+    // Previously only PRIVATE was guarded — INVITE_ONLY non-members could read all media.
+    if ((community.privacy === 'PRIVATE' || community.privacy === 'INVITE_ONLY') && !myRole) {
       return errorResponse(res, 'Join community to view media', 403);
     }
 
