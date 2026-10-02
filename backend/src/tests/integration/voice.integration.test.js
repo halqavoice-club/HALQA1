@@ -1562,31 +1562,43 @@ describe('Permanent room lifecycle — IDLE rooms remain joinable', function () 
 // Product invariant: a user can only be in ONE active voice room at a time.
 // Attempting to join a second room while active in a first must return 409
 // VOICE_ROOM_ALREADY_ACTIVE. Room A must remain completely untouched.
+//
+// IMPORTANT: Uses its own independent hostA/hostB users — NOT the shared global
+// `host` — so that room state from this suite cannot bleed into other suites.
 describe('Voice — one-active-room rule (INT-CI-001)', function () {
-  var roomA, roomB, activeUser, secondHost;
+  var roomA, roomB, activeUser, hostA, hostB;
 
   beforeAll(async function () {
-    activeUser  = await createUser({ role: 'MEMBER', schoolId: null });
-    secondHost  = await createUser({ role: 'MEMBER', schoolId: null });
+    activeUser = await createUser({ role: 'MEMBER', schoolId: null });
+    hostA      = await createUser({ role: 'MEMBER', schoolId: null });
+    hostB      = await createUser({ role: 'MEMBER', schoolId: null });
 
-    // Room A: created by host, activeUser joins and is active
-    var resA = await createRoom(tok(host));
+    // Room A: created by hostA, activeUser joins and is active
+    var resA = await createRoom(tok(hostA));
     expect(resA.status).toBe(201);
     roomA = resA.body.data;
     var joinA = await joinRoom(roomA.id, tok(activeUser));
     expect(joinA.status).toBe(200);
 
-    // Room B: created by secondHost — activeUser will attempt to join this
-    var resB = await createRoom(tok(secondHost));
+    // Room B: created by hostB — activeUser will attempt to join this
+    var resB = await createRoom(tok(hostB));
     expect(resB.status).toBe(201);
     roomB = resB.body.data;
   }, 60000);
 
   afterAll(async function () {
-    if (roomA) await prisma.voiceRoom.delete({ where: { id: roomA.id } }).catch(function () {});
-    if (roomB) await prisma.voiceRoom.delete({ where: { id: roomB.id } }).catch(function () {});
-    if (activeUser)  await prisma.user.delete({ where: { id: activeUser.id } }).catch(function () {});
-    if (secondHost)  await prisma.user.delete({ where: { id: secondHost.id } }).catch(function () {});
+    // End both rooms so hostA/hostB are not left as active participants
+    if (roomA) {
+      await request(app).patch('/api/v1/voice/' + roomA.id + '/end').set('Authorization', tok(hostA)).catch(function () {});
+      await prisma.voiceRoom.delete({ where: { id: roomA.id } }).catch(function () {});
+    }
+    if (roomB) {
+      await request(app).patch('/api/v1/voice/' + roomB.id + '/end').set('Authorization', tok(hostB)).catch(function () {});
+      await prisma.voiceRoom.delete({ where: { id: roomB.id } }).catch(function () {});
+    }
+    if (activeUser) await prisma.user.delete({ where: { id: activeUser.id } }).catch(function () {});
+    if (hostA)      await prisma.user.delete({ where: { id: hostA.id } }).catch(function () {});
+    if (hostB)      await prisma.user.delete({ where: { id: hostB.id } }).catch(function () {});
   }, 30000);
 
   test('active user in room A gets 409 when attempting to join room B', async function () {
