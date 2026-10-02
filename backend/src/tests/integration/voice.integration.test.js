@@ -17,6 +17,19 @@ jest.mock('livekit-server-sdk', () => ({
   VideoGrant: jest.fn(),
 }));
 
+// ─── Mock optional OpenTelemetry instrumentation packages ────────────────────
+// @opentelemetry/instrumentation-prisma is an optional dev dependency that
+// is not installed in CI. Without this mock, tracing.js throws MODULE_NOT_FOUND
+// inside its try/catch, but Jest's module resolver may propagate it as a fatal
+// error in the test sandbox before the catch block executes.
+jest.mock('@opentelemetry/instrumentation-prisma', () => ({
+  PrismaInstrumentation: jest.fn().mockImplementation(() => ({})),
+}), { virtual: true });
+
+jest.mock('@opentelemetry/instrumentation-redis', () => ({
+  RedisInstrumentation: jest.fn().mockImplementation(() => ({})),
+}), { virtual: true });
+
 /**
  * Voice Room Integration Tests — real MySQL DB
  *
@@ -68,6 +81,9 @@ let app;
 let host, memberA, memberB, suspended;
 
 beforeAll(async function () {
+  // PORT=0 lets the OS assign an ephemeral port — prevents startServer()
+  // from failing on a port conflict and calling process.exit(1).
+  process.env.PORT = '0';
   app = require('../../app');
   [host, memberA, memberB, suspended] = await Promise.all([
     createUser({ role: 'MEMBER', schoolId: null }),
