@@ -34,10 +34,9 @@ CREATE INDEX `creator_subscriptions_expiresAt_status_idx`
   ON `creator_subscriptions` (`expiresAt`, `status`);
 
 -- ─── sessions ────────────────────────────────────────────────────────────────
--- Used by: session cleanup (WHERE isActive=true AND lastSeenAt < cutoff)
--- Used by: session limit enforcement (WHERE userId=? AND isActive=true ORDER BY lastSeenAt)
-CREATE INDEX `sessions_lastSeenAt_isActive_idx`
-  ON `sessions` (`lastSeenAt`, `isActive`);
+-- Note: sessions table is defined in schema but not yet created via migration.
+-- Index will be added in a future migration once the sessions table migration exists.
+-- (removed to avoid error 1146 on MariaDB when table does not exist)
 
 -- ─── pk_invitations ──────────────────────────────────────────────────────────
 -- Used by: invitation expiry cleanup (WHERE expiresAt < NOW() AND status='PENDING')

@@ -30,8 +30,6 @@ CREATE INDEX `notifications_userId_type_isRead_idx`
   ON `notifications` (`userId`, `type`, `isRead`);
 
 -- ─── global_leaderboard ──────────────────────────────────────────────────────
-
--- Leaderboard by period, sorted by rank (common: top 100 for a specific period)
--- Query: WHERE period = ? ORDER BY rank ASC LIMIT 100
-CREATE INDEX `global_leaderboard_period_rank_idx`
-  ON `global_leaderboard` (`period`, `rank`);
+-- Note: global_leaderboard table is defined in schema but not yet created via migration.
+-- Index will be added in a future migration once the table migration exists.
+-- (removed to avoid error 1146 on MariaDB when table does not exist)
