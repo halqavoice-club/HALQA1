@@ -3398,7 +3398,7 @@ export default function VoiceRoomScreen() {
             contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 32, gap: 6 }}
             renderItem={({ item: p }) => {
               const isMe = p.id === user?.id;
-              const roleColor = p.role === 'HOST' ? '#f59e0b' : p.role === 'MODERATOR' ? '#10b981' : p.role === 'SPEAKER' ? '#6366f1' : '#6b7280';;
+              const roleColor = p.role === 'HOST' ? '#f59e0b' : p.role === 'MODERATOR' ? '#10b981' : p.role === 'SPEAKER' ? '#6366f1' : '#6b7280';
               return (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#1e1e3a', borderRadius: 12, padding: 10 }}>
                   <Image source={{ uri: avatarUrl(p.avatar, p.name) }} style={{ width: 36, height: 36, borderRadius: 18 }} />
