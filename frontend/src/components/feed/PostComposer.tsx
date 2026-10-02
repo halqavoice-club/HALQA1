@@ -85,8 +85,8 @@ export function PostComposer({
 
   // SA-COMPOSER-01: SUPER_ADMIN = Platform Administration ONLY.
   // Platform admins must not create social content.
-  // Early return MUST come after all hooks to comply with React rules-of-hooks.
-  if (user?.role === 'SUPER_ADMIN') return null
+  // Early return MUST come after ALL hooks to comply with React rules-of-hooks.
+  // (useCallback at ~line 95 and useMutation at ~line 208 must come before this)
 
   // URL regex — matches http(s):// URLs in text
   const URL_REGEX = /https?:\/\/[^\s<>"']+/gi
@@ -254,6 +254,9 @@ export function PostComposer({
   const canPost  = (body.trim().length > 0 || media.length > 0) && !createMutation.isPending && !uploading
   const avatarSrc = getAvatarUrl(user?.avatarUrl)
   const initials  = user ? `${user.firstName?.charAt(0) ?? ''}${user.lastName?.charAt(0) ?? ''}`.toUpperCase() || '?' : '?'
+
+  // SA-COMPOSER-01: SUPER_ADMIN cannot create social content — placed after all hooks
+  if (user?.role === 'SUPER_ADMIN') return null
 
   return (
     <div className={cn('bg-white rounded-2xl border border-gray-100 shadow-sm', compact ? 'p-3' : 'p-4')}>
