@@ -1,4 +1,4 @@
-∩╗┐/**
+╗┐/**
  * HALQA Mobile ΓÇö Create Live Class Screen
  * Teachers and School Admins only.
  * Supports room type (immediate/scheduled/permanent/limited),
