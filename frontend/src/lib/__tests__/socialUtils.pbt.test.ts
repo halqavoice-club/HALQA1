@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/rules-of-hooks */
 /**
  * Social Platform Utilities — Property-Based Tests
  *

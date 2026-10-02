@@ -62,10 +62,6 @@ export function PostComposer({
   const fileRef     = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // SA-COMPOSER-01: SUPER_ADMIN = Platform Administration ONLY.
-  // Platform admins must not create social content.
-  if (user?.role === 'SUPER_ADMIN') return null
-
   const [body,        setBody]        = useState('')
   const [visibility,  setVisibility]  = useState('PUBLIC')
   const [showVis,     setShowVis]     = useState(false)
@@ -86,6 +82,11 @@ export function PostComposer({
   const [linkFetching,     setLinkFetching]     = useState(false)
   const [linkDismissed,    setLinkDismissed]    = useState<string | null>(null)  // URL user has dismissed
   const linkDebounceRef = useRef<ReturnType<typeof setTimeout>>()
+
+  // SA-COMPOSER-01: SUPER_ADMIN = Platform Administration ONLY.
+  // Platform admins must not create social content.
+  // Early return MUST come after all hooks to comply with React rules-of-hooks.
+  if (user?.role === 'SUPER_ADMIN') return null
 
   // URL regex — matches http(s):// URLs in text
   const URL_REGEX = /https?:\/\/[^\s<>"']+/gi

@@ -1602,14 +1602,6 @@ export default function VoiceRoomScreen() {
         setActivePKMatchId(prev => prev === d.pkMatchId ? null : prev);
       }, 6500);
     });
-      if (d.roomId !== id) return;
-      // role_changed + mute_changed already updated local state.
-      showMessage({
-        message: d.message || '👑 The host has returned and you were moved to the audience.',
-        type: 'info',
-        duration: 3000,
-      });
-    });
 
     // ATOMIC STAGE STATE: authoritative snapshot after seat changes — reconcile any stale state
     socket.on('voice:stage_state', (d: {
