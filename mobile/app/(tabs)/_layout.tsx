@@ -1,5 +1,5 @@
 /**
- * HALQA Mobile — Bottom Tab Navigator
+ * HALQA Mobile ΓÇö Bottom Tab Navigator
  * Tabs: Feed | Voice | Live | Friend | My School | More
  * Fixed: uses useSafeAreaInsets for dynamic bottom padding
  * Fixed: disables system font scaling on tab labels
@@ -37,7 +37,7 @@ export default function TabLayout() {
   const { isAuthenticated } = useAuthStore();
   const { activeRoomId } = useVoiceStore();
   const { unreadCount: notifBadge } = useNotificationsStore();
-  // Friend request pending count — lightweight poll every 60s
+  // Friend request pending count ΓÇö lightweight poll every 60s
   const { data: friendRequestsData } = useQuery({
     queryKey: ['friend-requests-count'],
     queryFn: () => api.get('/social/requests/pending').then(r => {
@@ -90,7 +90,7 @@ export default function TabLayout() {
         },
       }}
     >
-      {/* ── Primary visible tabs: Feed | Voice | Live | Friend | My School | More ── */}
+      {/* ΓöÇΓöÇ Primary visible tabs: Feed | Voice | Live | Friend | My School | More ΓöÇΓöÇ */}
       <Tabs.Screen
         name="feed"
         options={{
@@ -160,7 +160,7 @@ export default function TabLayout() {
         }}
       />
 
-      {/* ── Hidden tabs — navigated to programmatically or from More screen ── */}
+      {/* ΓöÇΓöÇ Hidden tabs ΓÇö navigated to programmatically or from More screen ΓöÇΓöÇ */}
       <Tabs.Screen name="explore"       options={{ href: null }} />
       <Tabs.Screen name="chat"          options={{ href: null }} />
       <Tabs.Screen name="communities"   options={{ href: null }} />
@@ -187,22 +187,3 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: '#fff',
   },
 });
-
-function TabIcon({ name, focused, badge, liveIndicator }: { name: any; focused: boolean; badge?: number; liveIndicator?: boolean }) {
-  return (
-    <View style={{ alignItems: 'center' }}>
-      <View>
-        <Ionicons name={name} size={22} color={focused ? '#4f46e5' : '#9ca3af'} />
-        {badge && badge > 0 ? (
-          <View style={styles.badge}>
-            <Text allowFontScaling={false} style={styles.badgeText}>{badge > 9 ? '9+' : badge}</Text>
-          </View>
-        ) : null}
-        {/* Pulsing green dot when user is live in a voice room */}
-        {liveIndicator && (
-          <View style={styles.liveDot} />
-        )}
-      </View>
-    </View>
-  );
-}

@@ -118,8 +118,6 @@ export default function AdminPaymentsPage() {
     }
   })
 
-  if (!isAdmin) return <div className="flex items-center justify-center h-64"><p className="text-gray-500">Access restricted.</p></div>
-
   // ── Coin grant lookup helper ─────────────────────────────────────────────
   async function lookupUserForGrant() {
     if (!grantUserEmail.trim()) return
@@ -193,6 +191,9 @@ export default function AdminPaymentsPage() {
   const pages     = Math.ceil(txs.length / PAGE)
   const payouts   = payoutsData?.payouts ?? []
   const pendingCount = payouts.filter((p: any) => p.status === 'PENDING').length
+
+  // Access guard — placed after ALL hooks to comply with React rules-of-hooks
+  if (!isAdmin) return <div className="flex items-center justify-center h-64"><p className="text-gray-500">Access restricted.</p></div>
 
   return (
     <div className="max-w-6xl mx-auto py-8 px-4 space-y-10">
