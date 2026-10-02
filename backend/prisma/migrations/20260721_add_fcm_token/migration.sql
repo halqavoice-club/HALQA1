@@ -5,4 +5,4 @@
 -- registers the token (on login or permission grant).
 
 ALTER TABLE `users`
-  ADD COLUMN `fcmToken` VARCHAR(512) NULL AFTER `username`;
+  ADD COLUMN IF NOT EXISTS `fcmToken` VARCHAR(512) NULL AFTER `email`;
