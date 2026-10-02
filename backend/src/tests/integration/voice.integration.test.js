@@ -1557,3 +1557,70 @@ describe('Permanent room lifecycle — IDLE rooms remain joinable', function () 
     }
   });
 });
+
+// ─── ONE-ACTIVE-ROOM RULE ─────────────────────────────────────────────────────
+// Product invariant: a user can only be in ONE active voice room at a time.
+// Attempting to join a second room while active in a first must return 409
+// VOICE_ROOM_ALREADY_ACTIVE. Room A must remain completely untouched.
+describe('Voice — one-active-room rule (INT-CI-001)', function () {
+  var roomA, roomB, activeUser, secondHost;
+
+  beforeAll(async function () {
+    activeUser  = await createUser({ role: 'MEMBER', schoolId: null });
+    secondHost  = await createUser({ role: 'MEMBER', schoolId: null });
+
+    // Room A: created by host, activeUser joins and is active
+    var resA = await createRoom(tok(host));
+    expect(resA.status).toBe(201);
+    roomA = resA.body.data;
+    var joinA = await joinRoom(roomA.id, tok(activeUser));
+    expect(joinA.status).toBe(200);
+
+    // Room B: created by secondHost — activeUser will attempt to join this
+    var resB = await createRoom(tok(secondHost));
+    expect(resB.status).toBe(201);
+    roomB = resB.body.data;
+  }, 60000);
+
+  afterAll(async function () {
+    if (roomA) await prisma.voiceRoom.delete({ where: { id: roomA.id } }).catch(function () {});
+    if (roomB) await prisma.voiceRoom.delete({ where: { id: roomB.id } }).catch(function () {});
+    if (activeUser)  await prisma.user.delete({ where: { id: activeUser.id } }).catch(function () {});
+    if (secondHost)  await prisma.user.delete({ where: { id: secondHost.id } }).catch(function () {});
+  }, 30000);
+
+  test('active user in room A gets 409 when attempting to join room B', async function () {
+    var res = await joinRoom(roomB.id, tok(activeUser));
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/VOICE_ROOM_ALREADY_ACTIVE|already.*active|leave.*existing/i);
+  });
+
+  test('room A participant record is NOT deactivated after the rejected join', async function () {
+    var participant = await prisma.voiceParticipant.findUnique({
+      where: { roomId_userId: { roomId: roomA.id, userId: activeUser.id } }
+    });
+    // The participant in room A must still be active — the rejection must be a pure return,
+    // not a side-effect that clears room A state.
+    expect(participant).not.toBeNull();
+    expect(participant.isActive).toBe(true);
+  });
+
+  test('room A is still LIVE after the rejected join attempt', async function () {
+    var dbRoom = await prisma.voiceRoom.findUnique({
+      where: { id: roomA.id }, select: { status: true }
+    });
+    expect(dbRoom.status).toBe('LIVE');
+  });
+
+  test('after leaving room A, user can join room B successfully', async function () {
+    // Leave room A first
+    var leaveRes = await request(app)
+      .post('/api/v1/voice/' + roomA.id + '/leave')
+      .set('Authorization', tok(activeUser));
+    expect(leaveRes.status).toBe(200);
+
+    // Now room B join must succeed
+    var joinRes = await joinRoom(roomB.id, tok(activeUser));
+    expect(joinRes.status).toBe(200);
+  });
+});

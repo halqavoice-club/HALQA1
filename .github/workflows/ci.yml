@@ -226,6 +226,23 @@ jobs:
         run: npm ci
         working-directory: backend
 
+      - name: Wait for Redis to be ready
+        # Ensure Redis is accepting connections before migrations or tests start.
+        # The service health-check confirms the container is healthy, but a brief
+        # explicit ping loop guards against the edge case where the runner picks up
+        # the job before the health-check propagates.
+        run: |
+          for i in $(seq 1 10); do
+            if redis-cli -h localhost -p 6379 ping | grep -q PONG; then
+              echo "Redis is ready."
+              exit 0
+            fi
+            echo "Waiting for Redis... attempt $i/10"
+            sleep 2
+          done
+          echo "ERROR: Redis did not become ready in time."
+          exit 1
+
       - name: Run Prisma migrations against test DB
         run: npx prisma migrate deploy
         working-directory: backend

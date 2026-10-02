@@ -7,7 +7,7 @@
     "start": "node --max-old-space-size=512 --expose-gc src/app.js",
     "dev": "npx nodemon --config nodemon.json src/app.js",
     "test": "jest --runInBand --forceExit",
-    "test:unit": "jest --runInBand --forceExit --testPathIgnorePatterns='integration|real-db|phase-c|google-auth|bug-003|sprint18|voice-one-room-rule'",
+    "test:unit": "jest --runInBand --forceExit --testPathIgnorePatterns='integration|real-db|phase-c|google-auth|bug-003'",
     "test:integration": "jest --runInBand --forceExit --testPathIgnorePatterns=node_modules --testPathPattern=integration",
     "test:coverage": "jest --runInBand --forceExit --coverage --testPathIgnorePatterns='integration'",
     "check": "node src/prisma/check-setup.js",
