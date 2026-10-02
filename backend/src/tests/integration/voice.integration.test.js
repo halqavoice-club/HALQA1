@@ -1,4 +1,22 @@
 'use strict';
+
+// ─── Mock livekit-server-sdk ──────────────────────────────────────────────────
+// livekit-server-sdk v2.x is ESM-only. In CI the CJS require() returns an
+// empty object, making RoomServiceClient undefined and crashing app boot.
+// These integration tests do not need real LiveKit — the voice controller
+// already handles a null getLivekitRoomService() return gracefully (503).
+jest.mock('livekit-server-sdk', () => ({
+  AccessToken: jest.fn().mockImplementation(() => ({
+    addGrant: jest.fn(),
+    toJwt:    jest.fn().mockResolvedValue('mock-livekit-jwt'),
+  })),
+  RoomServiceClient: jest.fn().mockImplementation(() => ({
+    removeParticipant:  jest.fn().mockResolvedValue({}),
+    updateParticipant:  jest.fn().mockResolvedValue({}),
+  })),
+  VideoGrant: jest.fn(),
+}));
+
 /**
  * Voice Room Integration Tests — real MySQL DB
  *
