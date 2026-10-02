@@ -94,6 +94,16 @@ beforeAll(async function () {
 }, 60000);
 
 afterAll(async function () {
+  // RC-04: Stop the scheduler started by startServer() so cron jobs do not
+  // fire dynamic require() calls after Jest tears down the module sandbox.
+  // jobScheduler.shutdown() calls cancelJob() on every registered task,
+  // which calls job.task.stop() on cron tasks and clearInterval/clearTimeout
+  // on interval/delayed tasks — then clears the internal jobs Map.
+  try {
+    const jobScheduler = require('../../utils/jobScheduler');
+    jobScheduler.shutdown();
+  } catch { /* non-fatal — if scheduler was never initialized, ignore */ }
+
   const emails = [host, memberA, memberB, suspended].filter(Boolean).map(u => u.email);
   try {
     await prisma.voiceRoom.deleteMany({ where: { hostId: { in: [host?.id].filter(Boolean) } } }).catch(() => {});
@@ -134,6 +144,11 @@ describe('Voice — auth gates', function () {
 });
 
 // ─── ROOM LIFECYCLE ───────────────────────────────────────────────────────────
+// CONTRACT (current production):
+//   - MEMBER/HOST calling END → 403 ("Rooms are permanent...")
+//   - Only SUPER_ADMIN can archive (end) a room
+//   - ENDED room join → 400 "Room already archived"
+//   - Non-authorized user END → 403 (same as host)
 describe('Voice — room lifecycle', function () {
   let room;
 
@@ -157,28 +172,64 @@ describe('Voice — room lifecycle', function () {
     expect(res.status).toBe(200);
   });
 
-  test('host can end the room', async function () {
-    const res = await request(app)
+  // RC-01: MEMBER/HOST cannot end a room — rooms are permanent.
+  // Only SUPER_ADMIN can archive (end) a room.
+  // This test verifies the security boundary: host is denied, room remains LIVE.
+  test('host attempting END → 403, room remains LIVE (permanent-room contract)', async function () {
+    const endRes = await request(app)
       .patch(`/api/v1/voice/${room.id}/end`)
       .set('Authorization', tok(host));
-    expect(res.status).toBe(200);
+    expect(endRes.status).toBe(403);
+    expect(endRes.body.success).toBe(false);
+    // Room must still be LIVE — the 403 must not have side-effected room state
+    const dbRoom = await prisma.voiceRoom.findUnique({
+      where: { id: room.id },
+      select: { status: true }
+    });
+    expect(dbRoom.status).toBe('LIVE');
   });
 
-  test('cannot join an ENDED room', async function () {
+  // RC-02 / Phase 4: Test ENDED-room join without calling the host END endpoint.
+  // We set status to ENDED directly in the DB (legitimate persisted state)
+  // then verify the real join endpoint returns 400.
+  test('cannot join an ENDED room — join returns 400 "archived"', async function () {
+    // Set room to ENDED directly in DB — this is a legitimate persisted production state.
+    // We do NOT call the end API (host is not authorized) but the DB state is valid.
+    await prisma.voiceRoom.update({
+      where: { id: room.id },
+      data: { status: 'ENDED', endedAt: new Date() }
+    });
     const res = await joinRoom(room.id, tok(memberB));
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/ended/i);
+    expect(res.body.message).toMatch(/archived|ended/i);
+    // cleanup — room is now ENDED, direct delete is safe
+    await prisma.voiceRoom.delete({ where: { id: room.id } }).catch(() => {});
   });
 
-  test('non-host cannot end a room', async function () {
-    const r2 = await createRoom(tok(host));
+  // RC-02 / Phase 5: Non-authorized user END test uses its own isolated fixture
+  // so it cannot be affected by the host's active room state from prior tests.
+  test('non-authorized user END → 403, room remains unchanged', async function () {
+    // Isolated fixture: fresh user creates and joins their own room
+    const isolatedHost = await createUser({ role: 'MEMBER', schoolId: null });
+    const r2 = await createRoom(tok(isolatedHost));
     expect(r2.status).toBe(201);
+    const r2Id = r2.body.data.id;
+
     const endRes = await request(app)
-      .patch(`/api/v1/voice/${r2.body.data.id}/end`)
+      .patch(`/api/v1/voice/${r2Id}/end`)
       .set('Authorization', tok(memberA));
     expect(endRes.status).toBe(403);
-    // cleanup
-    await prisma.voiceRoom.delete({ where: { id: r2.body.data.id } }).catch(() => {});
+
+    // Room must still exist and not be ENDED
+    const dbRoom = await prisma.voiceRoom.findUnique({
+      where: { id: r2Id },
+      select: { status: true }
+    });
+    expect(dbRoom.status).toBe('LIVE');
+
+    // Cleanup
+    await prisma.voiceRoom.delete({ where: { id: r2Id } }).catch(() => {});
+    await prisma.user.delete({ where: { id: isolatedHost.id } }).catch(() => {});
   });
 });
 

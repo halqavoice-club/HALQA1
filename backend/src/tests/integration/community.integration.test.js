@@ -319,8 +319,18 @@ describe('Ban and Unban', function() {
   test('cannot ban the community owner', async function() {
     var res = await request(app)
       .post('/api/v1/communities/' + publicComm.id + '/members/' + owner.id + '/ban')
-      .set('Authorization', tok(owner));
-    expect(res.status).toBe(400);
+      .set('Authorization', tok(owner))
+      .send({ reason: 'test' });
+    // RC-03: Production returns 403 (not authorized — OWNER is not a valid
+    // target in KICK_HIERARCHY). The previous expectation of 400 was stale.
+    // The contract: OWNER cannot be banned by anyone, including themselves.
+    expect(res.status).toBe(403);
+    // Verify OWNER is still a member and still OWNER
+    const membership = await prisma.communityMember.findUnique({
+      where: { communityId_userId: { communityId: publicComm.id, userId: owner.id } }
+    });
+    expect(membership).not.toBeNull();
+    expect(membership.role).toBe('OWNER');
   });
 });
 
