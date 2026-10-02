@@ -60,7 +60,7 @@ export function DmInputBar({
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [recDuration, setRecDuration] = useState(0);
   const [recBlob, setRecBlob] = useState<{ uri: string; duration: number } | null>(null);
-  const recTimer = useRef<ReturnType<typeof setInterval>>();
+  const recTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   const recStart = useRef(0);
 
   // Cleanup recording on unmount

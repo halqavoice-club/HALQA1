@@ -87,7 +87,7 @@ export function useDmSocket({
 import { useRef, useCallback } from 'react';
 
 export function useEmitDmTyping(convId: string | null, receiverId: string | null) {
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const lastEmit = useRef(0);
 
   const emit = useCallback(() => {

@@ -155,12 +155,14 @@ export default function MarkAttendanceScreen() {
   const { data: classes = [], isLoading: loadingClasses } = useQuery<{ id: string; name: string }[]>({
     queryKey: ['classes'],
     queryFn: () => api.get('/classes').then(r => r.data.data ?? []),
-    onSuccess: (data) => {
-      if (data.length > 0 && !selectedClassId) {
-        setSelectedClassId(data[0].id);
-      }
-    },
   });
+
+  // Auto-select first class when list loads
+  React.useEffect(() => {
+    if (classes.length > 0 && !selectedClassId) {
+      setSelectedClassId(classes[0].id);
+    }
+  }, [classes, selectedClassId]);
 
   // ── Fetch students for selected class ─────────────────────────────────────
   const { data: students = [], isLoading: loadingStudents } = useQuery<Student[]>({
@@ -169,15 +171,18 @@ export default function MarkAttendanceScreen() {
       api.get('/students', { params: { classId: selectedClassId, limit: 500 } })
         .then(r => r.data.data ?? []),
     enabled: !!selectedClassId,
-    onSuccess: (data) => {
-      // Default all to PRESENT when class/data loads
+  });
+
+  // Default all students to PRESENT when class data loads
+  React.useEffect(() => {
+    if (students.length > 0) {
       setStatuses(prev => {
         const next = { ...prev };
-        data.forEach(s => { if (!next[s.id]) next[s.id] = 'PRESENT'; });
+        students.forEach((s: Student) => { if (!next[s.id]) next[s.id] = 'PRESENT'; });
         return next;
       });
-    },
-  });
+    }
+  }, [students]);
 
   // ── Fetch existing attendance to pre-fill today's data ────────────────────
   useQuery({

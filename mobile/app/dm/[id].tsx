@@ -186,7 +186,7 @@ export default function DMConversationScreen() {
   const { user } = useAuthStore();
   const qc       = useQueryClient();
   const flatRef  = useRef<FlatList>(null);
-  const typingTimer    = useRef<ReturnType<typeof setTimeout>>();
+  const typingTimer    = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const lastTypingEmit = useRef(0);
 
   const [convId,       setConvId]       = useState<string | null>(null);
@@ -200,7 +200,7 @@ export default function DMConversationScreen() {
   const [searchQuery,  setSearchQuery]  = useState('');
   const [searchResults, setSearchResults] = useState<Message[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
-  const searchTimer = useRef<ReturnType<typeof setTimeout>>();
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // Forward
   const [forwardMsg,   setForwardMsg]   = useState<Message | null>(null);
   const [showForward,  setShowForward]  = useState(false);

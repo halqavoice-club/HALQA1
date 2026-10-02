@@ -251,7 +251,7 @@ export default function SecuritySettingsScreen() {
         'Enter your current 6-digit code to disable two-factor authentication',
         [
           { text: 'Cancel', style: 'cancel' },
-          { text: 'Disable', style: 'destructive', onPress: (code) => {
+          { text: 'Disable', style: 'destructive', onPress: (code: string | undefined) => {
             if (code) disable2FA.mutate(code);
           }},
         ],

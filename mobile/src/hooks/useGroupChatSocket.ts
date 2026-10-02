@@ -88,7 +88,7 @@ export function useEmitGroupTyping(
   userId?: string,
   userName?: string,
 ) {
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const lastEmit = useRef(0);
 
   const emit = useCallback(() => {

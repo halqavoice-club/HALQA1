@@ -267,7 +267,7 @@ export default function GroupChatThreadScreen() {
   const [searchQ, setSearchQ] = useState('');
   const [searchResults, setSearchResults] = useState<GcMsg[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
-  const searchTimer = useRef<ReturnType<typeof setTimeout>>();
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // ── Load conversation ──────────────────────────────────────────────────────
   const { data: conv } = useQuery<GcConv>({

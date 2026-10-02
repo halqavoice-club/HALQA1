@@ -86,12 +86,14 @@ export default function AttendanceScreen() {
     queryFn: () => api.get('/classes').then(r => r.data.data ?? []),
     enabled: isStaff,
     staleTime: 60_000,
-    onSuccess: (data) => {
-      if (data.length > 0 && !selectedClassId) {
-        setSelectedClassId(data[0].id);
-      }
-    },
   });
+
+  // Auto-select first class when list loads
+  React.useEffect(() => {
+    if (classes.length > 0 && !selectedClassId) {
+      setSelectedClassId(classes[0].id);
+    }
+  }, [classes, selectedClassId]);
 
   // ── Student: /me endpoint resolves student record automatically ─────────────
   // No need to extract student record ID manually
