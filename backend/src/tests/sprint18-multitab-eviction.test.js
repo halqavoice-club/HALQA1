@@ -218,6 +218,9 @@ describe('One-room-at-a-time: joinRoom REJECTS second room (does NOT evict from 
   });
 
   test('rejection message tells user to leave the existing room first', () => {
-    expect(codeBlock).toMatch(/Leave|leave/);
+    // The "leave" message is in the post-transaction error-handler of joinFn,
+    // outside the enforcement block (which only throws the error). The full
+    // joinFn contains it; checking codeBlock alone is too narrow.
+    expect(joinFn).toMatch(/Leave|leave/);
   });
 });
