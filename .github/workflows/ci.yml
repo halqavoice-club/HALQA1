@@ -228,20 +228,25 @@ jobs:
 
       - name: Wait for Redis to be ready
         # Ensure Redis is accepting connections before migrations or tests start.
-        # The service health-check confirms the container is healthy, but a brief
-        # explicit ping loop guards against the edge case where the runner picks up
-        # the job before the health-check propagates.
+        # Uses Node.js TCP check — redis-cli is not installed on GitHub-hosted runners.
         run: |
-          for i in $(seq 1 10); do
-            if redis-cli -h localhost -p 6379 ping | grep -q PONG; then
-              echo "Redis is ready."
-              exit 0
-            fi
-            echo "Waiting for Redis... attempt $i/10"
-            sleep 2
-          done
-          echo "ERROR: Redis did not become ready in time."
-          exit 1
+          node -e "
+            const net = require('net');
+            let attempts = 0;
+            const MAX = 10;
+            function check() {
+              attempts++;
+              const c = net.createConnection({ port: 6379, host: 'localhost' });
+              c.on('connect', () => { console.log('Redis is ready.'); c.destroy(); process.exit(0); });
+              c.on('error', () => {
+                c.destroy();
+                if (attempts >= MAX) { console.error('ERROR: Redis did not become ready in time.'); process.exit(1); }
+                console.log('Waiting for Redis... attempt ' + attempts + '/' + MAX);
+                setTimeout(check, 2000);
+              });
+            }
+            check();
+          "
 
       - name: Run Prisma migrations against test DB
         run: npx prisma migrate deploy
