@@ -22,9 +22,10 @@ import api from '@/lib/api';
 import { dmApi, type SendMessagePayload } from '@/lib/dm';
 import { useAuthStore } from '@/store/auth.store';
 import { getSocket } from '@/lib/socket';
-import { DmMediaBubble } from '@/src/components/dm/DmMediaBubble';
-import { DmInputBar } from '@/src/components/dm/DmInputBar';
-import { MobileShareSheet, type MobileSharePayload } from '@/src/components/chat/MobileShareSheet';
+import * as Clipboard from 'expo-clipboard';
+import { DmMediaBubble } from '@/components/dm/DmMediaBubble';
+import { DmInputBar } from '@/components/dm/DmInputBar';
+import { MobileShareSheet, type MobileSharePayload } from '@/components/chat/MobileShareSheet';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface DmUser { id: string; firstName: string; lastName: string; avatarUrl?: string | null }
@@ -393,7 +394,7 @@ export default function DMConversationScreen() {
     setActionTarget(null);
     if (action === 'reply') { setReplyTo(actionTarget); setEditingMsg(null); }
     else if (action === 'copy') {
-      import('expo-clipboard').then(C => { C.setStringAsync(actionTarget.body ?? ''); showMessage({ message: 'Copied', type: 'success', duration: 1200 }); }).catch(() => {});
+      Clipboard.setStringAsync(actionTarget.body ?? '').then(() => showMessage({ message: 'Copied', type: 'success', duration: 1200 })).catch(() => {});
     } else if (action === 'edit') {
       const age = differenceInMinutes(new Date(), new Date(actionTarget.createdAt));
       if (age > 15) { showMessage({ message: 'Can only edit within 15 minutes', type: 'warning' }); return; }
