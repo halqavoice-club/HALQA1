@@ -12,7 +12,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { Audio, Video as ExpoVideo, ResizeMode, type AVPlaybackStatus } from 'expo-av';
 import { getBaseURL } from '@/lib/api';
-import { VoiceRoomShareCard } from '@/src/components/chat/VoiceRoomShareCard';
+import { VoiceRoomShareCard } from '@/components/chat/VoiceRoomShareCard';
 
 // ─── Backend base URL (strips /api/v1 suffix) ─────────────────────────────────
 const BACKEND_BASE = getBaseURL().replace('/api/v1', '');

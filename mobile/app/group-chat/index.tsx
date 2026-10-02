@@ -13,7 +13,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { showMessage } from 'react-native-flash-message';
-import { getAvatarUrl } from '@/src/lib/avatar';
+import { getAvatarUrl } from '@/lib/avatar';
 import { formatDistanceToNow } from 'date-fns';
 import api from '@/lib/api';
 import { getSocket } from '@/lib/socket';

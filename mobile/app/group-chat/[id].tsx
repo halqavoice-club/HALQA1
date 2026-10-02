@@ -29,9 +29,9 @@ import { showMessage } from 'react-native-flash-message';
 import api, { getBaseURL } from '@/lib/api';
 import { getSocket } from '@/lib/socket';
 import { useAuthStore } from '@/store/auth.store';
-import { DmMediaBubble } from '@/src/components/dm/DmMediaBubble';
-import { GcInputBar } from '@/src/components/group-chat/GcInputBar';
-import { MobileShareSheet } from '@/src/components/chat/MobileShareSheet';
+import { DmMediaBubble } from '@/components/dm/DmMediaBubble';
+import { GcInputBar } from '@/components/group-chat/GcInputBar';
+import { MobileShareSheet } from '@/components/chat/MobileShareSheet';
 
 // ─── Resolve relative upload URLs ─────────────────────────────────────────────
 const BACKEND_BASE = getBaseURL().replace('/api/v1', '');
@@ -649,8 +649,8 @@ export default function GroupChatThreadScreen() {
         setTimeout(() => inputRef.current?.focus(), 100);
         break;
       case 'copy':
-        import('expo-clipboard').then(C => {
-          C.setStringAsync(selected.body ?? '');
+        import('expo-clipboard').then(({ setStringAsync }) => {
+          setStringAsync(selected.body ?? '');
           showMessage({ message: 'Copied', type: 'success', duration: 1200 });
         }).catch(() => {});
         break;
