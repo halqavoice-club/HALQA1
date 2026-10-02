@@ -19,6 +19,7 @@ interface User {
   name: string;
   avatar?: string;
   student?: { id: string } | null;
+  guardian?: { id: string } | null;
   lastLoginAt?: string | null;
   emailVerified?: boolean;
   school?: { id: string; name: string } | null;

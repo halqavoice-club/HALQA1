@@ -97,6 +97,10 @@ interface VoiceState {
   myQueuePosition: number; // 0 = not in queue
   setQueuePosition: (pos: number) => void;
   clearQueuePosition: () => void;
+
+  // ── Speaker queue — live queue of users waiting to speak ─────────────────
+  speakerQueue: any[];
+  setSpeakerQueue: (queue: any[]) => void;
 }
 
 // ─── Store implementation ─────────────────────────────────────────────────────
@@ -173,4 +177,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   myQueuePosition: 0,
   setQueuePosition: (pos) => set({ myQueuePosition: pos }),
   clearQueuePosition: () => set({ myQueuePosition: 0 }),
+
+  // ── Speaker queue ────────────────────────────────────────────────────────
+  speakerQueue: [],
+  setSpeakerQueue: (queue) => set({ speakerQueue: queue }),
 }));
