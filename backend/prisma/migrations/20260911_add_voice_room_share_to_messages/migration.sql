@@ -23,11 +23,14 @@ CREATE INDEX `direct_messages_refEntityType_refEntityId_idx`
 -- ── group_messages ─────────────────────────────────────────────────────────────
 
 ALTER TABLE `group_messages`
-  ADD COLUMN `refEntityType` VARCHAR(50)  NULL,
-  ADD COLUMN `refEntityId`   VARCHAR(36)  NULL;
+  ADD COLUMN IF NOT EXISTS `refEntityType` VARCHAR(50)  NULL,
+  ADD COLUMN IF NOT EXISTS `refEntityId`   VARCHAR(36)  NULL;
 
 -- Index: enables efficient lookup of all VOICE_ROOM_SHARE messages for a given room
-CREATE INDEX `group_messages_refEntityType_refEntityId_idx`
+-- IF NOT EXISTS: 20260905c_add_group_chat creates group_messages with this index
+-- already defined in the CREATE TABLE statement. On a fresh database the CREATE TABLE
+-- runs first, making this a duplicate. IF NOT EXISTS guards against error 1061.
+CREATE INDEX IF NOT EXISTS `group_messages_refEntityType_refEntityId_idx`
   ON `group_messages` (`refEntityType`, `refEntityId`);
 
 -- ── group_messages.type enum: append VOICE_ROOM_SHARE ─────────────────────────
