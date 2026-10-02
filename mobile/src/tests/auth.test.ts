@@ -127,6 +127,9 @@ describe('restoreSession()', () => {
     mockPost.mockResolvedValueOnce({
       data: { data: { accessToken: 'new_tok', refreshToken: 'new_ref', user: mockUser } }
     })
+    mockGet.mockResolvedValueOnce({
+      data: { data: mockUser }
+    })
 
     await useAuthStore.getState().restoreSession()
 
