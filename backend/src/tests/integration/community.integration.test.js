@@ -62,6 +62,13 @@ beforeAll(async function() {
 }, 60000);
 
 afterAll(async function() {
+  // S-01: Stop the scheduler started by startServer() so cron jobs do not
+  // fire dynamic require() calls after Jest tears down the module sandbox.
+  try {
+    const jobScheduler = require('../../utils/jobScheduler');
+    jobScheduler.shutdown();
+  } catch { /* non-fatal */ }
+
   const emails = [owner, member1, member2, suspended]
     .filter(Boolean).map(u => u.email);
 
@@ -321,10 +328,10 @@ describe('Ban and Unban', function() {
       .post('/api/v1/communities/' + publicComm.id + '/members/' + owner.id + '/ban')
       .set('Authorization', tok(owner))
       .send({ reason: 'test' });
-    // RC-03: Production returns 403 (not authorized — OWNER is not a valid
-    // target in KICK_HIERARCHY). The previous expectation of 400 was stale.
+    // C-01: Production banMember() explicitly returns 400 when target is OWNER
+    // (explicit guard: `if (target?.role === 'OWNER') return 400`).
     // The contract: OWNER cannot be banned by anyone, including themselves.
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(400);
     // Verify OWNER is still a member and still OWNER
     const membership = await prisma.communityMember.findUnique({
       where: { communityId_userId: { communityId: publicComm.id, userId: owner.id } }
@@ -859,7 +866,9 @@ describe('Role security — privilege escalation', function() {
     var res = await request(app)
       .delete('/api/v1/communities/' + roleComm.id + '/members/' + roleOwner.id)
       .set('Authorization', tok(roleAdmin));
-    expect(res.status).toBe(400);
+    // C-02: KICK_HIERARCHY check returns 403 for OWNER target
+    // (OWNER is not in the allowed kick targets list).
+    expect(res.status).toBe(403);
   });
 
   test('OWNER cannot be banned', async function() {

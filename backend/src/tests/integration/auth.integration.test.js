@@ -22,6 +22,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // S-01: Stop the scheduler started by startServer() so cron jobs do not
+  // fire dynamic require() calls after Jest tears down the module sandbox.
+  try {
+    const jobScheduler = require('../../utils/jobScheduler');
+    jobScheduler.shutdown();
+  } catch { /* non-fatal */ }
+
   await prisma.$disconnect();
 });
 

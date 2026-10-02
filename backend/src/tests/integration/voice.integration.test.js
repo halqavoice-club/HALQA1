@@ -317,7 +317,21 @@ describe('Voice — kick and ban', function () {
   }, 30000);
 
   afterAll(async function () {
-    if (kickRoom) await prisma.voiceRoom.delete({ where: { id: kickRoom.id } }).catch(() => {});
+    // V-04 FIX: Leave the room via the application API before deleting it.
+    // Without this, the global `host` participant row remains isActive=true
+    // (until the cascade delete) and the one-active-room rule blocks
+    // createRoom() in subsequent suites that reuse `host`.
+    if (kickRoom) {
+      await request(app)
+        .post(`/api/v1/voice/${kickRoom.id}/leave`)
+        .set('Authorization', tok(host))
+        .catch(() => {});
+      await request(app)
+        .post(`/api/v1/voice/${kickRoom.id}/leave`)
+        .set('Authorization', tok(memberB))
+        .catch(() => {});
+      await prisma.voiceRoom.delete({ where: { id: kickRoom.id } }).catch(() => {});
+    }
   }, 20000);
 
   test('non-moderator cannot kick', async function () {
@@ -334,9 +348,14 @@ describe('Voice — kick and ban', function () {
     expect(res.status).toBe(200);
   });
 
-  test('kicked user CAN rejoin (no persistent ban from kick)', async function () {
+  test('kicked user CANNOT rejoin the same room session (PH24C-003 wasKicked)', async function () {
+    // PH24C-003: wasKicked=true is set atomically when a user is kicked.
+    // joinRoom() reconnect path checks wasKicked and returns 403 KICKED_FROM_ROOM.
+    // This is session-scoped kick protection — the user cannot silently re-enter.
     const res = await joinRoom(kickRoom.id, tok(memberA));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
+    // The error is KICKED_FROM_ROOM — not a ban error
+    expect(res.body.message).toMatch(/kicked|KICKED_FROM_ROOM/i);
   });
 
   test('non-moderator cannot ban', async function () {
@@ -393,9 +412,27 @@ describe('Voice — kick and ban', function () {
     expect(record?.isBanned).toBe(false);
   });
 
-  test('unbanned user CAN rejoin', async function () {
-    const res = await joinRoom(kickRoom.id, tok(memberA));
-    expect(res.status).toBe(200);
+  test('unban clears membership ban (isBanned=false) but does NOT reset PH24C kick state', async function () {
+    // unbanParticipant only updates VoiceRoomMember.isBanned=false.
+    // voiceParticipant.wasKicked is NOT reset by unban.
+    // Therefore a user who was kicked and then unbanned still cannot rejoin
+    // the same session — wasKicked=true is still in the participant row.
+    // This is the authoritative PH24C-003 contract.
+    const unbanRes = await request(app)
+      .delete(`/api/v1/voice/${kickRoom.id}/ban/${memberA.id}`)
+      .set('Authorization', tok(host));
+    expect(unbanRes.status).toBe(200);
+
+    // Verify isBanned is now false in VoiceRoomMember
+    const record = await prisma.voiceRoomMember.findUnique({
+      where: { roomId_userId: { roomId: kickRoom.id, userId: memberA.id } }
+    });
+    expect(record?.isBanned).toBe(false);
+
+    // Rejoin is still blocked because wasKicked=true was NOT reset by unban
+    const rejoinRes = await joinRoom(kickRoom.id, tok(memberA));
+    expect(rejoinRes.status).toBe(403);
+    expect(rejoinRes.body.message).toMatch(/kicked|KICKED_FROM_ROOM/i);
   });
 
   test('cannot ban the host', async function () {
@@ -479,9 +516,12 @@ describe('Voice — speaker queue', function () {
     expect(p?.handRaised).toBe(false);
   });
 
-  test('race condition: approving already-promoted speaker returns 409', async function () {
-    // memberA is already SPEAKER — try to approve them again via queue (simulate race)
-    // Inject a fake handRaised=true directly in DB to simulate stale queue state
+  test('approving already-on-stage speaker returns 200 (idempotent — user is already promoted)', async function () {
+    // Production contract: _promoteUser catches internal ALREADY_ON_STAGE (409)
+    // and returns HTTP 200 — the user is already where they should be.
+    // The test verifies idempotent approval behavior, not an error path.
+    // memberA is already SPEAKER — inject stale handRaised=true to simulate a
+    // race where the host's approve arrives after the user was already promoted.
     await prisma.voiceParticipant.update({
       where: { roomId_userId: { roomId: qRoom.id, userId: memberA.id } },
       data: { handRaised: true, handRaisedAt: new Date() }
@@ -490,8 +530,8 @@ describe('Voice — speaker queue', function () {
     const res = await request(app)
       .post(`/api/v1/voice/${qRoom.id}/queue/approve/${memberA.id}`)
       .set('Authorization', tok(host));
-    // Should get 409 (already SPEAKER) from the transaction role check
-    expect([409, 400]).toContain(res.status);
+    // _promoteUser: ALREADY_ON_STAGE is caught internally, returns 200
+    expect(res.status).toBe(200);
 
     // Cleanup
     await prisma.voiceParticipant.update({
@@ -564,7 +604,21 @@ describe('Voice — LiveKit token', function () {
   }, 30000);
 
   afterAll(async function () {
-    if (lkRoom) await prisma.voiceRoom.delete({ where: { id: lkRoom.id } }).catch(() => {});
+    // V-04 FIX: Leave the room via the application API before deleting it.
+    // Without this, the global `host` and `memberA` participant rows remain
+    // isActive=true (until the cascade delete) and the one-active-room rule
+    // blocks createRoom() in subsequent suites that reuse `host` or `memberA`.
+    if (lkRoom) {
+      await request(app)
+        .post(`/api/v1/voice/${lkRoom.id}/leave`)
+        .set('Authorization', tok(host))
+        .catch(() => {});
+      await request(app)
+        .post(`/api/v1/voice/${lkRoom.id}/leave`)
+        .set('Authorization', tok(memberA))
+        .catch(() => {});
+      await prisma.voiceRoom.delete({ where: { id: lkRoom.id } }).catch(() => {});
+    }
   }, 20000);
 
   test('active participant gets a LiveKit token', async function () {
