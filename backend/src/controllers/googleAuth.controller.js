@@ -278,7 +278,17 @@ async function googleSignIn(req, res, next) {
       ip:        req.ip,
     });
 
-    // ── Step 5: Return the same response shape as normal login ────────────────
+    // ── Step 5: Set httpOnly refresh token cookie (same as password login) ────
+    // This is required for the Next.js middleware to recognise the session and
+    // allow navigation to dashboard routes after Google Sign-In.
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    });
+
+    // ── Step 6: Return the same response shape as normal login ────────────────
     // The { passwordHash, ...rest } spread is not needed since we used select: {}
     return successResponse(res, {
       user,

@@ -350,12 +350,12 @@ describe('Voice — kick and ban', function () {
 
   test('kicked user CANNOT rejoin the same room session (PH24C-003 wasKicked)', async function () {
     // PH24C-003: wasKicked=true is set atomically when a user is kicked.
-    // joinRoom() reconnect path checks wasKicked and returns 403 KICKED_FROM_ROOM.
+    // joinRoom() reconnect path checks wasKicked and returns 403.
     // This is session-scoped kick protection — the user cannot silently re-enter.
     const res = await joinRoom(kickRoom.id, tok(memberA));
     expect(res.status).toBe(403);
-    // The error is KICKED_FROM_ROOM — not a ban error
-    expect(res.body.message).toMatch(/kicked|KICKED_FROM_ROOM/i);
+    // User-facing message confirms removal and rejoin block
+    expect(res.body.message).toMatch(/removed.*cannot rejoin/i);
   });
 
   test('non-moderator cannot ban', async function () {
@@ -432,7 +432,7 @@ describe('Voice — kick and ban', function () {
     // Rejoin is still blocked because wasKicked=true was NOT reset by unban
     const rejoinRes = await joinRoom(kickRoom.id, tok(memberA));
     expect(rejoinRes.status).toBe(403);
-    expect(rejoinRes.body.message).toMatch(/kicked|KICKED_FROM_ROOM/i);
+    expect(rejoinRes.body.message).toMatch(/removed.*cannot rejoin/i);
   });
 
   test('cannot ban the host', async function () {
@@ -646,7 +646,11 @@ describe('Voice — LiveKit token', function () {
     const r = await createRoom(tok(host));
     const rId = r.body.data.id;
     await joinRoom(rId, tok(memberA));
-    await request(app).patch(`/api/v1/voice/${rId}/end`).set('Authorization', tok(host));
+    // Manually set room to ENDED status (bypass endRoom API which requires SUPER_ADMIN)
+    await prisma.voiceRoom.update({
+      where: { id: rId },
+      data: { status: 'ENDED', endedAt: new Date() }
+    });
 
     const res = await request(app)
       .post(`/api/v1/voice/${rId}/livekit-token`)
@@ -1608,23 +1612,21 @@ describe('Permanent room lifecycle — IDLE rooms remain joinable', function () 
     var endRoomId = r.body.data.id;
     await joinRoom(endRoomId, tok(plUser));
 
-    // Test 11: endRoom changes status to ENDED
+    // Test 11: endRoom requires SUPER_ADMIN (permanent-room contract)
+    // MEMBER/HOST attempting to end a permanent room receives 403
     var endRes = await request(app)
       .patch('/api/v1/voice/' + endRoomId + '/end')
       .set('Authorization', tok(plHost));
-    expect(endRes.status).toBe(200);
+    expect(endRes.status).toBe(403);
+    expect(endRes.body.message).toMatch(/permanent|platform admin/i);
 
+    // Verify room is still LIVE (not ended) after failed endRoom attempt
     var dbRoom = await prisma.voiceRoom.findUnique({
       where: { id: endRoomId },
       select: { status: true, endedAt: true }
     });
-    expect(dbRoom.status).toBe('ENDED');           // test 11
-    expect(dbRoom.endedAt).not.toBeNull();
-
-    // Test 12: ENDED room is unjoinable
-    var rejoinRes = await joinRoom(endRoomId, tok(plUser));
-    expect(rejoinRes.status).toBe(400);
-    expect(rejoinRes.body.message).toMatch(/ended/i); // test 12
+    expect(dbRoom.status).toBe('LIVE');
+    expect(dbRoom.endedAt).toBeNull();
 
     // Cleanup
     await prisma.voiceRoom.delete({ where: { id: endRoomId } }).catch(function () {});

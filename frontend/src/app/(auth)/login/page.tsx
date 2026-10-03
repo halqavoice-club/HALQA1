@@ -114,12 +114,16 @@ function LoginContent() {
         return
       }
 
+      const role = user?.role || 'MEMBER'
+      const destination = getDefaultRoute(role)
+
       if (isNewUser) {
         toast({ title: '🎉 Welcome to HALQA!', description: 'Your account has been created.' })
+        // Small delay so the toast renders before navigation takes over
+        setTimeout(() => router.replace(destination), 300)
+      } else {
+        router.replace(destination)
       }
-
-      const role = user?.role || 'MEMBER'
-      router.push(getDefaultRoute(role))
     } catch (error: any) {
       const message = error.response?.data?.message || 'Google Sign-In failed. Please try again.'
       toast({ title: 'Google Sign-In failed', description: message, variant: 'destructive' })

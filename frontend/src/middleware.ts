@@ -42,13 +42,13 @@ const SECURITY_HEADERS: Record<string, string> = {
   //   frame-src   'none'                   — no iframes
   'Content-Security-Policy-Report-Only': [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-    "style-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com/gsi/client",
+    "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style",
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
-    "connect-src 'self' wss: ws: https:",
+    "connect-src 'self' wss: ws: https: https://accounts.google.com/gsi/",
     "media-src 'self' blob: https:",
-    "frame-src 'none'",
+    "frame-src 'none' https://accounts.google.com/gsi/",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",

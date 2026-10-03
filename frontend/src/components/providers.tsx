@@ -54,6 +54,13 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const socketReadyRef = useRef(false)
 
   useEffect(() => {
+    // Rehydrate the Zustand persist store from localStorage on mount.
+    // The store uses skipHydration: true to avoid SSR mismatches, so we
+    // must trigger hydration manually here on the client.
+    useAuthStore.persist.rehydrate()
+  }, [])
+
+  useEffect(() => {
     // Initialize analytics once
     analytics.initialize()
   }, [])
