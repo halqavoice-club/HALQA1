@@ -135,3 +135,17 @@ frontend/.expo/
 mobile/mobile-tsc-output.txt
 mobile/_*.js
 backend/test-join.js
+
+# ─── V1-01 ADDITIONS ─────────────────────────────────────────────────────────
+
+# Patch files — working-tree diff exports are development artifacts, not source.
+# These may contain uncommitted code changes. Store them outside the repo or in
+# a secure artifact store. Never commit a patch file to source control.
+*.patch
+
+# CI diagnostic and troubleshooting scripts — not part of the shipped product
+ci-integration-logs.txt
+backend/integration-test-output.txt
+
+# Root-level audit scan scripts
+_audit_scan.js
