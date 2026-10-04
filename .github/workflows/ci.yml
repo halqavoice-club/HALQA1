@@ -378,6 +378,10 @@ jobs:
         # Run next build directly on the runner before the Docker build.
         # Docker swallows build output by default; this step shows the full
         # Next.js compiler error so failures are visible in CI logs.
+        # Do NOT set NODE_ENV=production here -- npm ci skips devDependencies
+        # when NODE_ENV is production, but next build needs autoprefixer,
+        # tailwindcss, postcss, and typescript from devDependencies.
+        # next build sets production mode internally regardless.
         run: |
           npm ci
           npm run build
@@ -387,7 +391,6 @@ jobs:
           NEXT_PUBLIC_SOCKET_URL: 'https://api.halqa.app'
           NEXT_PUBLIC_LIVEKIT_URL: 'wss://placeholder.livekit.cloud'
           DISABLE_PWA: 'true'
-          NODE_ENV: 'production'
 
       - name: Build frontend Docker image
         # NEXT_PUBLIC_* vars must be --build-arg, not env:.
