@@ -99,7 +99,10 @@
     "setupFiles": [
       "./jest.setup.js"
     ],
-    "moduleNameMapper": {},
+    "moduleNameMapper": {
+      "@opentelemetry/instrumentation-prisma": "<rootDir>/src/tests/__mocks__/otel-prisma.js",
+      "@opentelemetry/instrumentation-redis": "<rootDir>/src/tests/__mocks__/otel-redis.js"
+    },
     "transformIgnorePatterns": [
       "node_modules/(?!(livekit-server-sdk|@livekit)/)"
     ]
