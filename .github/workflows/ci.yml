@@ -516,11 +516,12 @@ jobs:
         env:
           PLAYWRIGHT_BASE_URL: 'http://localhost:3000'
           # Credentials must match a user created by seed.js.
-          # seed.js creates admin@halqa-academy.com / Admin@2024 as SCHOOL_ADMIN.
-          # The E2E auth spec falls back to these env vars; without them it would
-          # try test@halqa.app which does not exist in the seeded database.
-          E2E_TEST_EMAIL: 'admin@halqa-academy.com'
-          E2E_TEST_PASSWORD: 'Admin@2024'
+          # Using student1@halqa.com (STUDENT role) — seeded via create (not upsert),
+          # so mustChangePassword is never set. Routes to /feed after login.
+          # admin@halqa-academy.com uses upsert with update:{} so mustChangePassword
+          # could persist from a previous run and redirect to /change-password instead.
+          E2E_TEST_EMAIL: 'student1@halqa.com'
+          E2E_TEST_PASSWORD: 'Student@2024'
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4
