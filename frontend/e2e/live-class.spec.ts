@@ -1,11 +1,11 @@
 import { test, expect } from '@playwright/test';
 
 /**
- * E2E — Live class creation flow (teacher)
+ * E2E -- Live class creation flow (teacher)
  * Requirement: 20.6
  *
- * Covers: navigate to live classes as teacher → click create → fill title
- *         → submit → assert live class appears in list
+ * Covers: navigate to live classes as teacher -> click create -> fill title
+ *         -> submit -> assert live class appears in list
  */
 test.describe('Live Class', () => {
   test.beforeEach(async ({ page }) => {
@@ -17,18 +17,22 @@ test.describe('Live Class', () => {
       process.env.E2E_TEACHER_PASSWORD || process.env.E2E_TEST_PASSWORD || 'Test1234!'
     );
     await page.locator('button[type="submit"]').first().click();
-    // Wait until we leave /login — different roles land on different routes (/feed, /admin etc.)
+    // Wait until we leave /login -- different roles land on different routes (/feed, /admin etc.)
     await page.waitForURL(url => !url.pathname.includes('/login'), { timeout: 15000 });
   });
 
   test('live class list page loads', async ({ page }) => {
     await page.goto('/live-class');
 
-    // Page should load — either showing classes or an empty/create state
-    const pageContent = page.locator(
-      'h1, h2, [data-testid="live-class-list"], button:has-text("Create"), button:has-text("New Class"), text=/live class/i'
-    );
-    await expect(pageContent.first()).toBeVisible({ timeout: 10000 });
+    // Page should load -- either showing classes, a heading, or a create/empty state.
+    // Use separate locators joined with .or() to avoid mixing CSS and text= syntax
+    // in a single comma-separated string (causes Playwright parse errors).
+    const headingOrButton = page.locator('h1, h2, [data-testid="live-class-list"]')
+      .or(page.locator('button:has-text("Create")'))
+      .or(page.locator('button:has-text("New Class")'))
+      .or(page.getByText(/live class/i));
+
+    await expect(headingOrButton.first()).toBeVisible({ timeout: 10000 });
   });
 
   test('teacher can create a live class', async ({ page }) => {
@@ -41,7 +45,7 @@ test.describe('Live Class', () => {
 
     const createVisible = await createBtn.isVisible({ timeout: 8000 }).catch(() => false);
     if (!createVisible) {
-      // Role may not be teacher — skip
+      // Role may not be teacher -- skip
       test.skip();
       return;
     }
