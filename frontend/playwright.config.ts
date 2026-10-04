@@ -4,12 +4,16 @@ import { defineConfig, devices } from '@playwright/test';
  * HALQA E2E Test Configuration
  * Requirements: 20.6
  *
+ * Config lives at frontend/playwright.config.ts (project root for the frontend
+ * package). Playwright resolves testDir relative to this file's location, so
+ * testDir: './e2e' correctly points to frontend/e2e/ where the specs live.
+ *
  * Run: npx playwright test
  * Report: npx playwright show-report
  */
 export default defineConfig({
   testDir: './e2e',
-  /* Run tests in parallel */
+  /* Run tests sequentially in CI to avoid port conflicts */
   fullyParallel: false,
   /* Fail the build on CI if test.only is left */
   forbidOnly: !!process.env.CI,
