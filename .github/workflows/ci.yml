@@ -331,6 +331,59 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate docker-compose.yml
+        # Write a stub .env so the :? required-var syntax doesn't abort config parsing.
+        # This validates YAML structure, volume declarations, service references, etc.
+        # without actually starting any containers.
+        run: |
+          cat > .env.ci-stub << 'EOF'
+          MYSQL_ROOT_PASSWORD=ci_stub
+          MYSQL_USER=ci_stub
+          MYSQL_PASSWORD=ci_stub
+          JWT_SECRET=ci_stub_jwt_secret_32_chars_placeholder
+          JWT_REFRESH_SECRET=ci_stub_refresh_secret_32_chars_xx
+          CLIENT_URL=http://localhost:3000
+          NEXT_PUBLIC_API_URL=http://localhost:5000/api/v1
+          NEXT_PUBLIC_SOCKET_URL=http://localhost:5000
+          LIVEKIT_URL=wss://placeholder.livekit.cloud
+          EOF
+          docker compose --env-file .env.ci-stub -f docker-compose.yml config --quiet
+          echo "docker-compose.yml validation PASSED"
+
+      - name: Validate docker-compose.prod.yml
+        # Prod compose uses bare ${VAR} (no :? guard) so all vars just resolve to
+        # empty string when unset — config validation still catches structural errors.
+        run: |
+          docker compose -f docker-compose.prod.yml config --quiet
+          echo "docker-compose.prod.yml validation PASSED"
+        env:
+          MYSQL_ROOT_PASSWORD: ci_stub
+          MYSQL_USER: ci_stub
+          MYSQL_PASSWORD: ci_stub
+          REDIS_PASSWORD: ci_stub
+          JWT_SECRET: ci_stub_jwt_secret_32_chars_placeholder
+          JWT_REFRESH_SECRET: ci_stub_refresh_32_chars_placeholder
+          CLIENT_URL: http://localhost:3000
+          NEXT_PUBLIC_API_URL: https://api.halqa.app/api/v1
+          NEXT_PUBLIC_SOCKET_URL: https://api.halqa.app
+          LIVEKIT_URL: wss://placeholder.livekit.cloud
+          LIVEKIT_API_KEY: ci_placeholder
+          LIVEKIT_API_SECRET: ci_placeholder
+          STRIPE_SECRET_KEY: ci_placeholder
+          STRIPE_PUBLISHABLE_KEY: ci_placeholder
+          STRIPE_WEBHOOK_SECRET: ci_placeholder
+          R2_ACCOUNT_ID: ci_placeholder
+          R2_ACCESS_KEY_ID: ci_placeholder
+          R2_SECRET_ACCESS_KEY: ci_placeholder
+          R2_PUBLIC_URL: https://placeholder.r2.dev
+          SMTP_HOST: smtp.placeholder.com
+          SMTP_PORT: '587'
+          SMTP_USER: ci_placeholder
+          SMTP_PASS: ci_placeholder
+          EMAIL_FROM: ci@placeholder.com
+          METRICS_TOKEN: ci_placeholder
+          SERVICE_NAME: halqa-ci
+
       - name: Build backend Docker image
         run: docker build -t halqa-backend:test ./backend
 

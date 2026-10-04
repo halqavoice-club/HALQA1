@@ -129,3 +129,4 @@ volumes:
   redis_data:
   uploads_data:
   nginx_logs:
+  # nginx_logs is referenced by the nginx service above; must be declared here.
