@@ -281,6 +281,9 @@ jobs:
           SERVICE_NAME: 'halqa-integration-ci'
           HEALTH_TOKEN: 'ci_health_token_integration_tests_only_!!'
           METRICS_TOKEN: 'ci_metrics_token_integration_tests_only_!!'
+          # Payout encryption key — required for payout subsystem startup
+          # Value is a CI-only placeholder (no real payouts in integration tests)
+          PAYOUT_ENCRYPTION_KEY: 'ci_payout_encryption_key_32bytes_placeholder!!'
 
       - name: Verify backup and restore procedure
         # Proves that mysqldump + restore works against the test DB.

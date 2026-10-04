@@ -8,7 +8,7 @@ import { showMessage } from 'react-native-flash-message';
 import * as SecureStore from 'expo-secure-store';
 import { useAuthStore } from '@/store/auth.store';
 import { initSocket } from '@/lib/socket';
-import { api, setAccessToken, getChallengeToken, clearChallengeToken } from '@/lib/api';
+import api, { setAccessToken, getChallengeToken, clearChallengeToken } from '@/lib/api';
 
 export default function VerifyTOTPScreen() {
   const router = useRouter();

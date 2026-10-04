@@ -209,4 +209,21 @@ export const authEventEmitter = {
   },
 };
 
+// ─── Challenge token (ephemeral 2FA flow) ────────────────────────────────────
+// Stored in-memory only — never persisted to disk or SecureStore.
+// Set when login returns requiresTOTP=true, cleared after TOTP verification.
+let _challengeToken: string | null = null;
+
+export function setChallengeToken(token: string | null) {
+  _challengeToken = token;
+}
+
+export function getChallengeToken(): string | null {
+  return _challengeToken;
+}
+
+export function clearChallengeToken() {
+  _challengeToken = null;
+}
+
 export default api;

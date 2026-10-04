@@ -57,3 +57,9 @@ process.env.HEALTH_TOKEN        = 'test_health_token_32_chars_min_!!!!';
 
 // ─── Client URL ──────────────────────────────────────────────────────────────
 process.env.CLIENT_URL          = 'http://localhost:3000';
+
+// ─── Payout encryption key ────────────────────────────────────────────────────
+// Required in production; set here to suppress validateEnv warnings in test runs
+// and ensure payout subsystem initializes without error during integration tests.
+// Value is a test-only placeholder — no real crypto operations are performed.
+process.env.PAYOUT_ENCRYPTION_KEY = 'test_payout_encryption_key_32bytes!!!';
