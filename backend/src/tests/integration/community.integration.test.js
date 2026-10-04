@@ -51,6 +51,10 @@ let owner, member1, member2, suspended;
 let publicComm, privateComm, inviteComm;
 
 beforeAll(async function() {
+  // PORT=0 lets the OS assign an ephemeral port — prevents startServer()
+  // from failing on a port conflict and calling process.exit(1) when this
+  // suite runs after another suite that already holds the default port.
+  process.env.PORT = '0';
   app = require('../../app');
 
   [owner, member1, member2, suspended] = await Promise.all([

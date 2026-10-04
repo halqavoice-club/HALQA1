@@ -642,21 +642,34 @@ describe('Voice — LiveKit token', function () {
   });
 
   test('ended room token request → 400', async function () {
-    // Create a separate ended room
-    const r = await createRoom(tok(host));
-    const rId = r.body.data.id;
-    await joinRoom(rId, tok(memberA));
-    // Manually set room to ENDED status (bypass endRoom API which requires SUPER_ADMIN)
-    await prisma.voiceRoom.update({
-      where: { id: rId },
-      data: { status: 'ENDED', endedAt: new Date() }
-    });
+    // V-04-E FIX: Create this room with a dedicated fresh user rather than
+    // reusing `host`. The one-active-room rule blocks a second createRoom()
+    // call for `host` while lkRoom (created in beforeAll) is still LIVE.
+    // Using a dedicated user makes this test fully self-contained and avoids
+    // the cross-test state dependency that caused the TypeError at line 647.
+    const endedRoomHost = await createUser({ role: 'MEMBER', schoolId: null });
+    const endedRoomGuest = await createUser({ role: 'MEMBER', schoolId: null });
+    try {
+      const r = await createRoom(tok(endedRoomHost));
+      expect(r.body.data).toBeDefined(); // guard: creation must succeed
+      const rId = r.body.data.id;
+      await joinRoom(rId, tok(endedRoomGuest));
+      // Manually set room to ENDED status (bypass endRoom API which requires SUPER_ADMIN)
+      await prisma.voiceRoom.update({
+        where: { id: rId },
+        data: { status: 'ENDED', endedAt: new Date() }
+      });
 
-    const res = await request(app)
-      .post(`/api/v1/voice/${rId}/livekit-token`)
-      .set('Authorization', tok(memberA));
-    expect(res.status).toBe(400);
-    await prisma.voiceRoom.delete({ where: { id: rId } }).catch(() => {});
+      const res = await request(app)
+        .post(`/api/v1/voice/${rId}/livekit-token`)
+        .set('Authorization', tok(endedRoomGuest));
+      expect(res.status).toBe(400);
+      await prisma.voiceRoom.delete({ where: { id: rId } }).catch(() => {});
+    } finally {
+      // Always clean up dedicated users even if assertions fail
+      await prisma.user.delete({ where: { id: endedRoomHost.id } }).catch(() => {});
+      await prisma.user.delete({ where: { id: endedRoomGuest.id } }).catch(() => {});
+    }
   });
 });
 

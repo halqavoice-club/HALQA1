@@ -160,20 +160,24 @@ async function addParticipant(lcId, userId, role, wasKicked) {
   var id  = uuidv4();
   var now = new Date().toISOString().slice(0, 23).replace('T', ' ');
   var kicked = wasKicked ? 1 : 0;
+  // V-04-E FIX: Production kick sets isActive=false. A kicked participant
+  // must have isActive=0 so the token endpoint correctly rejects them (403).
+  // Tests that insert participants with wasKicked=true must mirror this.
+  var isActive = wasKicked ? 0 : 1;
   var existing = await prisma.$queryRawUnsafe(
     'SELECT id FROM live_class_participants WHERE liveClassId=? AND userId=? LIMIT 1',
     lcId, userId
   );
   if (existing.length > 0) {
     await prisma.$executeRawUnsafe(
-      'UPDATE live_class_participants SET isActive=1, role=?, wasKicked=?, isMuted=1, handRaised=0, speakerSlot=NULL WHERE liveClassId=? AND userId=?',
-      role || 'STUDENT', kicked, lcId, userId
+      'UPDATE live_class_participants SET isActive=?, role=?, wasKicked=?, isMuted=1, handRaised=0, speakerSlot=NULL WHERE liveClassId=? AND userId=?',
+      isActive, role || 'STUDENT', kicked, lcId, userId
     );
     return;
   }
   await prisma.$executeRawUnsafe(
-    'INSERT INTO live_class_participants (id, liveClassId, userId, role, isMuted, isActive, speakerSlot, handRaised, wasKicked, totalDuration, createdAt, updatedAt) VALUES (?,?,?,?,1,1,NULL,0,?,0,?,?)',
-    id, lcId, userId, role || 'STUDENT', kicked, now, now
+    'INSERT INTO live_class_participants (id, liveClassId, userId, role, isMuted, isActive, speakerSlot, handRaised, wasKicked, totalDuration, createdAt, updatedAt) VALUES (?,?,?,?,1,?,NULL,0,?,0,?,?)',
+    id, lcId, userId, role || 'STUDENT', isActive, kicked, now, now
   );
 }
 
@@ -373,7 +377,7 @@ describe('GATE-11: PUBLIC stream — any authenticated user can access', functio
       .post('/api/v1/live-classes/' + lcId + '/join')
       .set('Authorization', jwt(noSchoolUser));
     expect(res.status).toBe(200);
-    expect(res.body.data.role).toBe('STUDENT');
+    expect(res.body.data.participant.role).toBe('STUDENT');
   });
 
   test('creator POST /join PUBLIC stream → HOST role', async function () {
@@ -381,7 +385,7 @@ describe('GATE-11: PUBLIC stream — any authenticated user can access', functio
       .post('/api/v1/live-classes/' + lcId + '/join')
       .set('Authorization', jwt(host));
     expect(res.status).toBe(200);
-    expect(res.body.data.role).toBe('HOST');
+    expect(res.body.data.participant.role).toBe('HOST');
   });
 });
 
@@ -404,7 +408,7 @@ describe('GATE-9: Role injection attack — body.role ignored', function () {
       .set('Authorization', jwt(attacker))
       .send({ role: 'HOST', isHost: true, hostUserId: attacker.id });
     expect(res.status).toBe(200);
-    expect(res.body.data.role).toBe('STUDENT');
+    expect(res.body.data.participant.role).toBe('STUDENT');
   });
 
   test('POST /join with nested role injection → still STUDENT', async function () {
@@ -415,7 +419,7 @@ describe('GATE-9: Role injection attack — body.role ignored', function () {
       .set('Authorization', jwt(attacker2))
       .send({ participant: { role: 'MODERATOR' }, user: { role: 'HOST' } });
     expect(res.status).toBe(200);
-    expect(res.body.data.role).toBe('STUDENT');
+    expect(res.body.data.participant.role).toBe('STUDENT');
   });
 });
 
@@ -482,7 +486,7 @@ describe('GATE-6: Kicked participant — all re-entry paths blocked', function (
 
     // Set up: add participant with wasKicked=true directly in DB
     await addParticipant(lcId, host.id,       'HOST',    false);
-    await addParticipant(lcId, kickedUser.id,  'STUDENT', true);  // wasKicked=true
+    await addParticipant(lcId, kickedUser.id,  'STUDENT', true);  // wasKicked=true, isActive=false (production kick sets isActive=false)
   }, 30000);
 
   test('kicked user POST /join → 403', async function () {
@@ -521,7 +525,7 @@ describe('GATE-6: Kicked participant — all re-entry paths blocked', function (
       .post('/api/v1/live-classes/' + lcId + '/join')
       .set('Authorization', jwt(freshUser));
     expect(res.status).toBe(200);
-    expect(res.body.data.role).toBe('STUDENT');
+    expect(res.body.data.participant.role).toBe('STUDENT');
   });
 });
 
@@ -598,6 +602,6 @@ describe('GATE-CREATE-PUBLIC: any auth user can create a PUBLIC stream', functio
       .set('Authorization', jwt(creator));
 
     expect(joinRes.status).toBe(200);
-    expect(joinRes.body.data.role).toBe('HOST');
+    expect(joinRes.body.data.participant.role).toBe('HOST');
   });
 });
