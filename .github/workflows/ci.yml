@@ -1,4 +1,4 @@
-name: HALQA CI
+﻿name: HALQA CI
 
 on:
   push:
@@ -291,7 +291,7 @@ jobs:
         # Steps: dump â†’ drop â†’ recreate â†’ restore â†’ count tables.
         run: |
           echo "=== Step 1: Create backup of test database ==="
-          mysqldump -u halqa -phalqa_test_pw halqa_test > /tmp/halqa_test_backup.sql
+          mysqldump --host=127.0.0.1 --port=3306 --protocol=TCP -u halqa -phalqa_test_pw halqa_test > /tmp/halqa_test_backup.sql
           echo "Backup size: $(wc -c < /tmp/halqa_test_backup.sql) bytes"
 
           echo "=== Step 2: Verify backup file is non-empty ==="
@@ -301,13 +301,13 @@ jobs:
           fi
 
           echo "=== Step 3: Drop and recreate the test database ==="
-          mysql -u halqa -phalqa_test_pw -e "DROP DATABASE halqa_test; CREATE DATABASE halqa_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+          mysql --host=127.0.0.1 --port=3306 --protocol=TCP -u halqa -phalqa_test_pw -e "DROP DATABASE halqa_test; CREATE DATABASE halqa_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
           echo "=== Step 4: Restore from backup ==="
-          mysql -u halqa -phalqa_test_pw halqa_test < /tmp/halqa_test_backup.sql
+          mysql --host=127.0.0.1 --port=3306 --protocol=TCP -u halqa -phalqa_test_pw halqa_test < /tmp/halqa_test_backup.sql
 
           echo "=== Step 5: Verify table count is non-zero ==="
-          TABLE_COUNT=$(mysql -u halqa -phalqa_test_pw halqa_test --skip-column-names -e \
+          TABLE_COUNT=$(mysql --host=127.0.0.1 --port=3306 --protocol=TCP -u halqa -phalqa_test_pw halqa_test --skip-column-names -e \
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='halqa_test' AND table_type='BASE TABLE';")
           echo "Tables restored: $TABLE_COUNT"
           if [ "$TABLE_COUNT" -lt "10" ]; then
