@@ -1468,12 +1468,12 @@ model WalletTransaction {
 //   COIN_PURCHASE— full gross inflow from a Stripe coin purchase
 model PlatformRevenueEntry {
   id          String   @id @default(uuid())
-  sourceType  String   @db.VarChar(50)  // GIFT | TIP | SUBSCRIPTION | COIN_PURCHASE
-  sourceId    String   @db.VarChar(36)  // ID of originating record
-  userId      String   @db.VarChar(36)  // user whose action generated the revenue
+  sourceType  String   @db.VarChar(50)  @map("source_type") // GIFT | TIP | SUBSCRIPTION | COIN_PURCHASE
+  sourceId    String   @db.VarChar(36)  @map("source_id") // ID of originating record
+  userId      String   @db.VarChar(36)  @map("user_id") // user whose action generated the revenue
   coins       Int                       // platform share in coins (positive)
-  usdEquiv    Decimal  @db.Decimal(10, 2) @default(0) // coins / 100
-  createdAt   DateTime @default(now())
+  usdEquiv    Decimal  @db.Decimal(10, 2) @default(0) @map("usd_equiv") // coins / 100
+  createdAt   DateTime @default(now()) @map("created_at")
 
   @@index([sourceType])
   @@index([userId])

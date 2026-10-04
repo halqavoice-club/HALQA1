@@ -224,6 +224,15 @@ describe('GET /explore', function() {
       update: {},
     });
 
+    // Invalidate the per-user explore feed cache so this request reflects
+    // the new follow relationship, not the cached result from earlier tests.
+    try {
+      var redis = require('../../utils/redis');
+      if (redis.isRedisReady()) {
+        await redis.getRedis().del('explore:feed:' + userMember.id);
+      }
+    } catch (e) { /* Redis not available — cache miss will occur naturally */ }
+
     var res = await request(app)
       .get('/api/v1/explore')
       .set('Authorization', tok(userMember));
