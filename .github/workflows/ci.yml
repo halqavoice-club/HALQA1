@@ -374,12 +374,27 @@ jobs:
       - name: Build backend Docker image
         run: docker build -t halqa-backend:test ./backend
 
+      - name: Pre-flight frontend build check (exposes full next build errors)
+        # Run next build directly on the runner before the Docker build.
+        # Docker swallows build output by default; this step shows the full
+        # Next.js compiler error so failures are visible in CI logs.
+        run: |
+          npm ci
+          npm run build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: 'https://api.halqa.app/api/v1'
+          NEXT_PUBLIC_SOCKET_URL: 'https://api.halqa.app'
+          NEXT_PUBLIC_LIVEKIT_URL: 'wss://placeholder.livekit.cloud'
+          DISABLE_PWA: 'true'
+          NODE_ENV: 'production'
+
       - name: Build frontend Docker image
         # NEXT_PUBLIC_* vars must be --build-arg, not env:.
         # Next.js inlines them at build time inside the container;
         # host env: vars do NOT reach the Docker build context.
         run: |
-          docker build -t halqa-frontend:test \
+          docker build --progress=plain -t halqa-frontend:test \
             --build-arg NEXT_PUBLIC_API_URL=https://api.halqa.app/api/v1 \
             --build-arg NEXT_PUBLIC_SOCKET_URL=https://api.halqa.app \
             --build-arg NEXT_PUBLIC_LIVEKIT_URL=wss://placeholder.livekit.cloud \
