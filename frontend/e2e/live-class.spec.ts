@@ -39,8 +39,9 @@ test.describe('Live Class', () => {
     await page.goto('/live-class');
 
     // Find the Create/New Class button
+    // The live-class page renders this as "Go Live" (Button text from page.tsx)
     const createBtn = page.locator(
-      'button:has-text("Create"), button:has-text("New Class"), button:has-text("Schedule"), button:has-text("+ Class")'
+      'button:has-text("Go Live"), button:has-text("Create"), button:has-text("New Class"), button:has-text("Schedule"), button:has-text("+ Class")'
     ).first();
 
     const createVisible = await createBtn.isVisible({ timeout: 8000 }).catch(() => false);
