@@ -37,7 +37,8 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
 # Create a non-root user — same security reason as backend Dockerfile
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
+# Debian-based image uses addgroup/adduser (not BusyBox -S flag used in Alpine)
+RUN groupadd appgroup && useradd -g appgroup appuser \
     && chown -R appuser:appgroup /app
 
 USER appuser
