@@ -335,11 +335,15 @@ jobs:
         run: docker build -t halqa-backend:test ./backend
 
       - name: Build frontend Docker image
-        run: docker build -t halqa-frontend:test ./frontend
-        env:
-          NEXT_PUBLIC_API_URL: 'https://api.halqa.app/api/v1'
-          NEXT_PUBLIC_SOCKET_URL: 'https://api.halqa.app'
-          NEXT_PUBLIC_LIVEKIT_URL: 'wss://placeholder.livekit.cloud'
+        # NEXT_PUBLIC_* vars must be passed as --build-arg, not env vars.
+        # They are inlined by the Next.js compiler at build time inside the
+        # container — host-level `env:` does NOT reach the Docker build context.
+        run: |
+          docker build -t halqa-frontend:test \
+            --build-arg NEXT_PUBLIC_API_URL=https://api.halqa.app/api/v1 \
+            --build-arg NEXT_PUBLIC_SOCKET_URL=https://api.halqa.app \
+            --build-arg NEXT_PUBLIC_LIVEKIT_URL=wss://placeholder.livekit.cloud \
+            ./frontend
 
   # â”€â”€â”€ Playwright E2E Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   # Runs after the Docker build succeeds (app must build cleanly before E2E).
@@ -419,6 +423,9 @@ jobs:
           LIVEKIT_API_SECRET: 'ci_placeholder_api_key_only'
           HEALTH_TOKEN: 'ci_health_token_e2e_tests_only_!!'
           METRICS_TOKEN: 'ci_metrics_token_e2e_tests_only_!!'
+          # Required by validateEnv() — payout subsystem checks this at startup.
+          # CI-only placeholder; no real payouts run in E2E tests.
+          PAYOUT_ENCRYPTION_KEY: 'ci_payout_encryption_key_32bytes_placeholder!!'
 
       - name: Wait for backend
         run: npx wait-on http://localhost:5000/health --timeout 30000
@@ -455,6 +462,12 @@ jobs:
         working-directory: frontend
         env:
           PLAYWRIGHT_BASE_URL: 'http://localhost:3000'
+          # Credentials must match a user created by seed.js.
+          # seed.js creates admin@halqa-academy.com / Admin@2024 as SCHOOL_ADMIN.
+          # The E2E auth spec falls back to these env vars; without them it would
+          # try test@halqa.app which does not exist in the seeded database.
+          E2E_TEST_EMAIL: 'admin@halqa-academy.com'
+          E2E_TEST_PASSWORD: 'Admin@2024'
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4

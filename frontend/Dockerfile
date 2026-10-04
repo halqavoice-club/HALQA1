@@ -7,6 +7,22 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+
+# Build-time public env vars — must be ARG so they are available during `npm run build`.
+# NEXT_PUBLIC_* vars are inlined by the Next.js compiler at build time; setting them
+# only at runtime (via Docker -e or Compose environment:) has NO effect on the built
+# bundle. They MUST be present when `next build` runs.
+# Defaults here match next.config.js fallbacks so the image still builds if args are
+# omitted (e.g. local `docker build` without --build-arg).
+ARG NEXT_PUBLIC_API_URL=http://localhost:5000/api/v1
+ARG NEXT_PUBLIC_SOCKET_URL=http://localhost:5000
+ARG NEXT_PUBLIC_LIVEKIT_URL=
+
+# Expose the ARGs as env vars so Next.js compiler picks them up
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_SOCKET_URL=$NEXT_PUBLIC_SOCKET_URL
+ENV NEXT_PUBLIC_LIVEKIT_URL=$NEXT_PUBLIC_LIVEKIT_URL
+
 RUN npm run build
 
 FROM node:20-alpine AS runner

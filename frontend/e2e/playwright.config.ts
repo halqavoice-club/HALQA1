@@ -21,8 +21,10 @@ export default defineConfig({
   reporter: process.env.CI ? 'github' : 'html',
 
   use: {
-    /* Base URL for all tests */
-    baseURL: process.env.E2E_BASE_URL || 'http://localhost:3000',
+    /* Base URL for all tests.
+     * Reads PLAYWRIGHT_BASE_URL (set by CI) with fallback to E2E_BASE_URL
+     * (legacy local usage) then to http://localhost:3000. */
+    baseURL: process.env.PLAYWRIGHT_BASE_URL || process.env.E2E_BASE_URL || 'http://localhost:3000',
     /* Collect traces on failure for debugging */
     trace: 'on-first-retry',
     /* Screenshot on failure */

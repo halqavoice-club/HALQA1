@@ -126,11 +126,16 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      # NEXT_PUBLIC_* vars must be set at BUILD time — the Next.js compiler
+      # inlines them into the bundle. Runtime environment: has no effect on
+      # already-built pages. Pass them here as build args so the Dockerfile
+      # ARG declarations pick them up during `npm run build`.
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL}
+        NEXT_PUBLIC_LIVEKIT_URL: ${LIVEKIT_URL}
     container_name: halqa-frontend
     restart: always
-    environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
-      NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL}
     depends_on:
       backend:
         condition: service_healthy
