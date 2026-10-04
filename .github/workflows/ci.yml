@@ -527,11 +527,14 @@ jobs:
         working-directory: frontend
         env:
           PLAYWRIGHT_BASE_URL: 'http://localhost:3000'
-          # Credentials match a user created by seed.js.
-          # student1@halqa.com is seeded via create (not upsert) so mustChangePassword
-          # is never set. Login routes to /feed (STUDENT default route).
+          # Credentials match users created by seed.js.
+          # student1@halqa.com (STUDENT) -- used by auth.spec, voice.spec, purchase.spec
           E2E_TEST_EMAIL: 'student1@halqa.com'
           E2E_TEST_PASSWORD: 'Student@2024'
+          # teacher@halqa-academy.com (TEACHER) -- used by live-class.spec
+          # seed.js creates this user; teachers can create live classes.
+          E2E_TEACHER_EMAIL: 'teacher@halqa-academy.com'
+          E2E_TEACHER_PASSWORD: 'Teacher@2024'
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4

@@ -17,7 +17,8 @@ test.describe('Live Class', () => {
       process.env.E2E_TEACHER_PASSWORD || process.env.E2E_TEST_PASSWORD || 'Test1234!'
     );
     await page.locator('button[type="submit"]').first().click();
-    await page.waitForURL(/dashboard|voice-club|home/, { timeout: 15000 });
+    // Wait until we leave /login — different roles land on different routes (/feed, /admin etc.)
+    await page.waitForURL(url => !url.pathname.includes('/login'), { timeout: 15000 });
   });
 
   test('live class list page loads', async ({ page }) => {
