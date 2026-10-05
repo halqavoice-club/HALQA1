@@ -33,18 +33,29 @@ const eduMember = [
 ];
 
 // ── Staff: teacher + admin roles ──────────────────────────────────────────────
+// P3-001 FIX: Removed 'SUPER_ADMIN' from requireSchoolRole arrays.
+// The Prisma schema states: "SUPER_ADMIN is NOT a valid school membership role."
+// The DB CHECK constraint chk_membership_role (migration 20260821) enforces this.
+// requireSchoolMember() already blocks platform SUPER_ADMIN before this check runs,
+// so including 'SUPER_ADMIN' here is dead code and a defense-in-depth gap.
 const eduStaff = [
   requireSchoolMember(),
-  requireSchoolRole('TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'),
+  requireSchoolRole('TEACHER', 'SCHOOL_ADMIN'),
 ];
 
-// ── Admin: school admin + super admin only ────────────────────────────────────
+// ── Admin: school admin only ────────────────────────────────────────────────────
+// P3-001 FIX: Removed 'SUPER_ADMIN' — same reasoning as eduStaff above.
 const eduAdmin = [
   requireSchoolMember(),
-  requireSchoolRole('SCHOOL_ADMIN', 'SUPER_ADMIN'),
+  requireSchoolRole('SCHOOL_ADMIN'),
 ];
 
-// ── Super admin only ──────────────────────────────────────────────────────────
+// ── Super admin only (school-scoped — requires SUPER_ADMIN SchoolMembership) ───
+// NOTE: This is kept for completeness but should rarely be used.
+// Platform SUPER_ADMIN (User.role = 'SUPER_ADMIN') is blocked by requireSchoolMember()
+// and cannot reach requireSchoolRole(). This composite only passes if a user has
+// a SchoolMembership with role = 'SUPER_ADMIN', which the DB CHECK constraint prevents.
+// In practice, use authorize('SUPER_ADMIN') for platform admin operations instead.
 const eduSuperAdmin = [
   requireSchoolMember(),
   requireSchoolRole('SUPER_ADMIN'),
