@@ -10,7 +10,7 @@
  */
 
 import React from 'react'
-import type { LayoutMode } from '../../../../../src/lib/layout/layoutTypes'
+import type { LayoutMode } from '@/lib/layout/layoutTypes'
 
 export interface LayoutControlBarProps {
   currentMode: LayoutMode

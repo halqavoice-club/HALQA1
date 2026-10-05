@@ -50,8 +50,14 @@ async function initialize() {
     const { BatchSpanProcessor } = require('@opentelemetry/sdk-trace-base');
     const { HttpInstrumentation } = require('@opentelemetry/instrumentation-http');
     const { ExpressInstrumentation } = require('@opentelemetry/instrumentation-express');
-    const { PrismaInstrumentation } = require('@opentelemetry/instrumentation-prisma');
-    const { RedisInstrumentation } = require('@opentelemetry/instrumentation-redis');
+    const { PrismaInstrumentation } = (() => {
+      try { return require('@opentelemetry/instrumentation-prisma'); }
+      catch { return { PrismaInstrumentation: function() { return {}; } }; }
+    })();
+    const { RedisInstrumentation } = (() => {
+      try { return require('@opentelemetry/instrumentation-redis'); }
+      catch { return { RedisInstrumentation: function() { return {}; } }; }
+    })();
     const { registerInstrumentations } = require('@opentelemetry/instrumentation');
 
     // Create tracer provider

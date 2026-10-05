@@ -29,6 +29,15 @@
 const Redis  = require('ioredis');
 const logger = require('./logger');
 
+// Load Prometheus at module level to avoid dynamic require in async callback
+// which can fail after Jest teardown
+let prom = null;
+try {
+  prom = require('./prometheus');
+} catch {
+  // Prometheus may not be available in all environments
+}
+
 // ─── Module-level client references ──────────────────────────────────────────
 let pubClient   = null;
 let subClient   = null;
@@ -236,19 +245,29 @@ function isRedisReady() {
 // Pings Redis every 30 s and logs latency. Detects silent connection drops
 // before they affect user requests.
 let _pingTimer = null;
+let _isShuttingDown = false;
 
 function startRedisPing() {
   if (_pingTimer) return;
   _pingTimer = setInterval(async () => {
-    if (!cacheClient) return;
+    // Guard against execution after shutdown begins
+    if (_isShuttingDown || !cacheClient) return;
+
+    // Wrap entire callback in try-catch to suppress ALL errors during Jest teardown
     try {
       const t = Date.now();
       await cacheClient.ping();
       const latencyMs = Date.now() - t;
 
-      // Record in Prometheus
-      const prom = require('./prometheus');
-      prom.redisPingDurationMs.observe(latencyMs);
+      // Record in Prometheus (module-level require to avoid Jest teardown issue)
+      // Wrap in try-catch to suppress errors during Jest teardown
+      try {
+        if (prom && prom.redisPingDurationMs) {
+          prom.redisPingDurationMs.observe(latencyMs);
+        }
+      } catch {
+        // Ignore prometheus errors during shutdown
+      }
 
       if (latencyMs > 100) {
         logger.warn(`[redis:cache] High ping latency: ${latencyMs}ms`);
@@ -256,10 +275,20 @@ function startRedisPing() {
         logger.debug(`[redis:cache] Ping OK (${latencyMs}ms)`);
       }
     } catch (err) {
-      logger.error(`[redis:cache] Ping failed: ${err.message}`);
+      // Suppress ALL errors during shutdown to prevent Jest teardown failures
+      if (!_isShuttingDown) {
+        logger.error(`[redis:cache] Ping failed: ${err.message}`);
+      }
     }
   }, 30_000);
   _pingTimer.unref();
+}
+
+function stopRedisPing() {
+  if (_pingTimer) {
+    clearInterval(_pingTimer);
+    _pingTimer = null;
+  }
 }
 
 // ─── Cache API — Redis-only ───────────────────────────────────────────────────
@@ -300,12 +329,12 @@ async function getCache(key) {
     const raw = await cacheClient.get(key);
     if (raw === null) {
       logger.debug(`[cache] MISS ${key}`);
-      // Prometheus counter (lazy require avoids circular dependency at module load)
-      try { require('./prometheus').cacheMissesTotal.inc(); } catch {}
+      // Prometheus counter (use module-level require to avoid Jest teardown issue)
+      try { if (prom && prom.cacheMissesTotal) prom.cacheMissesTotal.inc(); } catch {}
       return null;
     }
     logger.debug(`[cache] HIT  ${key}`);
-    try { require('./prometheus').cacheHitsTotal.inc(); } catch {}
+    try { if (prom && prom.cacheHitsTotal) prom.cacheHitsTotal.inc(); } catch {}
     return JSON.parse(raw);
   } catch (err) {
     logger.error(`[cache] GET failed for "${key}": ${err.message}`);
@@ -368,6 +397,15 @@ function getCacheStats() {
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
 async function disconnectRedis() {
+  // Set shutdown flag FIRST to prevent in-flight ping callbacks from executing
+  _isShuttingDown = true;
+
+  // Then stop the timer to prevent future callbacks
+  stopRedisPing();
+
+  // Set cacheClient to null as additional guard
+  cacheClient = null;
+
   for (const [name, client] of [
     ['pub',   pubClient],
     ['sub',   subClient],
@@ -382,7 +420,7 @@ async function disconnectRedis() {
       }
     }
   }
-  pubClient = subClient = cacheClient = null;
+  pubClient = subClient = null;
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────────

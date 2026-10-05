@@ -2,7 +2,11 @@ const withPWA = require('next-pwa')({
   dest: 'public',
   register: true,
   skipWaiting: true,
-  disable: process.env.NODE_ENV === 'development',
+  // Disable PWA in development AND in Docker/CI builds (DISABLE_PWA=true).
+  // next-pwa 5.x has a known incompatibility with output: 'standalone' when
+  // running inside a Docker container — the CopyPlugin fails to resolve the
+  // correct output paths. Disable it at build time in those environments.
+  disable: process.env.NODE_ENV === 'development' || process.env.DISABLE_PWA === 'true',
   buildExcludes: ['middleware-manifest.json'],
   // REQ-14.6: Serve offline fallback page when the document request fails
   fallbacks: {

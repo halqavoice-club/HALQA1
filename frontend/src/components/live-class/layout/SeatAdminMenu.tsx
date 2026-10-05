@@ -10,7 +10,7 @@
  */
 
 import React, { useEffect, useRef } from 'react'
-import type { SeatData } from '../../../../../src/lib/layout/layoutTypes'
+import type { SeatData } from '@/lib/layout/layoutTypes'
 
 export interface SeatAdminMenuProps {
   seat: SeatData

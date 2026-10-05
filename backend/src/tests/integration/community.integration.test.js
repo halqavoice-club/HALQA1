@@ -51,6 +51,10 @@ let owner, member1, member2, suspended;
 let publicComm, privateComm, inviteComm;
 
 beforeAll(async function() {
+  // PORT=0 lets the OS assign an ephemeral port — prevents startServer()
+  // from failing on a port conflict and calling process.exit(1) when this
+  // suite runs after another suite that already holds the default port.
+  process.env.PORT = '0';
   app = require('../../app');
 
   [owner, member1, member2, suspended] = await Promise.all([
@@ -62,6 +66,13 @@ beforeAll(async function() {
 }, 60000);
 
 afterAll(async function() {
+  // S-01: Stop the scheduler started by startServer() so cron jobs do not
+  // fire dynamic require() calls after Jest tears down the module sandbox.
+  try {
+    const jobScheduler = require('../../utils/jobScheduler');
+    jobScheduler.shutdown();
+  } catch { /* non-fatal */ }
+
   const emails = [owner, member1, member2, suspended]
     .filter(Boolean).map(u => u.email);
 
@@ -319,8 +330,18 @@ describe('Ban and Unban', function() {
   test('cannot ban the community owner', async function() {
     var res = await request(app)
       .post('/api/v1/communities/' + publicComm.id + '/members/' + owner.id + '/ban')
-      .set('Authorization', tok(owner));
+      .set('Authorization', tok(owner))
+      .send({ reason: 'test' });
+    // C-01: Production banMember() explicitly returns 400 when target is OWNER
+    // (explicit guard: `if (target?.role === 'OWNER') return 400`).
+    // The contract: OWNER cannot be banned by anyone, including themselves.
     expect(res.status).toBe(400);
+    // Verify OWNER is still a member and still OWNER
+    const membership = await prisma.communityMember.findUnique({
+      where: { communityId_userId: { communityId: publicComm.id, userId: owner.id } }
+    });
+    expect(membership).not.toBeNull();
+    expect(membership.role).toBe('OWNER');
   });
 });
 
@@ -849,7 +870,9 @@ describe('Role security — privilege escalation', function() {
     var res = await request(app)
       .delete('/api/v1/communities/' + roleComm.id + '/members/' + roleOwner.id)
       .set('Authorization', tok(roleAdmin));
-    expect(res.status).toBe(400);
+    // C-02: KICK_HIERARCHY check returns 403 for OWNER target
+    // (OWNER is not in the allowed kick targets list).
+    expect(res.status).toBe(403);
   });
 
   test('OWNER cannot be banned', async function() {

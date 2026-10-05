@@ -1,4 +1,35 @@
 'use strict';
+
+// ─── Mock livekit-server-sdk ──────────────────────────────────────────────────
+// livekit-server-sdk v2.x is ESM-only. In CI the CJS require() returns an
+// empty object, making RoomServiceClient undefined and crashing app boot.
+// These integration tests do not need real LiveKit — the voice controller
+// already handles a null getLivekitRoomService() return gracefully (503).
+jest.mock('livekit-server-sdk', () => ({
+  AccessToken: jest.fn().mockImplementation(() => ({
+    addGrant: jest.fn(),
+    toJwt:    jest.fn().mockResolvedValue('mock-livekit-jwt'),
+  })),
+  RoomServiceClient: jest.fn().mockImplementation(() => ({
+    removeParticipant:  jest.fn().mockResolvedValue({}),
+    updateParticipant:  jest.fn().mockResolvedValue({}),
+  })),
+  VideoGrant: jest.fn(),
+}));
+
+// ─── Mock optional OpenTelemetry instrumentation packages ────────────────────
+// @opentelemetry/instrumentation-prisma is an optional dev dependency that
+// is not installed in CI. Without this mock, tracing.js throws MODULE_NOT_FOUND
+// inside its try/catch, but Jest's module resolver may propagate it as a fatal
+// error in the test sandbox before the catch block executes.
+jest.mock('@opentelemetry/instrumentation-prisma', () => ({
+  PrismaInstrumentation: jest.fn().mockImplementation(() => ({})),
+}), { virtual: true });
+
+jest.mock('@opentelemetry/instrumentation-redis', () => ({
+  RedisInstrumentation: jest.fn().mockImplementation(() => ({})),
+}), { virtual: true });
+
 /**
  * Voice Room Integration Tests — real MySQL DB
  *
@@ -50,6 +81,9 @@ let app;
 let host, memberA, memberB, suspended;
 
 beforeAll(async function () {
+  // PORT=0 lets the OS assign an ephemeral port — prevents startServer()
+  // from failing on a port conflict and calling process.exit(1).
+  process.env.PORT = '0';
   app = require('../../app');
   [host, memberA, memberB, suspended] = await Promise.all([
     createUser({ role: 'MEMBER', schoolId: null }),
@@ -60,6 +94,16 @@ beforeAll(async function () {
 }, 60000);
 
 afterAll(async function () {
+  // RC-04: Stop the scheduler started by startServer() so cron jobs do not
+  // fire dynamic require() calls after Jest tears down the module sandbox.
+  // jobScheduler.shutdown() calls cancelJob() on every registered task,
+  // which calls job.task.stop() on cron tasks and clearInterval/clearTimeout
+  // on interval/delayed tasks — then clears the internal jobs Map.
+  try {
+    const jobScheduler = require('../../utils/jobScheduler');
+    jobScheduler.shutdown();
+  } catch { /* non-fatal — if scheduler was never initialized, ignore */ }
+
   const emails = [host, memberA, memberB, suspended].filter(Boolean).map(u => u.email);
   try {
     await prisma.voiceRoom.deleteMany({ where: { hostId: { in: [host?.id].filter(Boolean) } } }).catch(() => {});
@@ -100,6 +144,11 @@ describe('Voice — auth gates', function () {
 });
 
 // ─── ROOM LIFECYCLE ───────────────────────────────────────────────────────────
+// CONTRACT (current production):
+//   - MEMBER/HOST calling END → 403 ("Rooms are permanent...")
+//   - Only SUPER_ADMIN can archive (end) a room
+//   - ENDED room join → 400 "Room already archived"
+//   - Non-authorized user END → 403 (same as host)
 describe('Voice — room lifecycle', function () {
   let room;
 
@@ -123,28 +172,64 @@ describe('Voice — room lifecycle', function () {
     expect(res.status).toBe(200);
   });
 
-  test('host can end the room', async function () {
-    const res = await request(app)
+  // RC-01: MEMBER/HOST cannot end a room — rooms are permanent.
+  // Only SUPER_ADMIN can archive (end) a room.
+  // This test verifies the security boundary: host is denied, room remains LIVE.
+  test('host attempting END → 403, room remains LIVE (permanent-room contract)', async function () {
+    const endRes = await request(app)
       .patch(`/api/v1/voice/${room.id}/end`)
       .set('Authorization', tok(host));
-    expect(res.status).toBe(200);
+    expect(endRes.status).toBe(403);
+    expect(endRes.body.success).toBe(false);
+    // Room must still be LIVE — the 403 must not have side-effected room state
+    const dbRoom = await prisma.voiceRoom.findUnique({
+      where: { id: room.id },
+      select: { status: true }
+    });
+    expect(dbRoom.status).toBe('LIVE');
   });
 
-  test('cannot join an ENDED room', async function () {
+  // RC-02 / Phase 4: Test ENDED-room join without calling the host END endpoint.
+  // We set status to ENDED directly in the DB (legitimate persisted state)
+  // then verify the real join endpoint returns 400.
+  test('cannot join an ENDED room — join returns 400 "archived"', async function () {
+    // Set room to ENDED directly in DB — this is a legitimate persisted production state.
+    // We do NOT call the end API (host is not authorized) but the DB state is valid.
+    await prisma.voiceRoom.update({
+      where: { id: room.id },
+      data: { status: 'ENDED', endedAt: new Date() }
+    });
     const res = await joinRoom(room.id, tok(memberB));
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/ended/i);
+    expect(res.body.message).toMatch(/archived|ended/i);
+    // cleanup — room is now ENDED, direct delete is safe
+    await prisma.voiceRoom.delete({ where: { id: room.id } }).catch(() => {});
   });
 
-  test('non-host cannot end a room', async function () {
-    const r2 = await createRoom(tok(host));
+  // RC-02 / Phase 5: Non-authorized user END test uses its own isolated fixture
+  // so it cannot be affected by the host's active room state from prior tests.
+  test('non-authorized user END → 403, room remains unchanged', async function () {
+    // Isolated fixture: fresh user creates and joins their own room
+    const isolatedHost = await createUser({ role: 'MEMBER', schoolId: null });
+    const r2 = await createRoom(tok(isolatedHost));
     expect(r2.status).toBe(201);
+    const r2Id = r2.body.data.id;
+
     const endRes = await request(app)
-      .patch(`/api/v1/voice/${r2.body.data.id}/end`)
+      .patch(`/api/v1/voice/${r2Id}/end`)
       .set('Authorization', tok(memberA));
     expect(endRes.status).toBe(403);
-    // cleanup
-    await prisma.voiceRoom.delete({ where: { id: r2.body.data.id } }).catch(() => {});
+
+    // Room must still exist and not be ENDED
+    const dbRoom = await prisma.voiceRoom.findUnique({
+      where: { id: r2Id },
+      select: { status: true }
+    });
+    expect(dbRoom.status).toBe('LIVE');
+
+    // Cleanup
+    await prisma.voiceRoom.delete({ where: { id: r2Id } }).catch(() => {});
+    await prisma.user.delete({ where: { id: isolatedHost.id } }).catch(() => {});
   });
 });
 
@@ -232,7 +317,21 @@ describe('Voice — kick and ban', function () {
   }, 30000);
 
   afterAll(async function () {
-    if (kickRoom) await prisma.voiceRoom.delete({ where: { id: kickRoom.id } }).catch(() => {});
+    // V-04 FIX: Leave the room via the application API before deleting it.
+    // Without this, the global `host` participant row remains isActive=true
+    // (until the cascade delete) and the one-active-room rule blocks
+    // createRoom() in subsequent suites that reuse `host`.
+    if (kickRoom) {
+      await request(app)
+        .post(`/api/v1/voice/${kickRoom.id}/leave`)
+        .set('Authorization', tok(host))
+        .catch(() => {});
+      await request(app)
+        .post(`/api/v1/voice/${kickRoom.id}/leave`)
+        .set('Authorization', tok(memberB))
+        .catch(() => {});
+      await prisma.voiceRoom.delete({ where: { id: kickRoom.id } }).catch(() => {});
+    }
   }, 20000);
 
   test('non-moderator cannot kick', async function () {
@@ -249,9 +348,14 @@ describe('Voice — kick and ban', function () {
     expect(res.status).toBe(200);
   });
 
-  test('kicked user CAN rejoin (no persistent ban from kick)', async function () {
+  test('kicked user CANNOT rejoin the same room session (PH24C-003 wasKicked)', async function () {
+    // PH24C-003: wasKicked=true is set atomically when a user is kicked.
+    // joinRoom() reconnect path checks wasKicked and returns 403.
+    // This is session-scoped kick protection — the user cannot silently re-enter.
     const res = await joinRoom(kickRoom.id, tok(memberA));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
+    // User-facing message confirms removal and rejoin block
+    expect(res.body.message).toMatch(/removed.*cannot rejoin/i);
   });
 
   test('non-moderator cannot ban', async function () {
@@ -308,9 +412,27 @@ describe('Voice — kick and ban', function () {
     expect(record?.isBanned).toBe(false);
   });
 
-  test('unbanned user CAN rejoin', async function () {
-    const res = await joinRoom(kickRoom.id, tok(memberA));
-    expect(res.status).toBe(200);
+  test('unban clears membership ban (isBanned=false) but does NOT reset PH24C kick state', async function () {
+    // unbanParticipant only updates VoiceRoomMember.isBanned=false.
+    // voiceParticipant.wasKicked is NOT reset by unban.
+    // Therefore a user who was kicked and then unbanned still cannot rejoin
+    // the same session — wasKicked=true is still in the participant row.
+    // This is the authoritative PH24C-003 contract.
+    const unbanRes = await request(app)
+      .delete(`/api/v1/voice/${kickRoom.id}/ban/${memberA.id}`)
+      .set('Authorization', tok(host));
+    expect(unbanRes.status).toBe(200);
+
+    // Verify isBanned is now false in VoiceRoomMember
+    const record = await prisma.voiceRoomMember.findUnique({
+      where: { roomId_userId: { roomId: kickRoom.id, userId: memberA.id } }
+    });
+    expect(record?.isBanned).toBe(false);
+
+    // Rejoin is still blocked because wasKicked=true was NOT reset by unban
+    const rejoinRes = await joinRoom(kickRoom.id, tok(memberA));
+    expect(rejoinRes.status).toBe(403);
+    expect(rejoinRes.body.message).toMatch(/removed.*cannot rejoin/i);
   });
 
   test('cannot ban the host', async function () {
@@ -394,9 +516,12 @@ describe('Voice — speaker queue', function () {
     expect(p?.handRaised).toBe(false);
   });
 
-  test('race condition: approving already-promoted speaker returns 409', async function () {
-    // memberA is already SPEAKER — try to approve them again via queue (simulate race)
-    // Inject a fake handRaised=true directly in DB to simulate stale queue state
+  test('approving already-on-stage speaker returns 200 (idempotent — user is already promoted)', async function () {
+    // Production contract: _promoteUser catches internal ALREADY_ON_STAGE (409)
+    // and returns HTTP 200 — the user is already where they should be.
+    // The test verifies idempotent approval behavior, not an error path.
+    // memberA is already SPEAKER — inject stale handRaised=true to simulate a
+    // race where the host's approve arrives after the user was already promoted.
     await prisma.voiceParticipant.update({
       where: { roomId_userId: { roomId: qRoom.id, userId: memberA.id } },
       data: { handRaised: true, handRaisedAt: new Date() }
@@ -405,8 +530,8 @@ describe('Voice — speaker queue', function () {
     const res = await request(app)
       .post(`/api/v1/voice/${qRoom.id}/queue/approve/${memberA.id}`)
       .set('Authorization', tok(host));
-    // Should get 409 (already SPEAKER) from the transaction role check
-    expect([409, 400]).toContain(res.status);
+    // _promoteUser: ALREADY_ON_STAGE is caught internally, returns 200
+    expect(res.status).toBe(200);
 
     // Cleanup
     await prisma.voiceParticipant.update({
@@ -479,7 +604,21 @@ describe('Voice — LiveKit token', function () {
   }, 30000);
 
   afterAll(async function () {
-    if (lkRoom) await prisma.voiceRoom.delete({ where: { id: lkRoom.id } }).catch(() => {});
+    // V-04 FIX: Leave the room via the application API before deleting it.
+    // Without this, the global `host` and `memberA` participant rows remain
+    // isActive=true (until the cascade delete) and the one-active-room rule
+    // blocks createRoom() in subsequent suites that reuse `host` or `memberA`.
+    if (lkRoom) {
+      await request(app)
+        .post(`/api/v1/voice/${lkRoom.id}/leave`)
+        .set('Authorization', tok(host))
+        .catch(() => {});
+      await request(app)
+        .post(`/api/v1/voice/${lkRoom.id}/leave`)
+        .set('Authorization', tok(memberA))
+        .catch(() => {});
+      await prisma.voiceRoom.delete({ where: { id: lkRoom.id } }).catch(() => {});
+    }
   }, 20000);
 
   test('active participant gets a LiveKit token', async function () {
@@ -503,17 +642,34 @@ describe('Voice — LiveKit token', function () {
   });
 
   test('ended room token request → 400', async function () {
-    // Create a separate ended room
-    const r = await createRoom(tok(host));
-    const rId = r.body.data.id;
-    await joinRoom(rId, tok(memberA));
-    await request(app).patch(`/api/v1/voice/${rId}/end`).set('Authorization', tok(host));
+    // V-04-E FIX: Create this room with a dedicated fresh user rather than
+    // reusing `host`. The one-active-room rule blocks a second createRoom()
+    // call for `host` while lkRoom (created in beforeAll) is still LIVE.
+    // Using a dedicated user makes this test fully self-contained and avoids
+    // the cross-test state dependency that caused the TypeError at line 647.
+    const endedRoomHost = await createUser({ role: 'MEMBER', schoolId: null });
+    const endedRoomGuest = await createUser({ role: 'MEMBER', schoolId: null });
+    try {
+      const r = await createRoom(tok(endedRoomHost));
+      expect(r.body.data).toBeDefined(); // guard: creation must succeed
+      const rId = r.body.data.id;
+      await joinRoom(rId, tok(endedRoomGuest));
+      // Manually set room to ENDED status (bypass endRoom API which requires SUPER_ADMIN)
+      await prisma.voiceRoom.update({
+        where: { id: rId },
+        data: { status: 'ENDED', endedAt: new Date() }
+      });
 
-    const res = await request(app)
-      .post(`/api/v1/voice/${rId}/livekit-token`)
-      .set('Authorization', tok(memberA));
-    expect(res.status).toBe(400);
-    await prisma.voiceRoom.delete({ where: { id: rId } }).catch(() => {});
+      const res = await request(app)
+        .post(`/api/v1/voice/${rId}/livekit-token`)
+        .set('Authorization', tok(endedRoomGuest));
+      expect(res.status).toBe(400);
+      await prisma.voiceRoom.delete({ where: { id: rId } }).catch(() => {});
+    } finally {
+      // Always clean up dedicated users even if assertions fail
+      await prisma.user.delete({ where: { id: endedRoomHost.id } }).catch(() => {});
+      await prisma.user.delete({ where: { id: endedRoomGuest.id } }).catch(() => {});
+    }
   });
 });
 
@@ -1469,23 +1625,21 @@ describe('Permanent room lifecycle — IDLE rooms remain joinable', function () 
     var endRoomId = r.body.data.id;
     await joinRoom(endRoomId, tok(plUser));
 
-    // Test 11: endRoom changes status to ENDED
+    // Test 11: endRoom requires SUPER_ADMIN (permanent-room contract)
+    // MEMBER/HOST attempting to end a permanent room receives 403
     var endRes = await request(app)
       .patch('/api/v1/voice/' + endRoomId + '/end')
       .set('Authorization', tok(plHost));
-    expect(endRes.status).toBe(200);
+    expect(endRes.status).toBe(403);
+    expect(endRes.body.message).toMatch(/permanent|platform admin/i);
 
+    // Verify room is still LIVE (not ended) after failed endRoom attempt
     var dbRoom = await prisma.voiceRoom.findUnique({
       where: { id: endRoomId },
       select: { status: true, endedAt: true }
     });
-    expect(dbRoom.status).toBe('ENDED');           // test 11
-    expect(dbRoom.endedAt).not.toBeNull();
-
-    // Test 12: ENDED room is unjoinable
-    var rejoinRes = await joinRoom(endRoomId, tok(plUser));
-    expect(rejoinRes.status).toBe(400);
-    expect(rejoinRes.body.message).toMatch(/ended/i); // test 12
+    expect(dbRoom.status).toBe('LIVE');
+    expect(dbRoom.endedAt).toBeNull();
 
     // Cleanup
     await prisma.voiceRoom.delete({ where: { id: endRoomId } }).catch(function () {});
@@ -1555,5 +1709,84 @@ describe('Permanent room lifecycle — IDLE rooms remain joinable', function () 
       }).catch(function () {});
       await prisma.user.delete({ where: { id: bannedUser.id } }).catch(function () {});
     }
+  });
+});
+
+// ─── ONE-ACTIVE-ROOM RULE ─────────────────────────────────────────────────────
+// Product invariant: a user can only be in ONE active voice room at a time.
+// Attempting to join a second room while active in a first must return 409
+// VOICE_ROOM_ALREADY_ACTIVE. Room A must remain completely untouched.
+//
+// IMPORTANT: Uses its own independent hostA/hostB users — NOT the shared global
+// `host` — so that room state from this suite cannot bleed into other suites.
+describe('Voice — one-active-room rule (INT-CI-001)', function () {
+  var roomA, roomB, activeUser, hostA, hostB;
+
+  beforeAll(async function () {
+    activeUser = await createUser({ role: 'MEMBER', schoolId: null });
+    hostA      = await createUser({ role: 'MEMBER', schoolId: null });
+    hostB      = await createUser({ role: 'MEMBER', schoolId: null });
+
+    // Room A: created by hostA, activeUser joins and is active
+    var resA = await createRoom(tok(hostA));
+    expect(resA.status).toBe(201);
+    roomA = resA.body.data;
+    var joinA = await joinRoom(roomA.id, tok(activeUser));
+    expect(joinA.status).toBe(200);
+
+    // Room B: created by hostB — activeUser will attempt to join this
+    var resB = await createRoom(tok(hostB));
+    expect(resB.status).toBe(201);
+    roomB = resB.body.data;
+  }, 60000);
+
+  afterAll(async function () {
+    // End both rooms so hostA/hostB are not left as active participants
+    if (roomA) {
+      await request(app).patch('/api/v1/voice/' + roomA.id + '/end').set('Authorization', tok(hostA)).catch(function () {});
+      await prisma.voiceRoom.delete({ where: { id: roomA.id } }).catch(function () {});
+    }
+    if (roomB) {
+      await request(app).patch('/api/v1/voice/' + roomB.id + '/end').set('Authorization', tok(hostB)).catch(function () {});
+      await prisma.voiceRoom.delete({ where: { id: roomB.id } }).catch(function () {});
+    }
+    if (activeUser) await prisma.user.delete({ where: { id: activeUser.id } }).catch(function () {});
+    if (hostA)      await prisma.user.delete({ where: { id: hostA.id } }).catch(function () {});
+    if (hostB)      await prisma.user.delete({ where: { id: hostB.id } }).catch(function () {});
+  }, 30000);
+
+  test('active user in room A gets 409 when attempting to join room B', async function () {
+    var res = await joinRoom(roomB.id, tok(activeUser));
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/VOICE_ROOM_ALREADY_ACTIVE|already.*active|leave.*existing/i);
+  });
+
+  test('room A participant record is NOT deactivated after the rejected join', async function () {
+    var participant = await prisma.voiceParticipant.findUnique({
+      where: { roomId_userId: { roomId: roomA.id, userId: activeUser.id } }
+    });
+    // The participant in room A must still be active — the rejection must be a pure return,
+    // not a side-effect that clears room A state.
+    expect(participant).not.toBeNull();
+    expect(participant.isActive).toBe(true);
+  });
+
+  test('room A is still LIVE after the rejected join attempt', async function () {
+    var dbRoom = await prisma.voiceRoom.findUnique({
+      where: { id: roomA.id }, select: { status: true }
+    });
+    expect(dbRoom.status).toBe('LIVE');
+  });
+
+  test('after leaving room A, user can join room B successfully', async function () {
+    // Leave room A first
+    var leaveRes = await request(app)
+      .post('/api/v1/voice/' + roomA.id + '/leave')
+      .set('Authorization', tok(activeUser));
+    expect(leaveRes.status).toBe(200);
+
+    // Now room B join must succeed
+    var joinRes = await joinRoom(roomB.id, tok(activeUser));
+    expect(joinRes.status).toBe(200);
   });
 });

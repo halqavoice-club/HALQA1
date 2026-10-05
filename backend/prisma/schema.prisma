@@ -187,8 +187,8 @@ model School {
   schoolBuses SchoolBus[] @relation("SchoolBuses")
   busRoutes BusRoute[] @relation("BusRoutes")
   drivers Driver[] @relation("Drivers")
-  // Practice Quiz back-relation — uncomment when Quiz model is added
-  // quizzes Quiz[]
+  // Practice Quiz back-relations
+  quizzes Quiz[]
 
   @@index([slug])
   @@map("schools")
@@ -526,8 +526,8 @@ model Class {
   assignmentSubmissions AssignmentSubmission[] @relation("AssignmentSubmissions")
   // Phase C-3: Exam Submissions
   examSubmissions ExamSubmission[] @relation("ExamSubmissions")
-  // Practice Quiz back-relation — uncomment when Quiz model is added
-  // quizzes Quiz[]
+  // Practice Quiz back-relations
+  quizzes Quiz[]
 
   @@index([schoolId])
   @@index([termId])
@@ -572,8 +572,8 @@ model Student {
   examSubmissions ExamSubmission[]
   // Phase C-5: Transport
   busAssignments BusAssignment[]
-  // Practice Quiz back-relation — uncomment when QuizAttempt model is added
-  // quizAttempts QuizAttempt[]
+  // Practice Quiz back-relations
+  quizAttempts QuizAttempt[]
 
   @@unique([schoolId, studentId])
   @@index([schoolId])
@@ -607,8 +607,8 @@ model Teacher {
   audioCourses    AudioCourse[]
   audioLessons    AudioLesson[]
   liveClasses     LiveClass[]
-  // Practice Quiz back-relation — uncomment when Quiz model is added
-  // quizzes         Quiz[]
+  // Practice Quiz back-relations
+  quizzes         Quiz[]
 
   @@index([schoolId])
   @@index([schoolId, deletedAt]) // active teachers filter
@@ -1468,12 +1468,12 @@ model WalletTransaction {
 //   COIN_PURCHASE— full gross inflow from a Stripe coin purchase
 model PlatformRevenueEntry {
   id          String   @id @default(uuid())
-  sourceType  String   @db.VarChar(50)  // GIFT | TIP | SUBSCRIPTION | COIN_PURCHASE
-  sourceId    String   @db.VarChar(36)  // ID of originating record
-  userId      String   @db.VarChar(36)  // user whose action generated the revenue
+  sourceType  String   @db.VarChar(50)  @map("source_type") // GIFT | TIP | SUBSCRIPTION | COIN_PURCHASE
+  sourceId    String   @db.VarChar(36)  @map("source_id") // ID of originating record
+  userId      String   @db.VarChar(36)  @map("user_id") // user whose action generated the revenue
   coins       Int                       // platform share in coins (positive)
-  usdEquiv    Decimal  @db.Decimal(10, 2) @default(0) // coins / 100
-  createdAt   DateTime @default(now())
+  usdEquiv    Decimal  @db.Decimal(10, 2) @default(0) @map("usd_equiv") // coins / 100
+  createdAt   DateTime @default(now()) @map("created_at")
 
   @@index([sourceType])
   @@index([userId])
@@ -3957,3 +3957,111 @@ model PKAnalyticsEvent {
 }
 
 // ─── END PK SYSTEM ────────────────────────────────────────────────────────────
+
+// ─── PRACTICE QUIZ SYSTEM ──────────────────────────────────────────────────────
+// Migration: 20260905_add_practice_quiz (tables already committed)
+// Models restored here to match the existing migration SQL.
+// Feature status: V1-DEFERRED — tables exist, backend controller/routes
+// are NOT yet implemented. Models restored to eliminate schema/migration drift.
+// Back-relations on Class, Teacher, Student are uncommented above.
+
+model Quiz {
+  id           String   @id @default(uuid())
+  schoolId     String
+  school       School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classId      String
+  class        Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacherId    String
+  teacher      Teacher  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  title        String   @db.VarChar(200)
+  description  String?  @db.Text
+  status       String   @default("DRAFT") @db.VarChar(20)
+  timeLimitMin Int?
+  openAt       DateTime?
+  closeAt      DateTime?
+  deletedAt    DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  questions    QuizQuestion[]
+  attempts     QuizAttempt[]
+
+  @@index([schoolId])
+  @@index([classId])
+  @@index([teacherId])
+  @@index([classId, status])
+  @@map("quizzes")
+}
+
+model QuizQuestion {
+  id           String   @id @default(uuid())
+  quizId       String
+  quiz         Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  position     Int
+  questionType String   @db.VarChar(30)
+  prompt       String   @db.Text
+  modelAnswer  String?  @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  options      QuizOption[]
+  answers      QuizAnswer[]
+
+  @@index([quizId])
+  @@index([quizId, position])
+  @@map("quiz_questions")
+}
+
+model QuizOption {
+  id         String      @id @default(uuid())
+  questionId String
+  question   QuizQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  text       String      @db.VarChar(500)
+  isCorrect  Boolean     @default(false)
+  position   Int
+
+  answers    QuizAnswer[]
+
+  @@index([questionId])
+  @@map("quiz_options")
+}
+
+model QuizAttempt {
+  id          String   @id @default(uuid())
+  quizId      String
+  quiz        Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  studentId   String
+  student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  userId      String
+  status      String   @default("IN_PROGRESS") @db.VarChar(20)
+  score       Float?
+  feedback    String?  @db.Text
+  startedAt   DateTime @default(now())
+  submittedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  answers     QuizAnswer[]
+
+  @@unique([quizId, studentId])
+  @@index([quizId])
+  @@index([studentId])
+  @@index([quizId, status])
+  @@map("quiz_attempts")
+}
+
+model QuizAnswer {
+  id               String       @id @default(uuid())
+  attemptId        String
+  attempt          QuizAttempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  questionId       String
+  question         QuizQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  selectedOptionId String?
+  selectedOption   QuizOption?  @relation(fields: [selectedOptionId], references: [id], onDelete: SetNull)
+  answerText       String?      @db.Text
+  isCorrect        Boolean?
+
+  @@unique([attemptId, questionId])
+  @@index([attemptId])
+  @@map("quiz_answers")
+}

@@ -622,8 +622,10 @@ async function joinRoom(req, res, next) {
           if (existing) {
             // PH24C-003 FIX: Check wasKicked before allowing same-room reconnect.
             // A user who was kicked (wasKicked=true) must not be able to silently
-            // re-enter the room via the reconnect path. The host can reset this by
-            // calling unbanParticipant or a future dedicated unkick endpoint.
+            // re-enter the room via the reconnect path.
+            // NOTE: unbanParticipant does NOT reset wasKicked — it only clears
+            // VoiceRoomMember.isBanned. A separate dedicated unkick endpoint is
+            // required to reset wasKicked=false and permit rejoining.
             if (existing.wasKicked) {
               const err = new Error('KICKED_FROM_ROOM');
               err.statusCode = 403;

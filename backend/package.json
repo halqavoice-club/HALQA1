@@ -7,7 +7,7 @@
     "start": "node --max-old-space-size=512 --expose-gc src/app.js",
     "dev": "npx nodemon --config nodemon.json src/app.js",
     "test": "jest --runInBand --forceExit",
-    "test:unit": "jest --runInBand --forceExit --testPathIgnorePatterns='integration|real-db|phase-c|google-auth|bug-003|sprint18|voice-one-room-rule'",
+    "test:unit": "jest --runInBand --forceExit --testPathIgnorePatterns=integration --testPathIgnorePatterns=real-db --testPathIgnorePatterns=phase-c --testPathIgnorePatterns=google-auth --testPathIgnorePatterns=bug-003",
     "test:integration": "jest --runInBand --forceExit --testPathIgnorePatterns=node_modules --testPathPattern=integration",
     "test:coverage": "jest --runInBand --forceExit --coverage --testPathIgnorePatterns='integration'",
     "check": "node src/prisma/check-setup.js",
@@ -99,7 +99,10 @@
     "setupFiles": [
       "./jest.setup.js"
     ],
-    "moduleNameMapper": {},
+    "moduleNameMapper": {
+      "@opentelemetry/instrumentation-prisma": "<rootDir>/src/tests/__mocks__/otel-prisma.js",
+      "@opentelemetry/instrumentation-redis": "<rootDir>/src/tests/__mocks__/otel-redis.js"
+    },
     "transformIgnorePatterns": [
       "node_modules/(?!(livekit-server-sdk|@livekit)/)"
     ]

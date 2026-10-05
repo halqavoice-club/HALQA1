@@ -48,6 +48,10 @@ var hashtag, publicPost, privatePost;
 var testSchool;
 
 beforeAll(async function() {
+  // PORT=0 lets the OS assign an ephemeral port — prevents startServer()
+  // from failing on a port conflict and calling process.exit(1) when this
+  // suite runs after another suite that already holds the default port.
+  process.env.PORT = '0';
   app = require('../../app');
 
   // Create test school
@@ -220,6 +224,15 @@ describe('GET /explore', function() {
       update: {},
     });
 
+    // Invalidate the per-user explore feed cache so this request reflects
+    // the new follow relationship, not the cached result from earlier tests.
+    try {
+      var redis = require('../../utils/redis');
+      if (redis.isRedisReady()) {
+        await redis.getRedis().del('explore:feed:' + userMember.id);
+      }
+    } catch (e) { /* Redis not available — cache miss will occur naturally */ }
+
     var res = await request(app)
       .get('/api/v1/explore')
       .set('Authorization', tok(userMember));
@@ -245,6 +258,16 @@ describe('GET /explore', function() {
 
   test('deleted posts do not appear in trendingPosts', async function() {
     await prisma.post.update({ where: { id: publicPost.id }, data: { deletedAt: new Date() } });
+
+    // Invalidate the per-user explore feed cache so this request bypasses
+    // any cached result from the earlier 'can access explore feed' test.
+    // The explore controller caches at `explore:feed:{userId}` for 120s.
+    try {
+      var redis = require('../../utils/redis');
+      if (redis.isRedisReady()) {
+        await redis.getRedis().del('explore:feed:' + userMember.id);
+      }
+    } catch (e) { /* Redis not available — cache miss will occur naturally */ }
 
     var res = await request(app)
       .get('/api/v1/explore')

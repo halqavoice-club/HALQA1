@@ -21,7 +21,7 @@
  */
 
 import React, { useState, useCallback } from 'react'
-import { SeatData, LayoutMode } from '../../../../../src/lib/layout/layoutTypes'
+import { SeatData, LayoutMode } from '@/lib/layout/layoutTypes'
 import { SpeakingRing } from './SpeakingRing'
 
 // ---------------------------------------------------------------------------
