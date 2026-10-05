@@ -121,13 +121,19 @@ describe('POST /api/v1/wallet/payout/request', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.PAYOUT_ENCRYPTION_KEY = 'test-payout-key-exactly-32bytes!!';
-    prisma.payoutRequest.findFirst.mockResolvedValue(null); // no pending request
+    prisma.payoutRequest.findFirst.mockResolvedValue(null); // no pending request (outer, pre-tx)
     prisma.$transaction.mockImplementation(async (fn) => {
       if (typeof fn !== 'function') return Promise.all(fn);
+      // P1-002 FIX: transaction now uses $queryRaw for SELECT ... FOR UPDATE,
+      // then tx.payoutRequest.findFirst, then tx.wallet.update (no gte filter).
       return fn({
-        wallet:              { update: jest.fn().mockResolvedValue(WALLET) },
-        payoutRequest:       { create: jest.fn().mockResolvedValue(PAYOUT) },
-        walletTransaction:   { create: jest.fn().mockResolvedValue({ id: 'wt-1' }) },
+        $queryRaw: jest.fn().mockResolvedValue([{ id: 'wallet-1', diamonds: 5000 }]),
+        payoutRequest: {
+          findFirst: jest.fn().mockResolvedValue(null),   // no active payout (post-lock)
+          create:    jest.fn().mockResolvedValue(PAYOUT),
+        },
+        wallet:            { update: jest.fn().mockResolvedValue(WALLET) },
+        walletTransaction: { create: jest.fn().mockResolvedValue({ id: 'wt-1' }) },
       });
     });
   });
@@ -149,7 +155,21 @@ describe('POST /api/v1/wallet/payout/request', () => {
   });
 
   test('returns 400 when pending request already exists', async () => {
-    prisma.payoutRequest.findFirst.mockResolvedValue(PAYOUT);
+    // P1-002 FIX: The active payout check now runs AFTER the wallet FOR UPDATE lock.
+    // Override the transaction mock: $queryRaw returns a valid locked wallet,
+    // then tx.payoutRequest.findFirst returns the active payout → PAYOUT_ALREADY_ACTIVE.
+    prisma.$transaction.mockImplementationOnce(async (fn) => {
+      if (typeof fn !== 'function') return Promise.all(fn);
+      return fn({
+        $queryRaw: jest.fn().mockResolvedValue([{ id: 'wallet-1', diamonds: 5000 }]),
+        payoutRequest: {
+          findFirst: jest.fn().mockResolvedValue(PAYOUT), // active payout found post-lock
+          create:    jest.fn().mockResolvedValue(PAYOUT),
+        },
+        wallet:            { update: jest.fn().mockResolvedValue(WALLET) },
+        walletTransaction: { create: jest.fn().mockResolvedValue({ id: 'wt-1' }) },
+      });
+    });
     const res = await request(buildApp())
       .post('/api/v1/wallet/payout/request')
       .send({ diamonds: 2000, method: 'paypal', accountDetails: { accountHolder: 'Ana B' } });
@@ -157,7 +177,31 @@ describe('POST /api/v1/wallet/payout/request', () => {
     expect(res.body.message).toMatch(/pending/i);
   });
 
-  test('returns 402 on optimistic lock miss (P2025)', async () => {
+  test('returns 402 when locked wallet has insufficient diamonds', async () => {
+    // P1-002 FIX: Insufficient balance is now detected post-lock via the
+    // INSUFFICIENT_DIAMONDS throw (checking lockedRows[0].diamonds < requested).
+    prisma.$transaction.mockImplementationOnce(async (fn) => {
+      if (typeof fn !== 'function') return Promise.all(fn);
+      return fn({
+        // $queryRaw returns wallet with only 100 diamonds
+        $queryRaw: jest.fn().mockResolvedValue([{ id: 'wallet-1', diamonds: 100 }]),
+        payoutRequest: {
+          findFirst: jest.fn().mockResolvedValue(null),
+          create:    jest.fn().mockResolvedValue(PAYOUT),
+        },
+        wallet:            { update: jest.fn().mockResolvedValue(WALLET) },
+        walletTransaction: { create: jest.fn().mockResolvedValue({ id: 'wt-1' }) },
+      });
+    });
+    const res = await request(buildApp())
+      .post('/api/v1/wallet/payout/request')
+      .send({ diamonds: 2000, method: 'paypal', accountDetails: { accountHolder: 'Ana B' } });
+    expect(res.status).toBe(402);
+    expect(res.body.message).toMatch(/insufficient/i);
+  });
+
+  test('returns 402 on legacy P2025 (defensive fallback)', async () => {
+    // The legacy optimistic lock miss path is kept as a defensive fallback.
     prisma.$transaction.mockImplementationOnce(async (fn) => {
       const err = new Error('Record to update not found');
       err.code = 'P2025';
@@ -170,8 +214,28 @@ describe('POST /api/v1/wallet/payout/request', () => {
     expect(res.status).toBe(402);
   });
 
+  test('returns 404 when wallet does not exist', async () => {
+    prisma.$transaction.mockImplementationOnce(async (fn) => {
+      if (typeof fn !== 'function') return Promise.all(fn);
+      return fn({
+        $queryRaw: jest.fn().mockResolvedValue([]),  // empty — no wallet row
+        payoutRequest: { findFirst: jest.fn(), create: jest.fn() },
+        wallet:            { update: jest.fn() },
+        walletTransaction: { create: jest.fn() },
+      });
+    });
+    // Use a unique user ID to avoid rate-limit exhaustion from previous tests
+    const uniqueUser = { ...USER, id: `user-wallet-notfound-${Date.now()}` };
+    const res = await request(buildApp(uniqueUser))
+      .post('/api/v1/wallet/payout/request')
+      .send({ diamonds: 2000, method: 'paypal', accountDetails: { accountHolder: 'Ana B' } });
+    expect(res.status).toBe(404);
+  });
+
   test('returns 400 for invalid method', async () => {
-    const res = await request(buildApp())
+    // Use a unique user ID to avoid rate-limit exhaustion from previous tests
+    const uniqueUser = { ...USER, id: `user-invalid-method-${Date.now()}` };
+    const res = await request(buildApp(uniqueUser))
       .post('/api/v1/wallet/payout/request')
       .send({ diamonds: 2000, method: 'bitcoin', accountDetails: { accountHolder: 'Ana B' } });
     expect(res.status).toBe(400);

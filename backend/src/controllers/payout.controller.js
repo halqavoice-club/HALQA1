@@ -12,10 +12,10 @@
  *   Status flow: PENDING → APPROVED → PROCESSING → COMPLETED | REJECTED
  *
  * Security:
- *   - Diamond balance is checked atomically inside a transaction
+ *   - Diamond balance is checked atomically inside a transaction with a wallet
+ *     row-level SELECT ... FOR UPDATE lock that serialises concurrent requests
  *   - Diamonds are held (deducted immediately on request) so double-requests
- *     cannot succeed
- *   - TOTP_ENCRYPTION_KEY / JWT auth required
+ *     cannot succeed even under concurrent load
  *   - Admin-only approval endpoints are protected by SCHOOL_ADMIN / SUPER_ADMIN role
  */
 
@@ -150,35 +150,74 @@ async function requestPayout(req, res) {
       return errorResponse(res, `method must be one of: ${validMethods.join(', ')}`, 400);
     }
 
-    // ── Check for pending requests ─────────────────────────────────────────
-    const hasPending = await prisma.payoutRequest.findFirst({
-      where: { userId, status: { in: ['PENDING', 'APPROVED', 'PROCESSING'] } }
-    });
-    if (hasPending) {
-      return errorResponse(res, 'You already have a pending payout request. Wait for it to complete.', 400);
-    }
-
-    // ── Atomic: check balance, deduct diamonds, create payout, write ledger ──────
-    // Three operations in one transaction:
-    //   1. Optimistic-lock wallet update (WHERE diamonds >= amount) — race-safe
-    //   2. PayoutRequest.create — the payout record
-    //   3. WalletTransaction.create type=PAYOUT — the auditable ledger entry
+    // ── Atomic payout: wallet row lock → validate → debit → create payout + ledger ──
     //
-    // If two concurrent requests race here, only one can win the optimistic lock.
-    // The loser gets P2025 (record not found) → rolls back → returns 402.
+    // P1-002 FIX (concurrent payout double-spend):
+    //
+    // The serialization point is a SELECT ... FOR UPDATE on the wallet row.
+    // Under MySQL's default READ COMMITTED isolation, a plain findFirst() inside
+    // a $transaction does NOT block concurrent readers — both concurrent requests
+    // can read "no active payout" before either commits. The FOR UPDATE lock
+    // prevents this: the second concurrent request blocks at the wallet lock
+    // acquisition and only proceeds after the first transaction commits, at which
+    // point it re-reads the true current state (balance already debited, or a
+    // PENDING payout already exists) and fails safely.
+    //
+    // All six operations are under the SAME $transaction:
+    //   1. SELECT wallet FOR UPDATE          — acquires row lock; serialises concurrency
+    //   2. Validate diamonds >= diamondAmount — checked post-lock on fresh data
+    //   3. SELECT active payout check        — checked post-lock on committed state
+    //   4. UPDATE wallet (decrement diamonds) — debits the reserved amount
+    //   5. CREATE PayoutRequest               — the payout record
+    //   6. CREATE WalletTransaction (PAYOUT)  — auditable ledger debit
+    //
+    // If any step throws, the entire transaction rolls back. No partial state.
     let payoutRequest;
     try {
       const result = await prisma.$transaction(async (tx) => {
-        // 1. Optimistic-lock deduction: only succeeds if diamonds >= diamondAmount
-        //    P2025 is thrown if no row matches (insufficient balance under concurrency)
+        // ── Step 1: Lock the wallet row ──────────────────────────────────────
+        // SELECT ... FOR UPDATE acquires an exclusive row lock. The second
+        // concurrent transaction blocks here until the first commits or rolls
+        // back, ensuring sequential evaluation of all subsequent checks.
+        const lockedRows = await tx.$queryRaw`
+          SELECT id, diamonds
+          FROM wallets
+          WHERE userId = ${userId}
+          FOR UPDATE
+        `;
+
+        if (!lockedRows || lockedRows.length === 0) {
+          throw new Error('WALLET_NOT_FOUND');
+        }
+        const lockedWallet = lockedRows[0];
+        const currentDiamonds = Number(lockedWallet.diamonds);
+
+        // ── Step 2: Validate balance (post-lock, on committed data) ─────────
+        if (currentDiamonds < diamondAmount) {
+          throw Object.assign(new Error(`INSUFFICIENT_DIAMONDS:${currentDiamonds}:${diamondAmount}`), {
+            code: 'INSUFFICIENT_DIAMONDS',
+          });
+        }
+
+        // ── Step 3: Check for existing active payout (post-lock) ────────────
+        // Because we hold the wallet lock, any concurrent request that already
+        // committed will have created a PENDING payout visible here.
+        const activePayout = await tx.payoutRequest.findFirst({
+          where: { userId, status: { in: ['PENDING', 'APPROVED', 'PROCESSING'] } },
+        });
+        if (activePayout) {
+          throw new Error('PAYOUT_ALREADY_ACTIVE');
+        }
+
+        // ── Step 4: Debit diamonds ───────────────────────────────────────────
         const updatedWallet = await tx.wallet.update({
-          where: { userId, diamonds: { gte: diamondAmount } },
-          data:  { diamonds: { decrement: diamondAmount } }
+          where: { userId },
+          data:  { diamonds: { decrement: diamondAmount } },
         });
 
         const usdAmount = toUsd(diamondAmount);
 
-        // 2. Create the payout request record
+        // ── Step 5: Create payout request ────────────────────────────────────
         const request = await tx.payoutRequest.create({
           data: {
             userId,
@@ -187,11 +226,10 @@ async function requestPayout(req, res) {
             method,
             accountDetails: encrypt(JSON.stringify(accountDetails || {})),
             status:         'PENDING',
-          }
+          },
         });
 
-        // 3. Write PAYOUT ledger entry — fatal (no .catch)
-        //    diamonds is negative: diamonds are being reserved/deducted
+        // ── Step 6: Write PAYOUT ledger entry (fatal — no .catch) ────────────
         await tx.walletTransaction.create({
           data: {
             userId,
@@ -199,31 +237,45 @@ async function requestPayout(req, res) {
             coins:       0,
             diamonds:    -diamondAmount,
             description: `Payout request ${request.id}: ${diamondAmount} diamonds reserved`,
-          }
+          },
         });
 
         return { request, updatedWallet };
+      }, {
+        // Increase timeout for this critical path — the lock may cause brief waits
+        timeout: 10000,
       });
 
       payoutRequest = result.request;
     } catch (txErr) {
-      // P2025 = optimistic lock miss (insufficient diamonds at commit time)
+      // Active payout already exists (detected inside transaction, post-lock)
+      if (txErr.message === 'PAYOUT_ALREADY_ACTIVE') {
+        return errorResponse(res, 'You already have a pending payout request. Wait for it to complete.', 400);
+      }
+      // Wallet not found
+      if (txErr.message === 'WALLET_NOT_FOUND') {
+        return errorResponse(res, 'Wallet not found. Please contact support.', 404);
+      }
+      // Insufficient diamonds (thrown post-lock with current balance)
+      if (txErr.message?.startsWith('INSUFFICIENT_DIAMONDS:')) {
+        const parts = txErr.message.split(':');
+        const have  = parts[1] ?? '0';
+        const need  = parts[2] ?? diamondAmount;
+        return errorResponse(
+          res,
+          `Insufficient diamonds. You have ${have}, requested ${need}`,
+          402
+        );
+      }
+      // P2025 = wallet update not found (defensive; should not reach here with lock)
       if (txErr.code === 'P2025' || txErr.message?.includes('Record to update not found')) {
         const currentWallet = await prisma.wallet.findUnique({
           where:  { userId },
-          select: { diamonds: true }
+          select: { diamonds: true },
         });
         return errorResponse(
           res,
           `Insufficient diamonds. You have ${currentWallet?.diamonds ?? 0}, requested ${diamondAmount}`,
-          402
-        );
-      }
-      if (txErr.message?.startsWith('INSUFFICIENT_DIAMONDS:')) {
-        const [, have, need] = txErr.message.split(':');
-        return errorResponse(
-          res,
-          `Insufficient diamonds. You have ${have}, requested ${need}`,
           402
         );
       }
@@ -342,9 +394,10 @@ async function processPayoutAdmin(req, res) {
     if (!request) return errorResponse(res, 'Payout request not found', 404);
 
     const VALID_TRANSITIONS = {
-      approve:  ['PENDING'],
-      reject:   ['PENDING', 'APPROVED'],
-      complete: ['PROCESSING', 'APPROVED'],
+      approve:    ['PENDING'],
+      reject:     ['PENDING', 'APPROVED'],
+      processing: ['APPROVED'],               // P2-005: explicit APPROVED → PROCESSING transition
+      complete:   ['PROCESSING', 'APPROVED'],
     };
 
     if (!VALID_TRANSITIONS[action]) {
@@ -354,7 +407,7 @@ async function processPayoutAdmin(req, res) {
       return errorResponse(res, `Cannot ${action} a ${request.status} payout request`, 400);
     }
 
-    const statusMap = { approve: 'APPROVED', reject: 'REJECTED', complete: 'COMPLETED' };
+    const statusMap = { approve: 'APPROVED', reject: 'REJECTED', processing: 'PROCESSING', complete: 'COMPLETED' };
     const newStatus = statusMap[action];
 
     // If rejecting, refund diamonds with PAYOUT_REVERSAL ledger entry

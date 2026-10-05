@@ -286,44 +286,81 @@ async function sendTip(req, res, next) {
     const existing = await prisma.creatorTip.findUnique({ where: { idempotencyKey: iKey } });
     if (existing) return successResponse(res, existing, 'Tip already sent');
 
-    const wallet = await prisma.wallet.findUnique({ where: { userId: senderId } });
-    if (!wallet || wallet.coins < amount) {
-      return errorResponse(res, `Not enough coins. Need ${amount}, have ${wallet?.coins ?? 0}`, 402);
-    }
-
+    // P1-001 FIX: Removed pre-transaction wallet.findUnique balance check (TOCTOU).
+    // The authoritative balance check is now the optimistic lock inside the transaction:
+    //   WHERE userId = senderId AND coins >= amount
+    // Two concurrent tips can no longer both pass a stale pre-tx read — only the one
+    // that wins the optimistic lock will succeed; the other gets P2025 → 402.
     const diamonds = toDiamonds(amount);
 
-    const tip = await prisma.$transaction(async (tx) => {
-      await tx.wallet.update({ where: { userId: senderId }, data: { coins: { decrement: amount }, totalSpent: { increment: amount } } });
-      await tx.wallet.upsert({ where: { userId: creatorUserId }, create: { userId: creatorUserId, coins: 0, diamonds, totalSpent: 0, totalEarned: diamonds }, update: { diamonds: { increment: diamonds }, totalEarned: { increment: diamonds } } });
-      const t = await tx.creatorTip.create({
-        data: { id: uuidv4(), senderId, creatorId: profile.id, amount, diamondsEarned: diamonds, message: message?.trim() || null, postId: postId || null, idempotencyKey: iKey }
-      });
-      await tx.creatorProfile.update({ where: { id: profile.id }, data: { tipCount: { increment: 1 }, totalEarned: { increment: diamonds } } });
+    let tip;
+    try {
+      tip = await prisma.$transaction(async (tx) => {
+        // 1. Optimistic-lock coin deduction — only succeeds if coins >= amount.
+        //    P2025 thrown if no row matches (insufficient balance under concurrency).
+        await tx.wallet.update({
+          where: { userId: senderId, coins: { gte: amount } },
+          data:  { coins: { decrement: amount }, totalSpent: { increment: amount } }
+        });
 
-      // Wallet ledger entry — FATAL (no .catch)
-      // Task 6.2: removed .catch(() => {}) — ledger failure rolls back entire tip transaction
-      await tx.walletTransaction.create({
-        data: {
-          userId:      senderId,
-          type:        'TIP_SEND',
-          coins:       -amount,
-          description: `Tip to creator ${creatorUserId}${message ? ': ' + message.substring(0, 50) : ''}`,
-          tipId:       t.id
-        }
-      });
+        // 2. Credit diamonds to creator
+        await tx.wallet.upsert({
+          where:  { userId: creatorUserId },
+          create: { userId: creatorUserId, coins: 0, diamonds, totalSpent: 0, totalEarned: diamonds },
+          update: { diamonds: { increment: diamonds }, totalEarned: { increment: diamonds } }
+        });
 
-      // Platform revenue entry — FATAL (no .catch)
-      // Platform retains 50% of tip amount.
-      await writePlatformRevenueFromSpend(tx, {
-        sourceType: 'TIP',
-        sourceId:   t.id,
-        userId:     senderId,
-        spendCoins: amount,
-      });
+        // 3. Create tip record
+        const t = await tx.creatorTip.create({
+          data: {
+            id: uuidv4(), senderId, creatorId: profile.id, amount,
+            diamondsEarned: diamonds, message: message?.trim() || null,
+            postId: postId || null, idempotencyKey: iKey
+          }
+        });
 
-      return t;
-    });
+        // 4. Increment creator stats
+        await tx.creatorProfile.update({
+          where: { id: profile.id },
+          data:  { tipCount: { increment: 1 }, totalEarned: { increment: diamonds } }
+        });
+
+        // 5. Sender wallet ledger entry — FATAL (no .catch)
+        await tx.walletTransaction.create({
+          data: {
+            userId:      senderId,
+            type:        'TIP_SEND',
+            coins:       -amount,
+            description: `Tip to creator ${creatorUserId}${message ? ': ' + message.substring(0, 50) : ''}`,
+            tipId:       t.id
+          }
+        });
+
+        // 6. Platform revenue entry — FATAL (no .catch)
+        await writePlatformRevenueFromSpend(tx, {
+          sourceType: 'TIP',
+          sourceId:   t.id,
+          userId:     senderId,
+          spendCoins: amount,
+        });
+
+        return t;
+      });
+    } catch (txErr) {
+      // P2025 = optimistic lock miss (insufficient coins at commit time)
+      if (txErr.code === 'P2025' || txErr.message?.includes('Record to update not found')) {
+        const currentWallet = await prisma.wallet.findUnique({
+          where:  { userId: senderId },
+          select: { coins: true }
+        });
+        return errorResponse(
+          res,
+          `Not enough coins. Need ${amount}, have ${currentWallet?.coins ?? 0}`,
+          402
+        );
+      }
+      throw txErr;
+    }
 
     // Notify creator
     await notify(creatorUserId, {
