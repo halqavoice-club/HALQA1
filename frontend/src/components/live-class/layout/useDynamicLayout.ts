@@ -30,7 +30,7 @@ import type {
   SpeakerSlot,
   LayoutMode,
   LayoutResult,
-} from '../../../../../src/lib/layout/layoutTypes'
+} from '@/lib/layout/layoutTypes'
 
 // ---------------------------------------------------------------------------
 // Return type
