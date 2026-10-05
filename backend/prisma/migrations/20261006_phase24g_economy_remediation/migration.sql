@@ -13,7 +13,9 @@
 --   wallet_transactions: 9 rows, no existing idempotencyKey column
 --   platform_revenue_entries: 0 rows, no duplicates
 --   user_daily_gift_spend: does not exist
---   DB column names are camelCase (Prisma @map does not rename MySQL columns here)
+--   DB column names: platform_revenue_entries uses snake_case (source_type, source_id,
+--   user_id, usd_equiv, created_at) as created by migration 20260922_platform_revenue_ledger.
+--   Other tables (wallet_transactions, payout_requests, user_daily_gift_spend) use camelCase.
 
 -- ── 1. WalletTransaction.idempotencyKey ──────────────────────────────────────
 -- Nullable so all existing rows remain valid.
@@ -39,10 +41,11 @@ EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
 -- ── 2. PlatformRevenueEntry unique constraint ────────────────────────────────
--- Table uses camelCase column names (sourceType, sourceId) in MySQL.
--- Table has 0 rows so no duplicate check needed.
+-- Table uses snake_case column names (source_type, source_id) as created by
+-- migration 20260922_platform_revenue_ledger. This index must reference the
+-- physical column names, not the Prisma field names.
 ALTER TABLE `platform_revenue_entries`
-  ADD UNIQUE INDEX `uq_platform_revenue_source` (`sourceType`, `sourceId`);
+  ADD UNIQUE INDEX `uq_platform_revenue_source` (`source_type`, `source_id`);
 
 -- ── 3. UserDailyGiftSpend — new table ────────────────────────────────────────
 -- Atomic daily cap counter. Updated inside the gift $transaction so the cap
