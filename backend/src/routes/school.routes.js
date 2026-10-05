@@ -235,15 +235,25 @@ router.put('/:id/settings',
 router.delete('/:id', authorize('SUPER_ADMIN'), ctrl.deleteSchool);
 
 // Logo upload
-// Auth: SUPER_ADMIN, legacy SCHOOL_ADMIN (User.role), OR any MEMBER user who
+// Auth: legacy SCHOOL_ADMIN (User.role) for own school, OR any MEMBER user who
 // holds an active SCHOOL_ADMIN membership for the target school (new architecture).
+// P2-001 FIX: SUPER_ADMIN must have an explicit school membership, same as PUT/PATCH /:id.
 router.post('/:id/logo',
   async (req, res, next) => {
     const { id } = req.params;
     const userRole = req.user?.role;
 
-    // SUPER_ADMIN: always allowed
-    if (userRole === 'SUPER_ADMIN') return next();
+    // SUPER_ADMIN: must have an active SCHOOL_ADMIN membership for this school
+    if (userRole === 'SUPER_ADMIN') {
+      const membership = await prisma.schoolMembership.findUnique({
+        where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+        select: { role: true, status: true },
+      }).catch(() => null);
+      if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+        return next();
+      }
+      return errorResponse(res, 'Platform admins must have an active school membership to upload a logo', 403);
+    }
 
     // Legacy SCHOOL_ADMIN (User.role): own school only
     if (userRole === 'SCHOOL_ADMIN') {
