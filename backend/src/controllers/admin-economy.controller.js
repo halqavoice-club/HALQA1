@@ -14,7 +14,7 @@
 const prisma  = require('../utils/prisma');
 const logger  = require('../utils/logger');
 const { successResponse, errorResponse } = require('../utils/response');
-const { PLATFORM_SHARE_PERCENT, DIAMOND_TO_USD, toUsd } = require('../services/economy.config');
+const { PLATFORM_SHARE_PERCENT, DIAMOND_TO_USD } = require('../services/economy.config');
 
 const MAX_RANGE_DAYS = 90;
 
@@ -91,7 +91,12 @@ async function getRevenueReport(req, res) {
       }),
     ]);
 
-    // ── Compute platform share ─────────────────────────────────────────────
+    // ── Add coinsToUsd helper ─────────────────────────────────────────────
+    // P2-002 FIX: Previous formula was toUsd(platformShareCoins * 10) which
+    // incorrectly used the diamond conversion rate (0.005/diamond) on coins.
+    // Correct formula: 100 coins = $1, so 1 coin = $0.01.
+    const coinsToUsdDisplay = (coins) => parseFloat((coins / 100).toFixed(2));
+
     const coinsPurchased      = stripePurchase._sum.coins ?? 0;
     // Gift spend: coins are stored as negative debits in ledger, use Math.abs
     const coinsSpentOnGifts   = Math.abs(giftSend._sum.coins ?? 0);
@@ -100,8 +105,8 @@ async function getRevenueReport(req, res) {
     // Platform share = coins spent × PLATFORM_SHARE_PERCENT / 100
     // These coins went to the platform (not to creators)
     const platformShareCoins  = Math.floor(coinsSpentOnGifts * PLATFORM_SHARE_PERCENT / 100);
-    // USD equivalent of platform share (display only)
-    const platformShareUsd    = toUsd(platformShareCoins * 10); // 100 coins = $1 → 1 coin = $0.01
+    // USD equivalent of platform share (display only) — 100 coins = $1
+    const platformShareUsd    = coinsToUsdDisplay(platformShareCoins);
 
     // Payout amounts — Prisma Decimal comes back as Decimal object, serialize to string
     const completedPayoutsUsd = Number(completedPayouts._sum.usdAmount ?? 0).toFixed(2);

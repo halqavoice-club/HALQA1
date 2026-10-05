@@ -221,10 +221,12 @@ router.post('/users/:id/grant-coins', async (req, res, next) => {
     });
     if (!target) return errorResponse(res, 'User not found', 404);
 
-    // Idempotency check — prevents double-grant on client retry
+    // Idempotency check — P2-004 FIX: Use WalletTransaction.idempotencyKey unique field
+    // instead of fragile description.contains() string search.
+    // The @unique constraint on idempotencyKey is the authoritative DB-level guard.
     const iKey = idempotencyKey || uuidv4();
-    const existing = await prisma.walletTransaction.findFirst({
-      where: { userId: targetUserId, type: 'ADMIN_GRANT', description: { contains: iKey } }
+    const existing = await prisma.walletTransaction.findUnique({
+      where: { idempotencyKey: iKey }
     });
     if (existing) {
       return res.status(200).json({
@@ -247,11 +249,12 @@ router.post('/users/:id/grant-coins', async (req, res, next) => {
 
       transaction = await tx.walletTransaction.create({
         data: {
-          id:          uuidv4(),
-          userId:      targetUserId,
-          type:        'ADMIN_GRANT',
-          coins:       coinsInt,   // positive = credit
-          description: `Admin grant by ${adminId} — ${reason.trim()} [ikey:${iKey}]`,
+          id:             uuidv4(),
+          userId:         targetUserId,
+          type:           'ADMIN_GRANT',
+          coins:          coinsInt,   // positive = credit
+          description:    `Admin grant by ${adminId} — ${reason.trim()}`,
+          idempotencyKey: iKey,       // P2-004: unique constraint prevents duplicate grants
         }
       });
     });

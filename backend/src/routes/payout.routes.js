@@ -51,7 +51,7 @@ router.get('/admin/list',
 router.patch('/admin/:id',
   authorize('SUPER_ADMIN'),
   [
-    body('action').isIn(['approve', 'reject', 'complete']),
+    body('action').isIn(['approve', 'reject', 'processing', 'complete']),
     body('adminNote').optional().isString().isLength({ max: 500 }),
     body('transactionRef').optional().isString().isLength({ max: 200 }),
   ],

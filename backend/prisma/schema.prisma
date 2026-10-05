@@ -287,6 +287,7 @@ model User {
   giftsReceived      GiftTransaction[]  @relation("GiftReceiver")
   giftLeaderboard    RoomGiftLeaderboard[] @relation("GiftLeaderboard")
   payoutRequests     PayoutRequest[]       @relation("UserPayouts")
+  dailyGiftSpend     UserDailyGiftSpend[]  @relation("UserDailyGiftSpend")
   // Social
   following          Follow[]           @relation("Follower")
   followers          Follow[]           @relation("Following")
@@ -1424,9 +1425,15 @@ model Wallet {
 // stripeSessionId has a @unique constraint — this is the primary defence against
 // Stripe webhook double-credit at the DB layer (beyond Redis idempotency).
 //
+// idempotencyKey — nullable unique field added in Phase 24G remediation (P2-004).
+// Used by ADMIN_GRANT to prevent duplicate grants on concurrent/retry requests.
+// Other types (STRIPE_PURCHASE, GIFT_SEND etc.) use their own dedicated unique
+// fields (stripeSessionId, GiftTransaction.idempotencyKey) and leave this null.
+//
 // Valid type values (as of economy consolidation M-D):
 //   STRIPE_PURCHASE  — Stripe checkout completed; coins credited
 //   GIFT_SEND        — Gift sent; coins debited from sender
+//   GIFT_RECEIVE     — Gift received; diamonds credited to receiver (P2-003)
 //   TIP_SEND         — Creator tip sent; coins debited from sender
 //   SUBSCRIPTION     — Creator subscription charged; coins debited
 //   ADMIN_GRANT      — Admin coin grant; coins credited
@@ -1443,6 +1450,10 @@ model WalletTransaction {
   diamonds         Int      @default(0) // positive = credit, negative = debit (diamonds); 0 for coin-only records
   description      String?  @db.VarChar(255)
   stripeSessionId  String?  @unique  // unique constraint prevents Stripe double-credit
+  // P2-004: authoritative idempotency key for ADMIN_GRANT (and future use).
+  // Nullable so existing rows are unaffected. @unique ensures at most one grant
+  // per key even under concurrent requests hitting the DB simultaneously.
+  idempotencyKey   String?  @unique  @db.VarChar(128)
   packageId        String?
   giftTxId         String?
   tipId            String?
@@ -1461,6 +1472,11 @@ model WalletTransaction {
 // Previously this was implicit — coins disappeared into the void.
 // Now every monetised event writes one entry here inside the same DB transaction.
 //
+// P1-003 (Phase 24G): @@unique([sourceType, sourceId]) added to prevent duplicate
+// revenue entries for the same originating economic event. The application already
+// prevents duplicates via GiftTransaction.idempotencyKey; this constraint is the
+// DB-level backstop. Migration verified: 0 existing rows, no conflicts.
+//
 // source_type values:
 //   GIFT         — platform share of a gift send
 //   TIP          — platform share of a creator tip
@@ -1468,13 +1484,14 @@ model WalletTransaction {
 //   COIN_PURCHASE— full gross inflow from a Stripe coin purchase
 model PlatformRevenueEntry {
   id          String   @id @default(uuid())
-  sourceType  String   @db.VarChar(50)  @map("source_type") // GIFT | TIP | SUBSCRIPTION | COIN_PURCHASE
-  sourceId    String   @db.VarChar(36)  @map("source_id") // ID of originating record
-  userId      String   @db.VarChar(36)  @map("user_id") // user whose action generated the revenue
-  coins       Int                       // platform share in coins (positive)
-  usdEquiv    Decimal  @db.Decimal(10, 2) @default(0) @map("usd_equiv") // coins / 100
-  createdAt   DateTime @default(now()) @map("created_at")
+  sourceType  String   @db.VarChar(50)   // GIFT | TIP | SUBSCRIPTION | COIN_PURCHASE
+  sourceId    String   @db.VarChar(36)   // ID of originating record
+  userId      String   @db.VarChar(36)   // user whose action generated the revenue
+  coins       Int                        // platform share in coins (positive)
+  usdEquiv    Decimal  @db.Decimal(10, 2) @default(0) // coins / 100
+  createdAt   DateTime @default(now())
 
+  @@unique([sourceType, sourceId], name: "uq_platform_revenue_source", map: "uq_platform_revenue_source")
   @@index([sourceType])
   @@index([userId])
   @@index([createdAt])
@@ -3282,9 +3299,47 @@ model JobExecution {
 // - durationMs: Int? (request duration in milliseconds)
 // These would be added via migration without breaking existing data.
 
+// ─── USER DAILY GIFT SPEND ────────────────────────────────────────────────────
+// P1-002 (Phase 24G): DB-authoritative daily gift spending counter.
+// Replaces the Redis-only daily cap check which was not atomic with the gift
+// transaction. This table is updated inside the same $transaction as the gift,
+// making the cap check and spend increment atomic at the database level.
+//
+// Redis may still serve as a fast read-path cache for the current day's total,
+// but this table is the source of truth. On Redis unavailability the controller
+// falls back to this table without any cap bypass risk.
+//
+// date field uses UTC (YYYY-MM-DD) matching the Redis key format.
+// totalSpent is atomically incremented via UPDATE WHERE totalSpent + amount <= cap.
+model UserDailyGiftSpend {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation("UserDailyGiftSpend", fields: [userId], references: [id], onDelete: Cascade)
+  date       String   @db.VarChar(10)  // UTC date: YYYY-MM-DD
+  totalSpent Int      @default(0)      // total coins spent on gifts today
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@index([date])
+  @@map("user_daily_gift_spend")
+}
+
 // ─── PAYOUT REQUESTS ─────────────────────────────────────────────────────────
 // Hosts request diamond-to-cash withdrawals via this model.
+//
+// P2-005 (Phase 24G): Full state machine explicitly documented and enforced.
 // Flow: PENDING → APPROVED → PROCESSING → COMPLETED | REJECTED | CANCELLED
+//   PENDING    — submitted by user; diamonds reserved (deducted from wallet)
+//   APPROVED   — admin has approved; ready for payment processing
+//   PROCESSING — payment transfer initiated externally (set via PATCH /admin/payouts/:id)
+//   COMPLETED  — payment confirmed; diamonds permanently paid out
+//   REJECTED   — admin rejected; diamonds restored to wallet (PAYOUT_REVERSAL)
+//   CANCELLED  — user cancelled; diamonds restored to wallet (PAYOUT_REVERSAL)
+//
+// P2-001 (Phase 24G): One active payout per user enforced by application locking
+// inside the $transaction (wallet row lock prevents diamond double-reservation).
 // On reject/cancel: diamonds are refunded to the user's wallet.
 
 model PayoutRequest {
@@ -3293,7 +3348,7 @@ model PayoutRequest {
   diamonds       Int                          // diamonds requested for withdrawal
   usdAmount      Decimal   @db.Decimal(10, 2) // USD value stored as exact decimal (M-B: was Float)
   method         String    @db.VarChar(30)    // 'bank_transfer' | 'paypal' | 'stripe'
-  accountDetails String    @db.Text           // JSON: method-specific payout details (will be encrypted in Task 4.3)
+  accountDetails String    @db.Text           // JSON: method-specific payout details (encrypted)
   status         String    @default("PENDING") @db.VarChar(20)
   adminNote      String?   @db.VarChar(500)
   transactionRef String?   @db.VarChar(200)  // external payment reference
@@ -3306,6 +3361,8 @@ model PayoutRequest {
   @@index([userId])
   @@index([status])
   @@index([createdAt])
+  // P2-001: composite index to efficiently check for active payouts per user
+  @@index([userId, status])
   @@map("payout_requests")
 }
 

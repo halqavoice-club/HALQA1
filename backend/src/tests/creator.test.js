@@ -490,9 +490,13 @@ describe('POST /api/v1/creators/:userId/tip', () => {
     );
 
     // Verify coins deducted from sender
+    // P1-001 FIX: wallet.update now uses optimistic lock WHERE coins >= amount
     expect(mockWalletUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { userId: SUBSCRIBER.id },
+        where: expect.objectContaining({
+          userId: SUBSCRIBER.id,
+          coins:  { gte: 50 },         // optimistic lock added by P1-001
+        }),
         data: expect.objectContaining({ coins: { decrement: 50 } }),
       })
     );
@@ -513,8 +517,20 @@ describe('POST /api/v1/creators/:userId/tip', () => {
   });
 
   // ── Insufficient balance ─────────────────────────────────────────────────────
+  // P1-001 FIX: The pre-transaction wallet.findUnique balance check was removed
+  // to fix the TOCTOU race. Insufficient balance is now detected via the optimistic
+  // lock inside the transaction (WHERE coins >= amount) which throws P2025.
+  // This test reflects the new behavior: transaction is entered, P2025 is thrown,
+  // and the controller returns 402 with the current balance.
   test('returns 402 when sender has insufficient coins', async () => {
-    prisma.wallet.findUnique.mockResolvedValue(WALLET_EMPTY); // 50 coins, tipping 100
+    // No longer reads wallet before tx — 402 comes from P2025 inside transaction
+    prisma.$transaction.mockImplementationOnce(async (fn) => {
+      const err = new Error('Record to update not found');
+      err.code  = 'P2025';
+      throw err;
+    });
+    // wallet.findUnique is called AFTER P2025 to get current balance for error msg
+    prisma.wallet.findUnique.mockResolvedValue({ ...WALLET_EMPTY, coins: 5 });
 
     const res = await request(buildApp())
       .post(`/api/v1/creators/${CREATOR_USER.id}/tip`)
@@ -522,7 +538,6 @@ describe('POST /api/v1/creators/:userId/tip', () => {
 
     expect(res.status).toBe(402);
     expect(res.body.message).toMatch(/coins/i);
-    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
   // ── Cannot tip yourself ──────────────────────────────────────────────────────

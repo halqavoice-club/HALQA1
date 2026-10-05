@@ -313,9 +313,11 @@ async function handleWebhook(req, res) {
           throw err;
         });
 
-        // Write platform revenue entry for gross coin inflow — non-fatal for Stripe path.
-        // COIN_PURCHASE = full gross amount (platform collects 100% of coin sales revenue;
-        // the creator 50% share is only paid out when coins are spent, not when purchased).
+        // P1-004 FIX: Platform revenue entry is now FATAL (no .catch).
+        // Coin credit and platform revenue ledger must commit or roll back together.
+        // Previously this was wrapped in .catch() which silently allowed revenue
+        // entries to be missing while coins were credited. Now if the revenue
+        // ledger write fails the entire transaction rolls back — no coins without a record.
         await tx.platformRevenueEntry.create({
           data: {
             id:         require('uuid').v4(),
@@ -325,10 +327,6 @@ async function handleWebhook(req, res) {
             coins:      totalCoins,
             usdEquiv:   parseFloat((totalCoins * 0.01).toFixed(2)),
           }
-        }).catch((err) => {
-          // Non-fatal for coin purchase — Stripe credit must succeed even if revenue
-          // ledger fails (avoids denying users their coins over a secondary write).
-          require('../utils/logger').error(`[stripe] Revenue ledger write failed for session ${session.id}: ${err.message}`);
         });
       });
 

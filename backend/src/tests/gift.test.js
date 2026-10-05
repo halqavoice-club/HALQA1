@@ -89,10 +89,12 @@ function happyTransaction() {
         create: jest.fn().mockResolvedValue({ id: 'txn-1', combo: 1 }),
         update: jest.fn().mockResolvedValue({ id: 'txn-1', combo: 2 }),
       },
-      walletTransaction:   { create: jest.fn().mockResolvedValue({}) },
+      walletTransaction:    { create: jest.fn().mockResolvedValue({}) },
       platformRevenueEntry: { create: jest.fn().mockResolvedValue({ id: 'pre-1' }) },
-      roomGiftLeaderboard: { upsert: jest.fn().mockResolvedValue({}) },
-      voiceRoomMember:     { updateMany: jest.fn().mockResolvedValue({}) },
+      roomGiftLeaderboard:  { upsert: jest.fn().mockResolvedValue({}) },
+      voiceRoomMember:      { updateMany: jest.fn().mockResolvedValue({}) },
+      // P1-002: userDailyGiftSpend is now upserted inside the transaction
+      userDailyGiftSpend:   { upsert: jest.fn().mockResolvedValue({ totalSpent: 20 }) },
     });
   });
 }
