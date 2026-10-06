@@ -259,11 +259,25 @@ describe('DELETE /api/v1/wallet/payout/:id/cancel', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.PAYOUT_ENCRYPTION_KEY = 'test-payout-key-exactly-32bytes!!';
+    // P2-H01: cancelPayout now uses interactive $transaction (function form).
+    // The success test exercises this mock; the 404/400 fast-fail tests return
+    // before the transaction body is reached.
+    prisma.$transaction.mockImplementation(async (fn) => {
+      if (typeof fn !== 'function') return Promise.all(fn);
+      return fn({
+        $queryRaw: jest.fn().mockResolvedValue([{ id: 'wallet-1', diamonds: 2000 }]),
+        payoutRequest: {
+          findUnique: jest.fn().mockResolvedValue(PAYOUT),
+          update:     jest.fn().mockResolvedValue({ ...PAYOUT, status: 'CANCELLED' }),
+        },
+        wallet:            { update: jest.fn().mockResolvedValue({}) },
+        walletTransaction: { create: jest.fn().mockResolvedValue({}) },
+      });
+    });
   });
 
   test('cancels PENDING request and refunds diamonds', async () => {
     prisma.payoutRequest.findUnique.mockResolvedValue(PAYOUT);
-    prisma.$transaction.mockResolvedValue([{}, {}, {}]);
     const res = await request(buildApp()).delete('/api/v1/wallet/payout/po-1/cancel');
     expect(res.status).toBe(200);
     expect(prisma.$transaction).toHaveBeenCalled();
@@ -280,6 +294,49 @@ describe('DELETE /api/v1/wallet/payout/:id/cancel', () => {
     const res = await request(buildApp()).delete('/api/v1/wallet/payout/po-1/cancel');
     expect(res.status).toBe(400);
   });
+
+  // ── P2-H01: new concurrency conflict tests ─────────────────────────────────
+
+  test('P2-H01: cancel returns 404 when wallet not found inside tx', async () => {
+    // Outer findUnique returns a valid PENDING payout (passes pre-check).
+    // Inside the tx, $queryRaw returns empty — wallet does not exist.
+    prisma.payoutRequest.findUnique.mockResolvedValue(PAYOUT);
+    prisma.$transaction.mockImplementationOnce(async (fn) => {
+      if (typeof fn !== 'function') return Promise.all(fn);
+      return fn({
+        $queryRaw: jest.fn().mockResolvedValue([]),  // no wallet row
+        payoutRequest: {
+          findUnique: jest.fn().mockResolvedValue(PAYOUT),
+          update:     jest.fn(),
+        },
+        wallet:            { update: jest.fn() },
+        walletTransaction: { create: jest.fn() },
+      });
+    });
+    const res = await request(buildApp()).delete('/api/v1/wallet/payout/po-1/cancel');
+    expect(res.status).toBe(404);
+  });
+
+  test('P2-H01: cancel returns 400 when payout is no longer PENDING post-lock', async () => {
+    // Outer findUnique returns PENDING (passes pre-check).
+    // Post-lock re-read inside tx sees APPROVED — concurrent transition occurred.
+    prisma.payoutRequest.findUnique.mockResolvedValue(PAYOUT);
+    prisma.$transaction.mockImplementationOnce(async (fn) => {
+      if (typeof fn !== 'function') return Promise.all(fn);
+      return fn({
+        $queryRaw: jest.fn().mockResolvedValue([{ id: 'wallet-1', diamonds: 2000 }]),
+        payoutRequest: {
+          findUnique: jest.fn().mockResolvedValue({ ...PAYOUT, status: 'APPROVED' }),
+          update:     jest.fn(),
+        },
+        wallet:            { update: jest.fn() },
+        walletTransaction: { create: jest.fn() },
+      });
+    });
+    const res = await request(buildApp()).delete('/api/v1/wallet/payout/po-1/cancel');
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/APPROVED/i);
+  });
 });
 
 // ─── PATCH /wallet/payout/admin/:id — State machine ───────────────────────────
@@ -292,7 +349,18 @@ describe('PATCH /api/v1/wallet/payout/admin/:id — state machine', () => {
     saApp = buildApp(SA_USER);
     prisma.payoutRequest.findUnique.mockResolvedValue(PAYOUT);
     prisma.payoutRequest.update.mockResolvedValue({ ...PAYOUT, status: 'APPROVED' });
-    prisma.$transaction.mockResolvedValue([{}, {}, {}]);
+    // P1-H01: non-reject paths now use updateMany instead of update.
+    prisma.payoutRequest.updateMany = jest.fn().mockResolvedValue({ count: 1 });
+    // P1-H01: reject path now uses interactive $transaction.
+    prisma.$transaction.mockImplementation(async (fn) => {
+      if (typeof fn !== 'function') return Promise.all(fn);
+      return fn({
+        $queryRaw: jest.fn().mockResolvedValue([{ id: 'po-1', status: 'PENDING', diamonds: 2000, userId: 'user-p-1' }]),
+        payoutRequest: { update: jest.fn().mockResolvedValue({}) },
+        wallet:        { update: jest.fn().mockResolvedValue({}) },
+        walletTransaction: { create: jest.fn().mockResolvedValue({}) },
+      });
+    });
   });
 
   test('approve: PENDING → APPROVED', async () => {
@@ -307,7 +375,7 @@ describe('PATCH /api/v1/wallet/payout/admin/:id — state machine', () => {
       .patch('/api/v1/wallet/payout/admin/po-1')
       .send({ action: 'reject', adminNote: 'Invalid account' });
     expect(res.status).toBe(200);
-    // $transaction called with 3 ops (update + wallet + PAYOUT_REVERSAL walletTransaction)
+    // $transaction called for the reject interactive tx
     expect(prisma.$transaction).toHaveBeenCalled();
   });
 
@@ -320,7 +388,7 @@ describe('PATCH /api/v1/wallet/payout/admin/:id — state machine', () => {
   });
 
   test('invalid transition returns 400', async () => {
-    // Cannot approve an already-APPROVED payout
+    // Cannot approve an already-APPROVED payout (soft pre-check)
     prisma.payoutRequest.findUnique.mockResolvedValue({ ...PAYOUT, status: 'APPROVED' });
     const res = await request(saApp)
       .patch('/api/v1/wallet/payout/admin/po-1')
@@ -339,6 +407,76 @@ describe('PATCH /api/v1/wallet/payout/admin/:id — state machine', () => {
     const res = await request(buildApp()) // member role
       .get('/api/v1/wallet/payout/admin/list');
     expect(res.status).toBe(403);
+  });
+
+  // ── P1-H01: new concurrency conflict tests ─────────────────────────────────
+
+  test('P1-H01: approve concurrent conflict returns 409 (updateMany count:0)', async () => {
+    prisma.payoutRequest.updateMany.mockResolvedValueOnce({ count: 0 });
+    const res = await request(saApp)
+      .patch('/api/v1/wallet/payout/admin/po-1')
+      .send({ action: 'approve' });
+    expect(res.status).toBe(409);
+  });
+
+  test('P1-H01: approve succeeds when updateMany returns count 1', async () => {
+    prisma.payoutRequest.updateMany.mockResolvedValueOnce({ count: 1 });
+    const res = await request(saApp)
+      .patch('/api/v1/wallet/payout/admin/po-1')
+      .send({ action: 'approve' });
+    expect(res.status).toBe(200);
+  });
+
+  test('P1-H01: processing concurrent conflict returns 409 (updateMany count:0)', async () => {
+    prisma.payoutRequest.findUnique.mockResolvedValue({ ...PAYOUT, status: 'APPROVED' });
+    prisma.payoutRequest.updateMany.mockResolvedValueOnce({ count: 0 });
+    const res = await request(saApp)
+      .patch('/api/v1/wallet/payout/admin/po-1')
+      .send({ action: 'processing' });
+    expect(res.status).toBe(409);
+  });
+
+  test('P1-H01: complete concurrent conflict returns 409 (updateMany count:0)', async () => {
+    prisma.payoutRequest.findUnique.mockResolvedValue({ ...PAYOUT, status: 'PROCESSING' });
+    prisma.payoutRequest.updateMany.mockResolvedValueOnce({ count: 0 });
+    const res = await request(saApp)
+      .patch('/api/v1/wallet/payout/admin/po-1')
+      .send({ action: 'complete', transactionRef: 'PP-99' });
+    expect(res.status).toBe(409);
+  });
+
+  test('P1-H01: reject concurrent transition returns 409 (CONCURRENT_TRANSITION from tx)', async () => {
+    // $queryRaw returns the payout row with status COMPLETED — no longer eligible for reject
+    prisma.$transaction.mockImplementationOnce(async (fn) => {
+      if (typeof fn !== 'function') return Promise.all(fn);
+      return fn({
+        $queryRaw: jest.fn().mockResolvedValue([{ id: 'po-1', status: 'COMPLETED', diamonds: 2000, userId: 'user-p-1' }]),
+        payoutRequest: { update: jest.fn() },
+        wallet:        { update: jest.fn() },
+        walletTransaction: { create: jest.fn() },
+      });
+    });
+    const res = await request(saApp)
+      .patch('/api/v1/wallet/payout/admin/po-1')
+      .send({ action: 'reject', adminNote: 'invalid' });
+    expect(res.status).toBe(409);
+  });
+
+  test('P1-H01: reject PAYOUT_NOT_FOUND_IN_TX returns 404', async () => {
+    // $queryRaw returns empty array — payout not found inside the transaction
+    prisma.$transaction.mockImplementationOnce(async (fn) => {
+      if (typeof fn !== 'function') return Promise.all(fn);
+      return fn({
+        $queryRaw: jest.fn().mockResolvedValue([]),
+        payoutRequest: { update: jest.fn() },
+        wallet:        { update: jest.fn() },
+        walletTransaction: { create: jest.fn() },
+      });
+    });
+    const res = await request(saApp)
+      .patch('/api/v1/wallet/payout/admin/po-1')
+      .send({ action: 'reject' });
+    expect(res.status).toBe(404);
   });
 });
 
