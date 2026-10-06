@@ -60,7 +60,14 @@ async function getPayoutInfo(req, res) {
     const usdValue = toUsd(diamonds);
     const canRequest = diamonds >= MIN_PAYOUT_DIAMONDS;
 
-    // Check for existing pending request
+    // NOTE (P3-H01): canRequest and pendingRequest are advisory snapshots based on
+    // current database state at the moment this endpoint is called. They may be stale
+    // by the time the client acts on them — e.g. a concurrent requestPayout() may have
+    // already consumed the available balance or created a pending request after this
+    // read. The authoritative payout eligibility check — including balance verification,
+    // duplicate-payout prevention, and diamond deduction — occurs atomically inside
+    // requestPayout()'s SELECT ... FOR UPDATE transaction. Never gate payout creation
+    // solely on these values without re-validating inside that transaction.
     const pendingRequest = await prisma.payoutRequest.findFirst({
       where:   { userId: req.user.id, status: { in: ['PENDING', 'APPROVED', 'PROCESSING'] } },
       select:  { id: true, status: true, diamonds: true, usdAmount: true, createdAt: true }
@@ -301,6 +308,7 @@ async function cancelPayout(req, res) {
     const { id } = req.params;
     const userId  = req.user.id;
 
+    // Fast pre-transaction checks — early return before acquiring DB lock
     const request = await prisma.payoutRequest.findUnique({ where: { id } });
     if (!request || request.userId !== userId) {
       return errorResponse(res, 'Payout request not found', 404);
@@ -309,26 +317,59 @@ async function cancelPayout(req, res) {
       return errorResponse(res, `Cannot cancel a ${request.status} payout request`, 400);
     }
 
-    // Refund diamonds atomically with PAYOUT_REVERSAL ledger entry
-    await prisma.$transaction([
-      prisma.payoutRequest.update({
-        where: { id },
-        data:  { status: 'CANCELLED' }
-      }),
-      prisma.wallet.update({
-        where: { userId },
-        data:  { diamonds: { increment: request.diamonds } }
-      }),
-      prisma.walletTransaction.create({
-        data: {
-          userId,
-          type:        'PAYOUT_REVERSAL',
-          coins:       0,
-          diamonds:    +request.diamonds,
-          description: `Payout request ${id} cancelled by user — diamonds restored`,
-        }
-      })
-    ]);
+    // P2-H01 FIX: explicit wallet FOR UPDATE lock — matches requestPayout() pattern.
+    // Serialises concurrent cancel + cancel and cancel + new-request races.
+    // The wallet lock is acquired first, then the payout status is re-verified
+    // post-lock to guarantee no double refund or duplicate PAYOUT_REVERSAL.
+    try {
+      await prisma.$transaction(async (tx) => {
+        // Step 1: Lock wallet row — serialises concurrent cancel + cancel races
+        const lockedWallet = await tx.$queryRaw`
+          SELECT id, diamonds
+          FROM wallets
+          WHERE userId = ${userId}
+          FOR UPDATE
+        `;
+        if (!lockedWallet || lockedWallet.length === 0) throw new Error('WALLET_NOT_FOUND');
+
+        // Step 2: Re-verify payout is still PENDING and owned by user (post-lock)
+        const current = await tx.payoutRequest.findUnique({ where: { id } });
+        if (!current || current.userId !== userId) throw new Error('PAYOUT_NOT_FOUND');
+        if (current.status !== 'PENDING') throw new Error(`PAYOUT_NOT_CANCELLABLE:${current.status}`);
+
+        // Step 3: Cancel payout
+        await tx.payoutRequest.update({ where: { id }, data: { status: 'CANCELLED' } });
+
+        // Step 4: Refund diamonds (use current.diamonds — authoritative post-lock value)
+        await tx.wallet.update({
+          where: { userId },
+          data:  { diamonds: { increment: current.diamonds } },
+        });
+
+        // Step 5: PAYOUT_REVERSAL ledger entry
+        await tx.walletTransaction.create({
+          data: {
+            userId,
+            type:        'PAYOUT_REVERSAL',
+            coins:       0,
+            diamonds:    +current.diamonds,
+            description: `Payout request ${id} cancelled by user — diamonds restored`,
+          },
+        });
+      }, { timeout: 10000 });
+    } catch (txErr) {
+      if (txErr.message === 'WALLET_NOT_FOUND') {
+        return errorResponse(res, 'Wallet not found. Please contact support.', 404);
+      }
+      if (txErr.message === 'PAYOUT_NOT_FOUND') {
+        return errorResponse(res, 'Payout request not found', 404);
+      }
+      if (txErr.message?.startsWith('PAYOUT_NOT_CANCELLABLE:')) {
+        const s = txErr.message.split(':')[1];
+        return errorResponse(res, `Cannot cancel a ${s} payout request`, 400);
+      }
+      throw txErr;
+    }
 
     return successResponse(res, null, 'Payout request cancelled and diamonds refunded.');
   } catch (err) {
@@ -412,35 +453,85 @@ async function processPayoutAdmin(req, res) {
 
     // If rejecting, refund diamonds with PAYOUT_REVERSAL ledger entry
     if (action === 'reject') {
-      await prisma.$transaction([
-        prisma.payoutRequest.update({
-          where: { id },
-          data:  { status: newStatus, adminNote: adminNote || null }
-        }),
-        prisma.wallet.update({
-          where: { userId: request.userId },
-          data:  { diamonds: { increment: request.diamonds } }
-        }),
-        prisma.walletTransaction.create({
-          data: {
-            userId:      request.userId,
-            type:        'PAYOUT_REVERSAL',
-            coins:       0,
-            diamonds:    +request.diamonds,
-            description: `Payout request ${id} rejected by admin ${req.user.id}${adminNote ? ': ' + adminNote.substring(0, 80) : ''} — diamonds restored`,
+      // P1-H01 FIX (reject path): interactive $transaction with SELECT...FOR UPDATE on
+      // payout_requests row. Serialises concurrent approve + reject races: the loser
+      // acquires the row lock AFTER the winner commits, re-reads the updated status
+      // post-lock, and aborts rather than issuing a duplicate refund.
+      try {
+        await prisma.$transaction(async (tx) => {
+          // Step 1: Lock payout row — serialises concurrent approve + reject
+          const locked = await tx.$queryRaw`
+            SELECT id, status, diamonds, userId
+            FROM payout_requests
+            WHERE id = ${id}
+            FOR UPDATE
+          `;
+          if (!locked || locked.length === 0) throw new Error('PAYOUT_NOT_FOUND_IN_TX');
+          const lockedPayout = locked[0];
+
+          // Step 2: Re-verify status is still valid inside the lock
+          if (!VALID_TRANSITIONS['reject'].includes(lockedPayout.status)) {
+            throw new Error(`CONCURRENT_TRANSITION:${lockedPayout.status}`);
           }
-        })
-      ]);
+
+          // Step 3: Update status
+          await tx.payoutRequest.update({
+            where: { id },
+            data:  { status: 'REJECTED', adminNote: adminNote || null },
+          });
+
+          // Step 4: Refund diamonds
+          await tx.wallet.update({
+            where: { userId: request.userId },
+            data:  { diamonds: { increment: request.diamonds } },
+          });
+
+          // Step 5: PAYOUT_REVERSAL ledger entry
+          await tx.walletTransaction.create({
+            data: {
+              userId:      request.userId,
+              type:        'PAYOUT_REVERSAL',
+              coins:       0,
+              diamonds:    +request.diamonds,
+              description: `Payout request ${id} rejected by admin ${req.user.id}${adminNote ? ': ' + adminNote.substring(0, 80) : ''} — diamonds restored`,
+            },
+          });
+        }, { timeout: 10000 });
+      } catch (txErr) {
+        if (txErr.message === 'PAYOUT_NOT_FOUND_IN_TX') {
+          return errorResponse(res, 'Payout request not found', 404);
+        }
+        if (txErr.message?.startsWith('CONCURRENT_TRANSITION:')) {
+          const currentStatus = txErr.message.split(':')[1];
+          return errorResponse(
+            res,
+            `Cannot reject — payout is no longer in an eligible state (concurrent transition to ${currentStatus} occurred)`,
+            409
+          );
+        }
+        throw txErr;
+      }
     } else {
-      await prisma.payoutRequest.update({
-        where: { id },
+      // P1-H01 FIX (non-reject paths): atomic conditional updateMany — the status
+      // condition and the write are a single DB operation, eliminating the TOCTOU gap
+      // between the pre-check findUnique above and this write. A concurrent transition
+      // that completes between the two would cause count===0 here → 409.
+      const result = await prisma.payoutRequest.updateMany({
+        where: { id, status: { in: VALID_TRANSITIONS[action] } },
         data:  {
           status:         newStatus,
           adminNote:      adminNote || null,
           transactionRef: transactionRef || null,
-          processedAt:    new Date()
-        }
+          processedAt:    new Date(),
+        },
       });
+      if (result.count === 0) {
+        return errorResponse(
+          res,
+          `Cannot ${action} — payout is no longer in an eligible state (concurrent transition occurred)`,
+          409
+        );
+      }
     }
 
     logger.info(`[payout] Admin ${req.user.id} ${action}d payout ${id} for user ${request.userId}`);

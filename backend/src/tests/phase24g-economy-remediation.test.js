@@ -734,6 +734,9 @@ describe('[MOCKED] P2-005: Payout state machine — PROCESSING transition', () =
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.PAYOUT_ENCRYPTION_KEY = 'test-payout-key-exactly-32bytes!!';
+    // P1-H01: non-reject paths now use updateMany. Set default success mock here
+    // so existing P2-005 tests continue to pass without each test setting it individually.
+    prisma.payoutRequest.updateMany.mockResolvedValue({ count: 1 });
   });
 
   test('P2-005: APPROVED → PROCESSING transition succeeds', async () => {
