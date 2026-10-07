@@ -119,9 +119,13 @@ beforeEach(() => {
   prisma.wallet.update     = jest.fn().mockResolvedValue({ coins: 1000 });
 
   // Default walletTransaction mock
+  // Call order in the refund route:
+  //   1st findUnique: load the transaction by id
+  //   2nd findUnique: idempotency check (WHERE idempotencyKey = 'refund:${txId}')
+  // By default: first returns null (overridden per-test), second returns null (not yet refunded)
   if (!prisma.walletTransaction) prisma.walletTransaction = {};
   prisma.walletTransaction.findUnique = jest.fn().mockResolvedValue(null);
-  prisma.walletTransaction.findFirst  = jest.fn().mockResolvedValue(null); // no existing refund
+  prisma.walletTransaction.findFirst  = jest.fn().mockResolvedValue(null); // legacy — kept for compat
   prisma.walletTransaction.create     = jest.fn().mockResolvedValue({ id: 'refund-tx-1', coins: -1000 });
 
   // Default $transaction mock — executes the callback
@@ -180,7 +184,10 @@ describe('PAY-GAP-001: Refund endpoint access control', () => {
 describe('PAY-GAP-001: Refund input validation', () => {
   test('Missing reason returns 400', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeStripeTx());
+    // 1st findUnique: tx load; 2nd findUnique: idempotency (null = not yet refunded)
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx())
+      .mockResolvedValueOnce(null);
     const res = await request(app)
       .post(`/api/v1/admin/actions/transactions/${TX_ID}/refund`)
       .set('Authorization', tok('sa-1'))
@@ -191,7 +198,9 @@ describe('PAY-GAP-001: Refund input validation', () => {
 
   test('Reason shorter than 10 chars returns 400', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeStripeTx());
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx())
+      .mockResolvedValueOnce(null);
     const res = await request(app)
       .post(`/api/v1/admin/actions/transactions/${TX_ID}/refund`)
       .set('Authorization', tok('sa-1'))
@@ -211,9 +220,9 @@ describe('PAY-GAP-001: Refund input validation', () => {
 
   test('Deleted user account returns 404', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(
-      makeStripeTx({ user: { ...TARGET_USER, deletedAt: new Date() } })
-    );
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx({ user: { ...TARGET_USER, deletedAt: new Date() } }))
+      .mockResolvedValueOnce(null);
     const res = await request(app)
       .post(`/api/v1/admin/actions/transactions/${TX_ID}/refund`)
       .set('Authorization', tok('sa-1'))
@@ -231,9 +240,10 @@ describe('PAY-GAP-001: Non-refundable transaction types', () => {
   NON_REFUNDABLE.forEach(type => {
     test(`${type} type returns 400 (non-refundable)`, async () => {
       asSuperAdmin();
-      prisma.walletTransaction.findUnique.mockResolvedValue(
-        makeStripeTx({ type, stripeSessionId: null })
-      );
+      // Non-refundable check happens before idempotency — only 1 findUnique call needed
+      prisma.walletTransaction.findUnique
+        .mockResolvedValueOnce(makeStripeTx({ type, stripeSessionId: null }))
+        .mockResolvedValueOnce(null);
       const res = await request(app)
         .post(`/api/v1/admin/actions/transactions/${TX_ID}/refund`)
         .set('Authorization', tok('sa-1'))
@@ -250,9 +260,11 @@ describe('PAY-GAP-001: Non-refundable transaction types', () => {
 describe('PAY-GAP-001: Refund business rules', () => {
   test('Already-refunded transaction returns 409', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeStripeTx());
-    // Existing refund found
-    prisma.walletTransaction.findFirst.mockResolvedValue({ id: 'existing-refund-tx' });
+    // 1st findUnique: tx load returns the original tx
+    // 2nd findUnique: idempotency check returns an existing REFUND tx (F-04: uses idempotencyKey)
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx())
+      .mockResolvedValueOnce({ id: 'existing-refund-tx' }); // idempotency hit
     const res = await request(app)
       .post(`/api/v1/admin/actions/transactions/${TX_ID}/refund`)
       .set('Authorization', tok('sa-1'))
@@ -263,7 +275,9 @@ describe('PAY-GAP-001: Refund business rules', () => {
 
   test('Insufficient wallet coins returns 400', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeStripeTx()); // 1000 coins
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx()) // 1000 coins tx
+      .mockResolvedValueOnce(null);          // not yet refunded
     prisma.wallet.findUnique.mockResolvedValue({ coins: 50 }); // only 50 coins
     const res = await request(app)
       .post(`/api/v1/admin/actions/transactions/${TX_ID}/refund`)
@@ -275,7 +289,9 @@ describe('PAY-GAP-001: Refund business rules', () => {
 
   test('Zero-coin transaction returns 400', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeStripeTx({ coins: 0 }));
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx({ coins: 0 }))
+      .mockResolvedValueOnce(null);
     const res = await request(app)
       .post(`/api/v1/admin/actions/transactions/${TX_ID}/refund`)
       .set('Authorization', tok('sa-1'))
@@ -286,7 +302,9 @@ describe('PAY-GAP-001: Refund business rules', () => {
 
   test('STRIPE_PURCHASE refund succeeds — returns 200 with refundTransaction', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeStripeTx());
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx())
+      .mockResolvedValueOnce(null);
     const res = await request(app)
       .post(`/api/v1/admin/actions/transactions/${TX_ID}/refund`)
       .set('Authorization', tok('sa-1'))
@@ -298,7 +316,9 @@ describe('PAY-GAP-001: Refund business rules', () => {
 
   test('ADMIN_GRANT refund succeeds — returns 200', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeAdminGrantTx());
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeAdminGrantTx())
+      .mockResolvedValueOnce(null);
     const res = await request(app)
       .post(`/api/v1/admin/actions/transactions/${ADMIN_TX_ID}/refund`)
       .set('Authorization', tok('sa-1'))
@@ -309,7 +329,9 @@ describe('PAY-GAP-001: Refund business rules', () => {
 
   test('$transaction is called atomically for coin deduction + ledger entry', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeStripeTx());
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx())
+      .mockResolvedValueOnce(null);
     await request(app)
       .post(`/api/v1/admin/actions/transactions/${TX_ID}/refund`)
       .set('Authorization', tok('sa-1'))
@@ -324,7 +346,9 @@ describe('PAY-GAP-001: Refund business rules', () => {
 describe('PAY-GAP-002: Stripe refund integration', () => {
   test('STRIPE_PURCHASE: stripe.refunds.create is called with payment intent', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeStripeTx());
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx())
+      .mockResolvedValueOnce(null);
     mockStripeSessionRetrieve.mockResolvedValue({ payment_intent: 'pi_test_123' });
     mockStripeRefundCreate.mockResolvedValue({ id: 'rf_abc', status: 'succeeded' });
 
@@ -343,7 +367,9 @@ describe('PAY-GAP-002: Stripe refund integration', () => {
 
   test('ADMIN_GRANT: Stripe is NOT called (no Stripe session)', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeAdminGrantTx());
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeAdminGrantTx())
+      .mockResolvedValueOnce(null);
     const res = await request(app)
       .post(`/api/v1/admin/actions/transactions/${ADMIN_TX_ID}/refund`)
       .set('Authorization', tok('sa-1'))
@@ -355,7 +381,9 @@ describe('PAY-GAP-002: Stripe refund integration', () => {
 
   test('stripeRefund=false skips Stripe even for STRIPE_PURCHASE', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeStripeTx());
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx())
+      .mockResolvedValueOnce(null);
     const res = await request(app)
       .post(`/api/v1/admin/actions/transactions/${TX_ID}/refund`)
       .set('Authorization', tok('sa-1'))
@@ -367,7 +395,9 @@ describe('PAY-GAP-002: Stripe refund integration', () => {
 
   test('Stripe failure is non-fatal — DB refund still committed (200)', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeStripeTx());
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx())
+      .mockResolvedValueOnce(null);
     mockStripeSessionRetrieve.mockResolvedValue({ payment_intent: 'pi_test_123' });
     mockStripeRefundCreate.mockRejectedValue(new Error('Stripe API error'));
 
@@ -383,7 +413,9 @@ describe('PAY-GAP-002: Stripe refund integration', () => {
 
   test('Stripe session with no payment_intent returns stripeRefund.error', async () => {
     asSuperAdmin();
-    prisma.walletTransaction.findUnique.mockResolvedValue(makeStripeTx());
+    prisma.walletTransaction.findUnique
+      .mockResolvedValueOnce(makeStripeTx())
+      .mockResolvedValueOnce(null);
     mockStripeSessionRetrieve.mockResolvedValue({ payment_intent: null });
 
     const res = await request(app)

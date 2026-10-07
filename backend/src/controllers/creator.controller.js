@@ -204,6 +204,21 @@ async function subscribe(req, res, next) {
           }
         });
 
+        // 5b. F-05: Creator receiver diamond ledger entry — FATAL (no .catch)
+        // Completes the subscription ledger: subscriber debit (SUBSCRIPTION) + creator credit (SUBSCRIPTION_RECEIVE).
+        if (diamonds > 0) {
+          await tx.walletTransaction.create({
+            data: {
+              userId:         creatorUserId,
+              type:           'SUBSCRIPTION_RECEIVE',
+              coins:          0,
+              diamonds,
+              description:    `Subscription income from ${subscriberId} — ${tier.name}`,
+              subscriptionId: subscription.id
+            }
+          });
+        }
+
         // 6. Write platform revenue entry — FATAL (no .catch)
         //    Platform retains 50% of subscription charge.
         await writePlatformRevenueFromSpend(tx, {
@@ -335,6 +350,22 @@ async function sendTip(req, res, next) {
             tipId:       t.id
           }
         });
+
+        // 5b. F-05: Creator receiver diamond ledger entry — FATAL (no .catch)
+        // Completes the tip ledger: sender debit (TIP_SEND) + receiver credit (TIP_RECEIVE).
+        // Only written when diamonds > 0 (mirrors GIFT_RECEIVE pattern for odd-coin floor).
+        if (diamonds > 0) {
+          await tx.walletTransaction.create({
+            data: {
+              userId:      creatorUserId,
+              type:        'TIP_RECEIVE',
+              coins:       0,
+              diamonds,
+              description: `Tip received from ${senderId}${message ? ': ' + message.substring(0, 50) : ''}`,
+              tipId:       t.id
+            }
+          });
+        }
 
         // 6. Platform revenue entry — FATAL (no .catch)
         await writePlatformRevenueFromSpend(tx, {
