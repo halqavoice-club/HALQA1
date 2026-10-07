@@ -10,7 +10,7 @@ import { useSearchParams } from 'next/navigation'
 import { getSocket } from '@/lib/socket'
 import { cn } from '@/lib/utils'
 import {
-  Coins, Gift,
+  Coins, Gift, ArrowUpRight, ArrowDownLeft,
   Sparkles, CheckCircle, Loader2, History, Wallet, ExternalLink,
 } from 'lucide-react'
 
