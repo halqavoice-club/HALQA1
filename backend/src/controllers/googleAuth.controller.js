@@ -229,6 +229,19 @@ async function googleSignIn(req, res, next) {
             }
           });
 
+          // F-06: Create wallet atomically with the Google user + auth provider.
+          // Ensures OAuth-registered users have a wallet from the start, matching
+          // the email/password registration path.
+          await tx.wallet.create({
+            data: {
+              userId:    newUser.id,
+              coins:      0,
+              diamonds:   0,
+              totalSpent: 0,
+              totalEarned: 0,
+            }
+          });
+
           return newUser;
         });
 

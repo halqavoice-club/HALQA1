@@ -86,11 +86,31 @@ describe('POST /api/v1/wallet/purchase', () => {
 
   test('grants coins+bonus in test/dev mode', async () => {
     prisma.coinPackage.findUnique.mockResolvedValue(PACKAGE);
-    prisma.wallet.upsert.mockResolvedValue({ ...WALLET, coins: WALLET.coins + 550 });
+    // $transaction mock: interactive form receives a callback fn
+    prisma.$transaction.mockImplementation(async (fn) => fn({
+      wallet:            { upsert: jest.fn().mockResolvedValue({ ...WALLET, coins: WALLET.coins + 550 }) },
+      walletTransaction: { create: jest.fn().mockResolvedValue({ id: 'wt-dev-1' }) },
+    }));
     const res = await request(buildApp('test')).post('/api/v1/wallet/purchase')
       .send({ packageId: PACKAGE.id });
     expect(res.status).toBe(200);
     expect(res.body.data.purchased.total).toBe(550); // 500 + 50 bonus
+  });
+
+  test('F-01: walletTransaction.create called with STRIPE_PURCHASE type in dev mode', async () => {
+    prisma.coinPackage.findUnique.mockResolvedValue(PACKAGE);
+    const mockCreate = jest.fn().mockResolvedValue({ id: 'wt-dev-2' });
+    prisma.$transaction.mockImplementation(async (fn) => fn({
+      wallet:            { upsert: jest.fn().mockResolvedValue({ ...WALLET, coins: WALLET.coins + 550 }) },
+      walletTransaction: { create: mockCreate },
+    }));
+    await request(buildApp('test')).post('/api/v1/wallet/purchase')
+      .send({ packageId: PACKAGE.id });
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ type: 'STRIPE_PURCHASE', coins: 550 })
+      })
+    );
   });
 
   test('SECURITY: blocks /wallet/purchase in production', async () => {

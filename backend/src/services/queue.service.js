@@ -118,6 +118,8 @@ function startWorkers() {
   // Also handles creator subscription auto-renewal (M2 fix)
   workers.socialCleanup = new Worker(QUEUE_NAMES.SOCIAL_CLEANUP, async (job) => {
     const prisma = require('../utils/prisma');
+    const { toDiamonds } = require('../services/economy.config');
+    const { writePlatformRevenueFromSpend } = require('../utils/platformRevenue');
     const now    = new Date();
 
     // ── 1. Soft-delete expired stories (24h TTL) ──────────────────────────────
@@ -174,27 +176,33 @@ function startWorkers() {
           }
 
           const newExpiry = new Date(sub.expiresAt.getTime() + 30 * 24 * 60 * 60 * 1000);
-          const diamonds  = Math.floor(sub.tier.priceCoins * 0.5);
+          // F-08 fix: use canonical toDiamonds() instead of hardcoded * 0.5
+          const diamonds  = toDiamonds(sub.tier.priceCoins);
 
-          await prisma.$transaction([
+          // F-03 fix: converted from array $transaction to interactive $transaction so
+          // writePlatformRevenueFromSpend (which needs the tx client) can be called inside.
+          await prisma.$transaction(async (tx) => {
             // Deduct coins from subscriber — optimistic lock prevents race
-            prisma.wallet.update({
+            await tx.wallet.update({
               where: { userId: sub.subscriberId, coins: { gte: sub.tier.priceCoins } },
               data:  { coins: { decrement: sub.tier.priceCoins }, totalSpent: { increment: sub.tier.priceCoins } }
-            }),
+            });
+
             // Credit diamonds to creator
-            prisma.wallet.upsert({
+            await tx.wallet.upsert({
               where:  { userId: sub.creator.userId },
               create: { userId: sub.creator.userId, coins: 0, diamonds, totalSpent: 0, totalEarned: diamonds },
               update: { diamonds: { increment: diamonds }, totalEarned: { increment: diamonds } }
-            }),
+            });
+
             // Extend subscription
-            prisma.creatorSubscription.update({
+            await tx.creatorSubscription.update({
               where: { id: sub.id },
               data:  { expiresAt: newExpiry, renewedAt: now, coinsCharged: { increment: sub.tier.priceCoins } }
-            }),
-            // Wallet ledger entry (debit)
-            prisma.walletTransaction.create({
+            });
+
+            // Wallet ledger entry (debit) — subscriber
+            await tx.walletTransaction.create({
               data: {
                 userId:         sub.subscriberId,
                 type:           'SUBSCRIPTION',
@@ -202,13 +210,23 @@ function startWorkers() {
                 description:    `Auto-renewal: ${sub.tier.name}`,
                 subscriptionId: sub.id
               }
-            }),
-            // Creator profile totalEarned counter — inside transaction for atomicity
-            prisma.creatorProfile.update({
+            });
+
+            // Creator profile totalEarned counter
+            await tx.creatorProfile.update({
               where: { id: sub.creatorId },
               data:  { totalEarned: { increment: diamonds } }
-            })
-          ]);
+            });
+
+            // F-03 fix: platform revenue entry — was missing from auto-renewal
+            // matches first-time subscription charge in creator.controller.js
+            await writePlatformRevenueFromSpend(tx, {
+              sourceType: 'SUBSCRIPTION',
+              sourceId:   sub.id,
+              userId:     sub.subscriberId,
+              spendCoins: sub.tier.priceCoins,
+            });
+          });
 
           renewalSuccess++;
           logger.info(`[social-cleanup] Auto-renewed subscription ${sub.id} → expires ${newExpiry.toISOString()}`);
