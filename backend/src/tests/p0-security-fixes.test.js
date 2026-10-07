@@ -375,3 +375,122 @@ describe('SEC-CRIT-003: LiveKit generic token voice room guard', () => {
     expect(src).toMatch(/not an active participant in this voice room/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEC-BAN-01 (Voice): Platform-banned users cannot obtain Voice Club LiveKit tokens
+//
+// The platform-ban flow (report-block.controller.js) sets user.status='BANNED'
+// but does NOT deactivate VoiceParticipant.isActive.  Without the fresh DB check
+// added by this fix, a banned user whose VoiceParticipant remains active could
+// call POST /voice/:id/livekit-token and receive a fresh 1-hour token.
+//
+// Regression matrix:
+//   BANNED  + active participant  → 403 (no token)
+//   ACTIVE  + active participant  → 200 (token issued) — regression positive
+//   BANNED  + inactive participant → 403 (participant check fires first)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('SEC-BAN-01 (Voice): banned user cannot get voice LiveKit token', () => {
+  let livekitCtrl;
+
+  beforeAll(() => {
+    livekitCtrl = require('../controllers/livekit.controller');
+  });
+
+  const ROOM_ID = 'voice-room-ban-test-uuid';
+
+  function makeVoiceReq(userId, status) {
+    return {
+      params: { id: ROOM_ID },
+      query:  {},
+      body:   {},
+      user:   { id: userId, role: 'MEMBER', status, schoolId: null, firstName: 'T', lastName: 'U' },
+    };
+  }
+  function makeRes() {
+    return { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() };
+  }
+  const next = jest.fn();
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.LIVEKIT_API_KEY    = 'test-key';
+    process.env.LIVEKIT_API_SECRET = 'test-secret';
+  });
+
+  test('BANNED user with active VoiceParticipant is rejected with 403', async () => {
+    // Room exists and is LIVE
+    prisma.voiceRoom.findUnique.mockResolvedValue({
+      id: ROOM_ID, status: 'LIVE', deletedAt: null, micLocked: false,
+    });
+    // Participant IS active — platform ban does not deactivate it
+    prisma.voiceParticipant.findUnique.mockResolvedValue({
+      roomId: ROOM_ID, userId: 'banned-user', isActive: true, role: 'AUDIENCE',
+    });
+    // Fresh DB query returns BANNED status
+    prisma.user.findUnique.mockResolvedValue({ status: 'BANNED' });
+
+    const res = makeRes();
+    await livekitCtrl.getLiveKitToken(makeVoiceReq('banned-user', 'BANNED'), res, next);
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ success: false }),
+    );
+    // No token must be present in any response payload
+    const jsonArg = res.json.mock.calls[0][0];
+    expect(jsonArg.data?.token).toBeUndefined();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test('ACTIVE user with active VoiceParticipant receives a token (regression positive)', async () => {
+    prisma.voiceRoom.findUnique.mockResolvedValue({
+      id: ROOM_ID, status: 'LIVE', deletedAt: null, micLocked: false,
+    });
+    prisma.voiceParticipant.findUnique.mockResolvedValue({
+      roomId: ROOM_ID, userId: 'active-user', isActive: true, role: 'SPEAKER',
+    });
+    // Fresh DB query returns ACTIVE status
+    prisma.user.findUnique.mockResolvedValue({ status: 'ACTIVE' });
+
+    const res = makeRes();
+    await livekitCtrl.getLiveKitToken(makeVoiceReq('active-user', 'ACTIVE'), res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ success: true }),
+    );
+  });
+
+  test('BANNED user whose VoiceParticipant is already inactive gets 403 from participant check', async () => {
+    prisma.voiceRoom.findUnique.mockResolvedValue({
+      id: ROOM_ID, status: 'LIVE', deletedAt: null, micLocked: false,
+    });
+    // Participant is inactive (e.g. room-level ban already ran)
+    prisma.voiceParticipant.findUnique.mockResolvedValue({
+      roomId: ROOM_ID, userId: 'banned-inactive', isActive: false, role: 'AUDIENCE',
+    });
+    // user.findUnique should NOT be reached — participant check fires first
+    prisma.user.findUnique.mockResolvedValue({ status: 'BANNED' });
+
+    const res = makeRes();
+    await livekitCtrl.getLiveKitToken(makeVoiceReq('banned-inactive', 'BANNED'), res, next);
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  // Source-level verification — ensure the fix is actually in the controller source
+  test('livekit.controller.js getLiveKitToken source contains SEC-BAN-01 check', () => {
+    const fs   = require('fs');
+    const path = require('path');
+    const src  = fs.readFileSync(
+      path.join(__dirname, '../controllers/livekit.controller.js'), 'utf8',
+    );
+    expect(src).toMatch(/SEC-BAN-01/);
+    expect(src).toMatch(/freshUser/);
+    expect(src).toMatch(/status.*BANNED/);
+    expect(src).toMatch(/Your account has been suspended/);
+  });
+});

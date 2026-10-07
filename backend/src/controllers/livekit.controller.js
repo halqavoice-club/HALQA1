@@ -38,6 +38,21 @@ async function getLiveKitToken(req, res, next) {
       return errorResponse(res, 'You are not an active participant in this room', 403);
     }
 
+    // SEC-BAN-01: Banned users must not receive new LiveKit tokens.
+    // Tokens are long-lived (1h) so a ban applied after token issue won't take effect
+    // until expiry — but we can at least block new token requests immediately.
+    // The platform-ban flow (report-block.controller.js) sets user.status='BANNED'
+    // but does NOT deactivate VoiceParticipant, so the participant check above is
+    // insufficient on its own. Query fresh from DB — req.user is JWT-derived and
+    // may be stale if the ban was applied after the current access token was issued.
+    const freshUser = await prisma.user.findUnique({
+      where:  { id: userId },
+      select: { status: true },
+    });
+    if (freshUser?.status === 'BANNED') {
+      return errorResponse(res, 'Your account has been suspended', 403);
+    }
+
     const role = participant.role; // HOST | MODERATOR | SPEAKER | AUDIENCE
 
     // ── Build LiveKit token ────────────────────────────────────────────────

@@ -33,6 +33,10 @@ jest.mock('../utils/prisma', () => {
   const m = {
     voiceRoom:        { findUnique: jest.fn(), update: jest.fn() },
     voiceParticipant: { findMany: jest.fn(), findUnique: jest.fn() },
+    // SEC-BAN-01: getLiveKitToken now queries prisma.user.findUnique to check
+    // User.status before issuing a token. Default to ACTIVE so existing tests
+    // that do not override this mock continue to receive a token as expected.
+    user:             { findUnique: jest.fn().mockResolvedValue({ status: 'ACTIVE' }) },
     auditLog:         { create: jest.fn() },
     $queryRaw:        jest.fn().mockResolvedValue([]),
     $executeRaw:      jest.fn().mockResolvedValue(0),
