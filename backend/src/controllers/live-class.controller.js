@@ -52,7 +52,7 @@ async function rawCreateLiveClass(data) {
       title, description, scheduledAt, duration, status,
       chatEnabled, handRaiseEnabled, whiteboardEnabled,
       quranPanelEnabled, isOpenMic, screenShareEnabled,
-      maxSpeakers, isRecorded,
+      maxSpeakers, maxParticipants, isRecorded,
       createdAt, updatedAt
     ) VALUES (
       ?, ?, ?,
@@ -60,7 +60,7 @@ async function rawCreateLiveClass(data) {
       ?, ?, ?, ?, ?,
       ?, ?, ?,
       ?, ?, ?,
-      ?, ?,
+      ?, ?, ?,
       ?, ?
     )
   `,
@@ -77,6 +77,7 @@ async function rawCreateLiveClass(data) {
     data.quranPanelEnabled   ? 1 : 0,
     data.isOpenMic           ? 1 : 0,
     data.screenShareEnabled  ? 1 : 0,
+    data.maxSpeakers != null ? data.maxSpeakers : 20,
     data.maxParticipants != null ? data.maxParticipants : null,
     data.isRecorded          ? 1 : 0,
     now, now
