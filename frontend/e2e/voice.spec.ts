@@ -9,38 +9,25 @@ import { test, expect } from '@playwright/test';
  */
 test.describe('Voice Club', () => {
   test.beforeEach(async ({ page }) => {
-    // Log in first
-    await page.goto('/login');
-    await page.locator('input[type="email"], input[name="email"]').first().fill(
-      process.env.E2E_TEST_EMAIL || 'test@halqa.app'
-    );
-    await page.locator('input[type="password"], input[name="password"]').first().fill(
-      process.env.E2E_TEST_PASSWORD || 'Test1234!'
-    );
-    await page.locator('button[type="submit"]').first().click();
-    // Wait until we have navigated away from /login — different roles land on
-    // different routes (/feed, /admin, /dashboard) so we match any non-login URL.
-    await page.waitForURL(url => !url.pathname.includes('/login'), { timeout: 15000 });
-    // Wait for the dashboard shell to finish mounting — ClientOnly awaits a
-    // /auth/refresh call before setting mounted=true. Without this wait the
-    // next goto('/voice-club') arrives before auth state is established and
-    // the dashboard layout returns a spinner instead of rendering the page.
-    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-    // Extra guard: wait for the main dashboard shell to be visible
-    await page.waitForSelector('nav, [data-testid="sidebar"], aside, main', { timeout: 10000 }).catch(() => {});
+    // Auth is pre-loaded via storageState (set in playwright.config.ts).
+    // The httpOnly refreshToken cookie is present in the saved state, so
+    // ClientOnly's /auth/refresh call on every page.goto() succeeds immediately
+    // without a live login round-trip. No manual login needed here.
+    //
+    // Navigate directly to the voice club — the dashboard will mount with the
+    // pre-authenticated session.
+    await page.goto('/voice-club');
+    // Wait for networkidle so ClientOnly's refreshToken() call completes and
+    // mounted=true is set before any assertion fires.
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   });
 
   test('voice room list loads and shows rooms or empty state', async ({ page }) => {
-    await page.goto('/voice-club');
-    // Wait for navigation to settle and ClientOnly to finish its auth refresh
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-
+    // beforeEach already navigated to /voice-club and waited for networkidle.
     // The voice-club-page container is rendered once the component mounts in
-    // list view (not in activeRoom view). Waiting for it confirms the page
-    // has fully hydrated and is showing the room list UI.
+    // list view (not the activeRoom view).
     await expect(page.locator('[data-testid="voice-club-page"]')).toBeVisible({ timeout: 15000 });
 
-    // The page is mounted and showing the room list view (not an active room).
     // Assert either rooms, empty state, or the Start Room / Discover UI is present.
     const roomsOrEmpty = page.locator(
       '[data-testid="voice-room-card"], .vc-room-card, ' +
