@@ -140,6 +140,19 @@ async function generateToken(req, res, next) {
     const { roomId, canPublish = true, canSubscribe = true } = req.body;
     const userId = req.user.id;
 
+    // P24M-02 FIX: Fresh platform ban check for ALL room types.
+    // A platform-banned user must not obtain any LiveKit token via this endpoint.
+    // Mirrors getLiveKitToken() (voice) fresh ban check pattern (SEC-BAN-01).
+    // req.user is JWT-derived and may be stale if the ban was applied after the
+    // current access token was issued — always query fresh from DB.
+    const freshUser = await prisma.user.findUnique({
+      where:  { id: userId },
+      select: { status: true },
+    });
+    if (freshUser?.status === 'BANNED') {
+      return errorResponse(res, 'Your account has been suspended', 403);
+    }
+
     // ── Task 1 (P2-A): Live class room protection ──────────────────────────
     // Room names for live classes follow the pattern: "liveclass-{uuid}"
     // Any request for such a room MUST go through the full Live Class authorization
@@ -277,12 +290,18 @@ async function generateToken(req, res, next) {
       ttl:      '1h',
     });
 
+    // P24M-01 FIX: Never honor client-supplied canPublish for unknown/non-HALQA room types.
+    // Publish capability requires explicit server-side authorization, which only the
+    // dedicated room-type-specific checks above (liveclass-* and voice UUID paths) provide.
+    // For any room that did not go through an authorized path (e.g. custom PK/external rooms),
+    // default to subscribe-only so a client cannot self-elevate by sending canPublish:true.
+    // canSubscribe remains client-controllable since it does not grant broadcast capability.
     at.addGrant({
       roomJoin:             true,
       room:                 roomId,
-      canPublish:           Boolean(canPublish),
+      canPublish:           false,              // P24M-01: always false for unknown/non-HALQA rooms
       canSubscribe:         Boolean(canSubscribe),
-      canPublishData:       Boolean(canPublish),
+      canPublishData:       false,              // consistent with canPublish:false
       canUpdateOwnMetadata: true,
     });
 
