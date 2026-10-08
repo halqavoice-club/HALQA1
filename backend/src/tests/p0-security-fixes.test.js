@@ -494,3 +494,192 @@ describe('SEC-BAN-01 (Voice): banned user cannot get voice LiveKit token', () =>
     expect(src).toMatch(/Your account has been suspended/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P24M-02: Platform-banned users cannot obtain generic LiveKit tokens
+//
+// Finding: generateToken() had no fresh User.status check for unknown/non-HALQA
+// room types, so a platform-banned user whose JWT was still valid could obtain
+// a LiveKit token for any non-liveclass, non-voice room.
+//
+// Fix: a fresh prisma.user.findUnique check is inserted at the top of
+// generateToken(), before any room-type branching.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('P24M-02: Banned user cannot obtain generic LiveKit token', () => {
+  let livekitCtrl;
+
+  beforeAll(() => {
+    livekitCtrl = require('../controllers/livekit.controller');
+  });
+
+  function makeGenericReq(userId, status, roomId) {
+    return {
+      params: {},
+      query:  {},
+      body:   { roomId: roomId || 'pk-battle-room-custom', canPublish: true, canSubscribe: true },
+      user:   { id: userId, role: 'MEMBER', status, schoolId: null, firstName: 'T', lastName: 'U' },
+    };
+  }
+  function makeRes() {
+    return { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() };
+  }
+  const next = jest.fn();
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.LIVEKIT_API_KEY    = 'test-key';
+    process.env.LIVEKIT_API_SECRET = 'test-secret';
+    // Generic (non-liveclass, non-voice) rooms skip voice room lookup
+    prisma.voiceRoom.findUnique.mockResolvedValue(null);
+  });
+
+  test('P24M-02: BANNED user cannot obtain generic LiveKit token — returns 403', async () => {
+    // Fresh DB query returns BANNED status
+    prisma.user.findUnique.mockResolvedValue({ status: 'BANNED' });
+
+    const res = makeRes();
+    await livekitCtrl.generateToken(makeGenericReq('banned-generic', 'BANNED'), res, next);
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ success: false }),
+    );
+    // No token must be present in the response
+    const jsonArg = res.json.mock.calls[0][0];
+    expect(jsonArg.data?.token).toBeUndefined();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  test('P24M-02: ACTIVE user can still obtain generic LiveKit token — regression positive', async () => {
+    // Fresh DB query returns ACTIVE status
+    prisma.user.findUnique.mockResolvedValue({ status: 'ACTIVE' });
+
+    const res = makeRes();
+    await livekitCtrl.generateToken(makeGenericReq('active-generic', 'ACTIVE'), res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ success: true }),
+    );
+  });
+
+  // Source-level verification
+  test('P24M-02: livekit.controller.js generateToken source contains P24M-02 ban check', () => {
+    const fs   = require('fs');
+    const path = require('path');
+    const src  = fs.readFileSync(
+      path.join(__dirname, '../controllers/livekit.controller.js'), 'utf8',
+    );
+    expect(src).toMatch(/P24M-02/);
+    // generateToken must also contain freshUser ban check
+    const genFn = src.slice(src.indexOf('async function generateToken'));
+    expect(genFn).toMatch(/freshUser/);
+    expect(genFn).toMatch(/status.*BANNED/);
+    expect(genFn).toMatch(/Your account has been suspended/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P24M-01: Unknown/non-HALQA room types cannot obtain publish-capable token
+//
+// Finding: generateToken() passed client-supplied canPublish:true straight into
+// at.addGrant() for unknown room types (non-liveclass, non-voice-UUID), letting
+// any authenticated client self-elevate to publisher on arbitrary rooms.
+//
+// Fix: canPublish is hardcoded to false for the generic/unknown room path.
+// The existing liveclass-* and voice UUID authorization paths are unaffected.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('P24M-01: Unknown room type cannot grant canPublish via client body', () => {
+  let livekitCtrl;
+  const jwt = require('jsonwebtoken');
+
+  beforeAll(() => {
+    livekitCtrl = require('../controllers/livekit.controller');
+  });
+
+  // Override the AccessToken mock to capture addGrant arguments
+  let capturedGrant = null;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.LIVEKIT_API_KEY    = 'unit-test-key';
+    process.env.LIVEKIT_API_SECRET = 'unit-test-secret-long-enough-for-hmac';
+    capturedGrant = null;
+
+    const { AccessToken } = require('livekit-server-sdk');
+    AccessToken.mockImplementation(() => ({
+      addGrant: jest.fn((grant) => { capturedGrant = grant; }),
+      toJwt:    jest.fn().mockResolvedValue('mock.p24m.token'),
+    }));
+
+    // Fresh user check: ACTIVE
+    prisma.user.findUnique.mockResolvedValue({ status: 'ACTIVE' });
+    // Not a voice room — unknown generic room
+    prisma.voiceRoom.findUnique.mockResolvedValue(null);
+  });
+
+  function makeUnknownRoomReq(canPublish) {
+    return {
+      params: {},
+      query:  {},
+      body:   { roomId: 'unknown-external-room-xyz', canPublish, canSubscribe: true },
+      user:   { id: 'u-p24m', role: 'MEMBER', schoolId: null, firstName: 'T', lastName: 'T' },
+    };
+  }
+  function makeRes() {
+    return { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() };
+  }
+  const next = jest.fn();
+
+  test('P24M-01: canPublish:true in body does NOT grant canPublish in token for unknown room', async () => {
+    const res = makeRes();
+    await livekitCtrl.generateToken(makeUnknownRoomReq(true), res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+
+    // The addGrant call must have canPublish:false regardless of body value
+    expect(capturedGrant).not.toBeNull();
+    expect(capturedGrant.canPublish).toBe(false);
+    expect(capturedGrant.canPublishData).toBe(false);
+  });
+
+  test('P24M-01: canPublish:false in body also results in canPublish:false for unknown room (consistent)', async () => {
+    const res = makeRes();
+    await livekitCtrl.generateToken(makeUnknownRoomReq(false), res, next);
+
+    expect(capturedGrant).not.toBeNull();
+    expect(capturedGrant.canPublish).toBe(false);
+  });
+
+  test('P24M-01: canSubscribe from body is still honored for unknown rooms', async () => {
+    const req = {
+      params: {}, query: {},
+      body: { roomId: 'unknown-room', canPublish: true, canSubscribe: true },
+      user: { id: 'u-p24m2', role: 'MEMBER', schoolId: null, firstName: 'T', lastName: 'T' },
+    };
+    const res = makeRes();
+    await livekitCtrl.generateToken(req, res, next);
+
+    expect(capturedGrant).not.toBeNull();
+    expect(capturedGrant.canPublish).toBe(false);
+    expect(capturedGrant.canSubscribe).toBe(true);
+  });
+
+  // Source-level verification
+  test('P24M-01: livekit.controller.js generateToken source contains P24M-01 comment', () => {
+    const fs   = require('fs');
+    const path = require('path');
+    const src  = fs.readFileSync(
+      path.join(__dirname, '../controllers/livekit.controller.js'), 'utf8',
+    );
+    expect(src).toMatch(/P24M-01/);
+    // The grant for unknown rooms must not use Boolean(canPublish) — must be hardcoded false
+    const genFn = src.slice(src.indexOf('async function generateToken'));
+    expect(genFn).toMatch(/canPublish\s*:\s*false/);
+    // Must NOT use Boolean(canPublish) in the final addGrant
+    expect(genFn).not.toMatch(/canPublish\s*:\s*Boolean\s*\(\s*canPublish\s*\)/);
+  });
+});
