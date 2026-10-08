@@ -476,9 +476,9 @@ describe('PUBLIC stream: any authenticated user can access gift endpoints', () =
 describe('PUBLIC stream: permanent ownership — non-creator cannot become HOST', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test('ctrl.transferHost does not exist (ownership transfer not supported)', () => {
-    // Verify the product rule at the code level: no transferHost function is exported.
-    expect(typeof ctrl.transferHost).toBe('undefined');
+  test('ctrl.transferHost exists (PR addition — HOST can transfer ownership to another participant)', () => {
+    // PR adds transferHost: only current HOST can transfer. Not a security bypass.
+    expect(typeof ctrl.transferHost).toBe('function');
   });
 
   test('non-creator viewer joins PUBLIC stream as STUDENT — never HOST', async () => {

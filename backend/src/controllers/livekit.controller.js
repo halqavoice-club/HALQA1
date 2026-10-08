@@ -2,8 +2,6 @@ const { AccessToken } = require('livekit-server-sdk');
 const prisma = require('../utils/prisma');
 const { successResponse, errorResponse } = require('../utils/response');
 
-const MAX_SPEAKERS = 10;
-
 /**
  * POST /voice/rooms/:id/livekit-token
  *
@@ -98,8 +96,13 @@ async function getLiveKitToken(req, res, next) {
 
     const token = await at.toJwt();
 
-    // Tell the frontend whether to start with mic ON or OFF
-    const micEnabled = role === 'HOST' || role === 'MODERATOR' || role === 'SPEAKER';
+    // Tell the frontend whether to start with mic ON or OFF.
+    // HOST/MOD start muted (in audience state) — they unmute by calling grabMic/drop-mic.
+    // SPEAKER is always on stage with mic active.
+    // This is the initial mic state hint only; the client uses Socket.IO role events
+    // to enable/disable the mic track throughout the session.
+    const micEnabled = role === 'SPEAKER' ||
+      ((role === 'HOST' || role === 'MODERATOR') && !participant.isMuted);
 
     return successResponse(res, {
       token,
@@ -173,25 +176,24 @@ async function generateToken(req, res, next) {
           // schoolId mismatch — check SchoolMembership as fallback for MEMBER users
           const membership = await prisma.schoolMembership.findUnique({
             where: { userId_schoolId: { userId, schoolId: lc.schoolId } },
-            select: { status: true }
+            select: { status: true, deletedAt: true }
           });
-          if (!membership || membership.status !== 'ACTIVE') {
+          // G-4 FIX: also reject soft-deleted memberships (deletedAt is set).
+          // Previously only status was checked; a membership deleted while still
+          // ACTIVE at deletion time would incorrectly pass this guard.
+          if (!membership || membership.deletedAt || membership.status !== 'ACTIVE') {
             return errorResponse(res, 'Access denied to this school\'s resource', 403);
           }
         } else {
-          // schoolId matches — verify membership is ACTIVE.
-          // VULN-LIVE-005 FIX: A null membership (record deleted, not just
-          // suspended) must also be rejected here. The previous condition
-          //   if (membership && membership.status !== 'ACTIVE')
-          // treated a null membership as passing (null is falsy), which
-          // allowed a user with a matching legacy user.schoolId but no active
-          // SchoolMembership record to proceed past this layer.
-          // Fix: require membership to exist AND be ACTIVE.
+          // schoolId matches — verify membership is not suspended or deleted
           const membership = await prisma.schoolMembership.findUnique({
             where: { userId_schoolId: { userId, schoolId: lc.schoolId } },
-            select: { status: true }
+            select: { status: true, deletedAt: true }
           });
-          if (!membership || membership.status !== 'ACTIVE') {
+          // G-4 FIX: also reject soft-deleted memberships.
+          // VULN-LIVE-005 FIX: A null membership (record deleted, not just suspended)
+          // must also be rejected. Require membership to exist AND be ACTIVE and NOT deleted.
+          if (!membership || membership.deletedAt || membership.status !== 'ACTIVE') {
             return errorResponse(res, 'Access denied — your school membership is not active', 403);
           }
         }

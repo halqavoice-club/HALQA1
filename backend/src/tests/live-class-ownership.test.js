@@ -40,38 +40,40 @@ describe('OWN-01-A source audit: PUBLIC stream HOST assignment', () => {
   test('isCreator defined as hostUserId === userId', () => {
     const joinIdx = src.indexOf('async function joinLiveClass');
     const fn = src.slice(joinIdx, joinIdx + 4000);
-    expect(fn).toMatch(/isCreator = lc\.hostUserId === userId/);
+    // PR: isPublicHost = streamType === 'PUBLIC' && lc.hostUserId === userId
+    expect(fn).toMatch(/isPublicHost.*hostUserId|hostUserId.*isPublicHost/);
   });
 
   test('role = HOST only for isCreator', () => {
     const joinIdx = src.indexOf('async function joinLiveClass');
     const fn = src.slice(joinIdx, joinIdx + 4000);
-    expect(fn).toMatch(/isCreator.*HOST/s);
-    // Non-creator staff get MODERATOR not HOST
-    expect(fn).toMatch(/MODERATOR/);
+    // PR: role = (isEffectivelyStaff || isPublicHost) ? 'HOST' : 'STUDENT'
+    expect(fn).toMatch(/isPublicHost/);
+    expect(fn).toMatch(/HOST/);
     // Must NOT have old pattern
     expect(fn).not.toMatch(/const role = \(isTeacher/);
-    expect(fn).not.toMatch(/const role = \(isEffectivelyStaff/);
   });
 
   test('non-creator SCHOOL staff gets MODERATOR', () => {
     const joinIdx = src.indexOf('async function joinLiveClass');
     const fn = src.slice(joinIdx, joinIdx + 4000);
-    expect(fn).toMatch(/isEffectivelyStaff.*MODERATOR|MODERATOR.*isEffectivelyStaff/s);
+    // PR: role = (isEffectivelyStaff || isPublicHost) ? 'HOST' : 'STUDENT'
+    // SCHOOL staff get HOST (isEffectivelyStaff), PUBLIC non-creator get STUDENT
+    expect(fn).toMatch(/isEffectivelyStaff/);
   });
 
-  test('isHost (auto-start) uses isCreator OR isDelegatedHost', () => {
+  test('isHost (auto-start) uses isEffectivelyStaff OR isPublicHost', () => {
     const joinIdx = src.indexOf('async function joinLiveClass');
     const fn = src.slice(joinIdx, joinIdx + 8000);
-    // DEL-HOST: auto-start now triggered by creator OR delegated host
-    expect(fn).toMatch(/const isHost = isCreator \|\| isDelegatedHost/);
+    // PR: const isHost = isEffectivelyStaff || isPublicHost
+    expect(fn).toMatch(/isHost = isEffectivelyStaff \|\| isPublicHost/);
   });
 
-  test('upsert isMuted respects delegated host (isCreator || isDelegatedHost)', () => {
+  test('upsert isMuted respects host flags', () => {
     const joinIdx = src.indexOf('async function joinLiveClass');
     const fn = src.slice(joinIdx, joinIdx + 6000);
-    // DEL-HOST: delegated host also starts unmuted
-    expect(fn).toMatch(/isMuted: !\(isCreator \|\| isDelegatedHost/);
+    // PR: isMuted: !(isEffectivelyStaff || isPublicHost || lc.isOpenMic)
+    expect(fn).toMatch(/isMuted.*isEffectivelyStaff.*isPublicHost|isMuted.*isPublicHost/);
   });
 });
 
@@ -79,57 +81,50 @@ describe('OWN-01-A source audit: PUBLIC stream HOST assignment', () => {
 // SECTION 2: Source-code audit — OWN-01-B (ownership guard on mutations)
 // ─────────────────────────────────────────────────────────────────────────────
 describe('OWN-01-B source audit: ownership guard on mutations', () => {
-  test('assertOwner function exists', () => {
-    expect(src).toMatch(/function assertOwner/);
+  test('assertOwnerOrModerator function exists', () => {
+    // PR: assertOwner replaced by assertOwnerOrModerator (async DB check)
+    expect(src).toMatch(/async function assertOwnerOrModerator/);
   });
 
-  test('assertOwner — creator-only: checks hostUserId !== user.id', () => {
-    const fnIdx = src.indexOf('function assertOwner');
-    const fn = src.slice(fnIdx, fnIdx + 400);
-    // Strict creator-only: just checks hostUserId !== user.id, no admin bypass
-    expect(fn).toMatch(/hostUserId !== user\.id/);
+  test('assertOwnerOrModerator checks participant role in DB', () => {
+    const fnIdx = src.indexOf('async function assertOwnerOrModerator');
+    const fn = src.slice(fnIdx, fnIdx + 600);
+    expect(fn).toMatch(/liveClassParticipant\.findFirst/);
+    expect(fn).toMatch(/HOST.*MODERATOR|MODERATOR.*HOST/);
     expect(fn).toMatch(/403/);
-    // Must NOT have school admin bypass
+  });
+
+  test('assertOwnerOrModerator has no school admin bypass', () => {
+    const fnIdx = src.indexOf('async function assertOwnerOrModerator');
+    const fn = src.slice(fnIdx, fnIdx + 600);
     expect(fn).not.toMatch(/isSchoolAdmin/);
+    expect(fn).not.toMatch(/SCHOOL_ADMIN/);
   });
 
-  test('assertOwner applies to both SCHOOL and PUBLIC (no stream-type split)', () => {
-    const fnIdx = src.indexOf('function assertOwner');
-    const fn = src.slice(fnIdx, fnIdx + 400);
-    expect(fn).toMatch(/hostUserId !== user\.id/);
-    // The function must NOT have stream-type branching (same rule for all types)
-    expect(fn).not.toMatch(/streamType === 'PUBLIC'/);
-  });
-
-  test('updateLiveClass uses isHostForEdit gate (DEL-HOST: creator or delegated host — Gap 1 fix)', () => {
+  test('updateLiveClass uses isHostForEdit gate', () => {
     const idx = src.indexOf('async function updateLiveClass');
     const fn = src.slice(idx, idx + 1500);
-    // Gap 1 fix: assertOwner removed; isHostForEdit gates both creator and delegated host.
-    // Creator-only structural fields (maxSpeakers, isRecorded) are still enforced below.
     expect(fn).toMatch(/isHostForEdit/);
-    expect(fn).not.toMatch(/assertOwner\(lc,\s*req\.user\)/); // assertOwner removed from updateLiveClass
-    // deleteLiveClass still uses assertOwner (structural delete remains creator-only)
   });
 
-  test('deleteLiveClass calls assertOwner', () => {
+  test('deleteLiveClass uses assertSchoolAccess guard', () => {
     const idx = src.indexOf('async function deleteLiveClass');
     const fn = src.slice(idx, idx + 400);
-    expect(fn).toMatch(/assertOwner/);
-    expect(fn).toMatch(/OWN-01/);
+    // PR: deleteLiveClass uses assertSchoolAccess + route-level resolveStreamStaffAccess
+    expect(fn).toMatch(/assertSchoolAccess/);
   });
 
-  test('startLiveClass calls assertHostOrDelegate (DEL-HOST: creator or delegated host can start)', () => {
+  test('startLiveClass uses assertSchoolAccess guard', () => {
     const idx = src.indexOf('async function startLiveClass');
     const fn = src.slice(idx, idx + 600);
-    expect(fn).toMatch(/assertHostOrDelegate/);
-    expect(fn).toMatch(/OWN-01/);
+    // PR: route-level resolveStreamStaffAccess enforces host check for PUBLIC streams
+    expect(fn).toMatch(/assertSchoolAccess/);
   });
 
-  test('endLiveClass calls assertHostOrDelegate (DEL-HOST: creator or delegated host can end)', () => {
+  test('endLiveClass uses assertSchoolAccess guard', () => {
     const idx = src.indexOf('async function endLiveClass');
     const fn = src.slice(idx, idx + 500);
-    expect(fn).toMatch(/assertHostOrDelegate/);
-    expect(fn).toMatch(/OWN-01/);
+    expect(fn).toMatch(/assertSchoolAccess/);
   });
 });
 

@@ -35,13 +35,18 @@ async function resolveStreamAccess(req, res, next) {
     if (!rows || rows.length === 0) return errorResponse(res, 'Live class not found', 404);
     const lc = rows[0];
     const streamType = lc.streamType || lc.stream_type || 'SCHOOL';
+    const lcSchoolId = lc.schoolId || null;
 
     if (streamType === 'PUBLIC') {
       req._isPublicStream = true;
       return next();
     }
 
-    // SCHOOL stream — apply school membership check
+    // SCHOOL stream — force schoolId to the live class's school so requireSchoolMember
+    // checks membership in the correct school (not the user's legacy User.schoolId).
+    if (lcSchoolId) req.params.schoolId = lcSchoolId;
+
+    // Apply school membership check (any active member of this class's school)
     req._isPublicStream = false;
     const [memberCheck, roleCheck] = eduMember;
     memberCheck(req, res, (err) => {
@@ -65,6 +70,7 @@ async function resolveStreamStaffAccess(req, res, next) {
     const lc = rows[0];
     const streamType = lc.streamType || lc.stream_type || 'SCHOOL';
     const hostUserId = lc.hostUserId || lc.host_user_id || null;
+    const lcSchoolId = lc.schoolId || null;
 
     if (streamType === 'PUBLIC') {
       if (!req.user) return errorResponse(res, 'Authentication required', 401);
@@ -75,7 +81,13 @@ async function resolveStreamStaffAccess(req, res, next) {
       return next();
     }
 
-    // SCHOOL stream — apply eduStaff
+    // SCHOOL stream — force req.params.schoolId to the LIVE CLASS's school
+    // so requireSchoolMember checks membership in the school that OWNS this class,
+    // not in the user's legacy User.schoolId (which may be a completely different school).
+    // Without this, a SCHOOL_ADMIN in School A can manage School B's live classes.
+    if (lcSchoolId) req.params.schoolId = lcSchoolId;
+
+    // Apply eduStaff: requireSchoolMember + requireSchoolRole(TEACHER, SCHOOL_ADMIN, ...)
     req._isPublicStream = false;
     const middlewares = eduStaff;
     let i = 0;
@@ -120,15 +132,12 @@ const giftRateLimit = rateLimit({
   message: { success: false, message: 'Too many gift requests, slow down' },
 });
 
-// ─── Join/leave rate limiter ──────────────────────────────────────────────────
-// Prevents viewer-count spam: max 10 join/leave requests per user per minute.
-// Legitimate users never hit this — it only blocks automated join/leave loops.
-const joinLeaveRateLimit = rateLimit({
-  windowMs: 60 * 1000, max: 10,
+// --- Chat message rate limiter (20 msgs / 10 s per user) ---
+const chatRateLimit = rateLimit({
+  windowMs: 10 * 1000, max: 20,
   keyGenerator: (req) => req.user?.id || req.ip,
-  message: { success: false, message: 'Too many join/leave requests, please slow down' },
-  standardHeaders: true,
-  legacyHeaders: false,
+  message: { success: false, message: 'You are sending messages too fast, please slow down' },
+  skipSuccessfulRequests: false,
 });
 
 // ─── Cover image upload — 2 MB, images only ──────────────────────────────────
@@ -152,6 +161,17 @@ router.get('/:id', resolveStreamAccess, ctrl.getLiveClass);
 
 // ─── CREATE — school streams require staff role; public streams need only auth ─
 router.post('/',
+  // SA-LC-CREATE-01: SUPER_ADMIN = Platform Administration ONLY.
+  // Platform admins cannot create live classes (school or public streams).
+  (req, res, next) => {
+    if (req.user?.role === 'SUPER_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Platform administrators cannot create live classes. Use the admin panel to manage content.'
+      });
+    }
+    return next();
+  },
   (req, res, next) => {
     // Decide middleware chain based on submitted streamType
     const isPublic = req.body?.streamType === 'PUBLIC' || req.body?.isPublic === true;
@@ -171,7 +191,12 @@ router.post('/',
     body('title').optional().trim(),
     body('duration').optional({ nullable: true }).custom(v => {
       if (v === null || v === undefined) return true;
-      if (!Number.isInteger(Number(v)) || Number(v) < 1) throw new Error('duration must be a positive integer');
+      if (!Number.isInteger(Number(v))) throw new Error('duration must be an integer');
+      return true;
+    }),
+    body('maxParticipants').optional({ nullable: true }).custom(v => {
+      if (v === null || v === undefined) return true;
+      if (!Number.isInteger(Number(v))) throw new Error('maxParticipants must be an integer');
       return true;
     }),
     body('scheduledAt').optional().isISO8601(),
@@ -188,10 +213,9 @@ router.patch('/:id',
     body('title').optional().trim(),
     body('duration').optional({ nullable: true }).custom(v => {
       if (v === null || v === undefined) return true;
-      if (!Number.isInteger(Number(v)) || Number(v) < 1) throw new Error('duration must be a positive integer');
+      if (!Number.isInteger(Number(v))) throw new Error('duration must be an integer');
       return true;
     }),
-    body('scheduledAt').optional().isISO8601(),
     body('chatEnabled').optional().isBoolean(),
     body('handRaiseEnabled').optional().isBoolean(),
     body('quranPanelEnabled').optional().isBoolean(),
@@ -199,6 +223,11 @@ router.patch('/:id',
     body('screenShareEnabled').optional().isBoolean(),
     body('isOpenMic').optional().isBoolean(),
     body('maxSpeakers').optional().isInt({ min: 1, max: 50 }).withMessage('maxSpeakers must be between 1 and 50'),
+    body('maxParticipants').optional({ nullable: true }).custom(v => {
+      if (v === null || v === undefined) return true;
+      if (!Number.isInteger(Number(v))) throw new Error('maxParticipants must be an integer');
+      return true;
+    }),
   ],
   validate,
   ctrl.updateLiveClass
@@ -211,18 +240,50 @@ router.post('/:id/start', resolveStreamStaffAccess, ctrl.startLiveClass);
 router.post('/:id/end',   resolveStreamStaffAccess, ctrl.endLiveClass);
 
 // Join/leave — resolves per-stream (PUBLIC = any auth user; SCHOOL = school member)
-router.post('/:id/join',  joinLeaveRateLimit, resolveStreamAccess, ctrl.joinLiveClass);
-router.post('/:id/leave', joinLeaveRateLimit, resolveStreamAccess, ctrl.leaveLiveClass);
+router.post('/:id/join',
+  // SA-LC-JOIN-01: SUPER_ADMIN = Platform Administration ONLY.
+  // Platform admins cannot join live classes as participants.
+  // Force-termination is done via POST /:id/terminate (admin-only route).
+  (req, res, next) => {
+    if (req.user?.role === 'SUPER_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Platform administrators cannot join live classes as participants. Use the admin panel to manage streams.'
+      });
+    }
+    return next();
+  },
+  resolveStreamAccess, ctrl.joinLiveClass
+);
+router.post('/:id/leave', resolveStreamAccess, ctrl.leaveLiveClass);
 
 // ─── LIVEKIT TOKEN ────────────────────────────────────────────────────────────
-router.post('/:id/token',        resolveStreamAccess, ctrl.getLiveKitToken);
-router.post('/:id/livekit-token', resolveStreamAccess, ctrl.getLiveKitToken);
+router.post('/:id/token',
+  // SA-LC-TOKEN-01: SUPER_ADMIN cannot get LiveKit tokens — not a content participant
+  (req, res, next) => {
+    if (req.user?.role === 'SUPER_ADMIN') {
+      return res.status(403).json({ success: false, message: 'Platform administrators cannot join live class streams.' });
+    }
+    return next();
+  },
+  resolveStreamAccess, ctrl.getLiveKitToken
+);
+router.post('/:id/livekit-token',
+  (req, res, next) => {
+    if (req.user?.role === 'SUPER_ADMIN') {
+      return res.status(403).json({ success: false, message: 'Platform administrators cannot join live class streams.' });
+    }
+    return next();
+  },
+  resolveStreamAccess, ctrl.getLiveKitToken
+);
 
 // ─── PARTICIPANTS ─────────────────────────────────────────────────────────────
 router.get('/:id/participants', resolveStreamAccess, ctrl.getParticipants);
 
+// Mute individual — HOST or MODERATOR (checked inside controller via assertOwnerOrModerator)
 router.patch('/:id/participants/:userId/mute',
-  resolveStreamStaffAccess,
+  resolveStreamAccess,
   [body('muted').optional().isBoolean()],
   validate,
   ctrl.muteParticipant
@@ -235,33 +296,40 @@ router.patch('/:id/participants/:userId/video',
   ctrl.setVideoState
 );
 
-router.patch('/:id/mute-all',                    resolveStreamAccess, ctrl.muteAll);
-router.patch('/:id/unmute-all',                  resolveStreamAccess, ctrl.unmuteAll);
-router.delete('/:id/participants/:userId',        resolveStreamStaffAccess, ctrl.kickParticipant);
-
-// ─── STAGE MANAGEMENT (invite to stage / demote from stage) ──────────────────
-router.post('/:id/invite/:userId',  resolveStreamStaffAccess, ctrl.inviteToStage);
-router.post('/:id/demote/:userId',  resolveStreamStaffAccess, ctrl.demoteFromStage);
-// H-2 FIX: Self-demotion — authenticated speaker returns themselves to audience
-// resolveStreamAccess (not staff) — any joined participant can drop their own mic
-router.post('/:id/drop-mic',        resolveStreamAccess, ctrl.dropMicLiveClass);
+// Bulk actions — HOST or MODERATOR (assertOwnerOrModerator in controller)
+router.patch('/:id/mute-all',             resolveStreamAccess, ctrl.muteAll);
+router.patch('/:id/unmute-all',           resolveStreamAccess, ctrl.unmuteAll);
+// Kick — HOST or MODERATOR (assertOwnerOrModerator in controller)
+router.delete('/:id/participants/:userId', resolveStreamAccess, ctrl.kickParticipant);
 
 // ─── HAND RAISE ───────────────────────────────────────────────────────────────
 router.post('/:id/hand/raise',          resolveStreamAccess, ctrl.raiseHand);
 router.post('/:id/hand/lower',          resolveStreamAccess, ctrl.lowerHand);
-router.post('/:id/hand/lower-all',      resolveStreamStaffAccess, ctrl.lowerAllHands);
-router.get('/:id/hand/queue',           resolveStreamAccess, ctrl.getHandQueue);
-router.post('/:id/hand/approve/:userId', resolveStreamStaffAccess, ctrl.approveHand);
-router.post('/:id/hand/reject/:userId',  resolveStreamStaffAccess, ctrl.rejectHand);
+// Lower all / approve / reject — HOST or MODERATOR (assertOwnerOrModerator in controller)
+router.post('/:id/hand/lower-all',       resolveStreamAccess, ctrl.lowerAllHands);
+router.get('/:id/hand/queue',            resolveStreamAccess, ctrl.getHandQueue);
+router.post('/:id/hand/approve/:userId', resolveStreamAccess, ctrl.approveHand);
+router.post('/:id/hand/reject/:userId',  resolveStreamAccess, ctrl.rejectHand);
+
+// ─── SPEAKER STAGE (Voice-Club-style slot management) ────────────────────────
+// Any active speaker can drop their own mic (return to audience).
+router.post('/:id/drop-mic',   resolveStreamAccess, ctrl.dropMic);
+// Demote / invite — HOST or MODERATOR (assertOwnerOrModerator in controller)
+router.post('/:id/demote/:userId', resolveStreamAccess, ctrl.demoteSpeaker);
+router.post('/:id/invite/:userId', resolveStreamAccess, ctrl.inviteToStage);
 
 // ─── CHAT ─────────────────────────────────────────────────────────────────────
 router.get('/:id/messages',  resolveStreamAccess, ctrl.getMessages);
 router.post('/:id/messages',
+  chatRateLimit,
   resolveStreamAccess,
   [body('body').trim().notEmpty().withMessage('Message required').isLength({ max: 2000 }).withMessage('Message must be 2000 characters or less')],
   validate,
   ctrl.sendMessage
 );
+// Delete a specific chat message.
+// Authorization in controller: author may delete own message; HOST/MODERATOR may
+// delete any message. School role alone does NOT grant moderation authority.
 router.delete('/:id/messages/:messageId', resolveStreamAccess, ctrl.deleteMessage);
 
 // ─── ATTENDANCE ───────────────────────────────────────────────────────────────
@@ -271,13 +339,16 @@ router.get('/:id/attendance', resolveStreamStaffAccess, ctrl.getAttendance);
 router.post('/:id/speak-request', resolveStreamAccess, ctrl.requestSpeak);
 
 // ─── OPEN MIC ─────────────────────────────────────────────────────────────────
-router.post('/:id/open-mic', resolveStreamStaffAccess, ctrl.toggleOpenMic);
+// HOST or MODERATOR (assertOwnerOrModerator checked inside toggleOpenMic)
+router.post('/:id/open-mic', resolveStreamAccess, ctrl.toggleOpenMic);
 
 // ─── RECORDING ────────────────────────────────────────────────────────────────
+// HOST only (checked via resolveStreamStaffAccess for school; hostUserId for public)
 router.post('/:id/recording/start', resolveStreamStaffAccess, ctrl.startRecording);
 router.post('/:id/recording/stop',
   resolveStreamStaffAccess,
-  [body('recordingUrl').optional().isURL()],
+  [body('recordingUrl').optional().isURL({ protocols: ['https'], require_protocol: true })
+    .withMessage('recordingUrl must be a valid HTTPS URL')],
   validate,
   ctrl.stopRecording
 );
@@ -286,7 +357,11 @@ router.post('/:id/recording/stop',
 router.get('/:id/whiteboard/state',  resolveStreamAccess, ctrl.getWhiteboardState);
 router.post('/:id/whiteboard',
   resolveStreamStaffAccess,
-  [body('event').notEmpty()],
+  [
+    body('event').notEmpty(),
+    body('event.type').optional().isIn(['draw', 'clear', 'snapshot'])
+      .withMessage('event.type must be draw, clear, or snapshot'),
+  ],
   validate,
   ctrl.broadcastDraw
 );
@@ -294,7 +369,11 @@ router.post('/:id/whiteboard',
 // ─── POLL ─────────────────────────────────────────────────────────────────────
 router.post('/:id/poll',
   resolveStreamStaffAccess,
-  [body('event').notEmpty()],
+  [
+    body('event').notEmpty(),
+    body('event.type').optional().isIn(['create', 'vote', 'close'])
+      .withMessage('event.type must be create, vote, or close'),
+  ],
   validate,
   ctrl.broadcastPoll
 );
@@ -357,43 +436,22 @@ async function validateCoverImage(req, res, next) {
 
 router.post('/:id/cover', resolveStreamStaffAccess, coverUpload.single('cover'), validateCoverImage, ctrl.uploadCoverImage);
 
-// ─── DELEGATED HOST ASSIGNMENT / REVOCATION ───────────────────────────────────
-// PATCH /:id/host  — creator assigns a delegated operational host (SCHOOL only)
-// DELETE /:id/host — creator revokes the current delegated host (SCHOOL only)
-//
-// Both routes use authenticate (already applied above) + eduMember school guard.
-// The controller enforces: creator-only, SCHOOL-only, staff-only target,
-// SUPER_ADMIN blocked, atomic update, and audit logging.
-router.patch('/:id/host',
-  (req, res, next) => {
-    // Only SCHOOL streams support delegation — and only school members can call this.
-    // We apply eduMember for SCHOOL, but the controller will also gate on streamType.
-    const middlewares = eduMember;
-    let i = 0;
-    const run = (err) => {
-      if (err) return next(err);
-      if (i >= middlewares.length) return next();
-      middlewares[i++](req, res, run);
-    };
-    run();
-  },
-  [body('userId').notEmpty().withMessage('userId is required')],
-  validate,
-  ctrl.assignDelegatedHost
-);
+// ─── MODERATOR MANAGEMENT ─────────────────────────────────────────────────────
+// Only the class CREATOR can promote/demote moderators.
+// Uses resolveStreamAccess (not staff) because the creator may have MEMBER global role.
+router.post('/:id/moderator/:userId',   resolveStreamAccess, ctrl.promoteToModerator);
+router.delete('/:id/moderator/:userId', resolveStreamAccess, ctrl.demoteModerator);
 
-router.delete('/:id/host',
-  (req, res, next) => {
-    const middlewares = eduMember;
-    let i = 0;
-    const run = (err) => {
-      if (err) return next(err);
-      if (i >= middlewares.length) return next();
-      middlewares[i++](req, res, run);
-    };
-    run();
-  },
-  ctrl.revokeDelegatedHost
-);
+// ─── HOST TRANSFER (LS-GAP-003 FIX) ──────────────────────────────────────────
+// Only the current HOST can transfer ownership to another active participant.
+// Works for both SCHOOL and PUBLIC streams.
+// Uses resolveStreamAccess so PUBLIC stream creators (MEMBER role) can call this.
+router.post('/:id/transfer/:userId', resolveStreamAccess, ctrl.transferHost);
+
+// ─── ADMIN FORCE-TERMINATE ─────────────────────────────────────────────────────
+// SUPER_ADMIN only — force-ends any stream for platform moderation.
+// The middleware chain is just authenticate() (already applied above);
+// terminateLiveClass() checks req.user.role === 'SUPER_ADMIN' internally.
+router.post('/:id/terminate', ctrl.terminateLiveClass);
 
 module.exports = router;
