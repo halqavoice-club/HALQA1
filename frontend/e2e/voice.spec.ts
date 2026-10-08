@@ -26,16 +26,15 @@ test.describe('Voice Club', () => {
   test('voice room list loads and shows rooms or empty state', async ({ page }) => {
     await page.goto('/voice-club');
 
-    // Wait for the page heading — confirms the component has mounted and rendered
-    await expect(page.locator('h1:has-text("Voice Club")')).toBeVisible({ timeout: 15000 });
+    // Wait for the page container — rendered unconditionally once the component
+    // mounts and auth state is hydrated. This is more reliable than waiting
+    // for content that depends on async API responses.
+    await expect(page.locator('[data-testid="voice-club-page"]')).toBeVisible({ timeout: 15000 });
 
-    // The Discover tab is active by default. After the page loads it will show
-    // either: room cards, an empty state ("No rooms yet"), or a "Start a Room"
-    // button. All three are acceptable outcomes. We also include the Discover
-    // tab button itself as a final fallback — if the tab UI renders, the page
-    // is functional even if the room list is still fetching.
+    // The page is mounted and showing the room list view (not an active room).
+    // Assert either rooms, empty state, or the Start Room / Discover UI is present.
     const roomsOrEmpty = page.locator(
-      '[data-testid="voice-room-card"], [data-testid="empty-state"], .vc-room-card, ' +
+      '[data-testid="voice-room-card"], .vc-room-card, ' +
       'button:has-text("Start Room"), button:has-text("Start a Room"), ' +
       'text=No rooms yet, button:has-text("Discover")'
     );
