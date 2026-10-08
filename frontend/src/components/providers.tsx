@@ -65,6 +65,30 @@ export function Providers({ children }: { children: React.ReactNode }) {
     analytics.initialize()
   }, [])
 
+  // FE-R-005: Cross-tab logout synchronisation via BroadcastChannel.
+  // BroadcastChannel messages are ONLY received by other tabs/windows —
+  // never by the tab that posted the message — so there is no same-tab
+  // loop risk. This replaces the previous storage-event approach which
+  // had subtle same-context timing issues in E2E test environments.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return
+
+    const channel = new BroadcastChannel('halqa-auth')
+
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type !== 'LOGOUT') return
+      // Only act if this tab currently believes it is authenticated
+      if (!useAuthStore.getState().isAuthenticated) return
+      useAuthStore.getState().logout()
+    }
+
+    channel.addEventListener('message', handleMessage)
+    return () => {
+      channel.removeEventListener('message', handleMessage)
+      channel.close()
+    }
+  }, [])
+
   useEffect(() => {
     if (isAuthenticated && accessToken) {
       initSocket(accessToken)

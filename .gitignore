@@ -194,3 +194,6 @@ scripts/gh-*.ps1
 # Two-word-segment HALQA audit reports (e.g. HALQA-CONTRADICTION-REGISTER.md)
 # Covered by HALQA-*-*.md (no tracked file matches this pattern)
 HALQA-*-*.md
+
+# Playwright saved auth state
+frontend/e2e/.auth/
