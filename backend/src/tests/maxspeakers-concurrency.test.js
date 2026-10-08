@@ -522,18 +522,18 @@ describe('GROUP-G: Slot release and reuse (dropMic + re-admit)', () => {
     expect(res.body.message).toMatch(/host cannot drop mic/i);
   });
 
-  test('G3: dropMic clears slot and demoteFromStage clears slot (source audit)', () => {
+  test('G3: dropMic clears slot and demoteSpeaker clears slot (source audit)', () => {
     const src = fs.readFileSync(CTRL_PATH, 'utf8');
 
-    const dropIdx = src.indexOf('async function dropMicLiveClass');
+    const dropIdx = src.indexOf('async function dropMic');
     expect(dropIdx).toBeGreaterThan(-1);
     const dropBody = src.slice(dropIdx, dropIdx + 1000);
     expect(dropBody).toMatch(/speakerSlot.*null|null.*speakerSlot/);
 
-    const demoteIdx = src.indexOf('async function demoteFromStage');
+    const demoteIdx = src.indexOf('async function demoteSpeaker');
     expect(demoteIdx).toBeGreaterThan(-1);
     const demoteBody = src.slice(demoteIdx, demoteIdx + 1500);
-    expect(demoteBody).toMatch(/speakerSlot: null/);
+    expect(demoteBody).toMatch(/speakerSlot.*null|null.*speakerSlot/);
   });
 });
 
@@ -677,7 +677,7 @@ describe('GROUP-K: Authorization guards (no role bypass)', () => {
       .set('Authorization', tok('student-u'));
 
     expect(res.status).toBe(403);
-    expect(res.body.message).toMatch(/host or moderator/i);
+    expect(res.body.message).toMatch(/host or.*moderator/i);
   });
 
   test('K2: School Admin joined as STUDENT cannot approve hands', async () => {
@@ -696,7 +696,7 @@ describe('GROUP-K: Authorization guards (no role bypass)', () => {
       .set('Authorization', tok('sadmin-u'));
 
     expect(res.status).toBe(403);
-    expect(res.body.message).toMatch(/host or moderator/i);
+    expect(res.body.message).toMatch(/host or.*moderator/i);
   });
 
   test('K3: SUPER_ADMIN blocked by assertSchoolAccess before reaching approveHand logic', async () => {

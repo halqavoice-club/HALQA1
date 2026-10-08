@@ -302,13 +302,6 @@ router.patch('/:id/unmute-all',           resolveStreamAccess, ctrl.unmuteAll);
 // Kick — HOST or MODERATOR (assertOwnerOrModerator in controller)
 router.delete('/:id/participants/:userId', resolveStreamAccess, ctrl.kickParticipant);
 
-// ─── STAGE MANAGEMENT (invite to stage / demote from stage) ──────────────────
-router.post('/:id/invite/:userId',  resolveStreamStaffAccess, ctrl.inviteToStage);
-router.post('/:id/demote/:userId',  resolveStreamStaffAccess, ctrl.demoteFromStage);
-// H-2 FIX: Self-demotion — authenticated speaker returns themselves to audience
-// resolveStreamAccess (not staff) — any joined participant can drop their own mic
-router.post('/:id/drop-mic',        resolveStreamAccess, ctrl.dropMicLiveClass);
-
 // ─── HAND RAISE ───────────────────────────────────────────────────────────────
 router.post('/:id/hand/raise',          resolveStreamAccess, ctrl.raiseHand);
 router.post('/:id/hand/lower',          resolveStreamAccess, ctrl.lowerHand);
