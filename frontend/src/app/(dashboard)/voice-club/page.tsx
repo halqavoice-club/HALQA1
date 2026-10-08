@@ -338,7 +338,7 @@ export default function VoiceClubPage() {
   }
 
   return (
-    <div data-testid="voice-club-page" className="max-w-2xl mx-auto space-y-5">
+    <div className="max-w-2xl mx-auto space-y-5">
 
       {/* ── Active-session conflict dialog ─────────────────────────────────── */}
       {conflictRoom && (
