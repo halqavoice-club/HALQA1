@@ -153,6 +153,16 @@ export const useAuthStore = create<AuthState>()(
         // FE-001: wipe memory token on logout
         setMemoryToken(null)
         set({ user: null, isAuthenticated: false, mustChangePassword: false })
+        // FE-R-005: notify other tabs to also log out via BroadcastChannel.
+        // BroadcastChannel messages are only received by OTHER tabs/windows,
+        // never by the posting tab, so this cannot cause a same-tab loop.
+        if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+          try {
+            const ch = new BroadcastChannel('halqa-auth')
+            ch.postMessage({ type: 'LOGOUT' })
+            ch.close()
+          } catch {}
+        }
         if (typeof window !== 'undefined') {
           window.location.href = '/login'
         }

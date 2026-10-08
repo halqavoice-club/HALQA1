@@ -65,40 +65,28 @@ export function Providers({ children }: { children: React.ReactNode }) {
     analytics.initialize()
   }, [])
 
-  // FE-R-005: Cross-tab logout synchronisation.
-  // When the user logs out in one tab, the Zustand persist middleware writes
-  // the updated state (isAuthenticated: false) to localStorage under the key
-  // 'halqa-auth'. The browser fires a 'storage' event in ALL OTHER open tabs
-  // (never in the tab that made the write), so there is no risk of an
-  // infinite logout loop.
+  // FE-R-005: Cross-tab logout synchronisation via BroadcastChannel.
+  // BroadcastChannel messages are ONLY received by other tabs/windows —
+  // never by the tab that posted the message — so there is no same-tab
+  // loop risk. This replaces the previous storage-event approach which
+  // had subtle same-context timing issues in E2E test environments.
   useEffect(() => {
-    const handleStorageLogout = (event: StorageEvent) => {
-      if (event.key === 'halqa-auth') {
-        // Only react if this tab currently believes it is authenticated
-        const isCurrentlyAuth = useAuthStore.getState().isAuthenticated
-        if (!isCurrentlyAuth) return
+    if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return
 
-        if (event.newValue === null) {
-          // Key was removed — other tab explicitly cleared auth storage
-          useAuthStore.getState().logout()
-          return
-        }
-        try {
-          const parsed = JSON.parse(event.newValue)
-          if (parsed?.state?.isAuthenticated === false) {
-            // Other tab logged out — mirror the logout in this tab.
-            // logout() silently catches the failed API call (token already
-            // revoked) then clears local state and redirects to /login.
-            useAuthStore.getState().logout()
-          }
-        } catch {
-          // Ignore malformed storage values
-        }
-      }
+    const channel = new BroadcastChannel('halqa-auth')
+
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type !== 'LOGOUT') return
+      // Only act if this tab currently believes it is authenticated
+      if (!useAuthStore.getState().isAuthenticated) return
+      useAuthStore.getState().logout()
     }
 
-    window.addEventListener('storage', handleStorageLogout)
-    return () => window.removeEventListener('storage', handleStorageLogout)
+    channel.addEventListener('message', handleMessage)
+    return () => {
+      channel.removeEventListener('message', handleMessage)
+      channel.close()
+    }
   }, [])
 
   useEffect(() => {
