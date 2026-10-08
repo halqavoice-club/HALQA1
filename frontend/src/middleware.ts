@@ -128,16 +128,20 @@ function applySecurityHeaders(response: NextResponse, nonce: string, enforcing =
   Object.entries(STATIC_SECURITY_HEADERS).forEach(([key, value]) => {
     response.headers.set(key, value)
   })
-  if (enforcing) {
-    // Authenticated routes: enforcing nonce-based CSP.
-    // Next.js App Router propagates the nonce to its own bootstrap scripts
-    // via the x-nonce header consumed in layout.tsx.
+
+  // Enforcing nonce-based CSP is only applied in production.
+  // In development and test (NODE_ENV !== 'production'), Next.js uses
+  // static build chunks that don't carry the per-request nonce, so an
+  // enforcing CSP would block hydration. We use Report-Only there so
+  // the policy is visible in DevTools without blocking anything.
+  const isProduction = process.env.NODE_ENV === 'production'
+
+  if (enforcing && isProduction) {
+    // Production authenticated routes: enforcing nonce-based CSP.
     response.headers.set('Content-Security-Policy', buildCspHeader(nonce))
     response.headers.set('x-nonce', nonce)
   } else {
-    // Public/unauthenticated routes (login, register, etc.): Report-Only so
-    // that Next.js hydration scripts are never blocked on unauthenticated pages.
-    // This matches the previous behaviour and keeps E2E tests working.
+    // Non-production OR public routes: Report-Only CSP (observe, don't block).
     response.headers.set('Content-Security-Policy-Report-Only', buildCspHeader(nonce))
   }
 }
