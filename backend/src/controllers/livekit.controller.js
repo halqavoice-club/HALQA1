@@ -137,7 +137,7 @@ async function generateToken(req, res, next) {
       return errorResponse(res, 'LiveKit is not configured on this server', 503);
     }
 
-    const { roomId, canPublish = true, canSubscribe = true } = req.body;
+    const { roomId, canSubscribe = true } = req.body;
     const userId = req.user.id;
 
     // P24M-02 FIX: Fresh platform ban check for ALL room types.
