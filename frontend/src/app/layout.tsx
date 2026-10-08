@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next'
 import { Inter, Noto_Sans_Arabic } from 'next/font/google'
+import { headers } from 'next/headers'
 import './globals.css'
 import { Providers } from '@/components/providers'
 import { Toaster } from '@/components/ui/toaster'
@@ -37,6 +38,13 @@ export const viewport: Viewport = {
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  // FE-R-002/003: Read the per-request nonce set by middleware.ts.
+  // Next.js 14 App Router automatically uses 'x-nonce' for its own bootstrap
+  // scripts (__NEXT_DATA__, etc.). We read it here so it can be forwarded to
+  // any explicit <Script nonce={nonce}> tags added in the future.
+  // This component is a Server Component by default, so headers() is available.
+  const nonce = headers().get('x-nonce') ?? ''
+
   return (
     <html lang="en" suppressHydrationWarning>
       <head>

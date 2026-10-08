@@ -65,6 +65,42 @@ export function Providers({ children }: { children: React.ReactNode }) {
     analytics.initialize()
   }, [])
 
+  // FE-R-005: Cross-tab logout synchronisation.
+  // When the user logs out in one tab, the Zustand persist middleware writes
+  // the updated state (isAuthenticated: false) to localStorage under the key
+  // 'halqa-auth'. The browser fires a 'storage' event in ALL OTHER open tabs
+  // (never in the tab that made the write), so there is no risk of an
+  // infinite logout loop.
+  useEffect(() => {
+    const handleStorageLogout = (event: StorageEvent) => {
+      if (event.key === 'halqa-auth') {
+        // Only react if this tab currently believes it is authenticated
+        const isCurrentlyAuth = useAuthStore.getState().isAuthenticated
+        if (!isCurrentlyAuth) return
+
+        if (event.newValue === null) {
+          // Key was removed — other tab explicitly cleared auth storage
+          useAuthStore.getState().logout()
+          return
+        }
+        try {
+          const parsed = JSON.parse(event.newValue)
+          if (parsed?.state?.isAuthenticated === false) {
+            // Other tab logged out — mirror the logout in this tab.
+            // logout() silently catches the failed API call (token already
+            // revoked) then clears local state and redirects to /login.
+            useAuthStore.getState().logout()
+          }
+        } catch {
+          // Ignore malformed storage values
+        }
+      }
+    }
+
+    window.addEventListener('storage', handleStorageLogout)
+    return () => window.removeEventListener('storage', handleStorageLogout)
+  }, [])
+
   useEffect(() => {
     if (isAuthenticated && accessToken) {
       initSocket(accessToken)

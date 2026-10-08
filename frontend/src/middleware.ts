@@ -4,11 +4,11 @@ import type { NextRequest } from 'next/server'
 // Public routes that don't require authentication
 const PUBLIC_ROUTES = ['/login', '/forgot-password', '/reset-password', '/register', '/change-password']
 
-// ─── Security headers ─────────────────────────────────────────────────────────
+// ─── Security headers (non-CSP) ───────────────────────────────────────────────
 // FE-007: Add security headers to every response.
-// Note: 'unsafe-inline' is required by Next.js for styled-jsx and inline scripts.
-// A nonce-based CSP would be stronger but requires custom Next.js server setup.
-const SECURITY_HEADERS: Record<string, string> = {
+// CSP is built dynamically per-request below (nonce-based) and therefore
+// cannot be defined as a static constant here.
+const STATIC_SECURITY_HEADERS: Record<string, string> = {
   // Prevent MIME type sniffing (FE-006, BE-013)
   'X-Content-Type-Options': 'nosniff',
   // Block clickjacking
@@ -26,42 +26,59 @@ const SECURITY_HEADERS: Record<string, string> = {
   // microphone=* — required for LiveKit audio in voice club and live classes
   // geolocation=() — not used, deny it
   'Permissions-Policy': 'camera=*, microphone=*, geolocation=()',
-  // Step 9 — CSP (Report-Only mode): collects violations without blocking anything.
-  // This allows us to discover any sources we need to allow before switching to
-  // enforcing mode. Review the report-uri endpoint and gradually tighten the policy.
-  // Switch to Content-Security-Policy (enforcing) once no violations are reported.
-  //
-  // Current policy:
-  //   default-src 'self'       — block unknown sources by default
-  //   script-src  'self' + unsafe-inline/eval — required by Next.js (move to nonce later)
-  //   style-src   'self' + unsafe-inline — required by Tailwind/styled-jsx
-  //   img-src     'self' data: blob: https: — allow images from any https source
-  //   font-src    'self' data:             — allow embedded fonts
-  //   connect-src 'self' wss: ws:          — allow WebSocket connections
-  //   media-src   'self' blob: https:      — allow audio/video
-  //   frame-src   'none'                   — no iframes
-  'Content-Security-Policy-Report-Only': [
+}
+
+// ─── Per-request nonce + enforcing CSP ────────────────────────────────────────
+// FE-R-002/003: Replace the static Report-Only CSP with a per-request nonce-
+// based enforcing CSP. A fresh cryptographic nonce is generated for every
+// request so that only scripts explicitly tagged with that nonce may execute.
+// This eliminates 'unsafe-inline' and 'unsafe-eval' from script-src.
+//
+// Next.js 14 App Router:
+//   - Reads the 'x-nonce' response header set here and automatically applies it
+//     to its own inline bootstrap scripts (__NEXT_DATA__, etc.).
+//   - Explicit <Script> components in layout.tsx should receive nonce={nonce}
+//     by reading headers().get('x-nonce') in the Server Component.
+//
+// Google Sign-In:
+//   - accounts.google.com/gsi/client is allowed via its origin in script-src.
+//   - Its inline styles are served via accounts.google.com/gsi/style (style-src).
+//
+// font-src includes data: because Next.js inlines some font data URIs.
+// frame-src allows accounts.google.com/gsi/ for the Google One-Tap iframe.
+function buildCspHeader(nonce: string): string {
+  return [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com/gsi/client",
-    "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style",
+    // nonce covers Next.js bootstrap scripts and any explicit <Script nonce> tags.
+    // Google GSI client is loaded from its own origin (no unsafe-inline needed).
+    `script-src 'self' 'nonce-${nonce}' https://accounts.google.com/gsi/client`,
+    // unsafe-inline kept for style-src only — required by Tailwind, styled-jsx,
+    // and CSS-in-JS. Nonce-based style CSP is a future improvement.
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com/gsi/style",
     "img-src 'self' data: blob: https:",
-    "font-src 'self' data:",
+    "font-src 'self' data: https://fonts.gstatic.com",
     "connect-src 'self' wss: ws: https: https://accounts.google.com/gsi/",
     "media-src 'self' blob: https:",
     "frame-src 'none' https://accounts.google.com/gsi/",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
-  ].join('; '),
+    "frame-ancestors 'none'",
+  ].join('; ')
 }
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
+  // Generate a fresh cryptographic nonce for every request (FE-R-002/003).
+  // Buffer.from encodes the UUID as base64, producing a ~44-char string that
+  // is safe to embed in an HTTP header and in HTML attribute values.
+  const nonce = Buffer.from(crypto.randomUUID()).toString('base64')
+
   // Allow public routes
   if (PUBLIC_ROUTES.some(r => pathname.startsWith(r))) {
     const response = NextResponse.next()
-    applySecurityHeaders(response)
+    applySecurityHeaders(response, nonce)
     return response
   }
 
@@ -97,19 +114,25 @@ export function middleware(request: NextRequest) {
   // Redirect root to feed
   if (pathname === '/') {
     const response = NextResponse.redirect(new URL('/feed', request.url))
-    applySecurityHeaders(response)
+    applySecurityHeaders(response, nonce)
     return response
   }
 
   const response = NextResponse.next()
-  applySecurityHeaders(response)
+  applySecurityHeaders(response, nonce)
   return response
 }
 
-function applySecurityHeaders(response: NextResponse) {
-  Object.entries(SECURITY_HEADERS).forEach(([key, value]) => {
+function applySecurityHeaders(response: NextResponse, nonce: string) {
+  // Apply all static headers
+  Object.entries(STATIC_SECURITY_HEADERS).forEach(([key, value]) => {
     response.headers.set(key, value)
   })
+  // Apply per-request enforcing CSP (replaces former Report-Only header)
+  response.headers.set('Content-Security-Policy', buildCspHeader(nonce))
+  // Expose nonce to the Next.js Server Component layer (layout.tsx reads this
+  // via headers().get('x-nonce') to pass to any explicit <Script> tags)
+  response.headers.set('x-nonce', nonce)
 }
 
 export const config = {
