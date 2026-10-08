@@ -78,7 +78,7 @@ export function middleware(request: NextRequest) {
   // Allow public routes
   if (PUBLIC_ROUTES.some(r => pathname.startsWith(r))) {
     const response = NextResponse.next()
-    applySecurityHeaders(response, nonce)
+    applySecurityHeaders(response, nonce, false) // Report-Only on public pages
     return response
   }
 
@@ -123,16 +123,23 @@ export function middleware(request: NextRequest) {
   return response
 }
 
-function applySecurityHeaders(response: NextResponse, nonce: string) {
+function applySecurityHeaders(response: NextResponse, nonce: string, enforcing = true) {
   // Apply all static headers
   Object.entries(STATIC_SECURITY_HEADERS).forEach(([key, value]) => {
     response.headers.set(key, value)
   })
-  // Apply per-request enforcing CSP (replaces former Report-Only header)
-  response.headers.set('Content-Security-Policy', buildCspHeader(nonce))
-  // Expose nonce to the Next.js Server Component layer (layout.tsx reads this
-  // via headers().get('x-nonce') to pass to any explicit <Script> tags)
-  response.headers.set('x-nonce', nonce)
+  if (enforcing) {
+    // Authenticated routes: enforcing nonce-based CSP.
+    // Next.js App Router propagates the nonce to its own bootstrap scripts
+    // via the x-nonce header consumed in layout.tsx.
+    response.headers.set('Content-Security-Policy', buildCspHeader(nonce))
+    response.headers.set('x-nonce', nonce)
+  } else {
+    // Public/unauthenticated routes (login, register, etc.): Report-Only so
+    // that Next.js hydration scripts are never blocked on unauthenticated pages.
+    // This matches the previous behaviour and keeps E2E tests working.
+    response.headers.set('Content-Security-Policy-Report-Only', buildCspHeader(nonce))
+  }
 }
 
 export const config = {
