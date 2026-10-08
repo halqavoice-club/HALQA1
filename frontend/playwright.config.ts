@@ -1,5 +1,4 @@
 import { defineConfig, devices } from '@playwright/test';
-import path from 'path';
 
 /**
  * HALQA E2E Test Configuration
@@ -12,10 +11,6 @@ import path from 'path';
  * Run: npx playwright test
  * Report: npx playwright show-report
  */
-
-/** Path to the saved auth state produced by globalSetup.ts */
-const STUDENT_AUTH = path.join(__dirname, 'e2e', '.auth', 'student.json');
-
 export default defineConfig({
   testDir: './e2e',
   /* Run tests sequentially in CI to avoid port conflicts */
@@ -29,12 +24,6 @@ export default defineConfig({
   /* Reporter */
   reporter: process.env.CI ? 'github' : 'html',
 
-  /* Global setup — runs once before all tests.
-   * Logs in as the E2E test student and saves the browser context state
-   * (cookies + localStorage, including the httpOnly refreshToken cookie)
-   * to e2e/.auth/student.json so tests can start pre-authenticated. */
-  globalSetup: require.resolve('./e2e/globalSetup'),
-
   use: {
     /* Base URL for all tests.
      * Reads PLAYWRIGHT_BASE_URL (set by CI) with fallback to E2E_BASE_URL
@@ -47,23 +36,9 @@ export default defineConfig({
   },
 
   projects: [
-    /* Auth spec — runs without storageState so it tests the real login flow */
-    {
-      name: 'auth',
-      testMatch: '**/auth.spec.ts',
-      use: { ...devices['Desktop Chrome'] },
-    },
-    /* All other specs — use pre-saved auth state to avoid per-test login overhead.
-     * The httpOnly refreshToken cookie in the saved state means ClientOnly's
-     * /auth/refresh call succeeds immediately on every page.goto(), eliminating
-     * the timing race that caused voice.spec.ts to fail. */
     {
       name: 'chromium',
-      testIgnore: '**/auth.spec.ts',
-      use: {
-        ...devices['Desktop Chrome'],
-        storageState: STUDENT_AUTH,
-      },
+      use: { ...devices['Desktop Chrome'] },
     },
   ],
 
