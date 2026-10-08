@@ -21,14 +21,23 @@ test.describe('Voice Club', () => {
     // Wait until we have navigated away from /login — different roles land on
     // different routes (/feed, /admin, /dashboard) so we match any non-login URL.
     await page.waitForURL(url => !url.pathname.includes('/login'), { timeout: 15000 });
+    // Wait for the dashboard shell to finish mounting — ClientOnly awaits a
+    // /auth/refresh call before setting mounted=true. Without this wait the
+    // next goto('/voice-club') arrives before auth state is established and
+    // the dashboard layout returns a spinner instead of rendering the page.
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    // Extra guard: wait for the main dashboard shell to be visible
+    await page.waitForSelector('nav, [data-testid="sidebar"], aside, main', { timeout: 10000 }).catch(() => {});
   });
 
   test('voice room list loads and shows rooms or empty state', async ({ page }) => {
     await page.goto('/voice-club');
+    // Wait for navigation to settle and ClientOnly to finish its auth refresh
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 
-    // Wait for the page container — rendered unconditionally once the component
-    // mounts and auth state is hydrated. This is more reliable than waiting
-    // for content that depends on async API responses.
+    // The voice-club-page container is rendered once the component mounts in
+    // list view (not in activeRoom view). Waiting for it confirms the page
+    // has fully hydrated and is showing the room list UI.
     await expect(page.locator('[data-testid="voice-club-page"]')).toBeVisible({ timeout: 15000 });
 
     // The page is mounted and showing the room list view (not an active room).
