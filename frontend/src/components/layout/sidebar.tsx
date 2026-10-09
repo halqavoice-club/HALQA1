@@ -301,6 +301,10 @@ export function Sidebar() {
       ...(canEducation('VIEW_EXAMS') ? [
         { label: 'Exams', href: '/exams', icon: BookMarked }
       ] : []),
+      // Quizzes — teachers create, students take
+      ...(activeRole === 'TEACHER' || activeRole === 'SCHOOL_ADMIN' || activeRole === 'STUDENT' ? [
+        { label: 'Quizzes', href: '/quizzes', icon: ClipboardCheck }
+      ] : []),
       { label: 'Leaderboard', href: '/leaderboard', icon: Trophy },
       ...(canEducation('VIEW_LIBRARY') ? [
         { label: t.library, href: '/library', icon: BookOpen }
