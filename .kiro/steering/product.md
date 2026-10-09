@@ -15,7 +15,7 @@ Student, teacher, guardian, and class CRUD. Attendance (QR, bulk, calendar), gra
 TikTok Live-style audio rooms with host/moderator/speaker/audience roles, FIFO speaker queue, open-mic mode, mic-pass, real-time chat, emoji reactions, and persistent rooms. Backed by LiveKit (WebRTC).
 
 ### Virtual Gift Economy
-17 gifts (common → ultimate rarity), combo animations, send-to-all, diamond earnings for hosts. Coin packages sold via Stripe. Platform takes 50% cut; 1 coin → 0.5 diamonds. Daily spend cap configurable via `GIFT_DAILY_CAP`.
+13 gifts (common → ultimate rarity), combo animations, send-to-all, diamond earnings for hosts. Coin packages sold via Stripe. Platform takes 50% cut on gifted coin value. Daily spend cap configurable via `GIFT_DAILY_CAP`.
 
 ### Live Classes
 Interactive video sessions for school use. Separate from Voice Club — different roles, authorization rules, and participation model.
