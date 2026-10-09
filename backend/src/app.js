@@ -44,6 +44,7 @@ const dashboardRoutes = require('./routes/dashboard.routes');
 const audioRoutes = require('./routes/audio.routes');
 const activityRoutes = require('./routes/activity.routes');
 const liveClassRoutes = require('./routes/live-class.routes');
+const quizRoutes      = require('./routes/quiz.routes');             // Practice Quiz
 const importRoutes = require('./routes/import.routes');
 const auditRoutes = require('./routes/audit.routes');
 const voiceRoutes = require('./routes/voice.routes');
@@ -698,6 +699,72 @@ io.on('connection', (socket) => {
     if (userId) socket.leave(`wallet:${userId}`);
   });
 
+  // ── Practice Quiz teacher dashboard channel ────────────────────────────────
+  //
+  // quiz:watch   { quizId } — teacher joins the quiz:{quizId} room to receive
+  //                           live quiz:submission events as students submit.
+  // quiz:unwatch { quizId } — teacher leaves the room (dashboard closed).
+  //
+  // Authorization: the socket's userId must own the quiz (teacherId → Teacher.userId).
+  // Invalid quizId or unauthorized access is silently ignored to avoid leaking IDs.
+  socket.on('quiz:watch', async ({ quizId } = {}) => {
+    if (!quizId || !userId) return;
+    try {
+      const { PrismaClient } = require('@prisma/client');
+      const _prisma = new PrismaClient();
+      const quiz = await _prisma.quiz.findFirst({
+        where: { id: quizId, deletedAt: null },
+        select: { id: true, teacher: { select: { userId: true } }, status: true, classId: true }
+      });
+      await _prisma.$disconnect();
+      if (!quiz) return;
+
+      // Allow quiz teacher or school admin (req.user role check done at HTTP level;
+      // here we simply verify the socket user owns or is the quiz's teacher)
+      if (quiz.teacher.userId !== userId) {
+        // Also allow SCHOOL_ADMIN — their socket.userRole is set at connect time
+        if (socket.userRole !== 'SCHOOL_ADMIN' && socket.userRole !== 'SUPER_ADMIN') return;
+      }
+
+      socket.join(`quiz:${quizId}`);
+
+      // Emit current snapshot: submitted count + pending count
+      const _prisma2 = new PrismaClient();
+      const [submitted, total] = await Promise.all([
+        _prisma2.quizAttempt.count({ where: { quizId, status: 'SUBMITTED' } }),
+        _prisma2.enrollment.count({ where: { classId: quiz.classId, status: 'ACTIVE', deletedAt: null } })
+      ]);
+      const submittedRows = await _prisma2.quizAttempt.findMany({
+        where:   { quizId, status: 'SUBMITTED' },
+        orderBy: { submittedAt: 'desc' },
+        select: {
+          id: true, studentId: true, score: true, submittedAt: true,
+          student: { select: { user: { select: { firstName: true, lastName: true } } } }
+        }
+      });
+      await _prisma2.$disconnect();
+
+      socket.emit('quiz:snapshot', {
+        quizId,
+        submitted: submittedRows.map(a => ({
+          attemptId:   a.id,
+          studentId:   a.studentId,
+          firstName:   a.student.user.firstName,
+          lastName:    a.student.user.lastName,
+          score:       a.score,
+          submittedAt: a.submittedAt
+        })),
+        total
+      });
+    } catch (err) {
+      logger.warn(`[socket] quiz:watch error for quiz ${quizId}: ${err.message}`);
+    }
+  });
+
+  socket.on('quiz:unwatch', ({ quizId } = {}) => {
+    if (quizId) socket.leave(`quiz:${quizId}`);
+  });
+
   // ── Community socket rooms (Phase B-4) ─────────────────────────────────────
   //
   // DB-AUTHORITATIVE AUTHORIZATION — mirrors voice:join_room pattern.
@@ -1133,6 +1200,7 @@ app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/v1/audio', audioRoutes);
 app.use('/api/v1/activities', activityRoutes);
 app.use('/api/v1/live-classes', liveClassRoutes);
+app.use('/api/v1/quizzes',      quizRoutes);                        // Practice Quiz
 app.use('/api/v1/import', importRoutes);
 app.use('/api/v1/audit', auditRoutes);
 app.use('/api/v1/voice', voiceRoutes);
