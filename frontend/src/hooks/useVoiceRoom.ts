@@ -710,7 +710,11 @@ export function useVoiceRoom(roomId: string | null) {
       updateParticipant(d.userId, { isPinned: d.isPinned })
     })
     socket.on('voice:premium_gift',       onGiftSent)   // BUG FIX: premium gifts use a separate channel
-    socket.on('voice:gift_received',      onGiftReceived)
+    // BUG FIX: server emits 'gift:received' on the private user:{id} socket room,
+    // NOT 'voice:gift_received' on the voice room. The socket already joins user:{userId}
+    // on connect (app.js: socket.join(`user:${userId}`)). Listening on the correct event
+    // name ensures the wallet-balance refresh fires when we receive a gift.
+    socket.on('gift:received',            onGiftReceived)
     socket.on('voice:gift_all',           onGiftAll)
 
     return () => {
@@ -766,7 +770,7 @@ export function useVoiceRoom(roomId: string | null) {
       socket.off('voice:room_updated',       onRoomUpdated)
       socket.off('voice:gift_sent',          onGiftSent)
       socket.off('voice:premium_gift',       onGiftSent)
-      socket.off('voice:gift_received',      onGiftReceived)
+      socket.off('gift:received',            onGiftReceived)
       socket.off('voice:gift_all',           onGiftAll)
     }
   }, [roomId]) // eslint-disable-line react-hooks/exhaustive-deps
