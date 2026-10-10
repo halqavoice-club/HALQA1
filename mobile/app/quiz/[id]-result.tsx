@@ -155,8 +155,8 @@ export default function QuizResultScreen() {
       <SafeAreaView style={styles.container}>
         <View style={styles.center}>
           <Text style={styles.errorText}>No result found.</Text>
-          <TouchableOpacity style={styles.backBtn} onPress={() => router.replace('/(tabs)/quizzes')}>
-            <Text style={styles.backBtnText}>Back to Quizzes</Text>
+          <TouchableOpacity style={styles.backBtn} onPress={() => router.replace('/(tabs)/feed')}>
+            <Text style={styles.backBtnText}>Back to Home</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
@@ -171,7 +171,7 @@ export default function QuizResultScreen() {
     <SafeAreaView style={styles.container} edges={['top']}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.replace('/(tabs)/quizzes')} style={styles.backIcon}>
+        <TouchableOpacity onPress={() => router.replace('/(tabs)/feed')} style={styles.backIcon}>
           <Ionicons name="arrow-back" size={22} color="#374151" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Quiz Result</Text>
