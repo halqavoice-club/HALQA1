@@ -4,6 +4,7 @@
 import { create } from 'zustand';
 import * as SecureStore from 'expo-secure-store';
 import api, { setAccessToken } from '@/lib/api';
+import { updateSocketToken } from '@/lib/socket';
 
 interface User {
   id: string;
@@ -75,6 +76,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, refreshToken);
     const enriched = { ...user, name: `${user.firstName} ${user.lastName}`.trim(), avatar: user.avatarUrl ?? undefined };
     set({ user: enriched, accessToken, isAuthenticated: true, mustChangePassword: !!mustChangePassword });
+    // VC-SYNC-001: keep socket auth in sync so reconnections use the current token
+    updateSocketToken(accessToken);
 
     // Populate school store so Education nav shows correct role immediately
     syncSchoolMemberships(enriched);
@@ -112,6 +115,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const { accessToken, refreshToken: newRefreshToken, user: refreshedUser } = res.data.data;
 
       setAccessToken(accessToken);
+      // VC-SYNC-001: keep socket auth in sync so reconnections use the current token
+      updateSocketToken(accessToken);
 
       // Rotate stored refresh token if backend returned a new one
       if (newRefreshToken) await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, newRefreshToken);
