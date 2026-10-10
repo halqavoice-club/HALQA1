@@ -1184,7 +1184,12 @@ export default function VoiceRoomScreen() {
     // Without this handler, Phase 24B guards (socket.rooms.has(...)) silently
     // drop all voice events (reactions, speaking, role changes) after reconnect.
     // Matches web useVoiceRoom.ts: socket.on('connect', onReconnect).
-    const onReconnect = () => { socket.emit('voice:join_room', id); };
+    const onReconnect = () => {
+      socket.emit('voice:join_room', id);
+      // Re-fetch room state so participant list and roles reflect server truth
+      // after a disconnect (stale data risk while socket was down).
+      queryClient.invalidateQueries({ queryKey: ['voice-room', id] });
+    };
     socket.on('connect', onReconnect);
 
     // Real-time gift animation

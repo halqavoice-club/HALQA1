@@ -1372,6 +1372,17 @@ async function promoteParticipant(req, res, next) {
 
     await safeDeleteCache(roomCacheKey(roomId));
 
+    // VC-SYNC-005 FIX: Revoke SFU publish capability on SPEAKER → AUDIENCE demotion.
+    // A demoted user's existing LiveKit token may still have canPublish:true from
+    // when they were promoted to SPEAKER. sfuRevokePublish forces canPublish=false
+    // on the live SFU connection immediately — no reconnect needed.
+    // Called AFTER the transaction commits so the DB state is already authoritative.
+    if (role === VOICE_ROLES.AUDIENCE) {
+      sfuRevokePublish(roomId, targetUserId, false, '[voice:demote]').catch(err => {
+        logger.warn('[voice:demote] sfuRevokePublish failed:', err?.message || err);
+      });
+    }
+
     // assignedSeatNumber was captured inside the transaction — always reliable.
     // No need for a separate post-transaction DB read.
 
