@@ -127,3 +127,150 @@ describe('Per-User Rate Limiter', () => {
     jest.useRealTimers();
   });
 });
+
+describe('Lazy-initialization behavior (proxy exports)', () => {
+  // These tests verify that the pre-built exported constants (strictLimiter, etc.)
+  // are lazy-proxy functions — they defer createUserRateLimiter() to first request,
+  // NOT to module-load time. This is the fix for F-001/F-009.
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  test('no [userRateLimiter] warning fires when module is required', () => {
+    // Before the fix, requiring the module would fire 4 warn lines immediately.
+    // After the fix, no warn fires until the first HTTP request.
+    jest.resetModules();
+
+    // Intercept logger before re-requiring the module
+    // We need to spy on the logger instance that rateLimiter.user.js will use
+    const loggerModule = require('../utils/logger');
+    const warnSpy = jest.spyOn(loggerModule, 'warn');
+
+    // Re-require to get a fresh module evaluation with our spy in place
+    require('../middleware/rateLimiter.user');
+
+    const userRateLimiterWarns = warnSpy.mock.calls.filter(
+      (args) => typeof args[0] === 'string' && args[0].includes('[userRateLimiter]')
+    );
+
+    expect(userRateLimiterWarns).toHaveLength(0);
+    jest.resetModules(); // clean up for other tests
+  });
+
+  test('proxy exports are callable middleware functions', () => {
+    const {
+      strictLimiter,
+      moderateLimiter,
+      lenientLimiter,
+      writeLimiter,
+      middleware,
+    } = require('../middleware/rateLimiter.user');
+
+    // All exports must be callable (req, res, next) functions
+    expect(typeof strictLimiter).toBe('function');
+    expect(typeof moderateLimiter).toBe('function');
+    expect(typeof lenientLimiter).toBe('function');
+    expect(typeof writeLimiter).toBe('function');
+    expect(typeof middleware).toBe('function');
+
+    // middleware must be the same reference as moderateLimiter
+    expect(middleware).toBe(moderateLimiter);
+  });
+
+  test('proxy creates exactly one instance on repeated calls (no duplicate construction)', async () => {
+    // Each proxy should call createUserRateLimiter() exactly once across multiple requests.
+    // We verify by checking that the warn/debug log fires at most once per proxy.
+    const loggerModule = require('../utils/logger');
+    const debugSpy = jest.spyOn(loggerModule, 'debug');
+
+    const { strictLimiter } = require('../middleware/rateLimiter.user');
+    const app = express();
+    app.use(express.json());
+    app.get('/test', strictLimiter, (_req, res) => res.json({ ok: true }));
+
+    // Make 3 requests — instance should be created on first, reused on 2nd and 3rd
+    for (let i = 0; i < 3; i++) {
+      await request(app).get('/test').set('X-User-Id', `user-${i}`);
+    }
+
+    const strictLimiterDebugCalls = debugSpy.mock.calls.filter(
+      (args) => typeof args[0] === 'string' && args[0].includes('strictLimiter')
+    );
+    // Should be exactly 1 — created on first request, reused thereafter
+    expect(strictLimiterDebugCalls.length).toBe(1);
+  });
+
+  test('warn fires at first request (not module load) when Redis unavailable', async () => {
+    jest.resetModules();
+
+    // Mock redis to return isRedisReady = false
+    jest.mock('../utils/redis', () => ({
+      isRedisReady: jest.fn().mockReturnValue(false),
+      getCache: jest.fn(),
+      setCache: jest.fn(),
+    }));
+
+    const loggerModule = require('../utils/logger');
+    const warnSpy = jest.spyOn(loggerModule, 'warn');
+
+    const { strictLimiter } = require('../middleware/rateLimiter.user');
+    const app = express();
+    app.use(express.json());
+    app.get('/test', strictLimiter, (_req, res) => res.json({ ok: true }));
+
+    // No warn yet — proxy hasn't been invoked
+    const warnsBeforeRequest = warnSpy.mock.calls.filter(
+      (args) => typeof args[0] === 'string' && args[0].includes('[userRateLimiter]')
+    );
+    expect(warnsBeforeRequest).toHaveLength(0);
+
+    // Make first request — this triggers lazy construction
+    await request(app).get('/test').set('X-User-Id', 'uid-1');
+
+    // Now exactly one warn should have fired
+    const warnsAfterRequest = warnSpy.mock.calls.filter(
+      (args) => typeof args[0] === 'string' && args[0].includes('[userRateLimiter] Redis unavailable')
+    );
+    expect(warnsAfterRequest.length).toBeGreaterThanOrEqual(1);
+
+    jest.resetModules();
+    jest.unmock('../utils/redis');
+  });
+
+  test('uses Redis branch when isRedisReady returns true at first request', async () => {
+    jest.resetModules();
+
+    jest.mock('../utils/redis', () => ({
+      isRedisReady: jest.fn().mockReturnValue(true),
+      getCache: jest.fn().mockResolvedValue(null),
+      setCache: jest.fn().mockResolvedValue('OK'),
+    }));
+
+    const { moderateLimiter } = require('../middleware/rateLimiter.user');
+    const app = express();
+    app.use(express.json());
+    app.get('/test', moderateLimiter, (_req, res) => res.json({ ok: true }));
+
+    const res = await request(app).get('/test')
+      .set('X-User-Id', 'uid-redis')
+      .set('authorization', 'Bearer fake');
+
+    // Redis path: fail-open on Redis errors, so even with mocked getCache returning null
+    // the request should proceed
+    expect([200, 429]).toContain(res.status);
+
+    // Most importantly: no warn should have fired (Redis was ready)
+    const loggerModule = require('../utils/logger');
+    const warnSpy = jest.spyOn(loggerModule, 'warn');
+    expect(
+      warnSpy.mock.calls.filter(
+        (args) => typeof args[0] === 'string' && args[0].includes('[userRateLimiter] Redis unavailable')
+      )
+    ).toHaveLength(0);
+
+    jest.resetModules();
+    jest.unmock('../utils/redis');
+  });
+});

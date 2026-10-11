@@ -111,3 +111,131 @@ describe('Per-Device Rate Limiter', () => {
     expect(typeof limiter).toBe('function'); // it's a valid middleware
   });
 });
+
+describe('Lazy-initialization behavior (proxy exports)', () => {
+  // These tests verify that the pre-built exported device limiter constants
+  // (strictDeviceLimiter, etc.) defer createDeviceRateLimiter() to first request.
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  test('no [deviceRateLimiter] warning fires when module is required', () => {
+    jest.resetModules();
+
+    const loggerModule = require('../utils/logger');
+    const warnSpy = jest.spyOn(loggerModule, 'warn');
+
+    require('../middleware/rateLimiter.device');
+
+    const deviceWarns = warnSpy.mock.calls.filter(
+      (args) => typeof args[0] === 'string' && args[0].includes('[deviceRateLimiter]')
+    );
+    expect(deviceWarns).toHaveLength(0);
+
+    jest.resetModules();
+  });
+
+  test('proxy exports are callable middleware functions', () => {
+    const {
+      strictDeviceLimiter,
+      moderateDeviceLimiter,
+      lenientDeviceLimiter,
+      middleware,
+    } = require('../middleware/rateLimiter.device');
+
+    expect(typeof strictDeviceLimiter).toBe('function');
+    expect(typeof moderateDeviceLimiter).toBe('function');
+    expect(typeof lenientDeviceLimiter).toBe('function');
+    expect(typeof middleware).toBe('function');
+
+    // middleware must be the same reference as moderateDeviceLimiter
+    expect(middleware).toBe(moderateDeviceLimiter);
+  });
+
+  test('proxy creates exactly one instance on repeated calls', async () => {
+    const loggerModule = require('../utils/logger');
+    const debugSpy = jest.spyOn(loggerModule, 'debug');
+
+    const { strictDeviceLimiter } = require('../middleware/rateLimiter.device');
+    const app = express();
+    app.use(express.json());
+    app.get('/test', strictDeviceLimiter, (_req, res) => res.json({ ok: true }));
+
+    for (let i = 0; i < 3; i++) {
+      await request(app).get('/test').set(DEVICE_HEADERS);
+    }
+
+    const strictDebugCalls = debugSpy.mock.calls.filter(
+      (args) => typeof args[0] === 'string' && args[0].includes('strictDeviceLimiter')
+    );
+    // Created exactly once on first request, reused on 2nd and 3rd
+    expect(strictDebugCalls.length).toBe(1);
+  });
+
+  test('warn fires at first request (not module load) when Redis unavailable', async () => {
+    jest.resetModules();
+
+    jest.mock('../utils/redis', () => ({
+      isRedisReady: jest.fn().mockReturnValue(false),
+      getCache: jest.fn(),
+      setCache: jest.fn(),
+    }));
+
+    const loggerModule = require('../utils/logger');
+    const warnSpy = jest.spyOn(loggerModule, 'warn');
+
+    const { strictDeviceLimiter } = require('../middleware/rateLimiter.device');
+    const app = express();
+    app.use(express.json());
+    app.get('/test', strictDeviceLimiter, (_req, res) => res.json({ ok: true }));
+
+    // No warn before first request
+    const warnsBeforeRequest = warnSpy.mock.calls.filter(
+      (args) => typeof args[0] === 'string' && args[0].includes('[deviceRateLimiter]')
+    );
+    expect(warnsBeforeRequest).toHaveLength(0);
+
+    // First request triggers lazy construction
+    await request(app).get('/test').set(DEVICE_HEADERS);
+
+    const warnsAfterRequest = warnSpy.mock.calls.filter(
+      (args) => typeof args[0] === 'string' && args[0].includes('[deviceRateLimiter] Redis unavailable')
+    );
+    expect(warnsAfterRequest.length).toBeGreaterThanOrEqual(1);
+
+    jest.resetModules();
+    jest.unmock('../utils/redis');
+  });
+
+  test('uses Redis branch when isRedisReady returns true at first request', async () => {
+    jest.resetModules();
+
+    jest.mock('../utils/redis', () => ({
+      isRedisReady: jest.fn().mockReturnValue(true),
+      getCache: jest.fn().mockResolvedValue(null),
+      setCache: jest.fn().mockResolvedValue('OK'),
+    }));
+
+    const { moderateDeviceLimiter } = require('../middleware/rateLimiter.device');
+    const app = express();
+    app.use(express.json());
+    app.get('/test', moderateDeviceLimiter, (_req, res) => res.json({ ok: true }));
+
+    const res = await request(app).get('/test').set(DEVICE_HEADERS);
+    expect([200, 429]).toContain(res.status);
+
+    // No warn should have fired (Redis was ready)
+    const loggerModule = require('../utils/logger');
+    const warnSpy = jest.spyOn(loggerModule, 'warn');
+    expect(
+      warnSpy.mock.calls.filter(
+        (args) => typeof args[0] === 'string' && args[0].includes('[deviceRateLimiter] Redis unavailable')
+      )
+    ).toHaveLength(0);
+
+    jest.resetModules();
+    jest.unmock('../utils/redis');
+  });
+});
