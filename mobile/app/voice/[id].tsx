@@ -1074,6 +1074,10 @@ export default function VoiceRoomScreen() {
   const [chatMessages,   setChatMessages]   = useState<ChatMsg[]>([]);
   const [animGift,       setAnimGift]       = useState<{ gift: Gift; senderName: string } | null>(null);
   const chatListRef = useRef<FlatList>(null);
+  // FEAT-002: tracks whether the HTTP join has completed successfully.
+  // Used to guard socket.emit('voice:join_room') and onReconnect so neither
+  // fires before the user has actually joined via the API.
+  const hasJoinedRef = useRef(false);
 
   // ── Mic pass state ──────────────────────────────────────────────────────────
   const [showMicPassOffer,    setShowMicPassOffer]    = useState(false);
@@ -1170,13 +1174,80 @@ export default function VoiceRoomScreen() {
     } catch {}
   }, [id]);
 
+  // FEAT-002: authoritative stage snapshot reconciliation.
+  // Called both from the socket voice:stage_state handler and from handleJoin's
+  // GET /voice/:id/stage-state pull-fetch. Performs: clear stale seats, update
+  // existing participants, and upsert any participants absent from local state.
+  const applyStageSnapshot = useCallback((d: {
+    roomId: string;
+    stageParticipants: Array<{
+      userId: string; role: string; isMuted: boolean; seatNumber: number | null;
+      isPinned: boolean; handRaised: boolean; mutedByModerator: boolean;
+      joinedAt?: string;
+      firstName?: string; lastName?: string; avatarUrl?: string | null;
+    }>;
+    stageCount: number;
+  }) => {
+    if (d.roomId !== id) return;
+    setParticipants(prev => {
+      const updated = [...prev];
+      // Clear seatNumbers for participants not in stage (stage_state is authoritative)
+      const inStageIds = new Set(d.stageParticipants.map(sp => sp.userId));
+      for (let i = 0; i < updated.length; i++) {
+        if (!inStageIds.has(updated[i].id)) {
+          updated[i] = { ...updated[i], seatNumber: null };
+        }
+      }
+      // Update matching participants
+      const matchedIds = new Set<string>();
+      d.stageParticipants.forEach(sp => {
+        const idx = updated.findIndex(p => p.id === sp.userId);
+        if (idx >= 0) {
+          updated[idx] = {
+            ...updated[idx],
+            role: sp.role as Participant['role'],
+            isMuted: sp.isMuted,
+            mutedByModerator: sp.mutedByModerator,
+            handRaised: sp.handRaised,
+            seatNumber: sp.seatNumber,
+          };
+          matchedIds.add(sp.userId);
+        }
+      });
+      // FEAT-002 upsert: push participants not yet in local state
+      d.stageParticipants.forEach(sp => {
+        if (!matchedIds.has(sp.userId)) {
+          const name = `${sp.firstName ?? ''} ${sp.lastName ?? ''}`.trim() || 'User';
+          updated.push({
+            id:               sp.userId,
+            name,
+            avatar:           sp.avatarUrl ?? undefined,
+            role:             sp.role as Participant['role'],
+            isMuted:          sp.isMuted,
+            isSpeaking:       false,
+            handRaised:       sp.handRaised,
+            mutedByModerator: sp.mutedByModerator,
+            isActive:         true,
+            seatNumber:       sp.seatNumber,
+            _joinedAt:        typeof sp.joinedAt === 'string' ? sp.joinedAt : '',
+          });
+        }
+      });
+      return updated;
+    });
+  }, [id]);
+
   // Socket: real-time events
+  // FEAT-002: effect now runs on mount with [id, user] deps — before the user
+  // taps Join. The isJoined guard is replaced by hasJoinedRef so listeners are
+  // registered early while the guarded emit/reconnect still require a completed join.
   useEffect(() => {
-    if (!isJoined || !user) return;
+    if (!user) return;
     const socket = getSocket();
     if (!socket) return;
 
-    socket.emit('voice:join_room', id);
+    // FEAT-002: only emit voice:join_room after HTTP join has completed
+    if (hasJoinedRef.current) socket.emit('voice:join_room', id);
 
     // PH24C-005 FIX: Re-join the socket room after a reconnect.
     // When the socket disconnects and reconnects (network blip, token refresh,
@@ -1185,6 +1256,8 @@ export default function VoiceRoomScreen() {
     // drop all voice events (reactions, speaking, role changes) after reconnect.
     // Matches web useVoiceRoom.ts: socket.on('connect', onReconnect).
     const onReconnect = () => {
+      // FEAT-002: do not re-join socket room before HTTP join completes
+      if (!hasJoinedRef.current) return;
       socket.emit('voice:join_room', id);
       // Re-fetch room state so participant list and roles reflect server truth
       // after a disconnect (stale data risk while socket was down).
@@ -1608,43 +1681,9 @@ export default function VoiceRoomScreen() {
       }, 6500);
     });
 
-    // ATOMIC STAGE STATE: authoritative snapshot after seat changes — reconcile any stale state
-    socket.on('voice:stage_state', (d: {
-      roomId: string;
-      stageParticipants: Array<{
-        userId: string; role: string; isMuted: boolean; seatNumber: number | null;
-        isPinned: boolean; handRaised: boolean; mutedByModerator: boolean;
-      }>;
-      stageCount: number;
-    }) => {
-      if (d.roomId !== id) return;
-      // Apply authoritative seatNumber for every stage participant
-      setParticipants(prev => {
-        const updated = [...prev];
-        // First clear all seatNumbers (stage_state is authoritative)
-        const inStageIds = new Set(d.stageParticipants.map(sp => sp.userId));
-        for (let i = 0; i < updated.length; i++) {
-          if (!inStageIds.has(updated[i].id)) {
-            updated[i] = { ...updated[i], seatNumber: null };
-          }
-        }
-        // Apply each stage participant's authoritative state
-        d.stageParticipants.forEach(sp => {
-          const idx = updated.findIndex(p => p.id === sp.userId);
-          if (idx >= 0) {
-            updated[idx] = {
-              ...updated[idx],
-              role: sp.role as Participant['role'],
-              isMuted: sp.isMuted,
-              mutedByModerator: sp.mutedByModerator,
-              handRaised: sp.handRaised,
-              seatNumber: sp.seatNumber,
-            };
-          }
-        });
-        return updated;
-      });
-    });
+    // ATOMIC STAGE STATE: authoritative snapshot after seat changes — reconcile any stale state.
+    // FEAT-002: delegate to applyStageSnapshot which also upserts absent participants.
+    socket.on('voice:stage_state', applyStageSnapshot);
 
     return () => {
       socket.emit('voice:leave_room', id);
@@ -1697,7 +1736,10 @@ export default function VoiceRoomScreen() {
       // Emoji reactions
       socket.off('voice:reaction', onReaction);
     };
-  }, [isJoined, id, user, gifts, queryClient]);
+  // FEAT-002: removed isJoined, gifts, queryClient from deps — listeners
+  // register on mount; hasJoinedRef guards the join_room emit instead.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, user]);
 
   const handleJoin = useCallback(async () => {
     // SA-VOICE-MOBILE-01: SUPER_ADMIN = Platform Administration ONLY.
@@ -1715,6 +1757,11 @@ export default function VoiceRoomScreen() {
       if (token && !getSocket()?.connected) initSocket(token);
 
       setIsJoined(true);
+      // FEAT-002: mark join as complete so the listener effect's guarded emit fires
+      hasJoinedRef.current = true;
+      // FEAT-002: register socket room now that HTTP join succeeded
+      const sockNow = getSocket();
+      if (sockNow?.connected) sockNow.emit('voice:join_room', id);
 
       // Store in shared voice store so the tab bar shows the "IN ROOM" badge
       const roomData = res.data.data;
@@ -1763,6 +1810,12 @@ export default function VoiceRoomScreen() {
       if (Array.isArray(roomData?.lockedSeats)) {
         setLockedSeats(roomData.lockedSeats);
       }
+      // FEAT-002: pull authoritative stage snapshot after HTTP join succeeds.
+      // This reconciles any stage changes that occurred between the HTTP join
+      // response and socket room subscription — the primary P0-B race window.
+      api.get(`/voice/${id}/stage-state`)
+        .then((r: any) => { if (r.data?.data) applyStageSnapshot(r.data.data); })
+        .catch(() => {});
       await loadChat();
       // Connect LiveKit for real audio (native builds only)
       try {
@@ -1851,6 +1904,8 @@ export default function VoiceRoomScreen() {
         lk.disconnect();
         clearActiveRoom();
         clearQueuePosition();
+        // FEAT-002: reset join ref so onReconnect won't re-register after leave
+        hasJoinedRef.current = false;
         setIsJoined(false);
         router.back();
       }},

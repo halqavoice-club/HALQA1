@@ -241,6 +241,21 @@ interface VoiceState {
   _liveKitDisconnect: (() => void) | null
   registerLiveKitDisconnect: (fn: () => void) => void
   clearLiveKitDisconnect: () => void
+
+  // Pre-join sync buffer — holds voice:stage_state events that arrive during
+  // the race window between POST /join and useVoiceRoom mounting its listener.
+  // The early listener in page.tsx pushes here; useVoiceRoom drains on mount.
+  pendingSyncEvents: Array<{
+    roomId: string
+    stageParticipants: Array<{
+      userId: string; role: string; isMuted: boolean; seatNumber: number | null
+      isPinned: boolean; handRaised: boolean; mutedByModerator: boolean
+      joinedAt: string; firstName?: string | null; lastName?: string | null; avatarUrl?: string | null
+    }>
+    stageCount: number
+  }>
+  pushSyncEvent: (e: VoiceState['pendingSyncEvents'][number]) => void
+  drainSyncEvents: () => VoiceState['pendingSyncEvents']
 }
 
 export const useVoiceStore = create<VoiceState>((set, get) => ({
@@ -413,7 +428,22 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     isChatOpen: false,
     isHandQueueOpen: false,
     isWaitingListOpen: false,
+    pendingSyncEvents: [],
   }),
+
+  // ─── Pre-join sync buffer ─────────────────────────────────────────────────
+  // voice:stage_state events that arrive between POST /join and the full
+  // useVoiceRoom listener mount are buffered here (max 5, oldest discarded).
+  // useVoiceRoom drains this buffer after registering all listeners.
+  pendingSyncEvents: [],
+  pushSyncEvent: (e) => set(s => ({
+    pendingSyncEvents: [...s.pendingSyncEvents.slice(-4), e],
+  })),
+  drainSyncEvents: () => {
+    const events = get().pendingSyncEvents
+    set({ pendingSyncEvents: [] })
+    return events
+  },
 
   // ─── LiveKit disconnect ref ───────────────────────────────────────────────
   // VoiceRoomView registers its disconnect() here so that any page (e.g. the

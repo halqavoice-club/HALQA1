@@ -505,12 +505,16 @@ export function useVoiceRoom(roomId: string | null) {
     // full authoritative stage snapshot. Apply it to reconcile any stale state
     // caused by out-of-order individual role_changed / mute_changed events.
     // This prevents the "13 seats" flicker.
+    // P1 FIX: Extended type includes optional profile fields from the enriched
+    // backend query (LEFT JOIN users). onStageState now upserts participants
+    // absent from the store so a buffered snapshot can backfill missed joins.
     const onStageState = (data: {
       roomId: string
       stageParticipants: Array<{
         userId: string; role: string; isMuted: boolean; joinedAt: string
         isPinned: boolean; handRaised: boolean; mutedByModerator: boolean
         seatNumber: number | null
+        firstName?: string | null; lastName?: string | null; avatarUrl?: string | null
       }>
       stageCount: number
     }) => {
@@ -525,6 +529,34 @@ export function useVoiceRoom(roomId: string | null) {
           mutedByModerator: sp.mutedByModerator,
           seatNumber: sp.seatNumber,
         })
+      })
+      // P1 FIX: Upsert pass — add any stage participant whose userId is not
+      // already in the store. This covers participants missed due to the initial
+      // join race (voice:user_joined arrived before listener was registered).
+      const currentParticipants = useVoiceStore.getState().activeRoom?.participants ?? []
+      data.stageParticipants.forEach(sp => {
+        const alreadyInStore = currentParticipants.some(p => p.userId === sp.userId)
+        if (!alreadyInStore) {
+          addParticipant({
+            id:               sp.userId,
+            userId:           sp.userId,
+            role:             asRole(sp.role),
+            isMuted:          sp.isMuted,
+            mutedByModerator: sp.mutedByModerator,
+            handRaised:       sp.handRaised,
+            handRaisedAt:     null,
+            joinedAt:         typeof sp.joinedAt === 'string' ? sp.joinedAt : new Date().toISOString(),
+            isActive:         true,
+            isPinned:         sp.isPinned,
+            seatNumber:       sp.seatNumber,
+            user: {
+              id:        sp.userId,
+              firstName: sp.firstName ?? '',
+              lastName:  sp.lastName  ?? '',
+              avatarUrl: sp.avatarUrl ?? null,
+            },
+          })
+        }
       })
     }
 
@@ -716,6 +748,11 @@ export function useVoiceRoom(roomId: string | null) {
     // name ensures the wallet-balance refresh fires when we receive a gift.
     socket.on('gift:received',            onGiftReceived)
     socket.on('voice:gift_all',           onGiftAll)
+
+    // P0-A FIX: Drain any voice:stage_state events that arrived during the
+    // race window between POST /join completing and this useEffect registering
+    // all listeners. The early listener in page.tsx buffered them in the store.
+    useVoiceStore.getState().drainSyncEvents().forEach(payload => onStageState(payload))
 
     return () => {
       socket.off('connect', onReconnect)
