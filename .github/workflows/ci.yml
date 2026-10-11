@@ -583,12 +583,12 @@ jobs:
         id: classify
         run: |
           chmod +x scripts/ci-group-classifier.sh
-          GROUPS=$(bash scripts/ci-group-classifier.sh "${{ steps.base.outputs.base }}" HEAD 2>/dev/null) || GROUPS=""
-          if [ -z "$GROUPS" ]; then
-            GROUPS="G1,G2,G3,G4,G5"
+          CI_GROUPS=$(bash scripts/ci-group-classifier.sh "${{ steps.base.outputs.base }}" HEAD 2>/dev/null) || CI_GROUPS=""
+          if [ -z "$CI_GROUPS" ]; then
+            CI_GROUPS="G1,G2,G3,G4,G5"
           fi
-          echo "groups=$GROUPS" >> "$GITHUB_OUTPUT"
-          echo "Selected groups: $GROUPS"
+          echo "groups=$CI_GROUPS" >> "$GITHUB_OUTPUT"
+          echo "Selected groups: $CI_GROUPS"
 
       - name: Verify classifier tests pass
         run: |

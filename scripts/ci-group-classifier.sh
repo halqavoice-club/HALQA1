@@ -208,17 +208,20 @@ while IFS= read -r file; do
 done <<< "$CHANGED"
 
 # ── Build output string ───────────────────────────────────────────────────────
-GROUPS=""
-[ $G1 -eq 1 ] && GROUPS="${GROUPS}G1,"
-[ $G2 -eq 1 ] && GROUPS="${GROUPS}G2,"
-[ $G3 -eq 1 ] && GROUPS="${GROUPS}G3,"
-[ $G4 -eq 1 ] && GROUPS="${GROUPS}G4,"
-[ $G5 -eq 1 ] && GROUPS="${GROUPS}G5,"
+# NOTE: 'GROUPS' is a reserved bash/environment variable on both Linux and Windows
+# (bash uses it for supplementary group IDs; Windows sets it as an env var).
+# Renaming to CI_GROUPS avoids the collision where GROUPS="" silently fails.
+CI_GROUPS=""
+[ $G1 -eq 1 ] && CI_GROUPS="${CI_GROUPS}G1,"
+[ $G2 -eq 1 ] && CI_GROUPS="${CI_GROUPS}G2,"
+[ $G3 -eq 1 ] && CI_GROUPS="${CI_GROUPS}G3,"
+[ $G4 -eq 1 ] && CI_GROUPS="${CI_GROUPS}G4,"
+[ $G5 -eq 1 ] && CI_GROUPS="${CI_GROUPS}G5,"
 
 # Strip trailing comma; if empty fall back to ALL (shouldn't happen but be safe)
-GROUPS="${GROUPS%,}"
-if [ -z "$GROUPS" ]; then
-  GROUPS="G1,G2,G3,G4,G5"
+CI_GROUPS="${CI_GROUPS%,}"
+if [ -z "$CI_GROUPS" ]; then
+  CI_GROUPS="G1,G2,G3,G4,G5"
 fi
 
-echo "$GROUPS"
+echo "$CI_GROUPS"
