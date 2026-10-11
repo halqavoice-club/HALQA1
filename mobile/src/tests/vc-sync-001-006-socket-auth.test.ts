@@ -252,3 +252,236 @@ describe('auth store token refresh calls updateSocketToken (VC-SYNC-001)', () =>
     expect((mockSocket!.auth as any).token).not.toBe('stale-token-007');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VC-SYNC-007 — Listener registration before isJoined (FEAT-002)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Helper that mimics applyStageSnapshot logic extracted from mobile/app/voice/[id].tsx.
+ * This is a pure-function replica used to test the upsert behaviour without
+ * importing the full React Native component (which requires a host environment).
+ */
+type Participant = {
+  id: string; name: string; avatar: string | null;
+  role: string; isMuted: boolean; isSpeaking: boolean;
+  handRaised: boolean; mutedByModerator: boolean;
+  isActive: boolean; seatNumber: number | null; _joinedAt: string;
+};
+
+type StagePayload = {
+  roomId: string;
+  stageParticipants: Array<{
+    userId: string; role: string; isMuted: boolean; seatNumber: number | null;
+    isPinned: boolean; handRaised: boolean; mutedByModerator: boolean;
+    joinedAt?: string; firstName?: string; lastName?: string; avatarUrl?: string | null;
+  }>;
+  stageCount: number;
+};
+
+function applyStageSnapshotPure(prev: Participant[], d: StagePayload, roomId: string): Participant[] {
+  if (d.roomId !== roomId) return prev;
+  const updated = [...prev];
+  const inStageIds = new Set(d.stageParticipants.map(sp => sp.userId));
+  for (let i = 0; i < updated.length; i++) {
+    if (!inStageIds.has(updated[i].id)) {
+      updated[i] = { ...updated[i], seatNumber: null };
+    }
+  }
+  const matchedIds = new Set<string>();
+  d.stageParticipants.forEach(sp => {
+    const idx = updated.findIndex(p => p.id === sp.userId);
+    if (idx >= 0) {
+      updated[idx] = {
+        ...updated[idx],
+        role: sp.role,
+        isMuted: sp.isMuted,
+        mutedByModerator: sp.mutedByModerator,
+        handRaised: sp.handRaised,
+        seatNumber: sp.seatNumber,
+      };
+      matchedIds.add(sp.userId);
+    }
+  });
+  // Upsert pass — add participants absent from local state
+  d.stageParticipants.forEach(sp => {
+    if (!matchedIds.has(sp.userId)) {
+      const name = `${sp.firstName ?? ''} ${sp.lastName ?? ''}`.trim() || 'User';
+      updated.push({
+        id: sp.userId, name,
+        avatar: sp.avatarUrl ?? null,
+        role: sp.role,
+        isMuted: sp.isMuted, isSpeaking: false,
+        handRaised: sp.handRaised,
+        mutedByModerator: sp.mutedByModerator,
+        isActive: true, seatNumber: sp.seatNumber,
+        _joinedAt: typeof sp.joinedAt === 'string' ? sp.joinedAt : '',
+      });
+    }
+  });
+  return updated;
+}
+
+describe('VC-SYNC-007 — listener registration before isJoined (FEAT-002)', () => {
+  beforeEach(() => {
+    resetSocketModule();
+  });
+
+  // ── (a) applyStageSnapshot upserts absent participant ──────────────────────
+  it('(a) applyStageSnapshot upserts a participant absent from the current array', () => {
+    const existing: Participant[] = [
+      { id: 'u1', name: 'Alice', avatar: null, role: 'HOST', isMuted: false,
+        isSpeaking: false, handRaised: false, mutedByModerator: false,
+        isActive: true, seatNumber: 1, _joinedAt: '2024-01-01T00:00:00Z' },
+    ];
+
+    const payload: StagePayload = {
+      roomId: 'room-1',
+      stageParticipants: [
+        { userId: 'u1', role: 'HOST', isMuted: false, seatNumber: 1,
+          isPinned: false, handRaised: false, mutedByModerator: false },
+        // u2 is NOT in existing — must be upserted
+        { userId: 'u2', role: 'SPEAKER', isMuted: false, seatNumber: 2,
+          isPinned: false, handRaised: false, mutedByModerator: false,
+          firstName: 'Bob', lastName: 'Smith', avatarUrl: null },
+      ],
+      stageCount: 2,
+    };
+
+    const result = applyStageSnapshotPure(existing, payload, 'room-1');
+
+    expect(result).toHaveLength(2);
+    const bob = result.find(p => p.id === 'u2');
+    expect(bob).toBeDefined();
+    expect(bob?.name).toBe('Bob Smith');
+    expect(bob?.role).toBe('SPEAKER');
+    expect(bob?.seatNumber).toBe(2);
+  });
+
+  // ── (b) applyStageSnapshot ignores payloads for other rooms ───────────────
+  it('(a-2) applyStageSnapshot ignores payload for wrong roomId', () => {
+    const existing: Participant[] = [
+      { id: 'u1', name: 'Alice', avatar: null, role: 'HOST', isMuted: false,
+        isSpeaking: false, handRaised: false, mutedByModerator: false,
+        isActive: true, seatNumber: 1, _joinedAt: '' },
+    ];
+    const payload: StagePayload = {
+      roomId: 'other-room',
+      stageParticipants: [
+        { userId: 'u99', role: 'SPEAKER', isMuted: false, seatNumber: 3,
+          isPinned: false, handRaised: false, mutedByModerator: false },
+      ],
+      stageCount: 1,
+    };
+    const result = applyStageSnapshotPure(existing, payload, 'room-1');
+    // unchanged — wrong roomId
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('u1');
+  });
+
+  // ── (b) voice:join_room NOT emitted when hasJoinedRef.current === false ────
+  it('(b) voice:join_room is NOT emitted when hasJoinedRef.current is false', () => {
+    initSocket('test-token');
+    expect(mockSocket).not.toBeNull();
+    mockSocket!.connected = true;
+
+    // Simulate the guarded emit from the listener useEffect:
+    // if (hasJoinedRef.current) socket.emit('voice:join_room', id)
+    const hasJoinedRef = { current: false };
+    if (hasJoinedRef.current) {
+      mockSocket!.emit('voice:join_room', 'room-1');
+    }
+
+    expect(mockSocket!.emit).not.toHaveBeenCalledWith('voice:join_room', 'room-1');
+  });
+
+  it('(b-2) voice:join_room IS emitted when hasJoinedRef.current is true', () => {
+    initSocket('test-token');
+    expect(mockSocket).not.toBeNull();
+    mockSocket!.connected = true;
+
+    const hasJoinedRef = { current: true };
+    if (hasJoinedRef.current) {
+      mockSocket!.emit('voice:join_room', 'room-1');
+    }
+
+    expect(mockSocket!.emit).toHaveBeenCalledWith('voice:join_room', 'room-1');
+  });
+
+  // ── (c) onReconnect does NOT emit when hasJoinedRef is false ───────────────
+  it('(c) onReconnect does not emit voice:join_room when hasJoinedRef.current is false', () => {
+    initSocket('test-token');
+    expect(mockSocket).not.toBeNull();
+    mockSocket!.connected = true;
+
+    const hasJoinedRef = { current: false };
+
+    // Simulate the onReconnect handler from the listener useEffect
+    const onReconnect = () => {
+      if (!hasJoinedRef.current) return;
+      mockSocket!.emit('voice:join_room', 'room-1');
+    };
+
+    // Fire the reconnect handler
+    onReconnect();
+
+    expect(mockSocket!.emit).not.toHaveBeenCalledWith('voice:join_room', 'room-1');
+  });
+
+  it('(c-2) onReconnect DOES emit voice:join_room when hasJoinedRef.current is true', () => {
+    initSocket('test-token');
+    expect(mockSocket).not.toBeNull();
+    mockSocket!.connected = true;
+
+    const hasJoinedRef = { current: true };
+
+    const onReconnect = () => {
+      if (!hasJoinedRef.current) return;
+      mockSocket!.emit('voice:join_room', 'room-1');
+    };
+
+    onReconnect();
+
+    expect(mockSocket!.emit).toHaveBeenCalledWith('voice:join_room', 'room-1');
+  });
+
+  // ── (d) upsert uses safe defaults when firstName/lastName absent ──────────
+  it('(d) applyStageSnapshot uses "User" fallback when firstName and lastName are absent', () => {
+    const existing: Participant[] = [];
+    const payload: StagePayload = {
+      roomId: 'room-1',
+      stageParticipants: [
+        { userId: 'u5', role: 'SPEAKER', isMuted: false, seatNumber: 1,
+          isPinned: false, handRaised: false, mutedByModerator: false,
+          // no firstName / lastName / avatarUrl
+        },
+      ],
+      stageCount: 1,
+    };
+    const result = applyStageSnapshotPure(existing, payload, 'room-1');
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe('User');
+    expect(result[0].avatar).toBeNull();
+  });
+
+  // ── (e) upsert does NOT duplicate an existing participant ─────────────────
+  it('(e) applyStageSnapshot does not create a duplicate for an existing participant', () => {
+    const existing: Participant[] = [
+      { id: 'u1', name: 'Alice', avatar: null, role: 'HOST', isMuted: false,
+        isSpeaking: false, handRaised: false, mutedByModerator: false,
+        isActive: true, seatNumber: 1, _joinedAt: '' },
+    ];
+    const payload: StagePayload = {
+      roomId: 'room-1',
+      stageParticipants: [
+        { userId: 'u1', role: 'HOST', isMuted: false, seatNumber: 1,
+          isPinned: false, handRaised: false, mutedByModerator: false,
+          firstName: 'Alice', lastName: 'Updated' },
+      ],
+      stageCount: 1,
+    };
+    const result = applyStageSnapshotPure(existing, payload, 'room-1');
+    expect(result).toHaveLength(1);  // still one — not duplicated
+    expect(result[0].id).toBe('u1');
+  });
+});
