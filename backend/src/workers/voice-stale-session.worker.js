@@ -41,8 +41,9 @@ const GRACE_PERIOD_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * Check if a user has an active Socket.IO connection in a voice room.
- * Uses the Redis adapter's room-membership key when available.
- * Falls back to true (assume active) if Redis is not available.
+ * Queries the Socket.IO adapter directly for live socket membership.
+ * Falls back to true (assume active/connected) if io is unavailable or
+ * fetchSockets throws — conservative: never falsely evict a connected user.
  *
  * @param {string} roomId
  * @param {string} userId
@@ -50,18 +51,17 @@ const GRACE_PERIOD_MS = 5 * 60 * 1000; // 5 minutes
  */
 async function hasActiveSocketConnection(roomId, userId) {
   try {
-    const { getCache } = require('../utils/redis');
-    // The Socket.IO Redis adapter stores socket IDs under a room key.
-    // We use the user-specific room key set by socketsJoin() in the controller.
-    // Key format: socket.io#{namespace}#voice:{roomId} contains socket IDs.
-    // We check a simpler presence key that we maintain ourselves.
-    // If the Redis adapter presence key doesn't exist, assume disconnected.
-    const presenceKey = `voice:presence:${roomId}:${userId}`;
-    const presence = await getCache(presenceKey);
-    return !!presence;
-  } catch {
-    // Redis unavailable — be conservative, assume connected (don't falsely evict)
-    return true;
+    const { getIo } = require('../sockets');
+    const io = getIo();
+    if (!io) {
+      logger.warn('[stale-session] io not available, skipping eviction (conservative)');
+      return true; // conservative: assume connected
+    }
+    const sockets = await io.in(`voice:${roomId}`).fetchSockets();
+    return sockets.some(s => String(s.data.userId) === String(userId));
+  } catch (err) {
+    logger.warn('[stale-session] fetchSockets error, skipping eviction (conservative):', err?.message || err);
+    return true; // conservative: assume connected
   }
 }
 
