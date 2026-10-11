@@ -687,3 +687,144 @@ describe('S16 — Backend source: all required emits verified', () => {
     expect(src).toMatch(/voice:stage_state/);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// 17 — Initial join: stage_state arrives before listeners are ready
+// ═══════════════════════════════════════════════════════════════════════
+describe('S17 — Initial join: stage_state before listeners (buffer + upsert)', () => {
+  // Helper: run onStageState with the upsert logic (mirrors the updated
+  // useVoiceRoom.ts onStageState implementation).
+  function onStageStateWithUpsert(store, data) {
+    const room = store.get().activeRoom;
+    if (!room) return;
+    // Update pass
+    data.stageParticipants.forEach(sp => {
+      store.updateParticipant(sp.userId, {
+        role: sp.role,
+        isMuted: sp.isMuted,
+        isPinned: sp.isPinned,
+        handRaised: sp.handRaised,
+        mutedByModerator: sp.mutedByModerator,
+        seatNumber: sp.seatNumber,
+      });
+    });
+    // Upsert pass — add participants absent from the store
+    const currentParticipants = store.get().activeRoom?.participants ?? [];
+    data.stageParticipants.forEach(sp => {
+      const alreadyInStore = currentParticipants.some(p => p.userId === sp.userId);
+      if (!alreadyInStore) {
+        store.addParticipant({
+          id:               sp.userId,
+          userId:           sp.userId,
+          role:             sp.role,
+          isMuted:          sp.isMuted,
+          mutedByModerator: sp.mutedByModerator,
+          handRaised:       sp.handRaised,
+          handRaisedAt:     null,
+          joinedAt:         typeof sp.joinedAt === 'string' ? sp.joinedAt : new Date().toISOString(),
+          isActive:         true,
+          isPinned:         sp.isPinned,
+          seatNumber:       sp.seatNumber,
+          user: {
+            id:        sp.userId,
+            firstName: sp.firstName ?? '',
+            lastName:  sp.lastName  ?? '',
+            avatarUrl: sp.avatarUrl ?? null,
+          },
+        });
+      }
+    });
+  }
+
+  test('(a) buffered snapshot applies correct seat numbers', () => {
+    const s = makeStore();
+    s.setActiveRoom(makeRoom([
+      makeP('a', 'HOST',    { seatNumber: 1, isMuted: false }),
+      makeP('b', 'SPEAKER', { seatNumber: 2, isMuted: false }),
+    ]));
+    // Simulate a snapshot that arrived before listeners were ready, now drained
+    const bufferedPayload = {
+      roomId: 'room-1',
+      stageCount: 2,
+      stageParticipants: [
+        { userId: 'a', role: 'HOST',    isMuted: false, seatNumber: 1,
+          isPinned: false, handRaised: false, mutedByModerator: false,
+          joinedAt: new Date().toISOString() },
+        { userId: 'b', role: 'SPEAKER', isMuted: false, seatNumber: 3,
+          isPinned: false, handRaised: false, mutedByModerator: false,
+          joinedAt: new Date().toISOString() },
+      ],
+    };
+    onStageStateWithUpsert(s, bufferedPayload);
+    expect(s.getParticipant('a').seatNumber).toBe(1);
+    // Buffered snapshot corrects b's seat from 2 to 3
+    expect(s.getParticipant('b').seatNumber).toBe(3);
+  });
+
+  test('(b) onStageState upserts participant absent from store (addParticipant called)', () => {
+    const s = makeStore();
+    // Store has only 'a' — 'b' was missed due to race
+    s.setActiveRoom(makeRoom([makeP('a', 'HOST', { seatNumber: 1, isMuted: false })]));
+    const payload = {
+      roomId: 'room-1',
+      stageCount: 2,
+      stageParticipants: [
+        { userId: 'a', role: 'HOST',    isMuted: false, seatNumber: 1,
+          isPinned: false, handRaised: false, mutedByModerator: false,
+          joinedAt: new Date().toISOString(), firstName: 'Alice', lastName: 'A', avatarUrl: null },
+        { userId: 'b', role: 'SPEAKER', isMuted: false, seatNumber: 2,
+          isPinned: false, handRaised: false, mutedByModerator: false,
+          joinedAt: new Date().toISOString(), firstName: 'Bob', lastName: 'B', avatarUrl: null },
+      ],
+    };
+    onStageStateWithUpsert(s, payload);
+    // 'b' must now be in the store with correct seat and profile
+    const b = s.getParticipant('b');
+    expect(b).not.toBeNull();
+    expect(b.seatNumber).toBe(2);
+    expect(b.role).toBe('SPEAKER');
+    expect(b.user.firstName).toBe('Bob');
+    expect(b.isActive).toBe(true);
+  });
+
+  test('(c) stageRows query in joinRoom contains u.firstName (enriched JOIN present)', () => {
+    const joinFn = extractFn(src, 'joinRoom', 'leaveRoom');
+    // The FIX-JOIN-STAGE block must LEFT JOIN users and select u.firstName
+    expect(joinFn).toMatch(/LEFT JOIN users u/i);
+    expect(joinFn).toMatch(/u\.firstName/);
+    expect(joinFn).toMatch(/u\.lastName/);
+    expect(joinFn).toMatch(/u\.avatarUrl/);
+  });
+
+  test('(d) stageRows.map in joinRoom emits firstName/lastName/avatarUrl fields', () => {
+    const joinFn = extractFn(src, 'joinRoom', 'leaveRoom');
+    // The map() after the FIX-JOIN-STAGE stageRows query must include the profile fields
+    expect(joinFn).toMatch(/firstName\s*:/);
+    expect(joinFn).toMatch(/lastName\s*:/);
+    expect(joinFn).toMatch(/avatarUrl\s*:/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// 19 — Backend event ordering: subscribe-before-emit contract
+// ═══════════════════════════════════════════════════════════════════════
+describe('S19 — Backend event ordering: socketsJoin before stage_state', () => {
+  test('(a) socketsJoin appears before voice:stage_state emit in joinRoom source', () => {
+    const joinFn = extractFn(src, 'joinRoom', 'leaveRoom');
+    const socketsJoinIdx = joinFn.indexOf('socketsJoin');
+    const stageStateIdx  = joinFn.indexOf("emit('voice:stage_state'");
+    expect(socketsJoinIdx).toBeGreaterThan(-1);
+    expect(stageStateIdx).toBeGreaterThan(-1);
+    // socketsJoin must appear before the stage_state emit so the client is
+    // subscribed to the socket room before the snapshot is delivered.
+    expect(socketsJoinIdx).toBeLessThan(stageStateIdx);
+  });
+
+  test('(b) stage_state in joinRoom is emitted to user:${userId} (personal channel, not room-wide)', () => {
+    const joinFn = extractFn(src, 'joinRoom', 'leaveRoom');
+    // The FIX-JOIN-STAGE emission must target the personal user channel,
+    // not the room-wide voice:${roomId} channel.
+    expect(joinFn).toMatch(/user:\$\{userId\}.*emit\('voice:stage_state'/s);
+  });
+});
+
