@@ -154,19 +154,25 @@ async function viewStory(req, res, next) {
     });
     if (!story) return errorResponse(res, 'Story not found or expired', 404);
 
-    // Upsert view (idempotent)
-    const isNew = await prisma.storyView.upsert({
-      where: { storyId_viewerId: { storyId: id, viewerId } },
-      create: { id: uuidv4(), storyId: id, viewerId },
-      update: {}
-    }).then(v => !!v);
-
-    // Increment view count (fire-and-forget)
+    // VIEW-COUNT FIX: Use create/catch(P2002) instead of upsert+then.
+    // Prisma 5 upsert always returns the row whether it was created or updated,
+    // so the previous pattern incremented viewCount on every visit, not just the first.
+    // Now: only increment when create succeeds (first view). P2002 = already viewed.
+    // Author viewing their own story never increments count.
     if (story.authorId !== viewerId) {
-      prisma.story.update({
-        where: { id },
-        data:  { viewCount: { increment: 1 } }
-      }).catch(() => {});
+      prisma.storyView.create({
+        data: { id: uuidv4(), storyId: id, viewerId }
+      }).then(() =>
+        prisma.story.update({
+          where: { id },
+          data:  { viewCount: { increment: 1 } }
+        })
+      ).catch(() => {}); // P2002 (repeat view) and other errors swallowed — fire-and-forget
+    } else {
+      // Author visit: still record the view row for viewer-list purposes, no count increment
+      prisma.storyView.create({
+        data: { id: uuidv4(), storyId: id, viewerId }
+      }).catch(() => {}); // P2002 if already recorded — safe to ignore
     }
 
     return successResponse(res, { viewed: true });
