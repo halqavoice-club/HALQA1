@@ -583,7 +583,7 @@ jobs:
         id: classify
         run: |
           chmod +x scripts/ci-group-classifier.sh
-          GROUPS=$(bash scripts/ci-group-classifier.sh "${{ steps.base.outputs.base }}" HEAD 2>/dev/null || echo "G1,G2,G3,G4,G5")
+          GROUPS=$(bash scripts/ci-group-classifier.sh "${{ steps.base.outputs.base }}" HEAD 2>/dev/null) || GROUPS=""
           if [ -z "$GROUPS" ]; then
             GROUPS="G1,G2,G3,G4,G5"
           fi
