@@ -806,6 +806,48 @@ describe('S17 — Initial join: stage_state before listeners (buffer + upsert)',
 });
 
 // ═══════════════════════════════════════════════════════════════════════
+// 18 — GET /stage-state authorization contract (source-analysis, no DB)
+// ═══════════════════════════════════════════════════════════════════════
+describe('S18 — GET /stage-state authorization contract', () => {
+  const VOICE_ROUTES = path.join(__dirname, '../routes/voice.routes.js');
+  const routesSrc = fs.readFileSync(VOICE_ROUTES, 'utf8');
+
+  test('(a) voice.routes.js registers GET /:id/stage-state route', () => {
+    expect(routesSrc).toMatch(/router\.get\(['"`][^'"`]*stage-state['"`]/);
+  });
+
+  test('(b) stage-state route appears after router.use(authenticate)', () => {
+    const authIdx  = routesSrc.indexOf('router.use(authenticate)');
+    const routeIdx = routesSrc.indexOf('stage-state');
+    expect(authIdx).toBeGreaterThan(-1);
+    expect(routeIdx).toBeGreaterThan(-1);
+    // Route must be defined after the authenticate middleware is mounted
+    // so all requests to /:id/stage-state go through JWT verification.
+    expect(authIdx).toBeLessThan(routeIdx);
+  });
+
+  test('(c) getStageState in controller checks participant.isActive', () => {
+    const fn = extractFn(src, 'getStageState', null);
+    // Must verify the caller has an active VoiceParticipant record
+    expect(fn).toMatch(/participant\.isActive/);
+    // Must return 403 for unauthorized callers
+    expect(fn).toMatch(/403/);
+  });
+
+  test('(d) getStageState returns stageParticipants with firstName/lastName/avatarUrl', () => {
+    const fn = extractFn(src, 'getStageState', null);
+    expect(fn).toMatch(/firstName/);
+    expect(fn).toMatch(/lastName/);
+    expect(fn).toMatch(/avatarUrl/);
+  });
+
+  test('(e) getStageState uses LEFT JOIN users for profile enrichment', () => {
+    const fn = extractFn(src, 'getStageState', null);
+    expect(fn).toMatch(/LEFT JOIN users u/i);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
 // 19 — Backend event ordering: subscribe-before-emit contract
 // ═══════════════════════════════════════════════════════════════════════
 describe('S19 — Backend event ordering: socketsJoin before stage_state', () => {
