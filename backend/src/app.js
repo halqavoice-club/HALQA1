@@ -714,16 +714,48 @@ io.on('connection', (socket) => {
       const _prisma = new PrismaClient();
       const quiz = await _prisma.quiz.findFirst({
         where: { id: quizId, deletedAt: null },
-        select: { id: true, teacher: { select: { userId: true } }, status: true, classId: true }
+        select: { id: true, teacher: { select: { userId: true } }, status: true, classId: true, schoolId: true }
       });
       await _prisma.$disconnect();
       if (!quiz) return;
 
-      // Allow quiz teacher or school admin (req.user role check done at HTTP level;
-      // here we simply verify the socket user owns or is the quiz's teacher)
-      if (quiz.teacher.userId !== userId) {
-        // Also allow SCHOOL_ADMIN — their socket.userRole is set at connect time
-        if (socket.userRole !== 'SCHOOL_ADMIN' && socket.userRole !== 'SUPER_ADMIN') return;
+      // ── Authorization ─────────────────────────────────────────────────────
+      //
+      // Allowed principals:
+      //   • The TEACHER who owns this quiz (Teacher.userId === socket.userId).
+      //   • A SCHOOL_ADMIN whose JWT school (socket.userSchoolId) matches the
+      //     quiz's school — regardless of whether they also have a Teacher record.
+      //
+      // AUDIT-007-AUTHZ FIX (edge-case hardening):
+      //
+      //   Step 1 — SUPER_ADMIN is a PLATFORM administrator only. The deny is
+      //   placed BEFORE the teacher-ID comparison so it is unconditional even
+      //   if a SUPER_ADMIN user happens to have a Teacher record in the DB
+      //   (the schema has no constraint preventing this; the HTTP quiz routes
+      //   block SA via requireSchoolMember(), but the socket is an independent
+      //   surface). Mirrors school:join (app.js ~line 369) and
+      //   requireSchoolMember() (schoolAuth.middleware.js ~line 156).
+      //
+      //   Step 2 — SCHOOL_ADMIN: school-scope is checked UNCONDITIONALLY.
+      //   A SCHOOL_ADMIN whose userId coincidentally matches quiz.teacher.userId
+      //   must still be in the quiz's school — the teacher-match alone is not
+      //   sufficient authorization for a school-scoped admin role.
+      //   socket.userSchoolId is set from the JWT at connection time and never
+      //   from client payload (mirrors school:join guard ~line 371).
+      //
+      //   Step 3 — All other roles (TEACHER, STUDENT, GUARDIAN, MEMBER, etc.):
+      //   must be the owning teacher (Teacher.userId === socket.userId).
+
+      // Step 1: SUPER_ADMIN — unconditional deny (platform role ≠ school membership)
+      if (socket.userRole === 'SUPER_ADMIN') return;
+
+      // Step 2: SCHOOL_ADMIN — allowed only when JWT school matches quiz school
+      if (socket.userRole === 'SCHOOL_ADMIN') {
+        if (socket.userSchoolId !== quiz.schoolId) return;
+        // school matches → fall through to socket.join
+      } else if (quiz.teacher.userId !== userId) {
+        // Step 3: all other roles must be the owning teacher
+        return;
       }
 
       socket.join(`quiz:${quizId}`);
