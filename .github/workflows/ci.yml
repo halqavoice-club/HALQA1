@@ -2,9 +2,16 @@
 
 on:
   push:
-    branches: [main, develop, fix/live-class-gap-analysis]
+    branches:
+      - main
+      - develop
+      - 'fix/**'
+      - 'feat/**'
+      - 'hotfix/**'
   pull_request:
-    branches: [main, develop, fix/live-class-gap-analysis]
+    branches:
+      - main
+      - develop
   workflow_dispatch:
     inputs:
       reason:
