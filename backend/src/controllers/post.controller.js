@@ -373,6 +373,88 @@ async function getPost(req, res, next) {
     });
     if (!post) return errorResponse(res, 'Post not found', 404);
 
+    // P1-B: Visibility and block enforcement for direct post retrieval.
+    // The owner (post author) bypasses all checks — they can always view their own post.
+    // All other callers must pass every applicable gate; failure returns 404 to
+    // avoid leaking the existence of a protected post (no oracle attack).
+    const requesterId = req.user.id;
+    if (post.authorId !== requesterId) {
+      // 1. Bilateral block check: viewer blocked author OR author blocked viewer
+      const block = await prisma.userBlock.findFirst({
+        where: { OR: [
+          { blockerId: requesterId, blockedId: post.authorId },
+          { blockerId: post.authorId, blockedId: requesterId }
+        ]}
+      });
+      if (block) return errorResponse(res, 'Post not found', 404);
+
+      // 2. PRIVATE posts: only the author may view
+      if (post.visibility === 'PRIVATE') {
+        return errorResponse(res, 'Post not found', 404);
+      }
+
+      // 3. FOLLOWERS: viewer must follow the author
+      if (post.visibility === 'FOLLOWERS') {
+        const follows = await prisma.follow.findFirst({
+          where: { followerId: requesterId, followingId: post.authorId }
+        });
+        if (!follows) return errorResponse(res, 'Post not found', 404);
+      }
+
+      // 4. SCHOOL_ONLY: viewer must belong to the same school as the author.
+      // Resolve both schoolIds via User.schoolId (legacy) with SchoolMembership fallback
+      // (new MEMBER-role users), matching the pattern in visibilityFilter().
+      if (post.visibility === 'SCHOOL_ONLY') {
+        let viewerSchoolId = req.user.schoolId || null;
+        if (!viewerSchoolId) {
+          const membership = await prisma.schoolMembership.findFirst({
+            where: { userId: requesterId, status: 'ACTIVE', deletedAt: null },
+            select: { schoolId: true }
+          });
+          viewerSchoolId = membership?.schoolId || null;
+        }
+        // Author schoolId: prefer post.author.schoolId (included via POST_INCLUDE)
+        let authorSchoolId = post.author?.schoolId || null;
+        if (!authorSchoolId) {
+          const authorMembership = await prisma.schoolMembership.findFirst({
+            where: { userId: post.authorId, status: 'ACTIVE', deletedAt: null },
+            select: { schoolId: true }
+          });
+          authorSchoolId = authorMembership?.schoolId || null;
+        }
+        if (!viewerSchoolId || !authorSchoolId || viewerSchoolId !== authorSchoolId) {
+          return errorResponse(res, 'Post not found', 404);
+        }
+      }
+
+      // 5. isExclusive: viewer must have an active CreatorSubscription for the author.
+      // CreatorSubscription.creatorId references CreatorProfile.id (not User.id),
+      // so we must first resolve the author's CreatorProfile id before checking.
+      if (post.isExclusive) {
+        let hasSubscription = false;
+        try {
+          const creatorProfile = await prisma.creatorProfile.findUnique({
+            where: { userId: post.authorId },
+            select: { id: true }
+          });
+          if (creatorProfile) {
+            const sub = await prisma.creatorSubscription.findFirst({
+              where: {
+                subscriberId: requesterId,
+                creatorId: creatorProfile.id,
+                status: 'ACTIVE',
+                expiresAt: { gt: new Date() }
+              }
+            });
+            hasSubscription = !!sub;
+          }
+        } catch {
+          // Non-fatal: if subscription check fails, treat as no subscription
+        }
+        if (!hasSubscription) return errorResponse(res, 'Post not found', 404);
+      }
+    }
+
     // Record view (fire-and-forget).
     // VIEW-COUNT FIX: Use try/create/catch(P2002) so viewCount is only
     // incremented on the FIRST view from this user. The previous upsert+then
@@ -578,7 +660,13 @@ async function getFeed(req, res, next) {
     if (cursor) {
       const [cursorTime, cursorId] = cursor.split('_');
       where.createdAt = { lte: new Date(cursorTime) };
-      where.NOT = { id: cursorId };
+      // P1-A FIX: Merge cursor id exclusion with any existing NOT clause instead of
+      // unconditionally overwriting it. Overwriting would drop the block-exclusion
+      // predicate set by visibilityFilter(), allowing blocked-author posts to leak
+      // through on pages 2+. Prisma 5 accepts NOT as a single object or an array
+      // (AND-NOT semantics), so both forms are valid and equivalent here.
+      const cursorNot = { id: cursorId };
+      where.NOT = where.NOT ? [where.NOT, cursorNot] : cursorNot;
     }
 
     const posts = await prisma.post.findMany({
@@ -612,6 +700,20 @@ async function getUserPosts(req, res, next) {
     const take = Math.min(50, Math.max(1, parseInt(limit)));
     const viewerId = req.user.id;
     const isOwner = userId === viewerId;
+
+    // P1-C FIX: Enforce bilateral block policy for non-owner viewers.
+    // If the viewer has blocked the profile owner, or the profile owner has
+    // blocked the viewer, return 404 (consistent with getUserProfile conventions).
+    // Owner always skips this check — a user can always view their own posts.
+    if (!isOwner) {
+      const block = await prisma.userBlock.findFirst({
+        where: { OR: [
+          { blockerId: viewerId, blockedId: userId },
+          { blockerId: userId,   blockedId: viewerId }
+        ]}
+      });
+      if (block) return errorResponse(res, 'User not found', 404);
+    }
 
     let where = { authorId: userId, deletedAt: null, isDraft: false };
 
