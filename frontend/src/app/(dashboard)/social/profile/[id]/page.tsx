@@ -89,13 +89,13 @@ export default function UserProfilePage() {
 
   const { data: followers = [] } = useQuery<SocialUser[]>({
     queryKey: ['profile-followers', id],
-    queryFn: () => socialApi.followers(id, 6).then(r => r.data.data),
+    queryFn: () => socialApi.followers(id, 6).then(r => r.data.data?.items ?? r.data.data ?? []),
     enabled: !!id
   })
 
   const { data: following = [] } = useQuery<SocialUser[]>({
     queryKey: ['profile-following', id],
-    queryFn: () => socialApi.following(id, 6).then(r => r.data.data),
+    queryFn: () => socialApi.following(id, 6).then(r => r.data.data?.items ?? r.data.data ?? []),
     enabled: !!id
   })
 

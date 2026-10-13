@@ -1059,10 +1059,12 @@ async function reportPost(req, res, next) {
   try {
     const { reason, description } = req.body;
 
-    // Validate reason — same set as userReport
+    // Validate reason — same set as userReport, plus mobile-friendly aliases
     const VALID_REASONS = [
       'spam', 'harassment', 'hate_speech', 'sexual_content',
       'scam', 'impersonation', 'underage', 'other',
+      // Mobile app sends these — included for client compatibility
+      'inappropriate', 'misinformation',
     ];
     if (!reason || !VALID_REASONS.includes(reason)) {
       return errorResponse(res, `reason must be one of: ${VALID_REASONS.join(', ')}`, 400);
