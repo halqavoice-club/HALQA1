@@ -331,3 +331,145 @@ test('10: DB create failure propagates as 500 (reports are not silently dropped)
   // Must not silently succeed -- the error must surface
   expect(res.status).toBe(500);
 });
+
+// ===========================================================================
+// Fix 4 — reportPost: SCHOOL_ADMIN socket broadcast removed
+// ===========================================================================
+// NOTE ON TEST LIMITATIONS:
+// These tests verify that:
+//   (a) the io mock's .emit() is called with 'role:SUPER_ADMIN' as the room,
+//   (b) the io mock's .emit() is NOT called with 'role:SCHOOL_ADMIN' as the room.
+// They do NOT verify real Socket.IO room authorisation or actual socket connections.
+// The room names are string literals passed to a mock; the tests confirm the
+// application code targets the correct room strings.
+// ===========================================================================
+
+describe('Fix 4 — reportPost socket broadcast: SUPER_ADMIN only', function() {
+  var app;
+  beforeAll(function() { app = buildApp(); });
+
+  test('R1: admin:post_reported event is emitted to role:SUPER_ADMIN', async function() {
+    var reporterId = 'reporter-r1';
+    var postId     = 'post-r1';
+    var reportId   = 'report-uuid-r1';
+    asUser(reporterId);
+
+    // Build a spy io mock that records which rooms received which events
+    var emittedRooms = [];
+    var ioMock = {
+      to: jest.fn(function(room) {
+        return {
+          emit: jest.fn(function(event) {
+            emittedRooms.push({ room: room, event: event });
+          })
+        };
+      })
+    };
+    getIo.mockReturnValue(ioMock);
+
+    prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-r1'));
+    prisma.postReport.findFirst.mockResolvedValue(null);
+    prisma.postReport.create.mockResolvedValue(makeReport(reportId, reporterId, postId));
+
+    var res = await request(app)
+      .post('/api/v1/posts/' + postId + '/report')
+      .set('Authorization', tok(reporterId))
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(201);
+
+    // SUPER_ADMIN room must have received admin:post_reported
+    var superAdminBroadcast = emittedRooms.find(function(r) {
+      return r.room === 'role:SUPER_ADMIN' && r.event === 'admin:post_reported';
+    });
+    expect(superAdminBroadcast).toBeDefined();
+  });
+
+  test('R2: admin:post_reported event is NOT emitted to role:SCHOOL_ADMIN (broadcast removed)', async function() {
+    var reporterId = 'reporter-r2';
+    var postId     = 'post-r2';
+    var reportId   = 'report-uuid-r2';
+    asUser(reporterId);
+
+    var emittedRooms = [];
+    var ioMock = {
+      to: jest.fn(function(room) {
+        return {
+          emit: jest.fn(function(event) {
+            emittedRooms.push({ room: room, event: event });
+          })
+        };
+      })
+    };
+    getIo.mockReturnValue(ioMock);
+
+    prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-r2'));
+    prisma.postReport.findFirst.mockResolvedValue(null);
+    prisma.postReport.create.mockResolvedValue(makeReport(reportId, reporterId, postId));
+
+    var res = await request(app)
+      .post('/api/v1/posts/' + postId + '/report')
+      .set('Authorization', tok(reporterId))
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(201);
+
+    // SCHOOL_ADMIN room must NOT have received admin:post_reported
+    var schoolAdminBroadcast = emittedRooms.find(function(r) {
+      return r.room === 'role:SCHOOL_ADMIN' && r.event === 'admin:post_reported';
+    });
+    expect(schoolAdminBroadcast).toBeUndefined();
+  });
+
+  test('R3: school-specific notify() is still called when post has a schoolId', async function() {
+    var reporterId   = 'reporter-r3';
+    var postId       = 'post-r3';
+    var reportId     = 'report-uuid-r3';
+    var schoolId     = 'school-xyz';
+    var schoolAdminId = 'school-admin-r3';
+    asUser(reporterId);
+
+    // io returns null — this test focuses on the notify() path, not sockets
+    getIo.mockReturnValue(null);
+
+    prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-r3', schoolId));
+    prisma.postReport.findFirst.mockResolvedValue(null);
+    prisma.postReport.create.mockResolvedValue(makeReport(reportId, reporterId, postId));
+    // School admin lookup
+    prisma.user.findFirst.mockResolvedValue({ id: schoolAdminId });
+
+    var res = await request(app)
+      .post('/api/v1/posts/' + postId + '/report')
+      .set('Authorization', tok(reporterId))
+      .send({ reason: 'spam' });
+
+    expect(res.status).toBe(201);
+    // Targeted notify() to the specific school admin must still fire
+    expect(notify).toHaveBeenCalledWith(
+      schoolAdminId,
+      expect.objectContaining({ type: 'SYSTEM' })
+    );
+  });
+
+  test('R4: report persistence and response unchanged — reportId still returned', async function() {
+    var reporterId = 'reporter-r4';
+    var postId     = 'post-r4';
+    var reportId   = 'report-uuid-r4';
+    asUser(reporterId);
+    getIo.mockReturnValue(null);
+
+    prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-r4'));
+    prisma.postReport.findFirst.mockResolvedValue(null);
+    prisma.postReport.create.mockResolvedValue(makeReport(reportId, reporterId, postId));
+
+    var res = await request(app)
+      .post('/api/v1/posts/' + postId + '/report')
+      .set('Authorization', tok(reporterId))
+      .send({ reason: 'harassment' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.reportId).toBe(reportId);
+    expect(prisma.postReport.create).toHaveBeenCalledTimes(1);
+  });
+});

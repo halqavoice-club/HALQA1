@@ -635,11 +635,32 @@ async function getFeed(req, res, next) {
 
     if (filter === 'following') {
       // Pure following feed: only posts from people the viewer follows + own posts
-      const following = await prisma.follow.findMany({
-        where: { followerId: viewerId },
-        select: { followingId: true }
-      });
+      const [following, followingBlocks] = await Promise.all([
+        prisma.follow.findMany({
+          where: { followerId: viewerId },
+          select: { followingId: true }
+        }),
+        // FOLLOW-BLOCK FIX: Apply bilateral block policy to the following feed.
+        // The main feed (filter=all) delegates to visibilityFilter() which already
+        // handles blocks. The following-feed branch built its own where clause
+        // without consulting UserBlock, allowing blocked/blocking followed users'
+        // posts to appear here. Mirrors the visibilityFilter() block-query pattern.
+        // SOC-P0-03 precedent: same fix applied to reportUser and all other social ops.
+        prisma.userBlock.findMany({
+          where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
+          select: { blockerId: true, blockedId: true }
+        }).catch(() => [])  // non-fatal — degrade safely if query fails
+      ]);
       const followingIds = following.map(f => f.followingId);
+
+      // Build set of all blocked user IDs (both directions), excluding the viewer's own ID.
+      // The viewer's own posts are always included via the { authorId: viewerId } OR branch,
+      // and UserBlock @@unique prevents self-blocks, so viewerId can never appear here.
+      const blockedFollowingIds = new Set(
+        followingBlocks
+          .flatMap(b => [b.blockerId, b.blockedId])
+          .filter(id => id !== viewerId)
+      );
 
       where = {
         deletedAt: null,
@@ -651,6 +672,13 @@ async function getFeed(req, res, next) {
           { authorId: viewerId },
         ]
       };
+
+      // Inject block exclusion only when there are blocked users to avoid an
+      // unnecessary empty-set predicate that could affect query plans (same
+      // guard used in visibilityFilter()).
+      if (blockedFollowingIds.size > 0) {
+        where.NOT = { authorId: { in: [...blockedFollowingIds] } };
+      }
     } else {
       // Default: full public feed (existing behaviour)
       where = await visibilityFilter(viewerId);
@@ -1216,11 +1244,18 @@ async function reportPost(req, res, next) {
       reportedAt:  new Date().toISOString(),
     };
 
-    // Broadcast to admin role rooms for real-time dashboard updates
+    // Broadcast to platform admin room for real-time dashboard updates.
+    // SOC-P0-03 / REPORT-POST-SOCKET FIX: Emit to role:SUPER_ADMIN only.
+    // Previously emitted to both role:SUPER_ADMIN and role:SCHOOL_ADMIN, which
+    // leaked reporter identity (name, userId) and report metadata to every
+    // connected SCHOOL_ADMIN on the platform — regardless of whether the
+    // reported post belongs to their school. Social content moderation is a
+    // PLATFORM-LEVEL operation (SUPER_ADMIN only); school-scoped admins receive
+    // a targeted notify() call below when the post actually belongs to their school.
+    // Mirrors the identical fix already applied to reportUser() (SOC-P0-03).
     const io = getIo();
     if (io) {
       io.to('role:SUPER_ADMIN').emit('admin:post_reported', reportPayload);
-      io.to('role:SCHOOL_ADMIN').emit('admin:post_reported', reportPayload);
     }
 
     // Notify the post author's school admin if the post belongs to a school
