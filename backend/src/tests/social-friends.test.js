@@ -181,11 +181,11 @@ describe('Follow', () => {
     expect(deleteWhere.followingId).toBe('user-f');
   });
 
-  test('getFollowers — returns follower list with iFollowThem field', async () => {
+  test('getFollowers — returns paginated follower list with iFollowThem field', async () => {
     asUser('viewer-1');
     prisma.follow.findMany
       .mockResolvedValueOnce([
-        { followerId: 'follower-a', createdAt: new Date(), follower: makeUser('follower-a', 'Alice') },
+        { id: 'follow-1', followerId: 'follower-a', createdAt: new Date(), follower: makeUser('follower-a', 'Alice') },
       ])
       .mockResolvedValueOnce([]); // viewer's following set
 
@@ -194,15 +194,18 @@ describe('Follow', () => {
       .set('Authorization', tok('viewer-1'));
 
     expect(res.status).toBe(200);
-    expect(Array.isArray(res.body.data)).toBe(true);
-    expect(res.body.data[0]).toHaveProperty('iFollowThem');
-    expect(res.body.data[0].id).toBe('follower-a');
+    // Response is now paginated: { items, nextCursor, hasMore }
+    expect(Array.isArray(res.body.data.items)).toBe(true);
+    expect(res.body.data.items[0]).toHaveProperty('iFollowThem');
+    expect(res.body.data.items[0].id).toBe('follower-a');
+    expect(res.body.data).toHaveProperty('nextCursor');
+    expect(res.body.data).toHaveProperty('hasMore');
   });
 
-  test('getFollowing — returns following list', async () => {
+  test('getFollowing — returns paginated following list', async () => {
     asUser('viewer-2');
     prisma.follow.findMany.mockResolvedValue([
-      { followingId: 'other-user', createdAt: new Date(), following: makeUser('other-user', 'Bob') },
+      { id: 'follow-2', followingId: 'other-user', createdAt: new Date(), following: makeUser('other-user', 'Bob') },
     ]);
 
     const res = await request(app)
@@ -210,9 +213,12 @@ describe('Follow', () => {
       .set('Authorization', tok('viewer-2'));
 
     expect(res.status).toBe(200);
-    expect(Array.isArray(res.body.data)).toBe(true);
-    expect(res.body.data[0].id).toBe('other-user');
-    expect(res.body.data[0]).toHaveProperty('followedAt');
+    // Response is now paginated: { items, nextCursor, hasMore }
+    expect(Array.isArray(res.body.data.items)).toBe(true);
+    expect(res.body.data.items[0].id).toBe('other-user');
+    expect(res.body.data.items[0]).toHaveProperty('followedAt');
+    expect(res.body.data).toHaveProperty('nextCursor');
+    expect(res.body.data).toHaveProperty('hasMore');
   });
 });
 

@@ -146,27 +146,27 @@ export default function TabLayout() {
           ),
         }}
       />
+      {/* ── Reels replaces More in the tab bar — More is still reachable programmatically ── */}
       <Tabs.Screen
-        name="more"
+        name="reels-tab"
         options={{
-          title: 'More',
+          title: 'Reels',
+          href: '/reels',
           tabBarIcon: ({ focused }) => (
-            <TabIcon
-              name={focused ? 'ellipsis-horizontal-circle' : 'ellipsis-horizontal-circle-outline'}
-              focused={focused}
-              badge={notifBadge > 0 ? notifBadge : undefined}
-            />
+            <TabIcon name={focused ? 'play-circle' : 'play-circle-outline'} focused={focused} />
           ),
         }}
       />
 
-      {/* ΓöÇΓöÇ Hidden tabs ΓÇö navigated to programmatically or from More screen ΓöÇΓöÇ */}
+      {/* ── Hidden tabs ── navigated to programmatically or from More screen ── */}
       <Tabs.Screen name="explore"       options={{ href: null }} />
       <Tabs.Screen name="chat"          options={{ href: null }} />
       <Tabs.Screen name="communities"   options={{ href: null }} />
       <Tabs.Screen name="wallet"        options={{ href: null }} />
       <Tabs.Screen name="notifications" options={{ href: null }} />
       <Tabs.Screen name="profile"       options={{ href: null }} />
+      {/* More screen still accessible as a stack push from Feed header or deep link */}
+      <Tabs.Screen name="more"          options={{ href: null }} />
     </Tabs>
   );
 }

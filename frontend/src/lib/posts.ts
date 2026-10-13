@@ -113,6 +113,7 @@ export const postsApi = {
   update:  (id: string, data: any) => api.patch<{ data: Post }>(`/posts/${id}`, data),
   remove:  (id: string)           => api.delete(`/posts/${id}`),
   recordView: (id: string)        => api.post(`/posts/${id}/view`),
+  recordShare: (id: string)       => api.post(`/posts/${id}/share`),
 
   // User posts / profile tabs
   getUserPosts: (userId: string, tab = 'posts', cursor?: string, limit = 20) =>

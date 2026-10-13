@@ -176,6 +176,16 @@ router.post('/:id/view', viewLimit, ctrl.recordView);
 // ─── Pin ──────────────────────────────────────────────────────────────────────
 router.post('/:id/pin', ctrl.pinPost);
 
+// ─── Share event (clipboard / native OS share) ────────────────────────────────
+// Increments shareCount for non-repost/quote share actions.
+// Rate-limited: 20 per minute to prevent artificial inflation.
+const shareLimit = rateLimit({
+  windowMs: 60 * 1000, max: 20,
+  keyGenerator: req => req.user?.id || req.ip,
+  message: { success: false, message: 'Too many share events, slow down' }
+});
+router.post('/:id/share', shareLimit, ctrl.recordShare);
+
 // ─── Report ───────────────────────────────────────────────────────────────────
 router.post('/:id/report',
   [body('reason').notEmpty()],

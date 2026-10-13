@@ -59,6 +59,9 @@ export function ShareMenu({ post, onShared, shareCount = 0, variant = 'light' }:
     try {
       await navigator.clipboard.writeText(buildShareUrl(post.id))
       toast({ title: '🔗 Link copied!' })
+      // MF-006: increment shareCount for clipboard shares (fire-and-forget)
+      postsApi.recordShare(post.id).catch(() => {})
+      onShared?.()
     } catch {
       toast({ title: 'Failed to copy link', variant: 'destructive' })
     }

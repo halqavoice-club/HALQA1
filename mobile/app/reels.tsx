@@ -164,6 +164,19 @@ function ReelItem({
 
   // Mute state
   const [muted, setMuted] = useState(true);
+  // MF-005: buffering and error state for video playback feedback
+  const [isBuffering, setIsBuffering] = useState(false);
+  const [videoError,  setVideoError]  = useState(false);
+
+  const onPlaybackStatusUpdate = useCallback((status: any) => {
+    if (!status.isLoaded) {
+      // error state
+      if (status.error) setVideoError(true);
+      return;
+    }
+    setVideoError(false);
+    setIsBuffering(status.isBuffering ?? false);
+  }, []);
 
   // React mutation
   const reactMutation = useMutation({
@@ -207,15 +220,30 @@ function ReelItem({
       {/* Video or fallback */}
       {video ? (
         <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setMuted(v => !v)}>
-          <Video
-            ref={videoRef}
-            source={{ uri: video.url.startsWith('http') ? video.url : `${api.defaults.baseURL?.replace('/api/v1', '')}${video.url}` }}
-            style={StyleSheet.absoluteFill}
-            resizeMode={ResizeMode.COVER}
-            shouldPlay={isActive}
-            isLooping
-            isMuted={muted}
-          />
+          {/* Error fallback — shown when video fails to load */}
+          {videoError ? (
+            <View style={[StyleSheet.absoluteFill, r.noVideo]}>
+              <Ionicons name="alert-circle-outline" size={48} color="rgba(255,100,100,0.8)" />
+              <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 13, marginTop: 8 }}>Video unavailable</Text>
+            </View>
+          ) : (
+            <Video
+              ref={videoRef}
+              source={{ uri: video.url.startsWith('http') ? video.url : `${api.defaults.baseURL?.replace('/api/v1', '')}${video.url}` }}
+              style={StyleSheet.absoluteFill}
+              resizeMode={ResizeMode.COVER}
+              shouldPlay={isActive}
+              isLooping
+              isMuted={muted}
+              onPlaybackStatusUpdate={onPlaybackStatusUpdate}
+            />
+          )}
+          {/* Buffering spinner overlay */}
+          {isBuffering && !videoError && (
+            <View style={r.bufferOverlay} pointerEvents="none">
+              <ActivityIndicator size="large" color="rgba(255,255,255,0.85)" />
+            </View>
+          )}
           {/* Mute indicator */}
           <View style={r.muteBtn}>
             <Ionicons name={muted ? 'volume-mute' : 'volume-high'} size={20} color="rgba(255,255,255,0.9)" />
@@ -416,6 +444,7 @@ const r = StyleSheet.create({
   center:        { justifyContent: 'center', alignItems: 'center' },
   reel:          { width: SW, height: SH, backgroundColor: '#111' },
   noVideo:       { justifyContent: 'center', alignItems: 'center', backgroundColor: '#1a1a2e' },
+  bufferOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.25)' },
   muteBtn:       { position: 'absolute', top: 60, right: 16, backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 20, padding: 6 },
   rightBar:      { position: 'absolute', right: 12, bottom: 120, alignItems: 'center', gap: 20 },
   avatarWrap:    { alignItems: 'center', marginBottom: 4 },
