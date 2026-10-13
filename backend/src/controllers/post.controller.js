@@ -131,15 +131,21 @@ async function syncMentions(postId, commentId, body, authorId) {
 //   2. Whether the viewer follows the author (for FOLLOWERS posts)
 //   3. School membership (for SCHOOL_ONLY posts)
 //   4. Creator subscription (for isExclusive posts)
+//   5. Block status — posts from blocked users (in either direction) are hidden
 //
 // SECURITY FIX: Added isExclusive enforcement.
 // Previously, posts marked isExclusive:true were returned to ALL followers
 // regardless of subscription status. Now they are only returned to:
 //   - The post author themselves
 //   - Viewers who have an active CreatorSubscription matching the post's tierRequired
+//
+// BLOCK FIX: Added bilateral block enforcement.
+// Previously, UserBlock records were never consulted here. A user could still
+// see posts from someone they blocked (or who blocked them). Now both directions
+// are resolved and excluded via NOT authorId in [...].
 async function visibilityFilter(viewerId) {
-  // Run all 4 prerequisite queries in parallel — cuts latency from ~4× to ~1×
-  const [viewer, following, activeSubs, schoolMembership] = await Promise.all([
+  // Run all 5 prerequisite queries in parallel — cuts latency from ~5× to ~1×
+  const [viewer, following, activeSubs, schoolMembership, blocks] = await Promise.all([
     prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } }),
     prisma.follow.findMany({ where: { followerId: viewerId }, select: { followingId: true } }),
     prisma.creatorSubscription.findMany({
@@ -153,13 +159,29 @@ async function visibilityFilter(viewerId) {
       where: { userId: viewerId, status: 'ACTIVE', deletedAt: null },
       select: { schoolId: true },
       orderBy: { joinedAt: 'asc' }
-    }).catch(() => null)
+    }).catch(() => null),
+    // BLOCK FIX: Fetch all block relationships involving this viewer (both directions).
+    // blockerId = viewerId → viewer blocked that user
+    // blockedId = viewerId → that user blocked the viewer
+    prisma.userBlock.findMany({
+      where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
+      select: { blockerId: true, blockedId: true }
+    }).catch(() => [])  // non-fatal — degrade safely if query fails
   ]);
   const followingIds = following.map(f => f.followingId);
 
   // FS-GAP-002 FIX: Resolve effective schoolId for feed visibility.
   // Legacy users: User.schoolId (non-null). New MEMBER users: SchoolMembership.schoolId.
   const effectiveSchoolId = viewer?.schoolId ?? schoolMembership?.schoolId ?? null;
+
+  // BLOCK FIX: Build the set of user IDs whose posts must be excluded.
+  // Union of: users the viewer blocked + users who blocked the viewer.
+  // The viewer's own ID is never in this set (UserBlock@@unique prevents self-blocks).
+  const blockedAuthorIds = [
+    ...new Set(
+      blocks.flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== viewerId)
+    )
+  ];
 
   // Resolve creatorProfile → userId mapping (only if we have active subs)
   let subscribedCreatorIds = [];
@@ -175,7 +197,7 @@ async function visibilityFilter(viewerId) {
     }
   }
 
-  return {
+  const filter = {
     deletedAt: null,
     isDraft:   false,
     OR: [
@@ -197,6 +219,15 @@ async function visibilityFilter(viewerId) {
         : [])
     ]
   };
+
+  // BLOCK FIX: Exclude posts from blocked authors (both directions).
+  // Only inject NOT clause when there are actually blocked users — avoids
+  // adding an unnecessary empty-set exclusion that could affect query plans.
+  if (blockedAuthorIds.length > 0) {
+    filter.NOT = { authorId: { in: blockedAuthorIds } };
+  }
+
+  return filter;
 }
 
 // ─── CREATE POST ─────────────────────────────────────────────────────────────
@@ -325,12 +356,23 @@ async function getPost(req, res, next) {
     });
     if (!post) return errorResponse(res, 'Post not found', 404);
 
-    // Record view (fire-and-forget)
-    prisma.postView.upsert({
-      where: { postId_userId: { postId: post.id, userId: req.user.id } },
-      create: { id: uuidv4(), postId: post.id, userId: req.user.id },
-      update: {}
-    }).then(() => prisma.post.update({ where: { id: post.id }, data: { viewCount: { increment: 1 } } })).catch(() => {});
+    // Record view (fire-and-forget).
+    // VIEW-COUNT FIX: Use try/create/catch(P2002) so viewCount is only
+    // incremented on the FIRST view from this user. The previous upsert+then
+    // pattern always fired the increment even on repeat visits because Prisma
+    // upsert always returns the row regardless of create-vs-update.
+    if (post.authorId !== req.user.id) {
+      prisma.postView.create({
+        data: { id: uuidv4(), postId: post.id, userId: req.user.id }
+      }).then(() =>
+        prisma.post.update({ where: { id: post.id }, data: { viewCount: { increment: 1 } } })
+      ).catch(err => {
+        // P2002 = unique constraint violation = already viewed — do not increment
+        if (!err || err.code !== 'P2002') {
+          // Unexpected error: swallow silently (fire-and-forget contract)
+        }
+      });
+    }
 
     return successResponse(res, post);
   } catch (e) { next(e); }
@@ -525,7 +567,7 @@ async function getFeed(req, res, next) {
     const posts = await prisma.post.findMany({
       where,
       include: POST_INCLUDE(viewerId),
-      orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
+      orderBy: [{ createdAt: 'desc' }],
       take: take + 1
     });
 
@@ -606,6 +648,18 @@ async function reactToPost(req, res, next) {
     const post = await prisma.post.findFirst({ where: { id: postId, deletedAt: null } });
     if (!post) return errorResponse(res, 'Post not found', 404);
 
+    // MF-001 FIX: Enforce bilateral block — a blocked user cannot react to posts.
+    // Covers: viewer blocked author OR author blocked viewer.
+    if (post.authorId !== userId) {
+      const block = await prisma.userBlock.findFirst({
+        where: { OR: [
+          { blockerId: userId,        blockedId: post.authorId },
+          { blockerId: post.authorId, blockedId: userId }
+        ]}
+      });
+      if (block) return errorResponse(res, 'You cannot interact with this content', 403);
+    }
+
     const existing = await prisma.postReaction.findUnique({
       where: { postId_userId: { postId, userId } }
     });
@@ -683,22 +737,37 @@ async function addComment(req, res, next) {
     const post = await prisma.post.findFirst({ where: { id: postId, deletedAt: null } });
     if (!post) return errorResponse(res, 'Post not found', 404);
 
+    // MF-001 FIX: Enforce bilateral block — a blocked user cannot comment on posts.
+    // Covers: commenter blocked author OR author blocked commenter.
+    if (post.authorId !== req.user.id) {
+      const block = await prisma.userBlock.findFirst({
+        where: { OR: [
+          { blockerId: req.user.id, blockedId: post.authorId },
+          { blockerId: post.authorId, blockedId: req.user.id }
+        ]}
+      });
+      if (block) return errorResponse(res, 'You cannot interact with this content', 403);
+    }
+
     // Validate parentId belongs to this post
     if (parentId) {
       const parent = await prisma.postComment.findFirst({ where: { id: parentId, postId, deletedAt: null } });
       if (!parent) return errorResponse(res, 'Parent comment not found', 404);
     }
 
-    const comment = await prisma.postComment.create({
-      data: { id: uuidv4(), postId, authorId: req.user.id, parentId: parentId || null, body: body.trim() },
-      include: { author: { select: AUTHOR_SELECT } }
+    // Create the comment and increment counters atomically in an interactive transaction
+    // Interactive form required because postComment.create uses `include`
+    const comment = await prisma.$transaction(async (tx) => {
+      const newComment = await tx.postComment.create({
+        data: { id: uuidv4(), postId, authorId: req.user.id, parentId: parentId || null, body: body.trim() },
+        include: { author: { select: AUTHOR_SELECT } }
+      });
+      await tx.post.update({ where: { id: postId }, data: { commentCount: { increment: 1 } } });
+      if (parentId) {
+        await tx.postComment.update({ where: { id: parentId }, data: { replyCount: { increment: 1 } } });
+      }
+      return newComment;
     });
-
-    // Increment counts
-    await prisma.post.update({ where: { id: postId }, data: { commentCount: { increment: 1 } } });
-    if (parentId) {
-      await prisma.postComment.update({ where: { id: parentId }, data: { replyCount: { increment: 1 } } });
-    }
 
     await syncMentions(postId, comment.id, body, req.user.id);
 
@@ -788,8 +857,27 @@ async function deleteComment(req, res, next) {
     // F-2 FIX: Comment deletion restricted to author + SUPER_ADMIN only (not SCHOOL_ADMIN).
     const can = comment.authorId === req.user.id || req.user.role === 'SUPER_ADMIN';
     if (!can) return errorResponse(res, 'Not authorized', 403);
-    await prisma.postComment.update({ where: { id: comment.id }, data: { deletedAt: new Date() } });
-    await prisma.post.update({ where: { id: comment.postId }, data: { commentCount: { decrement: 1 } } });
+
+    // Count active replies before soft-deleting so we decrement commentCount correctly.
+    // (DB cascade only fires on hard-delete; soft-delete of parent leaves replies alive.)
+    const replyCount = comment.parentId === null
+      ? await prisma.postComment.count({ where: { parentId: comment.id, deletedAt: null } })
+      : 0; // replies cannot themselves have replies (single-level threading)
+
+    const now = new Date();
+    // Soft-delete the comment itself and any active direct replies in one transaction
+    await prisma.$transaction([
+      prisma.postComment.update({ where: { id: comment.id }, data: { deletedAt: now } }),
+      ...(replyCount > 0
+        ? [prisma.postComment.updateMany({ where: { parentId: comment.id, deletedAt: null }, data: { deletedAt: now } })]
+        : []
+      ),
+      prisma.post.update({
+        where: { id: comment.postId },
+        data: { commentCount: { decrement: 1 + replyCount } }
+      }),
+    ]);
+
     return successResponse(res, null, 'Comment deleted');
   } catch (e) { next(e); }
 }
@@ -953,34 +1041,62 @@ async function getTrendingHashtags(req, res, next) {
 async function reportPost(req, res, next) {
   try {
     const { reason, description } = req.body;
-    if (!reason) return errorResponse(res, 'reason required', 400);
+
+    // Validate reason — same set as userReport
+    const VALID_REASONS = [
+      'spam', 'harassment', 'hate_speech', 'sexual_content',
+      'scam', 'impersonation', 'underage', 'other',
+    ];
+    if (!reason || !VALID_REASONS.includes(reason)) {
+      return errorResponse(res, `reason must be one of: ${VALID_REASONS.join(', ')}`, 400);
+    }
 
     const post = await prisma.post.findFirst({ where: { id: req.params.id, deletedAt: null } });
     if (!post) return errorResponse(res, 'Post not found', 404);
 
-    // BUG FIX: Previously called notify(null, ...) which caused a NOT NULL
-    // constraint violation on Notification.userId, crashing the notification worker.
-    //
-    // New approach:
-    //   1. Emit a real-time socket event to all SUPER_ADMIN and SCHOOL_ADMIN role rooms
-    //      so admins see the report instantly in their dashboard (no DB write needed).
-    //   2. Notify the post's school admin via the school admin's personal notification
-    //      (uses a valid userId — the post's school admin — not null).
-    //   3. Log the report to the server logs as a permanent audit trail.
+    // Reporter cannot report their own post
+    if (post.authorId === req.user.id) {
+      return errorResponse(res, 'Cannot report your own post', 400);
+    }
 
-    const io = getIo();
+    // REPORT-POST-DB FIX: Persist report to DB before emitting socket event.
+    // Previously only emitted a socket event — if no admin was online the report
+    // was permanently lost. Now mirrors the reportUser() pattern exactly.
+    //
+    // Duplicate guard: one PENDING report per reporter+post pair at a time.
+    const pendingReport = await prisma.postReport.findFirst({
+      where: { reporterId: req.user.id, postId: post.id, status: 'PENDING' },
+      select: { id: true },
+    });
+    if (pendingReport) {
+      return errorResponse(res, 'You already have a pending report on this post. Wait for it to be reviewed.', 409);
+    }
+
+    const report = await prisma.postReport.create({
+      data: {
+        id:          uuidv4(),
+        reporterId:  req.user.id,
+        postId:      post.id,
+        reason,
+        description: description?.trim() || null,
+        status:      'PENDING',
+      },
+    });
+
     const reportPayload = {
       type:        'post_reported',
+      reportId:    report.id,
       postId:      post.id,
       authorId:    post.authorId,
       reporterId:  req.user.id,
       reporterName:`${req.user.firstName} ${req.user.lastName}`,
       reason,
       description: description || '',
-      reportedAt:  new Date().toISOString()
+      reportedAt:  new Date().toISOString(),
     };
 
     // Broadcast to admin role rooms for real-time dashboard updates
+    const io = getIo();
     if (io) {
       io.to('role:SUPER_ADMIN').emit('admin:post_reported', reportPayload);
       io.to('role:SCHOOL_ADMIN').emit('admin:post_reported', reportPayload);
@@ -990,41 +1106,46 @@ async function reportPost(req, res, next) {
     if (post.schoolId) {
       try {
         const schoolAdmin = await prisma.user.findFirst({
-          where: {
-            schoolId: post.schoolId,
-            role: 'SCHOOL_ADMIN',
-            status: 'ACTIVE',
-            deletedAt: null
-          },
-          select: { id: true }
+          where: { schoolId: post.schoolId, role: 'SCHOOL_ADMIN', status: 'ACTIVE', deletedAt: null },
+          select: { id: true },
         });
         if (schoolAdmin) {
           await notify(schoolAdmin.id, {
             type:  'SYSTEM',
             title: `Post reported: ${reason}`,
             body:  description || `A post was reported by ${req.user.firstName} ${req.user.lastName}`,
-            data:  reportPayload
+            data:  reportPayload,
           });
         }
       } catch (notifyErr) {
-        // Non-fatal — report is still logged even if notification fails
+        // Non-fatal — report is already persisted even if notification fails
         logger.warn(`[reportPost] School admin notification failed: ${notifyErr.message}`);
       }
     }
 
-    logger.info(`[reportPost] Post ${post.id} reported by user ${req.user.id} — reason: ${reason}`);
-    return successResponse(res, null, 'Report submitted. Our moderation team will review it.');
+    logger.info(`[reportPost] Post ${post.id} reported by user ${req.user.id} — reportId: ${report.id} reason: ${reason}`);
+    return successResponse(res, { reportId: report.id }, 'Report submitted. Our moderation team will review it.', 201);
   } catch (e) { next(e); }
 }
 
 // ─── REELS — TikTok-style video feed ─────────────────────────────────────────
 // Returns posts that have at least one VIDEO media item, cursor-paginated.
 // Ordered by newest first. Only PUBLIC posts.
+// BLOCK FIX: Excludes posts from blocked authors (both directions).
 async function getReels(req, res, next) {
   try {
     const { cursor, limit = 10 } = req.query;
     const take      = Math.min(20, Math.max(1, parseInt(limit)));
     const viewerId  = req.user.id;
+
+    // BLOCK FIX: Load bilateral block list so blocked authors are excluded.
+    const blocks = await prisma.userBlock.findMany({
+      where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
+      select: { blockerId: true, blockedId: true }
+    }).catch(() => []);
+    const blockedAuthorIds = [
+      ...new Set(blocks.flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== viewerId))
+    ];
 
     const where = {
       deletedAt:  null,
@@ -1034,10 +1155,20 @@ async function getReels(req, res, next) {
       media: { some: { type: 'VIDEO' } },
     };
 
+    // BLOCK FIX: Apply block exclusion when there are blocked users.
+    if (blockedAuthorIds.length > 0) {
+      where.NOT = { authorId: { in: blockedAuthorIds } };
+    }
+
     if (cursor) {
       const [cursorTime, cursorId] = cursor.split('_');
       where.createdAt = { lte: new Date(cursorTime) };
-      where.NOT = { id: cursorId };
+      // Merge cursor id exclusion with any existing NOT clause
+      if (where.NOT) {
+        where.NOT = [where.NOT, { id: cursorId }];
+      } else {
+        where.NOT = { id: cursorId };
+      }
     }
 
     const posts = await prisma.post.findMany({
@@ -1180,17 +1311,19 @@ async function recordView(req, res, next) {
     });
     if (!exists) return res.status(204).end(); // silently ignore missing posts
 
-    // Upsert view record — one unique view per user per post
-    prisma.postView.upsert({
-      where:  { postId_userId: { postId, userId } },
-      create: { id: require('uuid').v4(), postId, userId },
-      update: {} // already viewed — no-op
+    // VIEW-COUNT FIX: Use create/catch(P2002) instead of upsert+then.
+    // Prisma 5 upsert always returns the row whether created or updated,
+    // so the chained .then() always fired even on repeat visits.
+    // Now: only increment viewCount when the create succeeds (first view).
+    // P2002 = unique constraint = already viewed = do not increment.
+    prisma.postView.create({
+      data: { id: require('uuid').v4(), postId, userId }
     }).then(() =>
       prisma.post.update({
         where: { id: postId },
         data:  { viewCount: { increment: 1 } }
       })
-    ).catch(() => {}); // fire-and-forget — never fail the request
+    ).catch(() => {}); // P2002 (repeat view) and other errors swallowed — fire-and-forget
 
     return res.status(204).end();
   } catch (e) { next(e); }

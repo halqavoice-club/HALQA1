@@ -2,8 +2,15 @@
  * HALQA Mobile — Friend Tab
  * Friends list, pending friend requests, and people you may know.
  * Mirrors the website's /social page functionality.
+ *
+ * FIX FEAT-001:
+ *  - Requests tab: GET /social/friends/requests (was /social/requests/pending)
+ *  - Accept:  POST /social/friends/accept/:userId (was PATCH /social/requests/:id/accept)
+ *  - Decline: POST /social/friends/reject/:userId (was PATCH /social/requests/:id/decline)
+ *  - Discover: GET /social/search (was /social/suggestions), only fires when >= 2 chars
+ *  - FriendRequest type updated to match backend response { requestId, user, sentAt }
  */
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   ActivityIndicator, TextInput, Image, RefreshControl,
@@ -19,9 +26,11 @@ import { getAvatarUrl } from '@/lib/avatar';
 type User = {
   id: string; firstName: string; lastName: string;
   avatarUrl: string | null; username?: string | null;
+  friendStatus?: 'none' | 'pending_sent' | 'pending_received' | 'friends';
 };
-type FriendRequest = { id: string; sender: User; createdAt: string };
-type Friend = { id: string; user: User; followedAt?: string };
+
+// Backend returns { requestId, user, sentAt }[] from GET /social/friends/requests
+type FriendRequest = { requestId: string; user: User; sentAt: string };
 
 function Avatar({ user, size = 44 }: { user: User; size?: number }) {
   const uri = getAvatarUrl(user.avatarUrl);
@@ -45,11 +54,12 @@ export default function FriendScreen() {
   const [search, setSearch] = useState('');
 
   // ── Pending friend requests ──────────────────────────────────────────────
+  // Backend: GET /social/friends/requests → { requestId, user, sentAt }[]
   const { data: requests = [], isLoading: loadingReq, refetch: refetchReq } = useQuery<FriendRequest[]>({
     queryKey: ['friend-requests'],
-    queryFn: () => api.get('/social/requests/pending').then(r => {
+    queryFn: () => api.get('/social/friends/requests').then(r => {
       const d = r.data.data;
-      return Array.isArray(d) ? d : (d?.requests ?? []);
+      return Array.isArray(d) ? d : [];
     }),
     staleTime: 30_000,
   });
@@ -65,21 +75,24 @@ export default function FriendScreen() {
     staleTime: 60_000,
   });
 
-  // ── Discover / suggested ─────────────────────────────────────────────────
+  // ── Discover / search ────────────────────────────────────────────────────
+  // Backend: GET /social/search?q= → User[] (requires q.length >= 2)
   const { data: suggested = [], isLoading: loadingSuggested } = useQuery<User[]>({
     queryKey: ['suggested-users', search],
-    queryFn: () => api.get('/social/suggestions', {
-      params: { q: search || undefined, limit: 20 }
+    queryFn: () => api.get('/social/search', {
+      params: { q: search.trim(), limit: 20 }
     }).then(r => {
       const d = r.data.data;
-      return Array.isArray(d) ? d : (d?.users ?? []);
+      return Array.isArray(d) ? d : [];
     }),
-    enabled: tab === 'discover',
+    // Only fire when on discover tab AND search has >= 2 chars
+    enabled: tab === 'discover' && search.trim().length >= 2,
     staleTime: 60_000,
   });
 
+  // ── Accept: POST /social/friends/accept/:userId ──────────────────────────
   const acceptMutation = useMutation({
-    mutationFn: (requestId: string) => api.patch(`/social/requests/${requestId}/accept`),
+    mutationFn: (userId: string) => api.post(`/social/friends/accept/${userId}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['friend-requests'] });
       queryClient.invalidateQueries({ queryKey: ['friend-requests-count'] });
@@ -87,14 +100,16 @@ export default function FriendScreen() {
     },
   });
 
+  // ── Decline: POST /social/friends/reject/:userId ─────────────────────────
   const declineMutation = useMutation({
-    mutationFn: (requestId: string) => api.patch(`/social/requests/${requestId}/decline`),
+    mutationFn: (userId: string) => api.post(`/social/friends/reject/${userId}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['friend-requests'] });
       queryClient.invalidateQueries({ queryKey: ['friend-requests-count'] });
     },
   });
 
+  // ── Follow (from Discover tab) ───────────────────────────────────────────
   const followMutation = useMutation({
     mutationFn: (userId: string) => api.post(`/social/follow/${userId}`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['suggested-users'] }),
@@ -161,7 +176,7 @@ export default function FriendScreen() {
           <TextInput
             value={search}
             onChangeText={setSearch}
-            placeholder="Search people…"
+            placeholder="Type to search people..."
             placeholderTextColor="#9ca3af"
             style={styles.searchInput}
             allowFontScaling={false}
@@ -184,33 +199,33 @@ export default function FriendScreen() {
           {tab === 'requests' && (
             <FlatList
               data={requests}
-              keyExtractor={r => r.id}
+              keyExtractor={r => r.requestId}
               contentContainerStyle={{ paddingBottom: 80 + insets.bottom }}
               refreshControl={<RefreshControl refreshing={loadingReq} onRefresh={refetchReq} tintColor="#4f46e5" />}
               renderItem={({ item }) => (
                 <View style={styles.requestRow}>
-                  <TouchableOpacity onPress={() => router.push({ pathname: '/profile/[id]', params: { id: item.sender.id } } as any)}>
-                    <Avatar user={item.sender} />
+                  <TouchableOpacity onPress={() => router.push({ pathname: '/profile/[id]', params: { id: item.user.id } } as any)}>
+                    <Avatar user={item.user} />
                   </TouchableOpacity>
                   <View style={{ flex: 1 }}>
                     <Text allowFontScaling={false} style={styles.userName}>
-                      {item.sender.firstName} {item.sender.lastName}
+                      {item.user.firstName} {item.user.lastName}
                     </Text>
-                    {item.sender.username && (
-                      <Text allowFontScaling={false} style={styles.userHandle}>@{item.sender.username}</Text>
+                    {item.user.username && (
+                      <Text allowFontScaling={false} style={styles.userHandle}>@{item.user.username}</Text>
                     )}
                   </View>
                   <View style={{ flexDirection: 'row', gap: 8 }}>
                     <TouchableOpacity
                       style={styles.acceptBtn}
-                      onPress={() => acceptMutation.mutate(item.id)}
+                      onPress={() => acceptMutation.mutate(item.user.id)}
                       disabled={acceptMutation.isPending}
                     >
                       <Text allowFontScaling={false} style={styles.acceptBtnText}>Accept</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={styles.declineBtn}
-                      onPress={() => declineMutation.mutate(item.id)}
+                      onPress={() => declineMutation.mutate(item.user.id)}
                       disabled={declineMutation.isPending}
                     >
                       <Text allowFontScaling={false} style={styles.declineBtnText}>Decline</Text>
@@ -270,7 +285,7 @@ export default function FriendScreen() {
             />
           )}
 
-          {/* ── Discover / Suggestions ── */}
+          {/* ── Discover / Search ── */}
           {tab === 'discover' && (
             <FlatList
               data={suggested}
@@ -289,21 +304,37 @@ export default function FriendScreen() {
                       <Text allowFontScaling={false} style={styles.userHandle}>@{item.username}</Text>
                     )}
                   </View>
-                  <TouchableOpacity
-                    style={styles.followBtn}
-                    onPress={() => followMutation.mutate(item.id)}
-                    disabled={followMutation.isPending}
-                  >
-                    <Text allowFontScaling={false} style={styles.followBtnText}>Follow</Text>
-                  </TouchableOpacity>
+                  {/* Show button based on friendStatus from search results */}
+                  {item.friendStatus === 'friends' ? (
+                    <View style={styles.friendedBtn}>
+                      <Text allowFontScaling={false} style={styles.friendedBtnText}>Friends</Text>
+                    </View>
+                  ) : item.friendStatus === 'pending_sent' ? (
+                    <View style={styles.pendingBtn}>
+                      <Text allowFontScaling={false} style={styles.pendingBtnText}>Pending</Text>
+                    </View>
+                  ) : (
+                    <TouchableOpacity
+                      style={styles.followBtn}
+                      onPress={() => followMutation.mutate(item.id)}
+                      disabled={followMutation.isPending}
+                    >
+                      <Text allowFontScaling={false} style={styles.followBtnText}>Follow</Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
               )}
               ListEmptyComponent={
                 <View style={styles.empty}>
                   <Ionicons name="search-outline" size={48} color="#d1d5db" />
                   <Text allowFontScaling={false} style={styles.emptyTitle}>
-                    {search ? 'No people found' : 'No suggestions'}
+                    {search.trim().length < 2 ? 'Type to search people...' : 'No people found'}
                   </Text>
+                  {search.trim().length < 2 && (
+                    <Text allowFontScaling={false} style={styles.emptySub}>
+                      Enter at least 2 characters to search
+                    </Text>
+                  )}
                 </View>
               }
             />
@@ -345,6 +376,10 @@ const styles = StyleSheet.create({
   declineBtnText:  { color: '#374151', fontWeight: '600', fontSize: 13 },
   followBtn:       { backgroundColor: '#ede9fe', paddingHorizontal: 14, paddingVertical: 7, borderRadius: 10 },
   followBtnText:   { color: '#4f46e5', fontWeight: '700', fontSize: 13 },
+  friendedBtn:     { backgroundColor: '#f0fdf4', paddingHorizontal: 14, paddingVertical: 7, borderRadius: 10, borderWidth: 1, borderColor: '#86efac' },
+  friendedBtnText: { color: '#16a34a', fontWeight: '600', fontSize: 13 },
+  pendingBtn:      { backgroundColor: '#fafafa', paddingHorizontal: 14, paddingVertical: 7, borderRadius: 10, borderWidth: 1, borderColor: '#e5e7eb' },
+  pendingBtnText:  { color: '#9ca3af', fontWeight: '600', fontSize: 13 },
   msgBtn:          { padding: 8 },
   discoverBtn:     { marginTop: 12, paddingHorizontal: 20, paddingVertical: 10, backgroundColor: '#4f46e5', borderRadius: 12 },
   discoverBtnText: { color: '#fff', fontWeight: '700' },

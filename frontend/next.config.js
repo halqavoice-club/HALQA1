@@ -47,34 +47,20 @@ const nextConfig = {
   experimental: {
     optimizePackageImports: ['lucide-react', '@radix-ui/react-icons'],
   },
-  // ── Permissions-Policy header for camera/mic/screen share ───────────────────
-  // Use camera=* — this allows camera access for both the top-level page AND
-  // same-origin iframes (LiveKit embeds).
+  // ── Permissions-Policy header ────────────────────────────────────────────────
+  // AUDIT-043-SEC FIX: Removed the duplicate headers() block that was setting
+  // Permissions-Policy from next.config.js.
   //
-  // WHY NOT camera=(self):
-  //   In the Permissions Policy spec, allowlist tokens like `self` ONLY apply to
-  //   embedded browsing contexts (iframes). For the TOP-LEVEL document, any
-  //   non-`*` allowlist results in the policy being "not delegated to the top
-  //   level" in some Chrome versions — effectively blocking camera.
-  //   This is the root cause of NotAllowedError even when the browser shows
-  //   camera as "Allowed" in site settings.
+  // This caused TWO Permissions-Policy headers to be delivered to the browser:
+  //   1. next.config.js headers(): camera=*, microphone=*, display-capture=*
+  //   2. frontend/src/middleware.ts:  camera=*, microphone=*, geolocation=()
   //
-  // chrome://flags/#enable-experimental-web-platform-features confirmed:
-  //   camera=(self)  →  top-level page camera BLOCKED by policy
-  //   camera=*       →  top-level page camera ALLOWED
-  async headers() {
-    return [
-      {
-        source: '/(.*)',
-        headers: [
-          {
-            key: 'Permissions-Policy',
-            value: 'camera=*, microphone=*, display-capture=*',
-          },
-        ],
-      },
-    ]
-  },
+  // The canonical Permissions-Policy is now set exclusively in
+  // frontend/src/middleware.ts so there is one authoritative source and
+  // no risk of conflicting values accumulating across layers.
+  //
+  // The policy required by LiveKit (camera=*, microphone=*) is preserved there.
+  // display-capture=* is included in middleware.ts if screen sharing is needed.
 };
 
 module.exports = withPWA(nextConfig);

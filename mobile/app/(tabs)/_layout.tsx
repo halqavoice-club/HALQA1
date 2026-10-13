@@ -40,7 +40,7 @@ export default function TabLayout() {
   // Friend request pending count ΓÇö lightweight poll every 60s
   const { data: friendRequestsData } = useQuery({
     queryKey: ['friend-requests-count'],
-    queryFn: () => api.get('/social/requests/pending').then(r => {
+    queryFn: () => api.get('/social/friends/requests').then(r => {
       const data = r.data.data;
       return Array.isArray(data) ? data.length : (data?.count ?? 0);
     }),

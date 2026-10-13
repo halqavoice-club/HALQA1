@@ -14,6 +14,7 @@ import { useQuery, useMutation, useInfiniteQuery, useQueryClient } from '@tansta
 import { Ionicons } from '@expo/vector-icons';
 import { showMessage } from 'react-native-flash-message';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Video, ResizeMode } from 'expo-av';
 import api from '@/lib/api';
 import { getAvatarUrl, getAvatarInitials, avatarColor } from '@/lib/avatar';
 import { useAuthStore } from '@/store/auth.store';
@@ -142,14 +143,30 @@ function PostHeader({ post, onLike }: { post: Post; onLike: () => void }) {
       {/* Body */}
       {post.body ? <Text style={st.postBody}>{post.body}</Text> : null}
 
-      {/* First media image */}
-      {post.media?.length > 0 && post.media[0].type !== 'VIDEO' && (
-        <Image
-          source={{ uri: post.media[0].url.startsWith('http') ? post.media[0].url : BASE + post.media[0].url }}
-          style={st.postMedia}
-          resizeMode="cover"
-        />
-      )}
+      {/* Media — image or video */}
+      {post.media?.length > 0 && (() => {
+        const first = post.media[0];
+        const url = first.url.startsWith('http') ? first.url : BASE + first.url;
+        if (first.type === 'VIDEO') {
+          return (
+            <Video
+              source={{ uri: url }}
+              style={st.postMedia}
+              resizeMode={ResizeMode.CONTAIN}
+              useNativeControls
+              shouldPlay={false}
+              isLooping={false}
+            />
+          );
+        }
+        return (
+          <Image
+            source={{ uri: url }}
+            style={st.postMedia}
+            resizeMode="cover"
+          />
+        );
+      })()}
 
       {/* Actions */}
       <View style={st.postActions}>

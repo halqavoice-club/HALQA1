@@ -11,9 +11,11 @@
 import React, { useState, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  Image, ActivityIndicator, Dimensions, StatusBar
+  Image, ActivityIndicator, Dimensions, StatusBar,
+  Modal, Pressable, TextInput, Platform, KeyboardAvoidingView as RNKeyboardAvoidingView,
+  ScrollView,
 } from 'react-native';
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -23,8 +25,111 @@ import { Video, ResizeMode } from 'expo-av';
 import api from '@/lib/api';
 import { avatarUrl } from '@/lib/avatar';
 import { useAuthStore } from '@/store/auth.store';
+import { Share } from 'react-native';
+import { getSocket } from '@/lib/socket';
 
 const { width: SW, height: SH } = Dimensions.get('window');
+
+// ─── Inline comment sheet rendered inside the reels Modal ─────────────────────
+function ReelCommentsSheet({ postId, onClose }: { postId: string; onClose: () => void }) {
+  const { user }    = useAuthStore();
+  const queryClient = useQueryClient();
+  const [text, setText] = useState('');
+
+  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery({
+    queryKey: ['comments', postId],
+    queryFn: ({ pageParam }) =>
+      api.get(`/posts/${postId}/comments`, { params: { cursor: pageParam, limit: 20 } })
+        .then(r => r.data.data),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page: any) => page?.nextCursor ?? undefined,
+    staleTime: 30_000,
+  });
+
+  const comments: any[] = data?.pages.flatMap((p: any) => p.items ?? []) ?? [];
+
+  const addMutation = useMutation({
+    mutationFn: (body: string) => api.post(`/posts/${postId}/comments`, { body }),
+    onSuccess: () => {
+      setText('');
+      queryClient.invalidateQueries({ queryKey: ['comments', postId] });
+      queryClient.invalidateQueries({ queryKey: ['reels'] });
+    },
+    onError: () => showMessage({ message: 'Failed to post comment', type: 'danger' }),
+  });
+
+  const handleSend = () => {
+    const t = text.trim();
+    if (!t || addMutation.isPending) return;
+    addMutation.mutate(t);
+  };
+
+  return (
+    <Pressable style={r.sheetBackdrop} onPress={onClose}>
+      <Pressable style={r.sheet} onPress={e => e.stopPropagation()}>
+        {/* Handle bar */}
+        <View style={r.sheetHandle} />
+        <Text style={r.sheetTitle}>Comments</Text>
+
+        {isLoading ? (
+          <ActivityIndicator size="small" color="#4f46e5" style={{ marginVertical: 20 }} />
+        ) : (
+          <ScrollView style={{ maxHeight: SH * 0.45 }} keyboardShouldPersistTaps="handled">
+            {comments.length === 0 && (
+              <Text style={r.sheetEmpty}>No comments yet — be the first!</Text>
+            )}
+            {comments.map((c: any) => (
+              <View key={c.id} style={r.commentItem}>
+                <View style={r.commentAv}>
+                  <Text style={r.commentAvTxt}>
+                    {(c.author?.firstName?.[0] ?? '') + (c.author?.lastName?.[0] ?? '')}
+                  </Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={r.commentName}>{c.author?.firstName} {c.author?.lastName}</Text>
+                  <Text style={r.commentBody}>{c.body}</Text>
+                </View>
+              </View>
+            ))}
+            {hasNextPage && (
+              <TouchableOpacity onPress={() => fetchNextPage()} style={{ alignItems: 'center', padding: 8 }}>
+                {isFetchingNextPage
+                  ? <ActivityIndicator size="small" color="#4f46e5" />
+                  : <Text style={{ color: '#4f46e5', fontSize: 13, fontWeight: '600' }}>Load more</Text>
+                }
+              </TouchableOpacity>
+            )}
+          </ScrollView>
+        )}
+
+        {/* Input */}
+        <RNKeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <View style={r.sheetInput}>
+            <TextInput
+              style={r.sheetTextInput}
+              value={text}
+              onChangeText={setText}
+              placeholder="Add a comment…"
+              placeholderTextColor="#9ca3af"
+              multiline
+              maxLength={1000}
+            />
+            <TouchableOpacity
+              style={[r.sheetSend, (!text.trim() || addMutation.isPending) && { opacity: 0.4 }]}
+              onPress={handleSend}
+              disabled={!text.trim() || addMutation.isPending}
+            >
+              {addMutation.isPending
+                ? <ActivityIndicator size="small" color="#fff" />
+                : <Ionicons name="send" size={16} color="#fff" />
+              }
+            </TouchableOpacity>
+          </View>
+        </RNKeyboardAvoidingView>
+      </Pressable>
+    </Pressable>
+  );
+}
 
 interface ReelPost {
   id: string;
@@ -155,6 +260,17 @@ function ReelItem({
         <TouchableOpacity style={r.actionBtn} onPress={() => bookmarkMutation.mutate(undefined)}>
           <Ionicons name={bookmarked ? 'bookmark' : 'bookmark-outline'} size={28} color={bookmarked ? '#fbbf24' : '#fff'} />
         </TouchableOpacity>
+
+        {/* Share */}
+        <TouchableOpacity
+          style={r.actionBtn}
+          onPress={() => {
+            const url = `${api.defaults.baseURL?.replace('/api/v1', '') ?? ''}/feed/post/${item.id}`;
+            Share.share({ message: url, title: 'Check out this reel on HALQA' }).catch(() => {});
+          }}
+        >
+          <Ionicons name="share-social-outline" size={26} color="#fff" />
+        </TouchableOpacity>
       </View>
 
       {/* Bottom info */}
@@ -174,13 +290,14 @@ function ReelItem({
 export default function ReelsScreen() {
   const router   = useRouter();
   const insets   = useSafeAreaInsets();
+  const queryClient = useQueryClient();
   const [activeIndex, setActiveIndex] = useState(0);
   const [commentPostId, setCommentPostId] = useState<string | null>(null);
 
   const { data, fetchNextPage, hasNextPage, isLoading, isError } = useInfiniteQuery({
     queryKey: ['reels'],
     queryFn: ({ pageParam }) =>
-      api.get('/posts/feed', { params: { cursor: pageParam, limit: 10, mediaType: 'VIDEO' } })
+      api.get('/posts/reels', { params: { cursor: pageParam, limit: 10 } })
         .then(r => r.data.data),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page: any) => page?.nextCursor ?? undefined,
@@ -193,9 +310,34 @@ export default function ReelsScreen() {
 
   const handleViewableChange = useCallback(({ viewableItems }: any) => {
     if (viewableItems?.[0]?.index != null) {
-      setActiveIndex(viewableItems[0].index);
+      const idx = viewableItems[0].index;
+      setActiveIndex(idx);
+      // Fire-and-forget view tracking when a reel becomes active
+      const activeReel = reels[idx];
+      if (activeReel?.id) {
+        api.post(`/posts/${activeReel.id}/view`).catch(() => {});
+      }
     }
-  }, []);
+  }, [reels]);
+
+  // ── Socket — invalidate reels cache when a new VIDEO post is created ─────────
+  React.useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return;
+    socket.emit('feed:join');
+
+    const onPostCreate = (d: { post: ReelPost }) => {
+      if (d.post.media?.some((m: any) => m.type === 'VIDEO')) {
+        queryClient.invalidateQueries({ queryKey: ['reels'] });
+      }
+    };
+
+    socket.on('post:create', onPostCreate);
+    return () => {
+      socket.emit('feed:leave');
+      socket.off('post:create', onPostCreate);
+    };
+  }, [queryClient]);
 
   if (isLoading) {
     return (
@@ -250,6 +392,21 @@ export default function ReelsScreen() {
         onEndReachedThreshold={0.5}
         getItemLayout={(_, index) => ({ length: SH, offset: SH * index, index })}
       />
+
+      {/* Comment sheet — renders when user taps Comment on any reel */}
+      <Modal
+        visible={!!commentPostId}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setCommentPostId(null)}
+      >
+        {commentPostId && (
+          <ReelCommentsSheet
+            postId={commentPostId}
+            onClose={() => setCommentPostId(null)}
+          />
+        )}
+      </Modal>
     </View>
   );
 }
@@ -273,5 +430,19 @@ const r = StyleSheet.create({
   caption:       { color: 'rgba(255,255,255,0.9)', fontSize: 14, lineHeight: 20, marginTop: 4, textShadowColor: 'rgba(0,0,0,0.6)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
   timeAgo:       { color: 'rgba(255,255,255,0.5)', fontSize: 11, marginTop: 4 },
   backBtn:       { position: 'absolute', left: 12, zIndex: 10, backgroundColor: 'rgba(0,0,0,0.35)', borderRadius: 20, padding: 6 },
+  // ─── Comment sheet styles ───────────────────────────────────────────────────
+  sheetBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' },
+  sheet:         { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 16, paddingBottom: 32, paddingTop: 12, maxHeight: SH * 0.75 },
+  sheetHandle:   { width: 40, height: 4, backgroundColor: '#e5e7eb', borderRadius: 2, alignSelf: 'center', marginBottom: 12 },
+  sheetTitle:    { fontSize: 16, fontWeight: '700', color: '#111827', marginBottom: 12, textAlign: 'center' },
+  sheetEmpty:    { textAlign: 'center', color: '#9ca3af', paddingVertical: 24, fontSize: 14 },
+  commentItem:   { flexDirection: 'row', gap: 10, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  commentAv:     { width: 32, height: 32, borderRadius: 16, backgroundColor: '#4f46e5', justifyContent: 'center', alignItems: 'center', flexShrink: 0 },
+  commentAvTxt:  { fontSize: 12, fontWeight: '700', color: '#fff' },
+  commentName:   { fontSize: 12, fontWeight: '700', color: '#111827', marginBottom: 2 },
+  commentBody:   { fontSize: 13, color: '#374151', lineHeight: 18 },
+  sheetInput:    { flexDirection: 'row', alignItems: 'flex-end', gap: 8, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#f3f4f6', marginTop: 8 },
+  sheetTextInput:{ flex: 1, backgroundColor: '#f3f4f6', borderRadius: 20, paddingHorizontal: 14, paddingVertical: 9, fontSize: 14, color: '#111827', maxHeight: 80 },
+  sheetSend:     { width: 36, height: 36, borderRadius: 18, backgroundColor: '#4f46e5', justifyContent: 'center', alignItems: 'center' },
 });
 

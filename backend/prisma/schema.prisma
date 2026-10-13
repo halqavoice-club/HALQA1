@@ -310,6 +310,7 @@ model User {
   // Report & Block
   reportsSent        UserReport[]       @relation("ReportsSent")
   reportsReceived    UserReport[]       @relation("ReportsReceived")
+  postReportsSent    PostReport[]       @relation("PostReportsSent")
   blocksSent         UserBlock[]        @relation("BlocksSent")
   blocksReceived     UserBlock[]        @relation("BlocksReceived")
   // Social Feed (Phase B-1)
@@ -1657,6 +1658,30 @@ model UserReport {
   @@map("user_reports")
 }
 
+// Post Report — persists every report submission for admin moderation queue.
+// Mirrors UserReport pattern. One PENDING report per reporter+post pair at a time.
+model PostReport {
+  id          String    @id @default(uuid())
+  reporterId  String
+  reporter    User      @relation("PostReportsSent", fields: [reporterId], references: [id], onDelete: Cascade)
+  postId      String
+  post        Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reason      String    // spam | harassment | hate_speech | sexual_content | scam | impersonation | underage | other
+  description String?   @db.Text
+  status      String    @default("PENDING") // PENDING | REVIEWED | DISMISSED | ACTION_TAKEN
+  reviewedBy  String?
+  reviewedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([reporterId])
+  @@index([postId])
+  @@index([reporterId, postId, status])
+  @@index([status])
+  @@index([createdAt])
+  @@map("post_reports")
+}
+
 // Block a user — blocks DMs, hides them from voice rooms, prevents gifting
 model UserBlock {
   id        String   @id @default(uuid())
@@ -2072,6 +2097,7 @@ model Post {
   mentions    PostMention[]
   bookmarks   PostBookmark[]
   views       PostView[]
+  reports     PostReport[]
 
   @@index([authorId])
   @@index([visibility])

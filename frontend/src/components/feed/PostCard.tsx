@@ -45,9 +45,10 @@ interface Props {
   post:                Post
   compact?:            boolean
   defaultCommentsOpen?: boolean
+  showPinIndicator?:   boolean  // true only on profile pages — pin is profile-scoped, not feed-scoped
 }
 
-export function PostCard({ post, compact = false, defaultCommentsOpen = false }: Props) {
+export function PostCard({ post, compact = false, defaultCommentsOpen = false, showPinIndicator = false }: Props) {
   const { user }    = useAuthStore()
   const { toast }   = useToast()
   const queryClient = useQueryClient()
@@ -383,11 +384,11 @@ export function PostCard({ post, compact = false, defaultCommentsOpen = false }:
       className={cn(
         'bg-white rounded-2xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow',
         compact ? 'p-3' : 'p-4',
-        post.isPinned && 'ring-1 ring-indigo-200'
+        showPinIndicator && post.isPinned && 'ring-1 ring-indigo-200'
       )}
     >
-      {/* Pinned indicator */}
-      {post.isPinned && (
+      {/* Pinned indicator — only shown on profile pages, not in the general feed */}
+      {showPinIndicator && post.isPinned && (
         <div className="flex items-center gap-1 text-xs text-indigo-500 font-semibold mb-2">
           <Pin className="w-3 h-3" /> Pinned
         </div>
@@ -790,7 +791,7 @@ export function PostCard({ post, compact = false, defaultCommentsOpen = false }:
                   {localShare >= 1000
                     ? `${(localShare / 1000).toFixed(1)}K`
                     : localShare}{' '}
-                  {localShare === 1 ? 'share' : 'shares'}
+                  {localShare === 1 ? 'repost' : 'reposts'}
                 </span>
               </>
             )}
@@ -798,9 +799,9 @@ export function PostCard({ post, compact = false, defaultCommentsOpen = false }:
         </div>
       )}
 
-      {/* ── Facebook-style action buttons — full-width equal 4 columns ──────── */}
-      <div className="flex items-center border-t border-gray-100 pt-0.5">
-        {/* Like */}
+      {/* ── Facebook-style pill action buttons ───────────────────────────── */}
+      <div className="flex items-center gap-2 border-t border-gray-100 pt-2 pb-0.5 flex-wrap">
+        {/* Like — pill with count via ReactionPicker */}
         <ReactionPicker
           postId={post.id}
           current={localMyReaction}
@@ -809,38 +810,45 @@ export function PostCard({ post, compact = false, defaultCommentsOpen = false }:
           disabled={reactMutation.isPending}
         />
 
-        {/* Comment */}
+        {/* Comment — pill with count */}
         <button
           onClick={() => setCommentsOpen(v => !v)}
           className={cn(
-            'flex flex-1 items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-colors',
+            'flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-sm font-semibold transition-colors',
             commentsOpen
-              ? 'text-indigo-600 bg-indigo-50'
-              : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+              ? 'bg-indigo-100 text-indigo-600 hover:bg-indigo-200'
+              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
           )}
         >
           <MessageCircle className="w-4 h-4" />
-          <span>Comment</span>
+          {localCommentCount > 0 && (
+            <span>
+              {localCommentCount >= 1_000_000
+                ? `${(localCommentCount / 1_000_000).toFixed(1)}M`
+                : localCommentCount >= 1_000
+                ? `${(localCommentCount / 1_000).toFixed(localCommentCount >= 10_000 ? 0 : 1)}K`
+                : localCommentCount}
+            </span>
+          )}
         </button>
 
-        {/* Share */}
-        <ShareMenu post={post} onShared={() => setLocalShare(c => c + 1)} />
+        {/* Share — pill with repost count */}
+        <ShareMenu post={post} onShared={() => setLocalShare(c => c + 1)} shareCount={localShare} />
 
-        {/* Bookmark / Save */}
+        {/* Bookmark — pill */}
         <button
           onClick={() => bookmarkMutation.mutate(undefined)}
           className={cn(
-            'flex flex-1 items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-colors',
+            'flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-sm font-semibold transition-colors',
             isBookmarked
-              ? 'text-indigo-600 bg-indigo-50'
-              : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+              ? 'bg-indigo-100 text-indigo-600 hover:bg-indigo-200'
+              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
           )}
         >
           {isBookmarked
             ? <BookmarkCheck className="w-4 h-4" />
             : <Bookmark className="w-4 h-4" />
           }
-          <span>Save</span>
         </button>
       </div>
 
