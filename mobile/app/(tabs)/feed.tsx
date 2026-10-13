@@ -133,6 +133,29 @@ export default function FeedScreen() {
     socket.on('post:delete', onPostDelete);
     socket.on('comment:create', onCommentNew);
 
+    // Targeted reaction count patch — avoids full feed refetch on every like
+    const onPostLike = (d: { postId: string; userId: string; type: string; action: 'added' | 'updated' | 'removed' }) => {
+      const delta = d.action === 'added' ? 1 : d.action === 'removed' ? -1 : 0;
+      if (delta === 0) return; // 'update' (type change) doesn't change total count
+      const patch = (p: Post) =>
+        p.id === d.postId
+          ? { ...p, _count: { ...p._count, reactions: Math.max(0, (p._count?.reactions ?? 0) + delta) } }
+          : p;
+      queryClient.setQueryData<any>(['feed'], (old: any) => {
+        if (!old?.pages) return old;
+        return {
+          ...old,
+          pages: old.pages.map((page: any) => ({
+            ...page,
+            items: page.items.map(patch),
+          })),
+        };
+      });
+      setNewPosts(prev => prev.map(patch));
+    };
+
+    socket.on('post:like', onPostLike);
+
     return () => {
       socket.emit('feed:leave');
       if (user?.schoolId) socket.emit('feed:leave:school', { schoolId: user.schoolId });
@@ -140,6 +163,7 @@ export default function FeedScreen() {
       socket.off('post:update', onPostUpdate);
       socket.off('post:delete', onPostDelete);
       socket.off('comment:create', onCommentNew);
+      socket.off('post:like', onPostLike);
     };
   }, [user?.id, user?.schoolId, queryClient]);
 

@@ -364,6 +364,7 @@ export function Sidebar() {
         icon: Rss,
         items: [
           { label: 'Feed', href: '/feed', icon: Rss },
+          { label: 'Reels', href: '/reels', icon: Video },
           { label: 'Explore', href: '/explore', icon: Compass },
           { label: 'Communities', href: '/communities', icon: UsersRound },
           { label: t.voiceClub, href: '/voice-club', icon: Radio },

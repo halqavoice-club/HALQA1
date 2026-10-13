@@ -567,7 +567,7 @@ async function getFeed(req, res, next) {
     const posts = await prisma.post.findMany({
       where,
       include: POST_INCLUDE(viewerId),
-      orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
+      orderBy: [{ createdAt: 'desc' }],
       take: take + 1
     });
 
@@ -648,6 +648,18 @@ async function reactToPost(req, res, next) {
     const post = await prisma.post.findFirst({ where: { id: postId, deletedAt: null } });
     if (!post) return errorResponse(res, 'Post not found', 404);
 
+    // MF-001 FIX: Enforce bilateral block — a blocked user cannot react to posts.
+    // Covers: viewer blocked author OR author blocked viewer.
+    if (post.authorId !== userId) {
+      const block = await prisma.userBlock.findFirst({
+        where: { OR: [
+          { blockerId: userId,        blockedId: post.authorId },
+          { blockerId: post.authorId, blockedId: userId }
+        ]}
+      });
+      if (block) return errorResponse(res, 'You cannot interact with this content', 403);
+    }
+
     const existing = await prisma.postReaction.findUnique({
       where: { postId_userId: { postId, userId } }
     });
@@ -725,22 +737,37 @@ async function addComment(req, res, next) {
     const post = await prisma.post.findFirst({ where: { id: postId, deletedAt: null } });
     if (!post) return errorResponse(res, 'Post not found', 404);
 
+    // MF-001 FIX: Enforce bilateral block — a blocked user cannot comment on posts.
+    // Covers: commenter blocked author OR author blocked commenter.
+    if (post.authorId !== req.user.id) {
+      const block = await prisma.userBlock.findFirst({
+        where: { OR: [
+          { blockerId: req.user.id, blockedId: post.authorId },
+          { blockerId: post.authorId, blockedId: req.user.id }
+        ]}
+      });
+      if (block) return errorResponse(res, 'You cannot interact with this content', 403);
+    }
+
     // Validate parentId belongs to this post
     if (parentId) {
       const parent = await prisma.postComment.findFirst({ where: { id: parentId, postId, deletedAt: null } });
       if (!parent) return errorResponse(res, 'Parent comment not found', 404);
     }
 
-    const comment = await prisma.postComment.create({
-      data: { id: uuidv4(), postId, authorId: req.user.id, parentId: parentId || null, body: body.trim() },
-      include: { author: { select: AUTHOR_SELECT } }
+    // Create the comment and increment counters atomically in an interactive transaction
+    // Interactive form required because postComment.create uses `include`
+    const comment = await prisma.$transaction(async (tx) => {
+      const newComment = await tx.postComment.create({
+        data: { id: uuidv4(), postId, authorId: req.user.id, parentId: parentId || null, body: body.trim() },
+        include: { author: { select: AUTHOR_SELECT } }
+      });
+      await tx.post.update({ where: { id: postId }, data: { commentCount: { increment: 1 } } });
+      if (parentId) {
+        await tx.postComment.update({ where: { id: parentId }, data: { replyCount: { increment: 1 } } });
+      }
+      return newComment;
     });
-
-    // Increment counts
-    await prisma.post.update({ where: { id: postId }, data: { commentCount: { increment: 1 } } });
-    if (parentId) {
-      await prisma.postComment.update({ where: { id: parentId }, data: { replyCount: { increment: 1 } } });
-    }
 
     await syncMentions(postId, comment.id, body, req.user.id);
 
@@ -830,8 +857,27 @@ async function deleteComment(req, res, next) {
     // F-2 FIX: Comment deletion restricted to author + SUPER_ADMIN only (not SCHOOL_ADMIN).
     const can = comment.authorId === req.user.id || req.user.role === 'SUPER_ADMIN';
     if (!can) return errorResponse(res, 'Not authorized', 403);
-    await prisma.postComment.update({ where: { id: comment.id }, data: { deletedAt: new Date() } });
-    await prisma.post.update({ where: { id: comment.postId }, data: { commentCount: { decrement: 1 } } });
+
+    // Count active replies before soft-deleting so we decrement commentCount correctly.
+    // (DB cascade only fires on hard-delete; soft-delete of parent leaves replies alive.)
+    const replyCount = comment.parentId === null
+      ? await prisma.postComment.count({ where: { parentId: comment.id, deletedAt: null } })
+      : 0; // replies cannot themselves have replies (single-level threading)
+
+    const now = new Date();
+    // Soft-delete the comment itself and any active direct replies in one transaction
+    await prisma.$transaction([
+      prisma.postComment.update({ where: { id: comment.id }, data: { deletedAt: now } }),
+      ...(replyCount > 0
+        ? [prisma.postComment.updateMany({ where: { parentId: comment.id, deletedAt: null }, data: { deletedAt: now } })]
+        : []
+      ),
+      prisma.post.update({
+        where: { id: comment.postId },
+        data: { commentCount: { decrement: 1 + replyCount } }
+      }),
+    ]);
+
     return successResponse(res, null, 'Comment deleted');
   } catch (e) { next(e); }
 }

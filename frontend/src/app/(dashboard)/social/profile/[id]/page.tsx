@@ -84,7 +84,7 @@ export default function UserProfilePage() {
   const { data: counts, isLoading: loadingCounts } = useQuery<SocialCounts>({
     queryKey: ['social-counts', id],
     queryFn: () => socialApi.counts(id).then(r => r.data.data),
-    enabled: !!id && !isMe
+    enabled: !!id
   })
 
   const { data: followers = [] } = useQuery<SocialUser[]>({
@@ -323,6 +323,7 @@ export default function UserProfilePage() {
           <StatPill
             label="Friends"
             value={counts?.friends ?? 0}
+            href="/social/friends"
           />
         </div>
       </motion.div>
@@ -419,7 +420,7 @@ export default function UserProfilePage() {
               </div>
             ) : (
               userPosts.map(p => (
-                <PostCard key={p.id} post={p} compact />
+                <PostCard key={p.id} post={p} compact showPinIndicator />
               ))
             )}
             {hasMorePosts && (

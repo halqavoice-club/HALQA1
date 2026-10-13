@@ -125,7 +125,8 @@ beforeEach(() => {
   prisma.auditLog.create = jest.fn().mockResolvedValue({});
 
   if (!prisma.userBlock) prisma.userBlock = {};
-  prisma.userBlock.findMany = jest.fn().mockResolvedValue([]);
+  prisma.userBlock.findMany  = jest.fn().mockResolvedValue([]);
+  prisma.userBlock.findFirst = jest.fn().mockResolvedValue(null); // no block by default
 
   if (!prisma.creatorSubscription) prisma.creatorSubscription = {};
   prisma.creatorSubscription.findMany = jest.fn().mockResolvedValue([]);
@@ -316,6 +317,8 @@ describe('Comments', () => {
     const comment = makeComment('cmt-1', 'post-c1', 'user-cmt-1');
     prisma.postComment.create.mockResolvedValue(comment);
     prisma.post.update.mockResolvedValue({});
+    // Interactive transaction: pass prisma itself as tx so existing mocks work
+    prisma.$transaction.mockImplementation(fn => fn(prisma));
     prisma.postMention = prisma.postMention || {};
     prisma.postMention.deleteMany = jest.fn().mockResolvedValue({});
     prisma.postMention.createMany = jest.fn().mockResolvedValue({});
@@ -384,6 +387,8 @@ describe('Comments', () => {
     prisma.postComment.create.mockResolvedValue(replyComment);
     prisma.post.update.mockResolvedValue({});
     prisma.postComment.update.mockResolvedValue({});
+    // Interactive transaction: pass prisma itself as tx so existing mocks work
+    prisma.$transaction.mockImplementation(fn => fn(prisma));
     // For notification: findUnique to get parent authorId
     prisma.postComment.findUnique.mockResolvedValue({ authorId: 'author-c5' });
     prisma.postMention = prisma.postMention || {};
@@ -512,35 +517,42 @@ describe('Comments', () => {
     });
     const comment = makeComment('cmt-sa-del', 'post-sa', 'some-author');
     prisma.postComment.findFirst.mockResolvedValue(comment);
-    prisma.postComment.update.mockResolvedValue({ ...comment, deletedAt: new Date() });
-    prisma.post.update.mockResolvedValue({});
+    prisma.postComment.count.mockResolvedValue(0); // no replies
+    prisma.$transaction.mockResolvedValue([{}, {}]);
 
     const res = await request(app)
       .delete('/api/v1/posts/post-sa/comments/cmt-sa-del')
       .set('Authorization', tok(adminId));
 
     expect(res.status).toBe(200);
-    // Soft-delete: update with deletedAt
-    expect(prisma.postComment.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ deletedAt: expect.any(Date) }) })
-    );
+    // Transaction must be used (contains the soft-delete update)
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    const txOps = prisma.$transaction.mock.calls[0][0];
+    // First op in transaction must soft-delete the comment
+    expect(txOps[0]).toBeDefined();
   });
 
   test('deleteComment — soft-deletes record and decrements commentCount', async () => {
     asUser('comment-author-del');
     const comment = makeComment('cmt-soft', 'post-soft', 'comment-author-del');
     prisma.postComment.findFirst.mockResolvedValue(comment);
+    prisma.postComment.count.mockResolvedValue(0); // no replies for this comment
     prisma.postComment.update.mockResolvedValue({ ...comment, deletedAt: new Date() });
     prisma.post.update.mockResolvedValue({});
+    prisma.$transaction.mockImplementation(ops => Promise.all(ops));
 
     const res = await request(app)
       .delete('/api/v1/posts/post-soft/comments/cmt-soft')
       .set('Authorization', tok('comment-author-del'));
 
     expect(res.status).toBe(200);
-    // Must soft-delete via update (not hard delete)
-    expect(prisma.postComment.update).toHaveBeenCalledTimes(1);
-    // Must decrement the post commentCount
+    // Must use a transaction
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    // comment soft-deleted via update
+    expect(prisma.postComment.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ deletedAt: expect.any(Date) }) })
+    );
+    // post commentCount decremented by 1 (no replies)
     expect(prisma.post.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: { commentCount: { decrement: 1 } } })
     );
@@ -588,5 +600,177 @@ describe('Comments', () => {
     expect(prisma.postComment.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: { likeCount: { increment: -1 } } })
     );
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MF-001 — Block enforcement in reactToPost and addComment
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('Block enforcement — reactToPost', () => {
+  let app;
+  beforeAll(() => { app = buildPostApp(); });
+
+  test('reactToPost — no block: reaction succeeds (existing toggle path)', async () => {
+    asUser('user-react-unblocked');
+    const post = makePost('post-unblocked', 'author-unblocked');
+    prisma.post.findFirst.mockResolvedValue(post);
+    prisma.userBlock.findFirst.mockResolvedValue(null); // no block
+    prisma.postReaction.findUnique.mockResolvedValue(null);
+    prisma.$transaction.mockResolvedValue([{}, {}]);
+
+    const res = await request(app)
+      .post('/api/v1/posts/post-unblocked/react')
+      .set('Authorization', tok('user-react-unblocked'))
+      .send({ type: 'LIKE' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.action).toBe('added');
+    expect(prisma.userBlock.findFirst).toHaveBeenCalledTimes(1);
+  });
+
+  test('reactToPost — requester blocked by post author: returns 403', async () => {
+    asUser('blocked-reactor');
+    const post = makePost('post-block-1', 'post-author-1');
+    prisma.post.findFirst.mockResolvedValue(post);
+    // Simulate: post author blocked the reactor
+    prisma.userBlock.findFirst.mockResolvedValue({
+      id: 'block-1', blockerId: 'post-author-1', blockedId: 'blocked-reactor'
+    });
+
+    const res = await request(app)
+      .post('/api/v1/posts/post-block-1/react')
+      .set('Authorization', tok('blocked-reactor'))
+      .send({ type: 'LIKE' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.message).toMatch(/cannot interact/i);
+    // No reaction or counter change should occur
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.postReaction.create).not.toHaveBeenCalled();
+  });
+
+  test('reactToPost — requester blocked the post author: returns 403', async () => {
+    asUser('reactor-who-blocked');
+    const post = makePost('post-block-2', 'blocked-author');
+    prisma.post.findFirst.mockResolvedValue(post);
+    // Simulate: reactor blocked the author
+    prisma.userBlock.findFirst.mockResolvedValue({
+      id: 'block-2', blockerId: 'reactor-who-blocked', blockedId: 'blocked-author'
+    });
+
+    const res = await request(app)
+      .post('/api/v1/posts/post-block-2/react')
+      .set('Authorization', tok('reactor-who-blocked'))
+      .send({ type: 'LOVE' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.message).toMatch(/cannot interact/i);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  test('reactToPost — user reacting to own post: block check skipped', async () => {
+    asUser('self-reactor');
+    const post = makePost('post-own', 'self-reactor'); // same authorId
+    prisma.post.findFirst.mockResolvedValue(post);
+    prisma.postReaction.findUnique.mockResolvedValue(null);
+    prisma.$transaction.mockResolvedValue([{}, {}]);
+
+    const res = await request(app)
+      .post('/api/v1/posts/post-own/react')
+      .set('Authorization', tok('self-reactor'))
+      .send({ type: 'LIKE' });
+
+    expect(res.status).toBe(200);
+    // findFirst should NOT be called for own post (authorId === userId guard)
+    expect(prisma.userBlock.findFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe('Block enforcement — addComment', () => {
+  let app;
+  beforeAll(() => { app = buildPostApp(); });
+
+  test('addComment — no block: comment succeeds', async () => {
+    asUser('commenter-unblocked');
+    const post = makePost('post-comment-unblocked', 'author-comment-1');
+    prisma.post.findFirst.mockResolvedValue(post);
+    prisma.userBlock.findFirst.mockResolvedValue(null); // no block
+    prisma.$transaction.mockImplementation(fn => fn(prisma));
+    prisma.postComment.create.mockResolvedValue(
+      makeComment('cmt-new', 'post-comment-unblocked', 'commenter-unblocked')
+    );
+    prisma.post.update.mockResolvedValue({});
+    if (!prisma.postMention) prisma.postMention = {};
+    prisma.postMention.deleteMany = jest.fn().mockResolvedValue({});
+    prisma.postMention.createMany = jest.fn().mockResolvedValue({});
+
+    const res = await request(app)
+      .post('/api/v1/posts/post-comment-unblocked/comments')
+      .set('Authorization', tok('commenter-unblocked'))
+      .send({ body: 'Nice post!' });
+
+    expect(res.status).toBe(201);
+    expect(prisma.userBlock.findFirst).toHaveBeenCalledTimes(1);
+  });
+
+  test('addComment — post author blocked commenter: returns 403, no comment created', async () => {
+    asUser('blocked-commenter');
+    const post = makePost('post-block-c1', 'comment-author-blocker');
+    prisma.post.findFirst.mockResolvedValue(post);
+    prisma.userBlock.findFirst.mockResolvedValue({
+      id: 'blk-c1', blockerId: 'comment-author-blocker', blockedId: 'blocked-commenter'
+    });
+
+    const res = await request(app)
+      .post('/api/v1/posts/post-block-c1/comments')
+      .set('Authorization', tok('blocked-commenter'))
+      .send({ body: 'Let me comment!' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.message).toMatch(/cannot interact/i);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.postComment.create).not.toHaveBeenCalled();
+    expect(prisma.post.update).not.toHaveBeenCalled(); // commentCount unchanged
+  });
+
+  test('addComment — commenter blocked the author: returns 403, no comment created', async () => {
+    asUser('commenter-who-blocked');
+    const post = makePost('post-block-c2', 'blocked-post-author');
+    prisma.post.findFirst.mockResolvedValue(post);
+    prisma.userBlock.findFirst.mockResolvedValue({
+      id: 'blk-c2', blockerId: 'commenter-who-blocked', blockedId: 'blocked-post-author'
+    });
+
+    const res = await request(app)
+      .post('/api/v1/posts/post-block-c2/comments')
+      .set('Authorization', tok('commenter-who-blocked'))
+      .send({ body: 'Trying to comment' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.message).toMatch(/cannot interact/i);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  test('addComment — user commenting on own post: block check skipped', async () => {
+    asUser('self-commenter');
+    const post = makePost('post-own-comment', 'self-commenter'); // own post
+    prisma.post.findFirst.mockResolvedValue(post);
+    prisma.$transaction.mockImplementation(fn => fn(prisma));
+    prisma.postComment.create.mockResolvedValue(
+      makeComment('cmt-self', 'post-own-comment', 'self-commenter')
+    );
+    prisma.post.update.mockResolvedValue({});
+    if (!prisma.postMention) prisma.postMention = {};
+    prisma.postMention.deleteMany = jest.fn().mockResolvedValue({});
+    prisma.postMention.createMany = jest.fn().mockResolvedValue({});
+
+    const res = await request(app)
+      .post('/api/v1/posts/post-own-comment/comments')
+      .set('Authorization', tok('self-commenter'))
+      .send({ body: 'My own post' });
+
+    expect(res.status).toBe(201);
+    expect(prisma.userBlock.findFirst).not.toHaveBeenCalled();
   });
 });

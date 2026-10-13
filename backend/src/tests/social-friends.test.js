@@ -104,6 +104,10 @@ beforeEach(() => {
   prisma.follow.deleteMany  = jest.fn().mockResolvedValue({ count: 0 });
   prisma.follow.upsert      = jest.fn().mockResolvedValue({});
   prisma.follow.count       = jest.fn().mockResolvedValue(0);
+
+  if (!prisma.userBlock) prisma.userBlock = {};
+  prisma.userBlock.findMany  = jest.fn().mockResolvedValue([]); // no blocks by default
+  prisma.userBlock.findFirst = jest.fn().mockResolvedValue(null);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -589,5 +593,123 @@ describe('Friend Requests', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.data.friendStatus).toBe('pending_received');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MF-002 — Block enforcement in searchUsers
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('Block enforcement — searchUsers', () => {
+  let app;
+  beforeAll(() => { app = buildSocialApp(); });
+
+  function makeUserResult(id, firstName) {
+    return {
+      id, firstName, lastName: 'User', email: `${id}@example.com`,
+      avatarUrl: null, role: 'MEMBER', schoolId: null, bio: null,
+      username: id,
+    };
+  }
+
+  test('searchUsers — no blocks: returns matching users', async () => {
+    asUser('searcher-1');
+    const alice = makeUserResult('alice-id', 'Alice');
+    prisma.user.findMany.mockResolvedValue([alice]);
+    prisma.userBlock.findMany.mockResolvedValue([]); // no blocks
+    prisma.follow.findMany.mockResolvedValue([]);
+    prisma.friendRequest.findMany.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/v1/social/search?q=Alice')
+      .set('Authorization', tok('searcher-1'));
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.data)).toBe(true);
+    // Block query must be called before user search
+    expect(prisma.userBlock.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { OR: [{ blockerId: 'searcher-1' }, { blockedId: 'searcher-1' }] }
+      })
+    );
+    // user.findMany is called with the NOT exclusion (empty set → no NOT clause)
+    expect(prisma.user.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  test('searchUsers — requester blocked target: target excluded from results', async () => {
+    asUser('searcher-2');
+    // Simulate: searcher blocked 'blocked-user-id'
+    prisma.userBlock.findMany.mockResolvedValue([
+      { blockerId: 'searcher-2', blockedId: 'blocked-user-id' }
+    ]);
+    // user.findMany returns empty because Prisma respects the NOT clause
+    // (In unit tests, the mock receives the full where clause — verify it contains NOT)
+    prisma.user.findMany.mockResolvedValue([]);
+    prisma.follow.findMany.mockResolvedValue([]);
+    prisma.friendRequest.findMany.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/v1/social/search?q=blocked')
+      .set('Authorization', tok('searcher-2'));
+
+    expect(res.status).toBe(200);
+    // Verify the NOT exclusion was passed to user.findMany
+    const whereArg = prisma.user.findMany.mock.calls[0][0].where;
+    expect(whereArg).toHaveProperty('NOT');
+    expect(whereArg.NOT).toMatchObject({ id: { in: ['blocked-user-id'] } });
+  });
+
+  test('searchUsers — target blocked requester: target excluded from results', async () => {
+    asUser('searcher-3');
+    // Simulate: 'blocking-user-id' blocked the searcher
+    prisma.userBlock.findMany.mockResolvedValue([
+      { blockerId: 'blocking-user-id', blockedId: 'searcher-3' }
+    ]);
+    prisma.user.findMany.mockResolvedValue([]);
+    prisma.follow.findMany.mockResolvedValue([]);
+    prisma.friendRequest.findMany.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/v1/social/search?q=blocking')
+      .set('Authorization', tok('searcher-3'));
+
+    expect(res.status).toBe(200);
+    const whereArg = prisma.user.findMany.mock.calls[0][0].where;
+    expect(whereArg).toHaveProperty('NOT');
+    expect(whereArg.NOT).toMatchObject({ id: { in: ['blocking-user-id'] } });
+  });
+
+  test('searchUsers — multiple blocks: all excluded', async () => {
+    asUser('searcher-4');
+    // Two blocks in different directions
+    prisma.userBlock.findMany.mockResolvedValue([
+      { blockerId: 'searcher-4',  blockedId: 'blocked-a' },
+      { blockerId: 'blocking-b',  blockedId: 'searcher-4' },
+    ]);
+    prisma.user.findMany.mockResolvedValue([]);
+    prisma.follow.findMany.mockResolvedValue([]);
+    prisma.friendRequest.findMany.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/v1/social/search?q=test')
+      .set('Authorization', tok('searcher-4'));
+
+    expect(res.status).toBe(200);
+    const whereArg = prisma.user.findMany.mock.calls[0][0].where;
+    expect(whereArg.NOT.id.in).toEqual(expect.arrayContaining(['blocked-a', 'blocking-b']));
+    expect(whereArg.NOT.id.in).toHaveLength(2);
+  });
+
+  test('searchUsers — short query: returns empty without hitting DB', async () => {
+    asUser('searcher-5');
+
+    const res = await request(app)
+      .get('/api/v1/social/search?q=a') // too short (< 2 chars)
+      .set('Authorization', tok('searcher-5'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual([]);
+    expect(prisma.userBlock.findMany).not.toHaveBeenCalled();
+    expect(prisma.user.findMany).not.toHaveBeenCalled();
   });
 });

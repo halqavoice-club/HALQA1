@@ -160,8 +160,52 @@ function FeedContent() {
     }
     const onPostUpdate = (d: { post: Post })     => updatePost(d.post)
     const onPostDelete = (d: { postId: string }) => removePost(d.postId)
-    const onPostLike   = ()                      => queryClient.invalidateQueries({ queryKey: ['feed'] })
-    const onCommentNew = ()                      => queryClient.invalidateQueries({ queryKey: ['feed'] })
+
+    // Targeted cache patch for reactions — avoids full refetch on every like
+    const onPostLike = (d: { postId: string; action: 'added' | 'updated' | 'removed' }) => {
+      const delta = d.action === 'added' ? 1 : d.action === 'removed' ? -1 : 0
+      if (delta === 0) return
+      const patchCache = (key: unknown[]) => {
+        queryClient.setQueryData<any>(key, (old: any) => {
+          if (!old?.pages) return old
+          return {
+            ...old,
+            pages: old.pages.map((page: any) => ({
+              ...page,
+              items: page.items.map((p: Post) =>
+                p.id === d.postId
+                  ? { ...p, _count: { ...p._count, reactions: Math.max(0, (p._count?.reactions ?? 0) + delta) } }
+                  : p
+              ),
+            })),
+          }
+        })
+      }
+      patchCache(['feed', retryCount])
+      patchCache(['feed-following', retryCount])
+    }
+
+    // Targeted cache patch for comments — increments comment count without full refetch
+    const onCommentNew = (d: { postId: string }) => {
+      const patchCache = (key: unknown[]) => {
+        queryClient.setQueryData<any>(key, (old: any) => {
+          if (!old?.pages) return old
+          return {
+            ...old,
+            pages: old.pages.map((page: any) => ({
+              ...page,
+              items: page.items.map((p: Post) =>
+                p.id === d.postId
+                  ? { ...p, _count: { ...p._count, comments: (p._count?.comments ?? 0) + 1 } }
+                  : p
+              ),
+            })),
+          }
+        })
+      }
+      patchCache(['feed', retryCount])
+      patchCache(['feed-following', retryCount])
+    }
 
     socket.on('post:create',    onPostCreate)
     socket.on('post:update',    onPostUpdate)
@@ -178,7 +222,7 @@ function FeedContent() {
       socket.off('post:like',      onPostLike)
       socket.off('comment:create', onCommentNew)
     }
-  }, [addIncoming, removePost, updatePost, queryClient, user?.id])
+  }, [addIncoming, removePost, updatePost, queryClient, user?.id, user?.schoolId, retryCount])
 
   const handleShowNew = useCallback(() => {
     setShowNew(false)

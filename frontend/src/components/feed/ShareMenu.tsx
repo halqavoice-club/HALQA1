@@ -4,21 +4,25 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { postsApi, type Post } from '@/lib/posts'
 import { groupChatApi } from '@/lib/groupChat'
+import { dmApi } from '@/lib/dm'
 import { buildShareUrl } from '@/lib/postUtils'
 import { useAuthStore } from '@/store/auth.store'
 import { useToast } from '@/components/ui/use-toast'
 import { getAvatarUrl } from '@/lib/avatar'
-import { Share2, Repeat2, Link2, Users, X, Loader2, Quote } from 'lucide-react'
+import { Share2, Repeat2, Link2, Users, MessageCircle, X, Loader2, Quote } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 interface Props {
   post: Post
   onShared?: () => void   // called after a successful repost/quote so parent can bump share count
+  shareCount?: number     // current repost count to display on the pill
+  variant?: 'light' | 'dark'  // 'dark' = white icon for video overlays, 'light' = default gray pill
 }
 
-export function ShareMenu({ post, onShared }: Props) {
+export function ShareMenu({ post, onShared, shareCount = 0, variant = 'light' }: Props) {
   const [open, setOpen]                     = useState(false)
   const [showGroupPicker, setShowGroupPicker] = useState(false)
+  const [showDmPicker, setShowDmPicker]       = useState(false)
   const [showQuote, setShowQuote]           = useState(false)
   const menuRef                             = useRef<HTMLDivElement>(null)
   const { toast }                 = useToast()
@@ -66,6 +70,11 @@ export function ShareMenu({ post, onShared }: Props) {
     setShowGroupPicker(true)
   }
 
+  const handleShareToDm = () => {
+    setOpen(false)
+    setShowDmPicker(true)
+  }
+
   const handleQuotePost = () => {
     setOpen(false)
     setShowQuote(true)
@@ -73,21 +82,35 @@ export function ShareMenu({ post, onShared }: Props) {
 
   return (
     <>
-      <div ref={menuRef} className="relative flex flex-1">
+      <div ref={menuRef} className="relative">
         <button
           onClick={() => setOpen(v => !v)}
-          className="flex flex-1 items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-50 transition-colors"
+          className={cn(
+            'flex items-center gap-1.5 rounded-full text-sm font-semibold transition-colors',
+            variant === 'dark'
+              ? 'w-12 h-12 justify-center bg-black/30 text-white hover:bg-black/50'
+              : 'px-3.5 py-1.5 bg-gray-100 text-gray-600 hover:bg-gray-200'
+          )}
         >
           <Share2 className="w-4 h-4" />
-          <span>Share</span>
+          {shareCount > 0 && (
+            <span>
+              {shareCount >= 1_000_000
+                ? `${(shareCount / 1_000_000).toFixed(1)}M`
+                : shareCount >= 1_000
+                ? `${(shareCount / 1_000).toFixed(shareCount >= 10_000 ? 0 : 1)}K`
+                : shareCount}
+            </span>
+          )}
         </button>
 
         {open && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
             <div className={cn(
-              'absolute bottom-full mb-1 left-0 z-20 bg-white rounded-2xl shadow-xl border border-gray-100 py-1.5 min-w-[180px]',
-              'animate-in fade-in slide-in-from-bottom-2 duration-150'
+              'absolute bottom-full mb-1 left-0 bg-white rounded-2xl shadow-xl border border-gray-100 py-1.5 min-w-[180px]',
+              'animate-in fade-in slide-in-from-bottom-2 duration-150',
+              variant === 'dark' ? 'z-[9999]' : 'z-20'
             )}>
               <button
                 onClick={() => repostMutation.mutate()}
@@ -118,6 +141,13 @@ export function ShareMenu({ post, onShared }: Props) {
                 <Users className="w-4 h-4 text-purple-500" />
                 Share to group
               </button>
+              <button
+                onClick={handleShareToDm}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                <MessageCircle className="w-4 h-4 text-rose-500" />
+                Share to DM
+              </button>
             </div>
           </>
         )}
@@ -131,6 +161,12 @@ export function ShareMenu({ post, onShared }: Props) {
             onClose={() => setShowGroupPicker(false)}
           />
         )}
+        {showDmPicker && (
+          <DmShareModal
+            post={post}
+            onClose={() => setShowDmPicker(false)}
+          />
+        )}
         {showQuote && (
           <QuotePostModal
             post={post}
@@ -139,6 +175,136 @@ export function ShareMenu({ post, onShared }: Props) {
           />
         )}
       </AnimatePresence>
+    </>
+  )
+}
+
+// ─── DM picker modal ─────────────────────────────────────────────────────────
+
+function DmShareModal({ post, onClose }: { post: Post; onClose: () => void }) {
+  const { toast } = useToast()
+  const [sending, setSending] = useState<string | null>(null)
+  const shareUrl = buildShareUrl(post.id)
+
+  const { data: convs = [], isLoading } = useQuery({
+    queryKey: ['dm-conversations'],
+    queryFn: async () => {
+      const res = await dmApi.conversations()
+      return Array.isArray(res.data?.data) ? res.data.data : []
+    },
+    staleTime: 60_000,
+  })
+
+  const handleSendToDm = async (convId: string, recipientName: string) => {
+    setSending(convId)
+    try {
+      const body = [
+        post.body ? post.body.slice(0, 100) + (post.body.length > 100 ? '…' : '') : '',
+        shareUrl,
+      ].filter(Boolean).join('\n')
+
+      await dmApi.send(convId, { body, msgType: 'TEXT' })
+      toast({ title: `✅ Shared to ${recipientName}` })
+      onClose()
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed to share', variant: 'destructive' })
+    } finally {
+      setSending(null)
+    }
+  }
+
+  return (
+    <>
+      {/* Backdrop */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        onClick={onClose}
+        className="fixed inset-0 z-40 bg-black/50"
+      />
+
+      {/* Sheet */}
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 20 }}
+        transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+        className="fixed z-50 bg-white rounded-2xl shadow-2xl w-full max-w-sm top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 overflow-hidden"
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+          <div className="flex items-center gap-2">
+            <MessageCircle className="w-4 h-4 text-rose-500" />
+            <h3 className="font-semibold text-gray-900 text-sm">Share via DM</h3>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-gray-100 rounded-full transition-colors">
+            <X className="w-4 h-4 text-gray-400" />
+          </button>
+        </div>
+
+        {/* Post preview */}
+        <div className="px-4 py-3 bg-gray-50 border-b border-gray-100">
+          <p className="text-xs text-gray-500 line-clamp-2">
+            {post.body?.slice(0, 100) || shareUrl}
+          </p>
+        </div>
+
+        {/* DM conversation list */}
+        <div className="max-h-72 overflow-y-auto">
+          {isLoading ? (
+            <div className="flex justify-center py-8">
+              <Loader2 className="w-5 h-5 animate-spin text-gray-400" />
+            </div>
+          ) : convs.length === 0 ? (
+            <div className="text-center py-8 text-gray-400">
+              <MessageCircle className="w-8 h-8 mx-auto mb-2 opacity-30" />
+              <p className="text-sm">No conversations yet</p>
+              <p className="text-xs mt-1">Start a DM first</p>
+            </div>
+          ) : (
+            convs.map((conv: any) => {
+              const other = conv.other ?? {}
+              const name = `${other.firstName ?? ''} ${other.lastName ?? ''}`.trim() || 'Unknown'
+              const avatarSrc = getAvatarUrl(other.avatarUrl)
+              const initials = `${other.firstName?.charAt(0) ?? ''}${other.lastName?.charAt(0) ?? ''}`.toUpperCase() || '?'
+              return (
+                <button
+                  key={conv.id}
+                  onClick={() => handleSendToDm(conv.id, name)}
+                  disabled={!!sending}
+                  className="w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors text-left disabled:opacity-60"
+                >
+                  <div className="w-10 h-10 rounded-full bg-rose-100 flex items-center justify-center overflow-hidden flex-shrink-0">
+                    {avatarSrc
+                      ? <img src={avatarSrc} alt="" className="w-full h-full object-cover" />
+                      : <span className="text-rose-600 font-semibold text-sm">{initials}</span>
+                    }
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-gray-900 text-sm truncate">{name}</p>
+                    {other.username && <p className="text-xs text-gray-400">@{other.username}</p>}
+                  </div>
+                  {sending === conv.id
+                    ? <Loader2 className="w-4 h-4 animate-spin text-rose-500 flex-shrink-0" />
+                    : <MessageCircle className="w-4 h-4 text-gray-300 flex-shrink-0" />
+                  }
+                </button>
+              )
+            })
+          )}
+        </div>
+
+        {/* Cancel */}
+        <div className="p-3 border-t border-gray-100">
+          <button
+            onClick={onClose}
+            className="w-full py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      </motion.div>
     </>
   )
 }

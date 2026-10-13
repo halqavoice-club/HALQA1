@@ -104,6 +104,26 @@ const openapi = require('./utils/openapi');
 const graphqlServer = require('./graphql/server');
 
 const app = express();
+
+// ─── Trust proxy — single hop (Nginx → Express) ───────────────────────────────
+// In production, the backend is not exposed to the internet. All traffic
+// arrives via a single Nginx reverse proxy (docker-compose.prod.yml: backend
+// has no host `ports:` mapping; only nginx binds 80/443). Setting trust proxy
+// to 1 tells Express to honour the X-Forwarded-For header set by that one
+// trusted hop, so req.ip returns the real client IP rather than the Nginx
+// container IP.
+//
+// This is required for:
+//   • IP-based rate limiting (rateLimiter.js keyGenerator uses req.ip)
+//   • Admin IP allowlist (ipAllowlist.js: getClientIP returns req.ip)
+//   • Audit log IP recording (audit.middleware.js line ~37)
+//   • X-Forwarded-Proto secure cookie semantics
+//
+// Value `1` = trust exactly one proxy hop — intentionally NOT `true`
+// (which would trust all proxies including client-supplied ones).
+// See: https://expressjs.com/en/guide/behind-proxies.html
+app.set('trust proxy', 1);
+
 const httpServer = createServer(app);
 
 // ─── Socket.IO setup ──────────────────────────────────────────────────────────

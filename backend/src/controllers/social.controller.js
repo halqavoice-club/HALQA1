@@ -101,12 +101,14 @@ async function getSocialCounts(req, res, next) {
     const { userId } = req.params;
     const meId = req.user.id;
 
-    const [followers, following, friends] = await Promise.all([
+    const [followers, following, friends, posts] = await Promise.all([
       prisma.follow.count({ where: { followingId: userId } }),
       prisma.follow.count({ where: { followerId: userId } }),
       prisma.friendRequest.count({
         where: { status: 'ACCEPTED', OR: [{ senderId: userId }, { receiverId: userId }] }
-      })
+      }),
+      // Count published (non-draft, non-deleted) posts for profile stat display
+      prisma.post.count({ where: { authorId: userId, deletedAt: null, isDraft: false } })
     ]);
 
     let isFollowing = false;
@@ -145,7 +147,7 @@ async function getSocialCounts(req, res, next) {
       mutualFriends  = [...myIds].filter(id => theirIds.has(id) && id !== meId && id !== userId).length;
     }
 
-    return successResponse(res, { followers, following, friends, isFollowing, friendStatus, mutualFriends });
+    return successResponse(res, { followers, following, friends, posts, isFollowing, friendStatus, mutualFriends });
   } catch (err) { next(err); }
 }
 
@@ -330,10 +332,23 @@ async function searchUsers(req, res, next) {
     // Social discovery must be platform-wide — no schoolId filter here.
     // Education-scoped search (students/teachers/classes) lives at GET /api/v1/search.
 
+    // MF-002 FIX: Exclude bilaterally blocked users from search results.
+    // Fetch all block relationships involving the searcher in one query, then
+    // pass the excluded IDs into the main findMany to avoid N+1.
+    const myBlocks = await prisma.userBlock.findMany({
+      where: { OR: [{ blockerId: meId }, { blockedId: meId }] },
+      select: { blockerId: true, blockedId: true }
+    }).catch(() => []);
+    const blockedUserIds = [...new Set(
+      myBlocks.flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== meId)
+    )];
+
     const users = await prisma.user.findMany({
       where: {
         deletedAt: null,
         id: { not: meId },
+        // MF-002: exclude blocked/blocking users
+        ...(blockedUserIds.length > 0 && { NOT: { id: { in: blockedUserIds } } }),
         OR: [
           { firstName: { contains: q.trim() } },
           { lastName:  { contains: q.trim() } },

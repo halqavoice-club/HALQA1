@@ -26,6 +26,7 @@ interface UserProfile {
   followersCount: number;
   followingCount: number;
   postsCount: number;
+  friendsCount: number;
   isFollowing: boolean;
   /** Backend returns friendStatus enum, not a boolean isFriend */
   friendStatus: 'none' | 'pending_sent' | 'pending_received' | 'friends';
@@ -33,13 +34,22 @@ interface UserProfile {
   createdAt: string;
 }
 
+interface PostMedia {
+  url: string;
+  type: string;
+}
+
 interface Post {
   id: string;
-  content: string;
-  mediaUrl?: string;
-  mediaType?: string;
-  likesCount: number;
-  commentsCount: number;
+  /** API returns 'body', not 'content' */
+  body: string;
+  media?: PostMedia[];
+  type: string;
+  /** API returns nested _count object, not flat counters */
+  _count: {
+    reactions: number;
+    comments: number;
+  };
   createdAt: string;
 }
 
@@ -55,13 +65,15 @@ function StatBox({ label, value }: { label: string; value: number }) {
 
 // ─── Post Grid Item ────────────────────────────────────────────────────────────
 function PostGridItem({ post, onPress }: { post: Post; onPress: () => void }) {
+  // API returns media[] array; use first item's url if present
+  const firstMediaUrl = post.media?.[0]?.url;
   return (
     <TouchableOpacity style={styles.gridItem} onPress={onPress}>
-      {post.mediaUrl ? (
-        <Image source={{ uri: post.mediaUrl }} style={styles.gridImage} />
+      {firstMediaUrl ? (
+        <Image source={{ uri: firstMediaUrl }} style={styles.gridImage} />
       ) : (
         <View style={[styles.gridImage, styles.textPost]}>
-          <Text numberOfLines={4} style={styles.textPostContent}>{post.content}</Text>
+          <Text numberOfLines={4} style={styles.textPostContent}>{post.body}</Text>
         </View>
       )}
     </TouchableOpacity>
@@ -93,6 +105,7 @@ export default function PublicProfileScreen() {
         followersCount: c.followers ?? 0,
         followingCount: c.following ?? 0,
         postsCount: c.posts ?? 0,
+        friendsCount: c.friends ?? 0,
         isFollowing: c.isFollowing ?? false,
         friendStatus: (c.friendStatus ?? 'none') as UserProfile['friendStatus'],
       } as UserProfile;
@@ -218,6 +231,7 @@ export default function PublicProfileScreen() {
           <StatBox label="Posts" value={profile.postsCount} />
           <StatBox label="Followers" value={profile.followersCount} />
           <StatBox label="Following" value={profile.followingCount} />
+          <StatBox label="Friends" value={profile.friendsCount} />
         </View>
 
         {/* Action buttons */}

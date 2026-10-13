@@ -53,6 +53,7 @@ interface RoleConfig {
 const SOCIAL_ROUTES = [
   '/dashboard',
   '/feed', '/explore', '/communities', '/voice-club', '/live-class', '/live-stream',
+  '/reels',
   '/dm', '/group-chat', '/messages', '/social',
   '/creator', '/wallet', '/marketplace',
   '/notifications', '/profile', '/settings',
