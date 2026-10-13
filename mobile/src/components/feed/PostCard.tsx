@@ -316,6 +316,9 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
   const isOwn        = user?.id === post.authorId;
 
   const [isFollowing,    setIsFollowing]    = useState(post.isFollowing ?? false);
+  const [showPostMenu,   setShowPostMenu]   = useState(false);
+  const [editingPost,    setEditingPost]    = useState(false);
+  const [editPostBody,   setEditPostBody]   = useState(post.body ?? '');
 
   const [showReactions, setShowReactions]         = useState(false);
   const [commentsOpen,  setCommentsOpen]           = useState(false);
@@ -467,6 +470,64 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
     },
   });
 
+  // ── Post edit / delete / report mutations ─────────────────────────────────
+  const editPostMutation = useMutation({
+    mutationFn: (body: string) => api.patch(`/posts/${post.id}`, { body }),
+    onSuccess: () => {
+      setEditingPost(false);
+      queryClient.invalidateQueries({ queryKey: ['feed'] });
+      queryClient.invalidateQueries({ queryKey: ['feed-following'] });
+      queryClient.invalidateQueries({ queryKey: ['user-posts', post.authorId] });
+      showMessage({ message: 'Post updated', type: 'success', duration: 1500 });
+    },
+    onError: () => showMessage({ message: 'Failed to update post', type: 'danger' }),
+  });
+
+  const deletePostMutation = useMutation({
+    mutationFn: () => api.delete(`/posts/${post.id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['feed'] });
+      queryClient.invalidateQueries({ queryKey: ['feed-following'] });
+      queryClient.invalidateQueries({ queryKey: ['user-posts', post.authorId] });
+      showMessage({ message: 'Post deleted', type: 'success', duration: 1500 });
+    },
+    onError: () => showMessage({ message: 'Failed to delete post', type: 'danger' }),
+  });
+
+  const reportPostMutation = useMutation({
+    mutationFn: (reason: string) => api.post(`/posts/${post.id}/report`, { reason }),
+    onSuccess: () => showMessage({ message: 'Post reported. Thank you.', type: 'success', duration: 2000 }),
+    onError: (e: any) => showMessage({
+      message: e?.response?.data?.message ?? 'Failed to report post',
+      type: 'danger',
+    }),
+  });
+
+  const handleDeletePost = () => {
+    Alert.alert(
+      'Delete Post',
+      'This will permanently delete your post. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => deletePostMutation.mutate() },
+      ]
+    );
+  };
+
+  const handleReportPost = () => {
+    Alert.alert(
+      'Report Post',
+      'Why are you reporting this post?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Spam', onPress: () => reportPostMutation.mutate('spam') },
+        { text: 'Inappropriate', onPress: () => reportPostMutation.mutate('inappropriate') },
+        { text: 'Harassment', onPress: () => reportPostMutation.mutate('harassment') },
+        { text: 'Misinformation', onPress: () => reportPostMutation.mutate('misinformation') },
+      ]
+    );
+  };
+
   const handleReact = (type: ReactionType) => {
     setShowReactions(false);
     reactMutation.mutate(type);
@@ -477,6 +538,8 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
     try {
       // Use native Share sheet — no expo-clipboard dependency needed
       await Share.share({ message: url, title: 'Share post' });
+      // MF-006: increment shareCount on successful native share (fire-and-forget)
+      api.post(`/posts/${post.id}/share`).catch(() => {});
     } catch { /* cancelled */ }
     setShowShare(false);
   };
@@ -563,54 +626,65 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
       {post.type !== 'REPOST' && (
         <>
       {/* Author row */}
-      <TouchableOpacity
-        style={s.header}
-        onPress={() => router.push(`/profile/${post.author.id}` as any)}
-        activeOpacity={0.7}
-      >
-        <View style={[s.avatar, { backgroundColor: bgColor }]}>
-          {avatarSrc
-            ? <Image source={{ uri: avatarSrc }} style={s.avatarImg} />
-            : <Text allowFontScaling={false} style={s.avatarTxt}>{initials}</Text>}
-        </View>
-        <View style={{ flex: 1 }}>
-          <View style={s.authorNameRow}>
-            <Text allowFontScaling={false} style={s.authorName}>
-              {post.author.firstName} {post.author.lastName}
-            </Text>
-            {/* Inline Follow button — only for other users' non-repost posts */}
-            {!isOwn && post.type !== 'REPOST' && (
-              <TouchableOpacity
-                onPress={() => followMutation.mutate()}
-                disabled={followMutation.isPending}
-                style={[s.followBtn, isFollowing && s.followBtnActive]}
-              >
-                <Ionicons
-                  name={isFollowing ? 'person-remove-outline' : 'person-add-outline'}
-                  size={11}
-                  color={isFollowing ? '#6b7280' : '#4f46e5'}
-                />
-                <Text allowFontScaling={false} style={[s.followBtnTxt, isFollowing && { color: '#6b7280' }]}>
-                  {isFollowing ? 'Following' : 'Follow'}
-                </Text>
-              </TouchableOpacity>
-            )}
+      {/* Author header — split into profile tap + ⋯ menu */}
+      <View style={s.header}>
+        <TouchableOpacity
+          style={{ flexDirection: 'row', alignItems: 'center', flex: 1, gap: 10 }}
+          onPress={() => router.push(`/profile/${post.author.id}` as any)}
+          activeOpacity={0.7}
+        >
+          <View style={[s.avatar, { backgroundColor: bgColor }]}>
+            {avatarSrc
+              ? <Image source={{ uri: avatarSrc }} style={s.avatarImg} />
+              : <Text allowFontScaling={false} style={s.avatarTxt}>{initials}</Text>}
           </View>
-          <View style={s.metaRow}>
-            <Text allowFontScaling={false} style={s.time}>
-              {formatDistanceToNow(new Date(post.createdAt), { addSuffix: true })}
-            </Text>
-            {post.location ? (
-              <>
-                <Text style={s.metaDot}>·</Text>
-                <Ionicons name="location-outline" size={11} color="#9ca3af" />
-                <Text allowFontScaling={false} style={s.locationTxt}>{post.location}</Text>
-              </>
-            ) : null}
+          <View style={{ flex: 1 }}>
+            <View style={s.authorNameRow}>
+              <Text allowFontScaling={false} style={s.authorName}>
+                {post.author.firstName} {post.author.lastName}
+              </Text>
+              {/* Inline Follow button — only for other users' non-repost posts */}
+              {!isOwn && post.type !== 'REPOST' && (
+                <TouchableOpacity
+                  onPress={() => followMutation.mutate()}
+                  disabled={followMutation.isPending}
+                  style={[s.followBtn, isFollowing && s.followBtnActive]}
+                >
+                  <Ionicons
+                    name={isFollowing ? 'person-remove-outline' : 'person-add-outline'}
+                    size={11}
+                    color={isFollowing ? '#6b7280' : '#4f46e5'}
+                  />
+                  <Text allowFontScaling={false} style={[s.followBtnTxt, isFollowing && { color: '#6b7280' }]}>
+                    {isFollowing ? 'Following' : 'Follow'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+            <View style={s.metaRow}>
+              <Text allowFontScaling={false} style={s.time}>
+                {formatDistanceToNow(new Date(post.createdAt), { addSuffix: true })}
+              </Text>
+              {post.location ? (
+                <>
+                  <Text style={s.metaDot}>·</Text>
+                  <Ionicons name="location-outline" size={11} color="#9ca3af" />
+                  <Text allowFontScaling={false} style={s.locationTxt}>{post.location}</Text>
+                </>
+              ) : null}
+            </View>
           </View>
-        </View>
-        <Ionicons name="ellipsis-horizontal" size={18} color="#9ca3af" />
-      </TouchableOpacity>
+        </TouchableOpacity>
+
+        {/* ⋯ menu button — separated so it doesn't navigate to profile */}
+        <TouchableOpacity
+          onPress={() => setShowPostMenu(true)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{ padding: 4 }}
+        >
+          <Ionicons name="ellipsis-horizontal" size={18} color="#9ca3af" />
+        </TouchableOpacity>
+      </View>
 
       {/* Body */}
       {post.body ? (
@@ -866,6 +940,96 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
             onClose={() => setShowQuote(false)}
             onShared={() => { queryClient.invalidateQueries({ queryKey: ['feed'] }); }}
           />
+        </Pressable>
+      </Modal>
+
+      {/* ─── Post ⋯ menu ──────────────────────────────────────────────────────── */}
+      <Modal visible={showPostMenu} transparent animationType="fade" onRequestClose={() => setShowPostMenu(false)}>
+        <Pressable style={s.menuBackdrop} onPress={() => setShowPostMenu(false)}>
+          <Pressable style={s.menuSheet} onPress={e => e.stopPropagation()}>
+            {isOwn ? (
+              <>
+                {/* Edit — author only */}
+                <TouchableOpacity
+                  style={s.menuRow}
+                  onPress={() => {
+                    setShowPostMenu(false);
+                    setEditPostBody(post.body ?? '');
+                    setEditingPost(true);
+                  }}
+                >
+                  <Ionicons name="create-outline" size={20} color="#4f46e5" />
+                  <Text allowFontScaling={false} style={s.menuRowTxt}>Edit post</Text>
+                </TouchableOpacity>
+                {/* Delete — author only */}
+                <TouchableOpacity
+                  style={s.menuRow}
+                  onPress={() => { setShowPostMenu(false); handleDeletePost(); }}
+                  disabled={deletePostMutation.isPending}
+                >
+                  <Ionicons name="trash-outline" size={20} color="#ef4444" />
+                  <Text allowFontScaling={false} style={[s.menuRowTxt, { color: '#ef4444' }]}>
+                    {deletePostMutation.isPending ? 'Deleting…' : 'Delete post'}
+                  </Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              /* Report — non-author only, matching MF-013 */
+              <TouchableOpacity
+                style={s.menuRow}
+                onPress={() => { setShowPostMenu(false); handleReportPost(); }}
+                disabled={reportPostMutation.isPending}
+              >
+                <Ionicons name="flag-outline" size={20} color="#f59e0b" />
+                <Text allowFontScaling={false} style={[s.menuRowTxt, { color: '#f59e0b' }]}>
+                  {reportPostMutation.isPending ? 'Reporting…' : 'Report post'}
+                </Text>
+              </TouchableOpacity>
+            )}
+            {/* Cancel */}
+            <TouchableOpacity style={[s.menuRow, { borderTopWidth: 1, borderTopColor: '#f3f4f6', marginTop: 4 }]} onPress={() => setShowPostMenu(false)}>
+              <Text allowFontScaling={false} style={[s.menuRowTxt, { color: '#6b7280', textAlign: 'center', flex: 1 }]}>Cancel</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* ─── Edit post sheet ──────────────────────────────────────────────────── */}
+      <Modal visible={editingPost} transparent animationType="slide" onRequestClose={() => setEditingPost(false)}>
+        <Pressable style={s.menuBackdrop} onPress={() => setEditingPost(false)}>
+          <Pressable style={[s.menuSheet, { paddingBottom: 24 }]} onPress={e => e.stopPropagation()}>
+            <Text allowFontScaling={false} style={[s.menuRowTxt, { fontWeight: '700', fontSize: 16, marginBottom: 12, textAlign: 'center', color: '#111827' }]}>
+              Edit Post
+            </Text>
+            <TextInput
+              style={s.editPostInput}
+              value={editPostBody}
+              onChangeText={setEditPostBody}
+              multiline
+              autoFocus
+              maxLength={5000}
+              placeholder="What's on your mind?"
+              placeholderTextColor="#9ca3af"
+            />
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+              <TouchableOpacity
+                style={[s.editPostBtn, { backgroundColor: '#f3f4f6', flex: 1 }]}
+                onPress={() => setEditingPost(false)}
+              >
+                <Text allowFontScaling={false} style={{ color: '#6b7280', fontWeight: '600', fontSize: 14 }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.editPostBtn, { backgroundColor: '#4f46e5', flex: 2 }, (!editPostBody.trim() || editPostMutation.isPending) && { opacity: 0.5 }]}
+                onPress={() => editPostMutation.mutate(editPostBody.trim())}
+                disabled={!editPostBody.trim() || editPostMutation.isPending}
+              >
+                {editPostMutation.isPending
+                  ? <ActivityIndicator size="small" color="#fff" />
+                  : <Text allowFontScaling={false} style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Save</Text>
+                }
+              </TouchableOpacity>
+            </View>
+          </Pressable>
         </Pressable>
       </Modal>
     </View>
@@ -1176,6 +1340,13 @@ const s = StyleSheet.create({
   quotePostBtnTxt:   { color: '#fff', fontWeight: '700', fontSize: 15 },
   quoteVisRow:       { flexDirection: 'row', alignItems: 'center', gap: 4 },
   quoteVisTxt:       { fontSize: 11, color: '#6b7280' },
+  // Post ⋯ menu + edit sheet
+  menuBackdrop:      { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
+  menuSheet:         { backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 16, paddingBottom: 32, gap: 2 },
+  menuRow:           { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 13, paddingHorizontal: 4 },
+  menuRowTxt:        { fontSize: 15, fontWeight: '600', color: '#111827' },
+  editPostInput:     { borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 12, padding: 12, fontSize: 15, color: '#111827', minHeight: 120, textAlignVertical: 'top', backgroundColor: '#f9fafb' },
+  editPostBtn:       { borderRadius: 12, paddingVertical: 11, alignItems: 'center', justifyContent: 'center' },
   // Comments section
   commentSec:        { marginTop: 10, borderTopWidth: 1, borderTopColor: '#f3f4f6', paddingTop: 8, gap: 10 },
   commentRow:        { flexDirection: 'row', gap: 8 },

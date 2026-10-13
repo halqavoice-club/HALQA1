@@ -326,8 +326,25 @@ async function createPost(req, res, next) {
           }
         }
       } else if (post.visibility === 'PUBLIC' || post.visibility === 'FOLLOWERS') {
-        // Regular (non-community) post — broadcast to all connected clients
-        io.to('feed:public').emit('post:create', { post: full });
+        // MF-010 FIX: Exclude blocked users from feed:public broadcast.
+        // Each connected user has a personal room `feed:${userId}` (joined in app.js feed:join handler).
+        // We fetch the author's bilateral block list and use io.except() to skip those personal rooms,
+        // so blocked users don't receive the new-post banner for content they can't see.
+        const blocks = await prisma.userBlock.findMany({
+          where: { OR: [{ blockerId: req.user.id }, { blockedId: req.user.id }] },
+          select: { blockerId: true, blockedId: true }
+        }).catch(() => []);
+
+        const blockedRooms = blocks
+          .flatMap(b => [b.blockerId, b.blockedId])
+          .filter(id => id !== req.user.id)
+          .map(id => `feed:${id}`);
+
+        const emitter = blockedRooms.length > 0
+          ? io.except(blockedRooms).to('feed:public')
+          : io.to('feed:public');
+
+        emitter.emit('post:create', { post: full });
       } else if (post.visibility === 'SCHOOL_ONLY' && post.schoolId) {
         // FS-GAP-002 FIX: Use post.schoolId (resolved at creation) not req.user.schoolId
         io.to(`feed:school:${post.schoolId}`).emit('post:create', { post: full });
@@ -1042,10 +1059,12 @@ async function reportPost(req, res, next) {
   try {
     const { reason, description } = req.body;
 
-    // Validate reason — same set as userReport
+    // Validate reason — same set as userReport, plus mobile-friendly aliases
     const VALID_REASONS = [
       'spam', 'harassment', 'hate_speech', 'sexual_content',
       'scam', 'impersonation', 'underage', 'other',
+      // Mobile app sends these — included for client compatibility
+      'inappropriate', 'misinformation',
     ];
     if (!reason || !VALID_REASONS.includes(reason)) {
       return errorResponse(res, `reason must be one of: ${VALID_REASONS.join(', ')}`, 400);
@@ -1138,19 +1157,36 @@ async function getReels(req, res, next) {
     const take      = Math.min(20, Math.max(1, parseInt(limit)));
     const viewerId  = req.user.id;
 
-    // BLOCK FIX: Load bilateral block list so blocked authors are excluded.
-    const blocks = await prisma.userBlock.findMany({
-      where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
-      select: { blockerId: true, blockedId: true }
-    }).catch(() => []);
+    // MF-016 FIX: Include FOLLOWERS-only reels from people the viewer follows.
+    // Fetch the viewer's following set in the same Promise.all as blocks to avoid extra round-trip.
+    const [blocks, following] = await Promise.all([
+      prisma.userBlock.findMany({
+        where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
+        select: { blockerId: true, blockedId: true }
+      }).catch(() => []),
+      prisma.follow.findMany({
+        where: { followerId: viewerId },
+        select: { followingId: true }
+      }).catch(() => []),
+    ]);
+
     const blockedAuthorIds = [
       ...new Set(blocks.flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== viewerId))
     ];
+    const followingIds = following.map(f => f.followingId);
+
+    // Build visibility filter: PUBLIC for all, OR FOLLOWERS for followed authors
+    const visibilityFilter = followingIds.length > 0
+      ? { OR: [
+          { visibility: 'PUBLIC' },
+          { visibility: 'FOLLOWERS', authorId: { in: followingIds } },
+        ]}
+      : { visibility: 'PUBLIC' };
 
     const where = {
-      deletedAt:  null,
-      isDraft:    false,
-      visibility: 'PUBLIC',
+      deletedAt: null,
+      isDraft:   false,
+      ...visibilityFilter,
       // Must have at least one VIDEO media item
       media: { some: { type: 'VIDEO' } },
     };
@@ -1329,6 +1365,24 @@ async function recordView(req, res, next) {
   } catch (e) { next(e); }
 }
 
+// ─── RECORD SHARE ─────────────────────────────────────────────────────────────
+// Called when a user shares via clipboard or native OS share sheet (not repost/quote).
+// Increments shareCount by 1. Fire-and-forget — returns 200 immediately.
+// Idempotent in the sense that calling multiple times keeps incrementing (each
+// clipboard/native share is a real share event). Rate-limiting on the route prevents abuse.
+async function recordShare(req, res, next) {
+  try {
+    const { id: postId } = req.params;
+    const exists = await prisma.post.findFirst({
+      where: { id: postId, deletedAt: null },
+      select: { id: true }
+    });
+    if (!exists) return res.status(204).end(); // silently ignore missing posts
+    await prisma.post.update({ where: { id: postId }, data: { shareCount: { increment: 1 } } });
+    return successResponse(res, { shared: true });
+  } catch (e) { next(e); }
+}
+
 // ─── LINK PREVIEW SCRAPE ─────────────────────────────────────────────────────
 // Fetches OG/meta tags from a URL. Uses Node built-in https/http — no extra deps.
 // Results cached in Redis for 1 hour (same URL will never be re-fetched during that window).
@@ -1479,6 +1533,29 @@ async function getLinkPreview(req, res, next) {
       image:       getMeta('image') || null,
     };
 
+    // MF-015 FIX: Validate the og:image URL against the SSRF blocklist before storing.
+    // A malicious page could set og:image to a private/internal URL (e.g. http://169.254.169.254/)
+    // which would be stored and rendered in <img src> on the frontend.
+    if (preview.image) {
+      try {
+        const imgParsed = new URL(preview.image);
+        if (imgParsed.protocol !== 'https:' && imgParsed.protocol !== 'http:') {
+          // Reject non-http(s) schemes (data:, javascript:, file:, etc.)
+          preview.image = null;
+        } else {
+          const imgIps = await Promise.allSettled([resolve4(imgParsed.hostname), resolve6(imgParsed.hostname)]).catch(() => []);
+          const imgResolvedIps = (Array.isArray(imgIps) ? imgIps : []).flatMap(r => r.status === 'fulfilled' ? r.value : []);
+          if (imgResolvedIps.some(isPrivateIp)) {
+            logger.warn(`[getLinkPreview] SSRF: og:image URL ${preview.image} resolves to private IP — suppressed`);
+            preview.image = null;
+          }
+        }
+      } catch {
+        // DNS error or invalid URL — suppress image rather than crashing
+        preview.image = null;
+      }
+    }
+
     // Cache for 1 hour
     try {
       const { isRedisReady, setCache } = require('../utils/redis');
@@ -1593,6 +1670,6 @@ module.exports = {
   getFeed, getUserPosts, getReels,
   reactToPost, getReactions,
   addComment, getComments, editComment, deleteComment, reactToComment,
-  toggleBookmark, pinPost, recordView, getLiveSessions,
+  toggleBookmark, pinPost, recordView, recordShare, getLiveSessions,
   searchPosts, getTrendingHashtags, reportPost, votePoll, getLinkPreview
 };
