@@ -198,7 +198,7 @@ jobs:
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-cmd="mysqladmin ping -h localhost -u root --password=root --silent"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=10
@@ -431,7 +431,7 @@ jobs:
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-cmd="mysqladmin ping -h localhost -u root --password=root --silent"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=10
