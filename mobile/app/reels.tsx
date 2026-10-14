@@ -8,7 +8,7 @@
  * - Author info + caption overlay
  * - Infinite scroll
  */
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   Image, ActivityIndicator, Dimensions, StatusBar,
@@ -21,7 +21,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { formatDistanceToNow } from 'date-fns';
 import { showMessage } from 'react-native-flash-message';
-import { Video, ResizeMode } from 'expo-av';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import api from '@/lib/api';
 import { avatarUrl } from '@/lib/avatar';
 import { useAuthStore } from '@/store/auth.store';
@@ -154,29 +154,56 @@ function ReelItem({
   const { user } = useAuthStore();
   const qc = useQueryClient();
   const video = item.media.find(m => m.type === 'VIDEO');
-  const videoRef = useRef<Video>(null);
+  const videoUri = video
+    ? (video.url.startsWith('http') ? video.url : `${api.defaults.baseURL?.replace('/api/v1', '')}${video.url}`)
+    : null;
 
   const myReaction = item.reactions?.find(r => r.userId === user?.id)?.type ?? null;
   const [liked,      setLiked]      = useState(!!myReaction);
   const [likeCount,  setLikeCount]  = useState(item._count.reactions);
   const [bookmarked, setBookmarked] = useState((item.bookmarks?.length ?? 0) > 0);
   const [following,  setFollowing]  = useState(item.isFollowing ?? false);
+  const [muted,      setMuted]      = useState(true);
 
-  // Mute state
-  const [muted, setMuted] = useState(true);
-  // MF-005: buffering and error state for video playback feedback
+  // expo-video: create player instance; loop and muted by default
+  const player = useVideoPlayer(videoUri ?? '', p => {
+    p.loop    = true;
+    p.muted   = true;
+    p.volume  = 1;
+  });
+
+  // MF-005: track buffering and error state for playback feedback
   const [isBuffering, setIsBuffering] = useState(false);
   const [videoError,  setVideoError]  = useState(false);
 
-  const onPlaybackStatusUpdate = useCallback((status: any) => {
-    if (!status.isLoaded) {
-      // error state
-      if (status.error) setVideoError(true);
-      return;
+  // Play/pause based on whether this reel is the visible one
+  React.useEffect(() => {
+    if (!videoUri) return;
+    if (isActive) {
+      player.play();
+    } else {
+      player.pause();
     }
-    setVideoError(false);
-    setIsBuffering(status.isBuffering ?? false);
-  }, []);
+  }, [isActive, player, videoUri]);
+
+  // Mirror mute state to player
+  React.useEffect(() => {
+    player.muted = muted;
+  }, [muted, player]);
+
+  // Buffering / error status via player events
+  React.useEffect(() => {
+    const sub = player.addListener('statusChange', (status: any) => {
+      if (status === 'error') {
+        setVideoError(true);
+        setIsBuffering(false);
+      } else {
+        setVideoError(false);
+        setIsBuffering(status === 'loading');
+      }
+    });
+    return () => sub.remove();
+  }, [player]);
 
   // React mutation
   const reactMutation = useMutation({
@@ -227,15 +254,11 @@ function ReelItem({
               <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 13, marginTop: 8 }}>Video unavailable</Text>
             </View>
           ) : (
-            <Video
-              ref={videoRef}
-              source={{ uri: video.url.startsWith('http') ? video.url : `${api.defaults.baseURL?.replace('/api/v1', '')}${video.url}` }}
+            <VideoView
+              player={player}
               style={StyleSheet.absoluteFill}
-              resizeMode={ResizeMode.COVER}
-              shouldPlay={isActive}
-              isLooping
-              isMuted={muted}
-              onPlaybackStatusUpdate={onPlaybackStatusUpdate}
+              contentFit="cover"
+              nativeControls={false}
             />
           )}
           {/* Buffering spinner overlay */}

@@ -2229,12 +2229,17 @@ model PostBookmark {
 }
 
 model PostView {
-  id        String   @id @default(uuid())
-  postId    String
-  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
-  userId    String
-  user      User     @relation("PostViews", fields: [userId], references: [id], onDelete: Cascade)
-  createdAt DateTime @default(now())
+  id            String   @id @default(uuid())
+  postId        String
+  post          Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User     @relation("PostViews", fields: [userId], references: [id], onDelete: Cascade)
+  // FIND-009 FIX: Store which poll option the user voted for.
+  // NULL means a regular view (not a poll vote). The votePoll controller
+  // uses PostView as a combined view+vote record to avoid a separate migration.
+  // Adding this column makes poll vote recording and count queries work correctly.
+  votedOptionId String?
+  createdAt     DateTime @default(now())
 
   @@unique([postId, userId])
   @@index([postId])

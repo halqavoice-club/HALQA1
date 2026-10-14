@@ -28,13 +28,36 @@ const logger = require('./logger');
 //   - Perspective API (Google): https://www.perspectiveapi.com
 //   - Azure Content Moderator
 // These can be wired as an async check here if API credentials are available.
+//
+// FIND-005 FIX: Added a baseline set of universally inappropriate terms.
+// Previously this array was empty, making the filter a no-op unless
+// CONTENT_FILTER_WORDS was explicitly configured at deploy time.
+// Operators should extend this via CONTENT_FILTER_WORDS for community-specific terms.
 const DEFAULT_BLOCKED_PATTERNS = [
-  // Hate speech patterns (regex — case-insensitive word-boundary match)
-  // Add your own patterns here as needed for your specific community
+  // Severe profanity — the most universally inappropriate English terms
+  /\bf+u+c+k+\b/i,
+  /\bs+h+i+t+\b/i,
+  /\ba+s+s+h+o+l+e+\b/i,
+  /\bb+i+t+c+h+\b/i,
+  /\bc+u+n+t\b/i,
+  // Slurs — religious and ethnic hatred
+  /\bkaffir\b/i,
+  /\bnigger\b/i,
+  /\bspic\b/i,
+  /\bchink\b/i,
+  /\bgook\b/i,
+  // Calls to violence / self-harm (phrase-level)
+  /\bkill\s+yourself\b/i,
+  /\bgo\s+kill\s+yourself\b/i,
 ];
 
 // Build the active filter from env config
 let _cachedFilter = null;
+
+// FIND-005 FIX: Emit a startup warning when the filter is enabled but no
+// patterns are configured. This surfaces misconfiguration at boot rather
+// than silently accepting all content. Fires once on first getFilter() call.
+let _startupWarningEmitted = false;
 
 function getFilter() {
   if (_cachedFilter) return _cachedFilter;
@@ -49,10 +72,25 @@ function getFilter() {
     ...customWords.map(w => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')),
   ];
 
+  const enabled = process.env.CONTENT_FILTER_ENABLED !== 'false';
+
+  // Startup warning: filter is enabled but has no patterns to enforce.
+  // This catches the case where DEFAULT_BLOCKED_PATTERNS is re-emptied by a
+  // future maintainer and CONTENT_FILTER_WORDS is not set in the environment.
+  if (enabled && allPatterns.length === 0 && !_startupWarningEmitted) {
+    _startupWarningEmitted = true;
+    logger.warn(
+      '[content-filter] Filter is ENABLED but DEFAULT_BLOCKED_PATTERNS is empty ' +
+      'and CONTENT_FILTER_WORDS is not configured. ' +
+      'All content will pass unchecked. Set CONTENT_FILTER_WORDS or populate ' +
+      'DEFAULT_BLOCKED_PATTERNS in backend/src/utils/contentFilter.js.'
+    );
+  }
+
   _cachedFilter = {
-    patterns:    allPatterns,
-    enabled:     process.env.CONTENT_FILTER_ENABLED !== 'false',
-    mode:        process.env.CONTENT_FILTER_MODE || 'block', // 'block' | 'flag'
+    patterns: allPatterns,
+    enabled,
+    mode: process.env.CONTENT_FILTER_MODE || 'block',
   };
 
   return _cachedFilter;
