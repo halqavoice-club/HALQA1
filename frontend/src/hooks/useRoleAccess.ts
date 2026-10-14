@@ -19,7 +19,7 @@ const ALWAYS_ALLOWED = [
   // Social features — all authenticated users can access these regardless of role
   '/live-class', '/live-stream', '/voice-club', '/feed', '/explore',
   '/communities', '/dm', '/group-chat', '/messages', '/social',
-  '/creator', '/wallet', '/leaderboard',
+  '/creator', '/wallet', '/leaderboard', '/reels',
 ]
 
 /**

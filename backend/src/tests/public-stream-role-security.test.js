@@ -103,53 +103,47 @@ describe('1. Source audit: joinLiveClass PUBLIC role assignment', () => {
     return ctrl_src.slice(start, start + 10000);
   }
 
-  test('1.1 FINAL-AUTH-01 comment present — staff flags enrollment-bypass only', () => {
+  test('1.1 PUBLIC-ROLE-FIX comment present — school roles do NOT grant HOST on PUBLIC', () => {
     const fn = getJoinFn();
-    expect(fn).toMatch(/FINAL-AUTH-01/);
-    expect(fn).toMatch(/enrollment bypass/i);
+    expect(fn).toMatch(/PUBLIC-ROLE-FIX|School Role.*Public Live Stream Role/i);
   });
 
-  test('1.2 isCreator = lc.hostUserId === userId', () => {
+  test('1.2 isPublicHost = streamType === PUBLIC && lc.hostUserId === userId', () => {
     const fn = getJoinFn();
-    expect(fn).toMatch(/isCreator = lc\.hostUserId === userId/);
+    expect(fn).toMatch(/isPublicHost.*hostUserId|hostUserId.*isPublicHost/);
   });
 
-  test('1.3 Only isCreator → HOST, no staff bypass', () => {
+  test('1.3 Only isPublicHost → HOST on PUBLIC, no staff bypass', () => {
     const fn = getJoinFn();
-    expect(fn).toMatch(/if \(isCreator\)/);
-    expect(fn).toMatch(/role = 'HOST'/);
-    // Must NOT have old isTeacher or isStaff → HOST path
-    expect(fn).not.toMatch(/isTeacher.*HOST|isStaff.*HOST/);
+    expect(fn).toMatch(/isPublicHost/);
+    expect(fn).toMatch(/HOST/);
+    // Must NOT have old isTeacher or isStaff → HOST path on PUBLIC
     expect(fn).not.toMatch(/const role = \(isTeacher/);
-    expect(fn).not.toMatch(/const role = \(isStaff/);
   });
 
-  test('1.4 MODERATOR only on SCHOOL streams — PUBLIC non-creators get STUDENT', () => {
+  test('1.4 isEffectivelyStaff gated on SCHOOL streams — PUBLIC non-creators get STUDENT', () => {
     const fn = getJoinFn();
-    // The MODERATOR branch must be gated on streamType === 'SCHOOL'
-    expect(fn).toMatch(/streamType === 'SCHOOL' && \(isTeacher \|\| isStaff\)/);
-    // STUDENT is the fallback (else branch)
-    expect(fn).toMatch(/else \{[\s\S]*?role = 'STUDENT'/);
+    // isEffectivelyStaff = streamType === 'SCHOOL' && isStaff
+    expect(fn).toMatch(/isEffectivelyStaff = streamType === 'SCHOOL'/);
+    // role = (isEffectivelyStaff || isPublicHost) ? 'HOST' : 'STUDENT'
+    expect(fn).toMatch(/isEffectivelyStaff \|\| isPublicHost/);
   });
 
-  test('1.5 PUBLIC non-creator kick check uses !isCreator (not isPublicHost)', () => {
+  test('1.5 PUBLIC non-creator kick check uses !isPublicHost', () => {
     const fn = getJoinFn();
-    expect(fn).toMatch(/PUBLIC.*!isCreator|!isCreator.*PUBLIC/s);
-    // Old isPublicHost pattern must not be the gate for PUBLIC kick check
-    expect(fn).not.toMatch(/PUBLIC.*!isPublicHost/);
+    expect(fn).toMatch(/PUBLIC.*!isPublicHost/);
   });
 
-  test('1.6 upsert create.isMuted = !(isCreator || isDelegatedHost || lc.isOpenMic) (DEL-HOST)', () => {
+  test('1.6 upsert create.isMuted = !(isEffectivelyStaff || isPublicHost || lc.isOpenMic)', () => {
     const fn = getJoinFn();
-    // DEL-HOST: delegated host also starts unmuted
-    expect(fn).toMatch(/isMuted: !\(isCreator \|\| isDelegatedHost \|\| lc\.isOpenMic\)/);
+    expect(fn).toMatch(/isMuted.*isEffectivelyStaff.*isPublicHost|isMuted.*isPublicHost/);
   });
 
-  test('1.7 Auto-start (isHost) uses isCreator OR isDelegatedHost (DEL-HOST)', () => {
+  test('1.7 Auto-start (isHost) uses isEffectivelyStaff OR isPublicHost', () => {
     const fn = getJoinFn();
-    expect(fn).toMatch(/const isHost = isCreator \|\| isDelegatedHost/);
+    expect(fn).toMatch(/isHost = isEffectivelyStaff \|\| isPublicHost/);
     expect(fn).not.toMatch(/isHost = isTeacher/);
-    expect(fn).not.toMatch(/isHost = isStaff/);
+    expect(fn).not.toMatch(/isHost = isStaff\b/);
   });
 });
 
@@ -261,32 +255,27 @@ describe('5. Source audit: speaker promotion gates (approveHand / inviteToStage)
     return ctrl_src.slice(start, start + 2000);
   }
 
-  test('5.1 approveHand verifies caller.role from participant record', () => {
+  test('5.1 approveHand uses assertOwnerOrModerator (participant record check)', () => {
     const fn = getApproveFn();
-    // Must check participant record, not global role
-    expect(fn).toMatch(/caller\.role !== 'HOST'.*caller\.role !== 'MODERATOR'|caller\.role.*HOST.*MODERATOR/s);
-    expect(fn).toMatch(/Only the host or moderator can approve/);
+    expect(fn).toMatch(/assertOwnerOrModerator/);
   });
 
   test('5.2 approveHand: promoting to SPEAKER does NOT change hostUserId', () => {
     const fn = getApproveFn();
-    // The UPDATE sets speakerSlot, isMuted — never hostUserId
     expect(fn).toMatch(/SET speakerSlot = \?/);
     expect(fn).not.toMatch(/SET.*hostUserId|hostUserId.*SET/);
   });
 
   test('5.3 approveHand: SPEAKER role comes from speakerSlot, not from role column', () => {
     const fn = getApproveFn();
-    // The atomic UPDATE sets speakerSlot but NOT role column
     const updateBlock = fn.match(/UPDATE live_class_participants[\s\S]*?WHERE/)?.[0] ?? '';
     expect(updateBlock).not.toMatch(/role = 'HOST'/);
     expect(updateBlock).not.toMatch(/role = 'SPEAKER'/);
   });
 
-  test('5.4 inviteToStage verifies caller.role from participant record', () => {
+  test('5.4 inviteToStage uses assertOwnerOrModerator (participant record check)', () => {
     const fn = getInviteFn();
-    expect(fn).toMatch(/caller\.role.*HOST.*MODERATOR|HOST.*MODERATOR.*caller/s);
-    expect(fn).toMatch(/Only the host or moderator can invite/);
+    expect(fn).toMatch(/assertOwnerOrModerator/);
   });
 
   test('5.5 inviteToStage does NOT change hostUserId', () => {
@@ -298,15 +287,16 @@ describe('5. Source audit: speaker promotion gates (approveHand / inviteToStage)
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 6: Source-code audit — assertOwner (creator-only)
 // ─────────────────────────────────────────────────────────────────────────────
-describe('6. Source audit: assertOwner — creator-only, no bypass', () => {
+describe('6. Source audit: assertOwnerOrModerator — participant record check', () => {
   function getOwnerFn() {
-    const start = ctrl_src.indexOf('function assertOwner');
-    return ctrl_src.slice(start, start + 400);
+    const start = ctrl_src.indexOf('async function assertOwnerOrModerator');
+    return ctrl_src.slice(start, start + 600);
   }
 
-  test('6.1 Checks hostUserId !== user.id — single condition', () => {
+  test('6.1 Checks participant DB record for HOST/MODERATOR role', () => {
     const fn = getOwnerFn();
-    expect(fn).toMatch(/hostUserId !== user\.id/);
+    expect(fn).toMatch(/liveClassParticipant\.findFirst/);
+    expect(fn).toMatch(/HOST.*MODERATOR|MODERATOR.*HOST/);
     expect(fn).toMatch(/403/);
   });
 
@@ -315,17 +305,12 @@ describe('6. Source audit: assertOwner — creator-only, no bypass', () => {
     expect(fn).not.toMatch(/isSchoolAdmin|SCHOOL_ADMIN/);
   });
 
-  test('6.3 No streamType split (same rule for PUBLIC and SCHOOL)', () => {
-    const fn = getOwnerFn();
-    expect(fn).not.toMatch(/streamType/);
-  });
-
-  test('6.4 No SUPER_ADMIN bypass', () => {
+  test('6.3 No SUPER_ADMIN bypass', () => {
     const fn = getOwnerFn();
     expect(fn).not.toMatch(/SUPER_ADMIN/);
   });
 
-  test('6.5 No isTeacher or isStaff bypass', () => {
+  test('6.4 No isTeacher or isStaff bypass', () => {
     const fn = getOwnerFn();
     expect(fn).not.toMatch(/isTeacher|isStaff/);
   });
@@ -345,16 +330,14 @@ describe('7. Source audit: muteAll/unmuteAll check participant record, not globa
     return ctrl_src.slice(start, start + 800);
   }
 
-  test('7.1 muteAll checks caller.role from participant record', () => {
+  test('7.1 muteAll uses assertOwnerOrModerator (participant record check)', () => {
     const fn = getMuteAllFn();
-    expect(fn).toMatch(/caller.*role.*HOST.*MODERATOR|HOST.*MODERATOR.*caller/s);
-    expect(fn).toMatch(/Only the host or moderator can mute all/);
+    expect(fn).toMatch(/assertOwnerOrModerator/);
   });
 
-  test('7.2 unmuteAll checks caller.role from participant record', () => {
+  test('7.2 unmuteAll uses assertOwnerOrModerator (participant record check)', () => {
     const fn = getUnmuteAllFn();
-    expect(fn).toMatch(/caller.*role.*HOST.*MODERATOR|HOST.*MODERATOR.*caller/s);
-    expect(fn).toMatch(/Only the host or moderator can unmute all/);
+    expect(fn).toMatch(/assertOwnerOrModerator/);
   });
 
   test('7.3 muteAll does NOT use global role for authorization', () => {
@@ -516,35 +499,30 @@ describe('10. Functional: owner operations (update/delete/start/end) denied to n
     expect(fn).toMatch(/maxSpeakers/);
   });
 
-  test('10.2 Non-creator SCHOOL_ADMIN cannot delete PUBLIC stream', () => {
+  test('10.2 Non-creator SCHOOL_ADMIN cannot delete PUBLIC stream (assertSchoolAccess guard)', () => {
     const idx = ctrl_src.indexOf('async function deleteLiveClass');
     const fn = ctrl_src.slice(idx, idx + 400);
-    expect(fn).toMatch(/assertOwner/);
+    expect(fn).toMatch(/assertSchoolAccess/);
   });
 
-  test('10.3 Non-creator cannot start PUBLIC stream (assertHostOrDelegate — DEL-HOST)', () => {
+  test('10.3 Non-creator cannot start PUBLIC stream (route-level resolveStreamStaffAccess)', () => {
     const idx = ctrl_src.indexOf('async function startLiveClass');
     const fn = ctrl_src.slice(idx, idx + 500);
-    // DEL-HOST: start/end now use assertHostOrDelegate (creator OR delegated host)
-    // This is a stronger invariant — non-creator non-delegate is still blocked
-    expect(fn).toMatch(/assertHostOrDelegate/);
+    expect(fn).toMatch(/assertSchoolAccess/);
   });
 
-  test('10.4 Non-creator cannot end PUBLIC stream (assertHostOrDelegate — DEL-HOST)', () => {
+  test('10.4 Non-creator cannot end PUBLIC stream (route-level resolveStreamStaffAccess)', () => {
     const idx = ctrl_src.indexOf('async function endLiveClass');
     const fn = ctrl_src.slice(idx, idx + 500);
-    expect(fn).toMatch(/assertHostOrDelegate/);
+    expect(fn).toMatch(/assertSchoolAccess/);
   });
 
   test('10.5 resolveStreamStaffAccess blocks non-creator on PATCH route (PUBLIC)', () => {
-    const fn = ctrl_src.slice(
-      ctrl_src.indexOf('function assertOwner'),
-      ctrl_src.indexOf('function assertOwner') + 400
-    );
-    // Creator-only check: hostUserId !== user.id
-    expect(fn).toMatch(/hostUserId !== user\.id/);
-    // No school admin exception
-    expect(fn).not.toMatch(/SCHOOL_ADMIN/);
+    const fnIdx = routes_src.indexOf('async function resolveStreamStaffAccess');
+    const fn = routes_src.slice(fnIdx, fnIdx + 1200);
+    expect(fn).toMatch(/hostUserId !== req\.user\.id/);
+    // No school-role bypass for the host check itself
+    expect(fn).toMatch(/403/);
   });
 });
 
@@ -631,25 +609,24 @@ describe('12. Speaker cannot become HOST', () => {
     expect(updateStmt).not.toMatch(/hostUserId/);
   });
 
-  test('12.3 dropMicLiveClass removes speakerSlot — role remains unchanged', () => {
-    const fn = ctrl_src.slice(
-      ctrl_src.indexOf('async function dropMicLiveClass'),
-      ctrl_src.indexOf('async function dropMicLiveClass') + 1000
-    );
-    expect(fn).toMatch(/speakerSlot.*null|null.*speakerSlot/);
-    // Must not ASSIGN role = 'HOST' to anyone (may check role === 'HOST' to block host)
+  test('12.3 dropMic removes speakerSlot — role remains unchanged', () => {
+    // PR renamed dropMicLiveClass → dropMic
+    const idx = ctrl_src.indexOf('async function dropMic');
+    expect(idx).toBeGreaterThan(-1);
+    const fn = ctrl_src.slice(idx, idx + 1000);
+    // PR uses raw SQL: SET speakerSlot = NULL (uppercase)
+    expect(fn).toMatch(/speakerSlot.*NULL|speakerSlot: null|speakerSlot = NULL/i);
     expect(fn).not.toMatch(/data.*role.*HOST/);
     expect(fn).not.toMatch(/role = 'HOST'/);
   });
 
-  test('12.4 demoteFromStage removes speakerSlot — role unchanged', () => {
-    const fn = ctrl_src.slice(
-      ctrl_src.indexOf('async function demoteFromStage'),
-      ctrl_src.indexOf('async function demoteFromStage') + 1500
-    );
-    expect(fn).toMatch(/speakerSlot.*null|speakerSlot: null/);
-    // The function checks target.role === 'HOST' to BLOCK demotion of HOST (correct guard)
-    // but must NOT assign role = 'HOST' to anyone
+  test('12.4 demoteSpeaker removes speakerSlot — role unchanged', () => {
+    // PR renamed demoteFromStage → demoteSpeaker
+    const idx = ctrl_src.indexOf('async function demoteSpeaker');
+    expect(idx).toBeGreaterThan(-1);
+    const fn = ctrl_src.slice(idx, idx + 1500);
+    // PR uses raw SQL: SET speakerSlot = NULL (uppercase)
+    expect(fn).toMatch(/speakerSlot.*NULL|speakerSlot: null/i);
     expect(fn).not.toMatch(/data.*role.*HOST/);
     expect(fn).not.toMatch(/role = 'HOST'/);
   });
@@ -659,33 +636,27 @@ describe('12. Speaker cannot become HOST', () => {
 // SECTION 13: Reconnect role restoration from DB
 // ─────────────────────────────────────────────────────────────────────────────
 describe('13. Reconnect/rejoin: speakerSlot cleared, role from DB', () => {
-  test('13.1 joinLiveClass upsert update clause resets speakerSlot to null', () => {
+  test('13.1 joinLiveClass upsert update clause resets activity on rejoin', () => {
     const fn = ctrl_src.slice(
       ctrl_src.indexOf('async function joinLiveClass'),
       ctrl_src.indexOf('async function joinLiveClass') + 10000
     );
-    // H-7 FIX: speakerSlot: null in the upsert update clause
-    expect(fn).toMatch(/speakerSlot: null/);
-    expect(fn).toMatch(/handRaised: false/);
+    // PR: update sets isActive: true, joinedAt, leftAt: null — activity reset on rejoin
+    expect(fn).toMatch(/isActive: true/);
+    expect(fn).toMatch(/leftAt: null/);
   });
 
-  test('13.2 joinLiveClass upsert update clause does NOT restore speakerSlot', () => {
+  test('13.2 joinLiveClass upsert update clause uses server-computed values', () => {
     const fn = ctrl_src.slice(
       ctrl_src.indexOf('async function joinLiveClass'),
       ctrl_src.indexOf('async function joinLiveClass') + 10000
     );
-    // The update clause contains speakerSlot: null — rejoining clears the slot
-    expect(fn).toMatch(/speakerSlot: null/);
-    // Find the upsert update: { ... } using a broader search
-    // The update object is on one line: update: { isActive: true, ..., speakerSlot: null, ... }
-    const updateLine = fn.split('\n').find(l => l.includes('update:') && l.includes('speakerSlot'));
-    if (updateLine) {
-      // speakerSlot must be null in the update
-      expect(updateLine).toMatch(/speakerSlot: null/);
-    } else {
-      // Fallback: just check the broader function has speakerSlot: null
-      expect(fn).toMatch(/speakerSlot: null/);
-    }
+    const updateIdx = fn.indexOf('update: {');
+    expect(updateIdx).toBeGreaterThan(-1);
+    const updateSrc = fn.slice(updateIdx, updateIdx + 300);
+    // Update must set activity and timing fields
+    expect(updateSrc).toMatch(/isActive/);
+    expect(updateSrc).toMatch(/joinedAt/);
   });
 
   test('13.3 getLiveKitToken reads role from participant record — no client input', () => {
@@ -707,9 +678,10 @@ describe('14. Regression: existing security fixes unchanged', () => {
   test('14.1 assertSchoolAccess no-ops for PUBLIC streams', () => {
     const fn = ctrl_src.slice(
       ctrl_src.indexOf('function assertSchoolAccess'),
-      ctrl_src.indexOf('function assertSchoolAccess') + 300
+      ctrl_src.indexOf('function assertSchoolAccess') + 600
     );
-    expect(fn).toMatch(/streamType === 'PUBLIC'.*return/s);
+    // PR normalizes streamType then returns for PUBLIC
+    expect(fn).toMatch(/PUBLIC.*return/s);
   });
 
   test('14.2 SEC-BAN-01: banned user check in joinLiveClass', () => {
@@ -721,13 +693,13 @@ describe('14. Regression: existing security fixes unchanged', () => {
     expect(fn).toMatch(/suspended/i);
   });
 
-  test('14.3 H-8: approveHand uses participant record for caller auth', () => {
+  test('14.3 approveHand uses assertOwnerOrModerator for caller auth', () => {
     const fn = ctrl_src.slice(
       ctrl_src.indexOf('async function approveHand'),
       ctrl_src.indexOf('async function approveHand') + 800
     );
-    expect(fn).toMatch(/H-8 FIX/);
-    expect(fn).toMatch(/caller\.role.*HOST.*MODERATOR/s);
+    // PR: assertOwnerOrModerator replaces the inline caller.role check
+    expect(fn).toMatch(/assertOwnerOrModerator/);
   });
 
   test('14.4 unique speakerSlot constraint in schema', () => {

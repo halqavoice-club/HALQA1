@@ -2,8 +2,6 @@ const { AccessToken } = require('livekit-server-sdk');
 const prisma = require('../utils/prisma');
 const { successResponse, errorResponse } = require('../utils/response');
 
-const MAX_SPEAKERS = 10;
-
 /**
  * POST /voice/rooms/:id/livekit-token
  *
@@ -36,6 +34,21 @@ async function getLiveKitToken(req, res, next) {
     });
     if (!participant || !participant.isActive) {
       return errorResponse(res, 'You are not an active participant in this room', 403);
+    }
+
+    // SEC-BAN-01: Banned users must not receive new LiveKit tokens.
+    // Tokens are long-lived (1h) so a ban applied after token issue won't take effect
+    // until expiry — but we can at least block new token requests immediately.
+    // The platform-ban flow (report-block.controller.js) sets user.status='BANNED'
+    // but does NOT deactivate VoiceParticipant, so the participant check above is
+    // insufficient on its own. Query fresh from DB — req.user is JWT-derived and
+    // may be stale if the ban was applied after the current access token was issued.
+    const freshUser = await prisma.user.findUnique({
+      where:  { id: userId },
+      select: { status: true },
+    });
+    if (freshUser?.status === 'BANNED') {
+      return errorResponse(res, 'Your account has been suspended', 403);
     }
 
     const role = participant.role; // HOST | MODERATOR | SPEAKER | AUDIENCE
@@ -83,8 +96,13 @@ async function getLiveKitToken(req, res, next) {
 
     const token = await at.toJwt();
 
-    // Tell the frontend whether to start with mic ON or OFF
-    const micEnabled = role === 'HOST' || role === 'MODERATOR' || role === 'SPEAKER';
+    // Tell the frontend whether to start with mic ON or OFF.
+    // HOST/MOD start muted (in audience state) — they unmute by calling grabMic/drop-mic.
+    // SPEAKER is always on stage with mic active.
+    // This is the initial mic state hint only; the client uses Socket.IO role events
+    // to enable/disable the mic track throughout the session.
+    const micEnabled = role === 'SPEAKER' ||
+      ((role === 'HOST' || role === 'MODERATOR') && !participant.isMuted);
 
     return successResponse(res, {
       token,
@@ -119,8 +137,21 @@ async function generateToken(req, res, next) {
       return errorResponse(res, 'LiveKit is not configured on this server', 503);
     }
 
-    const { roomId, canPublish = true, canSubscribe = true } = req.body;
+    const { roomId, canSubscribe = true } = req.body;
     const userId = req.user.id;
+
+    // P24M-02 FIX: Fresh platform ban check for ALL room types.
+    // A platform-banned user must not obtain any LiveKit token via this endpoint.
+    // Mirrors getLiveKitToken() (voice) fresh ban check pattern (SEC-BAN-01).
+    // req.user is JWT-derived and may be stale if the ban was applied after the
+    // current access token was issued — always query fresh from DB.
+    const freshUser = await prisma.user.findUnique({
+      where:  { id: userId },
+      select: { status: true },
+    });
+    if (freshUser?.status === 'BANNED') {
+      return errorResponse(res, 'Your account has been suspended', 403);
+    }
 
     // ── Task 1 (P2-A): Live class room protection ──────────────────────────
     // Room names for live classes follow the pattern: "liveclass-{uuid}"
@@ -158,25 +189,24 @@ async function generateToken(req, res, next) {
           // schoolId mismatch — check SchoolMembership as fallback for MEMBER users
           const membership = await prisma.schoolMembership.findUnique({
             where: { userId_schoolId: { userId, schoolId: lc.schoolId } },
-            select: { status: true }
+            select: { status: true, deletedAt: true }
           });
-          if (!membership || membership.status !== 'ACTIVE') {
+          // G-4 FIX: also reject soft-deleted memberships (deletedAt is set).
+          // Previously only status was checked; a membership deleted while still
+          // ACTIVE at deletion time would incorrectly pass this guard.
+          if (!membership || membership.deletedAt || membership.status !== 'ACTIVE') {
             return errorResponse(res, 'Access denied to this school\'s resource', 403);
           }
         } else {
-          // schoolId matches — verify membership is ACTIVE.
-          // VULN-LIVE-005 FIX: A null membership (record deleted, not just
-          // suspended) must also be rejected here. The previous condition
-          //   if (membership && membership.status !== 'ACTIVE')
-          // treated a null membership as passing (null is falsy), which
-          // allowed a user with a matching legacy user.schoolId but no active
-          // SchoolMembership record to proceed past this layer.
-          // Fix: require membership to exist AND be ACTIVE.
+          // schoolId matches — verify membership is not suspended or deleted
           const membership = await prisma.schoolMembership.findUnique({
             where: { userId_schoolId: { userId, schoolId: lc.schoolId } },
-            select: { status: true }
+            select: { status: true, deletedAt: true }
           });
-          if (!membership || membership.status !== 'ACTIVE') {
+          // G-4 FIX: also reject soft-deleted memberships.
+          // VULN-LIVE-005 FIX: A null membership (record deleted, not just suspended)
+          // must also be rejected. Require membership to exist AND be ACTIVE and NOT deleted.
+          if (!membership || membership.deletedAt || membership.status !== 'ACTIVE') {
             return errorResponse(res, 'Access denied — your school membership is not active', 403);
           }
         }
@@ -260,12 +290,18 @@ async function generateToken(req, res, next) {
       ttl:      '1h',
     });
 
+    // P24M-01 FIX: Never honor client-supplied canPublish for unknown/non-HALQA room types.
+    // Publish capability requires explicit server-side authorization, which only the
+    // dedicated room-type-specific checks above (liveclass-* and voice UUID paths) provide.
+    // For any room that did not go through an authorized path (e.g. custom PK/external rooms),
+    // default to subscribe-only so a client cannot self-elevate by sending canPublish:true.
+    // canSubscribe remains client-controllable since it does not grant broadcast capability.
     at.addGrant({
       roomJoin:             true,
       room:                 roomId,
-      canPublish:           Boolean(canPublish),
+      canPublish:           false,              // P24M-01: always false for unknown/non-HALQA rooms
       canSubscribe:         Boolean(canSubscribe),
-      canPublishData:       Boolean(canPublish),
+      canPublishData:       false,              // consistent with canPublish:false
       canUpdateOwnMetadata: true,
     });
 

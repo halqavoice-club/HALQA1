@@ -1068,7 +1068,16 @@ export default function LiveClassScreen() {
         const tkRes = await api.post(`/live-classes/${id}/livekit-token`);
         const { token: lkToken, livekitUrl } = tkRes.data.data;
         if (lkToken && livekitUrl) {
-          await lk.connect(livekitUrl, lkToken, true);
+          // P24M-03 FIX: pass tokenFetcher so every reconnect path obtains a fresh
+          // token from the authoritative backend endpoint rather than reusing the
+          // stale cached token.  Mirrors the Voice Club pattern (PH19-002 FIX).
+          const tokenFetcher = async (): Promise<string> => {
+            const res = await api.post(`/live-classes/${id}/livekit-token`);
+            const token = res.data?.data?.token;
+            if (!token) throw new Error('No token in response');
+            return token;
+          };
+          await lk.connect(livekitUrl, lkToken, true, id, tokenFetcher);
           setIsMuted(false);
         }
       } catch {
@@ -1093,7 +1102,16 @@ export default function LiveClassScreen() {
         const tkRes = await api.post(`/live-classes/${id}/livekit-token`);
         const { token: lkToken, livekitUrl } = tkRes.data.data;
         // startMuted=true → reconnects with mic disabled (listen-only audience state)
-        if (lkToken && livekitUrl) await lk.connect(livekitUrl, lkToken, true);
+        // P24M-03 FIX: pass tokenFetcher so every reconnect path obtains a fresh token.
+        if (lkToken && livekitUrl) {
+          const tokenFetcher = async (): Promise<string> => {
+            const res = await api.post(`/live-classes/${id}/livekit-token`);
+            const token = res.data?.data?.token;
+            if (!token) throw new Error('No token in response');
+            return token;
+          };
+          await lk.connect(livekitUrl, lkToken, true, id, tokenFetcher);
+        }
       } catch {
         // non-fatal — token reconnect failed, user stays disconnected until retry
       }
@@ -1369,7 +1387,20 @@ export default function LiveClassScreen() {
     try {
       const tkRes = await api.post(`/live-classes/${id}/livekit-token`);
       const { token: lkToken, livekitUrl } = tkRes.data.data;
-      if (lkToken && livekitUrl) await lk.connect(livekitUrl, lkToken, true);
+      if (lkToken && livekitUrl) {
+        // P24M-03 FIX: pass tokenFetcher so every reconnect path obtains a fresh
+        // token from the authoritative backend endpoint rather than reusing the
+        // stale cached token.  Mirrors the Voice Club pattern (PH19-002 FIX).
+        // A kicked/banned participant will be denied at the backend when the
+        // tokenFetcher is called on reconnect, halting further retry attempts.
+        const tokenFetcher = async (): Promise<string> => {
+          const res = await api.post(`/live-classes/${id}/livekit-token`);
+          const token = res.data?.data?.token;
+          if (!token) throw new Error('No token in response');
+          return token;
+        };
+        await lk.connect(livekitUrl, lkToken, true, id, tokenFetcher);
+      }
     } catch { /* non-fatal — audio degrades gracefully in Expo Go */ }
 
   }, [id, liveClass, isHost, isTeacher, loadHands]); // eslint-disable-line

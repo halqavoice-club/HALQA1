@@ -44,6 +44,7 @@ const dashboardRoutes = require('./routes/dashboard.routes');
 const audioRoutes = require('./routes/audio.routes');
 const activityRoutes = require('./routes/activity.routes');
 const liveClassRoutes = require('./routes/live-class.routes');
+const quizRoutes      = require('./routes/quiz.routes');             // Practice Quiz
 const importRoutes = require('./routes/import.routes');
 const auditRoutes = require('./routes/audit.routes');
 const voiceRoutes = require('./routes/voice.routes');
@@ -103,6 +104,26 @@ const openapi = require('./utils/openapi');
 const graphqlServer = require('./graphql/server');
 
 const app = express();
+
+// ─── Trust proxy — single hop (Nginx → Express) ───────────────────────────────
+// In production, the backend is not exposed to the internet. All traffic
+// arrives via a single Nginx reverse proxy (docker-compose.prod.yml: backend
+// has no host `ports:` mapping; only nginx binds 80/443). Setting trust proxy
+// to 1 tells Express to honour the X-Forwarded-For header set by that one
+// trusted hop, so req.ip returns the real client IP rather than the Nginx
+// container IP.
+//
+// This is required for:
+//   • IP-based rate limiting (rateLimiter.js keyGenerator uses req.ip)
+//   • Admin IP allowlist (ipAllowlist.js: getClientIP returns req.ip)
+//   • Audit log IP recording (audit.middleware.js line ~37)
+//   • X-Forwarded-Proto secure cookie semantics
+//
+// Value `1` = trust exactly one proxy hop — intentionally NOT `true`
+// (which would trust all proxies including client-supplied ones).
+// See: https://expressjs.com/en/guide/behind-proxies.html
+app.set('trust proxy', 1);
+
 const httpServer = createServer(app);
 
 // ─── Socket.IO setup ──────────────────────────────────────────────────────────
@@ -698,6 +719,104 @@ io.on('connection', (socket) => {
     if (userId) socket.leave(`wallet:${userId}`);
   });
 
+  // ── Practice Quiz teacher dashboard channel ────────────────────────────────
+  //
+  // quiz:watch   { quizId } — teacher joins the quiz:{quizId} room to receive
+  //                           live quiz:submission events as students submit.
+  // quiz:unwatch { quizId } — teacher leaves the room (dashboard closed).
+  //
+  // Authorization: the socket's userId must own the quiz (teacherId → Teacher.userId).
+  // Invalid quizId or unauthorized access is silently ignored to avoid leaking IDs.
+  socket.on('quiz:watch', async ({ quizId } = {}) => {
+    if (!quizId || !userId) return;
+    try {
+      const { PrismaClient } = require('@prisma/client');
+      const _prisma = new PrismaClient();
+      const quiz = await _prisma.quiz.findFirst({
+        where: { id: quizId, deletedAt: null },
+        select: { id: true, teacher: { select: { userId: true } }, status: true, classId: true, schoolId: true }
+      });
+      await _prisma.$disconnect();
+      if (!quiz) return;
+
+      // ── Authorization ─────────────────────────────────────────────────────
+      //
+      // Allowed principals:
+      //   • The TEACHER who owns this quiz (Teacher.userId === socket.userId).
+      //   • A SCHOOL_ADMIN whose JWT school (socket.userSchoolId) matches the
+      //     quiz's school — regardless of whether they also have a Teacher record.
+      //
+      // AUDIT-007-AUTHZ FIX (edge-case hardening):
+      //
+      //   Step 1 — SUPER_ADMIN is a PLATFORM administrator only. The deny is
+      //   placed BEFORE the teacher-ID comparison so it is unconditional even
+      //   if a SUPER_ADMIN user happens to have a Teacher record in the DB
+      //   (the schema has no constraint preventing this; the HTTP quiz routes
+      //   block SA via requireSchoolMember(), but the socket is an independent
+      //   surface). Mirrors school:join (app.js ~line 369) and
+      //   requireSchoolMember() (schoolAuth.middleware.js ~line 156).
+      //
+      //   Step 2 — SCHOOL_ADMIN: school-scope is checked UNCONDITIONALLY.
+      //   A SCHOOL_ADMIN whose userId coincidentally matches quiz.teacher.userId
+      //   must still be in the quiz's school — the teacher-match alone is not
+      //   sufficient authorization for a school-scoped admin role.
+      //   socket.userSchoolId is set from the JWT at connection time and never
+      //   from client payload (mirrors school:join guard ~line 371).
+      //
+      //   Step 3 — All other roles (TEACHER, STUDENT, GUARDIAN, MEMBER, etc.):
+      //   must be the owning teacher (Teacher.userId === socket.userId).
+
+      // Step 1: SUPER_ADMIN — unconditional deny (platform role ≠ school membership)
+      if (socket.userRole === 'SUPER_ADMIN') return;
+
+      // Step 2: SCHOOL_ADMIN — allowed only when JWT school matches quiz school
+      if (socket.userRole === 'SCHOOL_ADMIN') {
+        if (socket.userSchoolId !== quiz.schoolId) return;
+        // school matches → fall through to socket.join
+      } else if (quiz.teacher.userId !== userId) {
+        // Step 3: all other roles must be the owning teacher
+        return;
+      }
+
+      socket.join(`quiz:${quizId}`);
+
+      // Emit current snapshot: submitted count + pending count
+      const _prisma2 = new PrismaClient();
+      const [submitted, total] = await Promise.all([
+        _prisma2.quizAttempt.count({ where: { quizId, status: 'SUBMITTED' } }),
+        _prisma2.enrollment.count({ where: { classId: quiz.classId, status: 'ACTIVE', deletedAt: null } })
+      ]);
+      const submittedRows = await _prisma2.quizAttempt.findMany({
+        where:   { quizId, status: 'SUBMITTED' },
+        orderBy: { submittedAt: 'desc' },
+        select: {
+          id: true, studentId: true, score: true, submittedAt: true,
+          student: { select: { user: { select: { firstName: true, lastName: true } } } }
+        }
+      });
+      await _prisma2.$disconnect();
+
+      socket.emit('quiz:snapshot', {
+        quizId,
+        submitted: submittedRows.map(a => ({
+          attemptId:   a.id,
+          studentId:   a.studentId,
+          firstName:   a.student.user.firstName,
+          lastName:    a.student.user.lastName,
+          score:       a.score,
+          submittedAt: a.submittedAt
+        })),
+        total
+      });
+    } catch (err) {
+      logger.warn(`[socket] quiz:watch error for quiz ${quizId}: ${err.message}`);
+    }
+  });
+
+  socket.on('quiz:unwatch', ({ quizId } = {}) => {
+    if (quizId) socket.leave(`quiz:${quizId}`);
+  });
+
   // ── Community socket rooms (Phase B-4) ─────────────────────────────────────
   //
   // DB-AUTHORITATIVE AUTHORIZATION — mirrors voice:join_room pattern.
@@ -1133,6 +1252,7 @@ app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/v1/audio', audioRoutes);
 app.use('/api/v1/activities', activityRoutes);
 app.use('/api/v1/live-classes', liveClassRoutes);
+app.use('/api/v1/quizzes',      quizRoutes);                        // Practice Quiz
 app.use('/api/v1/import', importRoutes);
 app.use('/api/v1/audit', auditRoutes);
 app.use('/api/v1/voice', voiceRoutes);

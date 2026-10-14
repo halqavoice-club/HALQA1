@@ -5,8 +5,8 @@
  *
  * 1. Backend has NO fullscreen endpoint — it is purely a UI presentation concern.
  * 2. Backend has NO fullscreen DB column — no schema change required.
- * 3. Stage lifecycle controller (approveHand, inviteToStage, demoteFromStage,
- *    dropMicLiveClass) is intact and unaffected by fullscreen work.
+ * 3. Stage lifecycle controller (approveHand, inviteToStage, demoteSpeaker,
+ *    dropMic) is intact and unaffected by fullscreen work.
  * 4. All stage routes are still registered.
  *
  * Note: Web/mobile frontend tests read the physical .tsx files which are managed
@@ -100,14 +100,14 @@ describe('C. Stage lifecycle controller unchanged', () => {
     expect(exportBlock).toMatch(/inviteToStage/);
   });
 
-  test('demoteFromStage exported', () => {
+  test('demoteSpeaker exported', () => {
     const exportBlock = ctrlSrc.slice(ctrlSrc.lastIndexOf('module.exports'));
-    expect(exportBlock).toMatch(/demoteFromStage/);
+    expect(exportBlock).toMatch(/demoteSpeaker/);
   });
 
-  test('dropMicLiveClass exported', () => {
+  test('dropMic exported', () => {
     const exportBlock = ctrlSrc.slice(ctrlSrc.lastIndexOf('module.exports'));
-    expect(exportBlock).toMatch(/dropMicLiveClass/);
+    expect(exportBlock).toMatch(/dropMic/);
   });
 
   test('approveHand enforces maxSpeakers cap', () => {
@@ -125,16 +125,16 @@ describe('C. Stage lifecycle controller unchanged', () => {
     expect(fn).toMatch(/maxSpeakers/);
   });
 
-  test('demoteFromStage emits speaker_removed and revoke_mic', () => {
-    const idx = ctrlSrc.indexOf('async function demoteFromStage');
+  test('demoteSpeaker emits speaker_removed and revoke_mic', () => {
+    const idx = ctrlSrc.indexOf('async function demoteSpeaker');
     expect(idx).toBeGreaterThan(-1);
     const fn = ctrlSrc.slice(idx, idx + 2500);
     expect(fn).toMatch(/speaker_removed/);
     expect(fn).toMatch(/revoke_mic/);
   });
 
-  test('dropMicLiveClass clears speakerSlot', () => {
-    const idx = ctrlSrc.indexOf('async function dropMicLiveClass');
+  test('dropMic clears speakerSlot', () => {
+    const idx = ctrlSrc.indexOf('async function dropMic');
     expect(idx).toBeGreaterThan(-1);
     const fn = ctrlSrc.slice(idx, idx + 1200);
     expect(fn).toMatch(/speakerSlot.*null|null.*speakerSlot|speakerSlot: null/);

@@ -117,24 +117,45 @@ async function register(req, res, next) {
     const passwordHash = await bcrypt.hash(password, 12);
 
     // Create user
-    const user = await prisma.user.create({
-      data: {
-        email,
-        passwordHash,
-        firstName,
-        lastName,
-        role: 'MEMBER',
-        schoolId: schoolId || null,
-        phone: phone || null,
-        // In development: activate immediately so users can log in without email verification.
-        // In production: start as PENDING until email is verified via OTP.
-        status: process.env.NODE_ENV === 'development' ? 'ACTIVE' : 'PENDING',
-        emailVerified: process.env.NODE_ENV === 'development' ? true : false,
-      },
-      select: {
-        id: true, email: true, firstName: true, lastName: true,
-        role: true, status: true, schoolId: true, createdAt: true
-      }
+    // F-06: Wallet is created atomically in the same transaction as the user
+    // so every registered user has a wallet row from the start. Previously the
+    // wallet was created lazily on first /wallet/me call, which meant a user
+    // who received diamonds via seed/admin paths and then tried to request a
+    // payout would hit WALLET_NOT_FOUND (404).
+    const user = await prisma.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: {
+          email,
+          passwordHash,
+          firstName,
+          lastName,
+          role: 'MEMBER',
+          schoolId: schoolId || null,
+          phone: phone || null,
+          // In development: activate immediately so users can log in without email verification.
+          // In production: start as PENDING until email is verified via OTP.
+          status: process.env.NODE_ENV === 'development' ? 'ACTIVE' : 'PENDING',
+          emailVerified: process.env.NODE_ENV === 'development' ? true : false,
+        },
+        select: {
+          id: true, email: true, firstName: true, lastName: true,
+          role: true, status: true, schoolId: true, createdAt: true
+        }
+      });
+
+      // Create wallet atomically with the user — zero balances, no ledger entry
+      // (a brand-new wallet has no transaction history).
+      await tx.wallet.create({
+        data: {
+          userId:    newUser.id,
+          coins:      0,
+          diamonds:   0,
+          totalSpent: 0,
+          totalEarned: 0,
+        }
+      });
+
+      return newUser;
     });
 
     // Send verification OTP

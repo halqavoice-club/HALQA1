@@ -50,6 +50,9 @@ async function getCoinPackages(req, res) {
  *
  * DEV MODE ONLY — grants coins directly without payment for local testing.
  * In production, use POST /api/v1/stripe/checkout instead.
+ *
+ * Ledger: writes a WalletTransaction of type STRIPE_PURCHASE so the reconciliation
+ * worker and history endpoint behave the same as the real Stripe path in dev/test.
  */
 async function purchaseCoins(req, res) {
   // SECURITY: This endpoint grants coins without real payment.
@@ -71,10 +74,29 @@ async function purchaseCoins(req, res) {
 
     const totalCoins = pkg.coins + pkg.bonusCoins;
 
-    const wallet = await prisma.wallet.upsert({
-      where:  { userId: req.user.id },
-      create: { userId: req.user.id, coins: totalCoins, diamonds: 0, totalSpent: 0, totalEarned: 0 },
-      update: { coins: { increment: totalCoins } }
+    // Wrap in $transaction so wallet credit and ledger entry are atomic.
+    // mirrors the production Stripe path behaviour so the reconciliation worker
+    // and GET /wallet/history work correctly in dev/test.
+    const wallet = await prisma.$transaction(async (tx) => {
+      const updated = await tx.wallet.upsert({
+        where:  { userId: req.user.id },
+        create: { userId: req.user.id, coins: totalCoins, diamonds: 0, totalSpent: 0, totalEarned: 0 },
+        update: { coins: { increment: totalCoins } }
+      });
+
+      // Write STRIPE_PURCHASE ledger entry so history and reconciliation match prod
+      await tx.walletTransaction.create({
+        data: {
+          userId:      req.user.id,
+          type:        'STRIPE_PURCHASE',
+          coins:       totalCoins,
+          description: `Dev mode purchase — ${pkg.name}`,
+          packageId:   pkg.id,
+          // stripeSessionId intentionally null — this is a dev-only synthetic credit
+        }
+      });
+
+      return updated;
     });
 
     return successResponse(res, {

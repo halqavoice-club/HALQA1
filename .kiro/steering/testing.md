@@ -147,7 +147,7 @@ fc.assert(
 
 The established passing test baseline must be verified from the repository before making any changes. Never reduce, weaken, delete, bypass, or conceal an established passing test without an explicit justified decision.
 
-The last documented unit-test count was **985 passing tests** (unit tests only, excluding integration tests, per the repository's Jest configuration in `backend/package.json`). This number is historical documentation — not a permanent fixed count. The test suite grows as features are added.
+The last documented unit-test count was **3,017 passing tests** as of October 2026 (unit tests only, excluding integration tests, per the repository's Jest configuration in `backend/package.json`). This number is historical documentation — not a permanent fixed count. The test suite grows as features are added.
 
 Before making changes that affect tests:
 1. Run `npm run test:unit` in `backend/` to determine the current verified baseline

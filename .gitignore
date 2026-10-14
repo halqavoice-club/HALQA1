@@ -194,3 +194,18 @@ scripts/gh-*.ps1
 # Two-word-segment HALQA audit reports (e.g. HALQA-CONTRADICTION-REGISTER.md)
 # Covered by HALQA-*-*.md (no tracked file matches this pattern)
 HALQA-*-*.md
+
+# Playwright saved auth state
+frontend/e2e/.auth/
+
+# Agent audit reports and task artifacts (generated, not source code)
+.agents/tasks/
+
+# Worktrees directory (local git worktrees, never committed)
+.worktrees/
+
+# Kiro AI master prompts file (local tooling doc)
+KIRO-AI-MASTER-PROMPTS.md
+
+# Next.js fallback JS files (generated at build/runtime)
+frontend/public/fallback-*.js

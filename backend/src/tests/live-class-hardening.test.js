@@ -332,7 +332,11 @@ describe('Task 3: kicked participant cannot rejoin', () => {
 
   test('kickParticipant sets wasKicked=true in DB', async () => {
     prisma.liveClass.findFirst.mockResolvedValue(LC_LIVE);
-    prisma.liveClassParticipant.findFirst.mockResolvedValue({ id: 'p-1', isActive: true });
+    // assertOwnerOrModerator: caller is HOST (first findFirst)
+    // kickParticipant target lookup: target found (second findFirst)
+    prisma.liveClassParticipant.findFirst
+      .mockResolvedValueOnce({ id: 'caller-p', role: 'HOST', isActive: true })
+      .mockResolvedValueOnce({ id: 'p-1', isActive: true, role: 'STUDENT' });
     prisma.liveClassParticipant.update.mockResolvedValue({});
 
     const req = makeReq({
@@ -373,12 +377,17 @@ describe('Task 3: kicked participant cannot rejoin', () => {
   test('unauthorized user cannot kick (STUDENT role blocked by authorize middleware)', async () => {
     // The route has authorize('TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN') — students cannot kick.
     // This is already enforced at the route level. Test the controller with teacher role.
+    // assertOwnerOrModerator throws 403 when caller has no active HOST/MODERATOR participant record.
+    // The error is passed to next(err), not res.status directly.
     prisma.liveClass.findFirst.mockResolvedValue(LC_LIVE);
-    prisma.liveClassParticipant.findFirst.mockResolvedValue(null); // target not found
+    prisma.liveClassParticipant.findFirst.mockResolvedValue(null); // caller has no participant record
     const req = makeReq({ params: { id: 'class-1', userId: 'target' }, user: { id: 'teacher-1', role: 'TEACHER', schoolId: 'school-a', firstName: 'T', lastName: 'T' } });
     const res = makeRes();
     await ctrl.kickParticipant(req, res, next);
-    expect(res.status).toHaveBeenCalledWith(404); // participant not found
+    // assertOwnerOrModerator throws and passes to next — res.status is NOT called directly
+    expect(next).toHaveBeenCalled();
+    const errArg = next.mock.calls[0]?.[0];
+    expect(errArg?.status).toBe(403);
   });
 });
 

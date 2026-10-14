@@ -463,9 +463,14 @@ router.post('/transactions/:id/refund', async (req, res, next) => {
       return errorResponse(res, `Unknown transaction type '${tx.type}'`, 400);
     }
 
-    // ── Idempotency: check if already refunded ─────────────────────────────────
-    const existingRefund = await prisma.walletTransaction.findFirst({
-      where: { userId: tx.userId, type: 'REFUND', description: { contains: txId } }
+    // ── Idempotency: use existing idempotencyKey column (P2-004 infrastructure) ─
+    // F-04 fix: replaced description.contains(txId) string search with
+    // idempotencyKey = txId lookup + DB-unique write inside the transaction.
+    // The UNIQUE constraint on idempotencyKey means a concurrent second refund
+    // will hit P2002 inside the $transaction and roll back rather than double-deducting.
+    const refundIdempotencyKey = `refund:${txId}`;
+    const existingRefund = await prisma.walletTransaction.findUnique({
+      where: { idempotencyKey: refundIdempotencyKey }
     });
     if (existingRefund) {
       return errorResponse(res,
@@ -497,25 +502,41 @@ router.post('/transactions/:id/refund', async (req, res, next) => {
 
     // ── Atomic DB transaction: deduct coins + write REFUND ledger entry ────────
     let refundTx;
-    await prisma.$transaction(async (db) => {
-      // Deduct coins from wallet
-      await db.wallet.update({
-        where: { userId: tx.userId },
-        data:  { coins: { decrement: coinsToDeduct } }
-      });
+    try {
+      await prisma.$transaction(async (db) => {
+        // Deduct coins from wallet
+        await db.wallet.update({
+          where: { userId: tx.userId },
+          data:  { coins: { decrement: coinsToDeduct } }
+        });
 
-      // Write REFUND ledger entry — negative coins = debit
-      refundTx = await db.walletTransaction.create({
-        data: {
-          id:          uuidv4(),
-          userId:      tx.userId,
-          type:        'REFUND',
-          coins:       -coinsToDeduct,   // negative = debit
-          description: `Refund of tx ${txId} by admin ${adminId} — ${reason.trim()}`,
-          packageId:   tx.packageId ?? null,
-        }
+        // Write REFUND ledger entry with idempotencyKey — UNIQUE constraint is the
+        // DB-level backstop against concurrent double-refund (P2002 on race)
+        refundTx = await db.walletTransaction.create({
+          data: {
+            id:             uuidv4(),
+            userId:         tx.userId,
+            type:           'REFUND',
+            coins:          -coinsToDeduct,   // negative = debit
+            description:    `Refund of tx ${txId} by admin ${adminId} — ${reason.trim()}`,
+            packageId:      tx.packageId ?? null,
+            idempotencyKey: refundIdempotencyKey,  // F-04: DB-enforced uniqueness
+          }
+        });
       });
-    });
+    } catch (txErr) {
+      // P2002 = concurrent refund already committed — idempotency constraint fired
+      if (txErr.code === 'P2002') {
+        const raced = await prisma.walletTransaction.findUnique({
+          where: { idempotencyKey: refundIdempotencyKey }
+        });
+        return errorResponse(res,
+          `Transaction ${txId} has already been refunded (concurrent request, refund tx: ${raced?.id ?? 'unknown'})`,
+          409
+        );
+      }
+      throw txErr;
+    }
 
     logger.info(`[admin-actions] Refunded ${coinsToDeduct} coins for tx ${txId} (user ${tx.userId}) by admin ${adminId}`);
 

@@ -17,7 +17,7 @@ import {
   Pressable, Modal, TextInput,
   Platform, ActivityIndicator,
   Dimensions, Alert, Share} from 'react-native';
-import { useMutation, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useInfiniteQuery, useQueryClient, useQuery } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { formatDistanceToNow } from 'date-fns';
 import { useRouter } from 'expo-router';
@@ -193,6 +193,14 @@ function CommentsSection({ postId, open }: { postId: string; open: boolean }) {
     onError: () => showMessage({ message: 'Failed to delete comment', type: 'danger' }),
   });
 
+  // Toggle LIKE reaction on a comment
+  const reactCommentMutation = useMutation({
+    mutationFn: (commentId: string) =>
+      api.post(`/posts/${postId}/comments/${commentId}/react`, { type: 'LIKE' }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['comments', postId] }),
+    onError: () => showMessage({ message: 'Could not react', type: 'danger' }),
+  });
+
   const handleSubmit = useCallback(() => {
     const t = body.trim();
     if (!t) return;
@@ -236,6 +244,21 @@ function CommentsSection({ postId, open }: { postId: string; open: boolean }) {
               </View>
               <View style={s.commentMeta}>
                 <Text style={s.commentTime}>{formatDistanceToNow(new Date(c.createdAt), { addSuffix: true })}</Text>
+                {/* Like button — toggles LIKE reaction on the comment */}
+                <TouchableOpacity
+                  style={s.commentLikeBtn}
+                  onPress={() => reactCommentMutation.mutate(c.id)}
+                  disabled={reactCommentMutation.isPending}
+                >
+                  <Ionicons
+                    name={c.reactions?.some(r => r.type === 'LIKE') ? 'heart' : 'heart-outline'}
+                    size={12}
+                    color={c.reactions?.some(r => r.type === 'LIKE') ? '#ef4444' : '#9ca3af'}
+                  />
+                  {(c._count?.reactions ?? 0) > 0 && (
+                    <Text style={s.commentLikeCount}>{c._count.reactions}</Text>
+                  )}
+                </TouchableOpacity>
                 <TouchableOpacity onPress={() => setReplyTo({ id: c.id, name: `${c.author.firstName}` })}>
                   <Text style={s.commentAction}>Reply</Text>
                 </TouchableOpacity>
@@ -293,10 +316,16 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
   const isOwn        = user?.id === post.authorId;
 
   const [isFollowing,    setIsFollowing]    = useState(post.isFollowing ?? false);
+  const [showPostMenu,   setShowPostMenu]   = useState(false);
+  const [editingPost,    setEditingPost]    = useState(false);
+  const [editPostBody,   setEditPostBody]   = useState(post.body ?? '');
 
   const [showReactions, setShowReactions]         = useState(false);
   const [commentsOpen,  setCommentsOpen]           = useState(false);
-  const [showShare,     setShowShare]              = useState(false);
+  const [showShare,        setShowShare]              = useState(false);
+  const [showDmPicker,     setShowDmPicker]           = useState(false);
+  const [showGroupPicker,  setShowGroupPicker]        = useState(false);
+  const [showQuote,        setShowQuote]              = useState(false);
   // Media lightbox viewer (react-native-image-viewing)
   const [mediaViewerIndex,   setMediaViewerIndex]   = useState(0);
   const [mediaViewerVisible, setMediaViewerVisible] = useState(false);
@@ -441,6 +470,64 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
     },
   });
 
+  // ── Post edit / delete / report mutations ─────────────────────────────────
+  const editPostMutation = useMutation({
+    mutationFn: (body: string) => api.patch(`/posts/${post.id}`, { body }),
+    onSuccess: () => {
+      setEditingPost(false);
+      queryClient.invalidateQueries({ queryKey: ['feed'] });
+      queryClient.invalidateQueries({ queryKey: ['feed-following'] });
+      queryClient.invalidateQueries({ queryKey: ['user-posts', post.authorId] });
+      showMessage({ message: 'Post updated', type: 'success', duration: 1500 });
+    },
+    onError: () => showMessage({ message: 'Failed to update post', type: 'danger' }),
+  });
+
+  const deletePostMutation = useMutation({
+    mutationFn: () => api.delete(`/posts/${post.id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['feed'] });
+      queryClient.invalidateQueries({ queryKey: ['feed-following'] });
+      queryClient.invalidateQueries({ queryKey: ['user-posts', post.authorId] });
+      showMessage({ message: 'Post deleted', type: 'success', duration: 1500 });
+    },
+    onError: () => showMessage({ message: 'Failed to delete post', type: 'danger' }),
+  });
+
+  const reportPostMutation = useMutation({
+    mutationFn: (reason: string) => api.post(`/posts/${post.id}/report`, { reason }),
+    onSuccess: () => showMessage({ message: 'Post reported. Thank you.', type: 'success', duration: 2000 }),
+    onError: (e: any) => showMessage({
+      message: e?.response?.data?.message ?? 'Failed to report post',
+      type: 'danger',
+    }),
+  });
+
+  const handleDeletePost = () => {
+    Alert.alert(
+      'Delete Post',
+      'This will permanently delete your post. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: () => deletePostMutation.mutate() },
+      ]
+    );
+  };
+
+  const handleReportPost = () => {
+    Alert.alert(
+      'Report Post',
+      'Why are you reporting this post?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Spam', onPress: () => reportPostMutation.mutate('spam') },
+        { text: 'Inappropriate', onPress: () => reportPostMutation.mutate('inappropriate') },
+        { text: 'Harassment', onPress: () => reportPostMutation.mutate('harassment') },
+        { text: 'Misinformation', onPress: () => reportPostMutation.mutate('misinformation') },
+      ]
+    );
+  };
+
   const handleReact = (type: ReactionType) => {
     setShowReactions(false);
     reactMutation.mutate(type);
@@ -451,6 +538,8 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
     try {
       // Use native Share sheet — no expo-clipboard dependency needed
       await Share.share({ message: url, title: 'Share post' });
+      // MF-006: increment shareCount on successful native share (fire-and-forget)
+      api.post(`/posts/${post.id}/share`).catch(() => {});
     } catch { /* cancelled */ }
     setShowShare(false);
   };
@@ -537,54 +626,65 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
       {post.type !== 'REPOST' && (
         <>
       {/* Author row */}
-      <TouchableOpacity
-        style={s.header}
-        onPress={() => router.push(`/profile/${post.author.id}` as any)}
-        activeOpacity={0.7}
-      >
-        <View style={[s.avatar, { backgroundColor: bgColor }]}>
-          {avatarSrc
-            ? <Image source={{ uri: avatarSrc }} style={s.avatarImg} />
-            : <Text allowFontScaling={false} style={s.avatarTxt}>{initials}</Text>}
-        </View>
-        <View style={{ flex: 1 }}>
-          <View style={s.authorNameRow}>
-            <Text allowFontScaling={false} style={s.authorName}>
-              {post.author.firstName} {post.author.lastName}
-            </Text>
-            {/* Inline Follow button — only for other users' non-repost posts */}
-            {!isOwn && post.type !== 'REPOST' && (
-              <TouchableOpacity
-                onPress={() => followMutation.mutate()}
-                disabled={followMutation.isPending}
-                style={[s.followBtn, isFollowing && s.followBtnActive]}
-              >
-                <Ionicons
-                  name={isFollowing ? 'person-remove-outline' : 'person-add-outline'}
-                  size={11}
-                  color={isFollowing ? '#6b7280' : '#4f46e5'}
-                />
-                <Text allowFontScaling={false} style={[s.followBtnTxt, isFollowing && { color: '#6b7280' }]}>
-                  {isFollowing ? 'Following' : 'Follow'}
-                </Text>
-              </TouchableOpacity>
-            )}
+      {/* Author header — split into profile tap + ⋯ menu */}
+      <View style={s.header}>
+        <TouchableOpacity
+          style={{ flexDirection: 'row', alignItems: 'center', flex: 1, gap: 10 }}
+          onPress={() => router.push(`/profile/${post.author.id}` as any)}
+          activeOpacity={0.7}
+        >
+          <View style={[s.avatar, { backgroundColor: bgColor }]}>
+            {avatarSrc
+              ? <Image source={{ uri: avatarSrc }} style={s.avatarImg} />
+              : <Text allowFontScaling={false} style={s.avatarTxt}>{initials}</Text>}
           </View>
-          <View style={s.metaRow}>
-            <Text allowFontScaling={false} style={s.time}>
-              {formatDistanceToNow(new Date(post.createdAt), { addSuffix: true })}
-            </Text>
-            {post.location ? (
-              <>
-                <Text style={s.metaDot}>·</Text>
-                <Ionicons name="location-outline" size={11} color="#9ca3af" />
-                <Text allowFontScaling={false} style={s.locationTxt}>{post.location}</Text>
-              </>
-            ) : null}
+          <View style={{ flex: 1 }}>
+            <View style={s.authorNameRow}>
+              <Text allowFontScaling={false} style={s.authorName}>
+                {post.author.firstName} {post.author.lastName}
+              </Text>
+              {/* Inline Follow button — only for other users' non-repost posts */}
+              {!isOwn && post.type !== 'REPOST' && (
+                <TouchableOpacity
+                  onPress={() => followMutation.mutate()}
+                  disabled={followMutation.isPending}
+                  style={[s.followBtn, isFollowing && s.followBtnActive]}
+                >
+                  <Ionicons
+                    name={isFollowing ? 'person-remove-outline' : 'person-add-outline'}
+                    size={11}
+                    color={isFollowing ? '#6b7280' : '#4f46e5'}
+                  />
+                  <Text allowFontScaling={false} style={[s.followBtnTxt, isFollowing && { color: '#6b7280' }]}>
+                    {isFollowing ? 'Following' : 'Follow'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+            <View style={s.metaRow}>
+              <Text allowFontScaling={false} style={s.time}>
+                {formatDistanceToNow(new Date(post.createdAt), { addSuffix: true })}
+              </Text>
+              {post.location ? (
+                <>
+                  <Text style={s.metaDot}>·</Text>
+                  <Ionicons name="location-outline" size={11} color="#9ca3af" />
+                  <Text allowFontScaling={false} style={s.locationTxt}>{post.location}</Text>
+                </>
+              ) : null}
+            </View>
           </View>
-        </View>
-        <Ionicons name="ellipsis-horizontal" size={18} color="#9ca3af" />
-      </TouchableOpacity>
+        </TouchableOpacity>
+
+        {/* ⋯ menu button — separated so it doesn't navigate to profile */}
+        <TouchableOpacity
+          onPress={() => setShowPostMenu(true)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{ padding: 4 }}
+        >
+          <Ionicons name="ellipsis-horizontal" size={18} color="#9ca3af" />
+        </TouchableOpacity>
+      </View>
 
       {/* Body */}
       {post.body ? (
@@ -709,7 +809,7 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
                 {(post.shareCount ?? 0) >= 1000
                   ? `${((post.shareCount ?? 0) / 1000).toFixed(1)}K`
                   : post.shareCount}{' '}
-                {post.shareCount === 1 ? 'share' : 'shares'}
+                {post.shareCount === 1 ? 'repost' : 'reposts'}
               </Text>
             )}
           </View>
@@ -798,14 +898,377 @@ export default function PostCard({ post, onNavigateToDetail }: Props) {
               <Text allowFontScaling={false} style={s.sheetRowTxt}>Share to feed</Text>
               {repostMutation.isPending && <ActivityIndicator size="small" color="#4f46e5" />}
             </TouchableOpacity>
+            <TouchableOpacity style={s.sheetRow} onPress={() => { setShowShare(false); setShowQuote(true); }}>
+              <Ionicons name="chatbox-ellipses-outline" size={20} color="#7c3aed" />
+              <Text allowFontScaling={false} style={s.sheetRowTxt}>Quote post</Text>
+            </TouchableOpacity>
             <TouchableOpacity style={s.sheetRow} onPress={handleCopyLink}>
               <Ionicons name="link-outline" size={20} color="#0891b2" />
               <Text allowFontScaling={false} style={s.sheetRowTxt}>Copy link</Text>
             </TouchableOpacity>
+            <TouchableOpacity style={s.sheetRow} onPress={() => { setShowShare(false); setShowGroupPicker(true); }}>
+              <Ionicons name="people-outline" size={20} color="#7c3aed" />
+              <Text allowFontScaling={false} style={s.sheetRowTxt}>Share to group</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={s.sheetRow} onPress={() => { setShowShare(false); setShowDmPicker(true); }}>
+              <Ionicons name="chatbubble-outline" size={20} color="#e11d48" />
+              <Text allowFontScaling={false} style={s.sheetRowTxt}>Share to DM</Text>
+            </TouchableOpacity>
           </View>
         </Pressable>
       </Modal>
+
+      {/* DM picker modal */}
+      <Modal visible={showDmPicker} transparent animationType="slide" onRequestClose={() => setShowDmPicker(false)}>
+        <Pressable style={s.modalBackdrop} onPress={() => setShowDmPicker(false)}>
+          <DmPickerSheet postId={post.id} postBody={post.body} onClose={() => setShowDmPicker(false)} />
+        </Pressable>
+      </Modal>
+
+      {/* Group picker modal */}
+      <Modal visible={showGroupPicker} transparent animationType="slide" onRequestClose={() => setShowGroupPicker(false)}>
+        <Pressable style={s.modalBackdrop} onPress={() => setShowGroupPicker(false)}>
+          <GroupPickerSheet postId={post.id} postBody={post.body} onClose={() => setShowGroupPicker(false)} />
+        </Pressable>
+      </Modal>
+
+      {/* Quote modal */}
+      <Modal visible={showQuote} transparent animationType="slide" onRequestClose={() => setShowQuote(false)}>
+        <Pressable style={s.modalBackdrop} onPress={() => setShowQuote(false)}>
+          <QuoteSheet
+            post={post}
+            onClose={() => setShowQuote(false)}
+            onShared={() => { queryClient.invalidateQueries({ queryKey: ['feed'] }); }}
+          />
+        </Pressable>
+      </Modal>
+
+      {/* ─── Post ⋯ menu ──────────────────────────────────────────────────────── */}
+      <Modal visible={showPostMenu} transparent animationType="fade" onRequestClose={() => setShowPostMenu(false)}>
+        <Pressable style={s.menuBackdrop} onPress={() => setShowPostMenu(false)}>
+          <Pressable style={s.menuSheet} onPress={e => e.stopPropagation()}>
+            {isOwn ? (
+              <>
+                {/* Edit — author only */}
+                <TouchableOpacity
+                  style={s.menuRow}
+                  onPress={() => {
+                    setShowPostMenu(false);
+                    setEditPostBody(post.body ?? '');
+                    setEditingPost(true);
+                  }}
+                >
+                  <Ionicons name="create-outline" size={20} color="#4f46e5" />
+                  <Text allowFontScaling={false} style={s.menuRowTxt}>Edit post</Text>
+                </TouchableOpacity>
+                {/* Delete — author only */}
+                <TouchableOpacity
+                  style={s.menuRow}
+                  onPress={() => { setShowPostMenu(false); handleDeletePost(); }}
+                  disabled={deletePostMutation.isPending}
+                >
+                  <Ionicons name="trash-outline" size={20} color="#ef4444" />
+                  <Text allowFontScaling={false} style={[s.menuRowTxt, { color: '#ef4444' }]}>
+                    {deletePostMutation.isPending ? 'Deleting…' : 'Delete post'}
+                  </Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              /* Report — non-author only, matching MF-013 */
+              <TouchableOpacity
+                style={s.menuRow}
+                onPress={() => { setShowPostMenu(false); handleReportPost(); }}
+                disabled={reportPostMutation.isPending}
+              >
+                <Ionicons name="flag-outline" size={20} color="#f59e0b" />
+                <Text allowFontScaling={false} style={[s.menuRowTxt, { color: '#f59e0b' }]}>
+                  {reportPostMutation.isPending ? 'Reporting…' : 'Report post'}
+                </Text>
+              </TouchableOpacity>
+            )}
+            {/* Cancel */}
+            <TouchableOpacity style={[s.menuRow, { borderTopWidth: 1, borderTopColor: '#f3f4f6', marginTop: 4 }]} onPress={() => setShowPostMenu(false)}>
+              <Text allowFontScaling={false} style={[s.menuRowTxt, { color: '#6b7280', textAlign: 'center', flex: 1 }]}>Cancel</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* ─── Edit post sheet ──────────────────────────────────────────────────── */}
+      <Modal visible={editingPost} transparent animationType="slide" onRequestClose={() => setEditingPost(false)}>
+        <Pressable style={s.menuBackdrop} onPress={() => setEditingPost(false)}>
+          <Pressable style={[s.menuSheet, { paddingBottom: 24 }]} onPress={e => e.stopPropagation()}>
+            <Text allowFontScaling={false} style={[s.menuRowTxt, { fontWeight: '700', fontSize: 16, marginBottom: 12, textAlign: 'center', color: '#111827' }]}>
+              Edit Post
+            </Text>
+            <TextInput
+              style={s.editPostInput}
+              value={editPostBody}
+              onChangeText={setEditPostBody}
+              multiline
+              autoFocus
+              maxLength={5000}
+              placeholder="What's on your mind?"
+              placeholderTextColor="#9ca3af"
+            />
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 12 }}>
+              <TouchableOpacity
+                style={[s.editPostBtn, { backgroundColor: '#f3f4f6', flex: 1 }]}
+                onPress={() => setEditingPost(false)}
+              >
+                <Text allowFontScaling={false} style={{ color: '#6b7280', fontWeight: '600', fontSize: 14 }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.editPostBtn, { backgroundColor: '#4f46e5', flex: 2 }, (!editPostBody.trim() || editPostMutation.isPending) && { opacity: 0.5 }]}
+                onPress={() => editPostMutation.mutate(editPostBody.trim())}
+                disabled={!editPostBody.trim() || editPostMutation.isPending}
+              >
+                {editPostMutation.isPending
+                  ? <ActivityIndicator size="small" color="#fff" />
+                  : <Text allowFontScaling={false} style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Save</Text>
+                }
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
+  );
+}
+
+// ─── Group Picker Sheet ──────────────────────────────────────────────────────────
+function GroupPickerSheet({ postId, postBody, onClose }: { postId: string; postBody: string | null; onClose: () => void }) {
+  const [sending, setSending] = useState<string | null>(null);
+  const shareUrl = `${getBaseURL().replace('/api/v1', '')}/feed/post/${postId}`;
+
+  const { data: convs = [], isLoading } = useQuery({
+    queryKey: ['group-conversations-share'],
+    queryFn: async () => {
+      const res = await api.get('/group-chat/conversations?limit=50');
+      return Array.isArray(res.data?.data) ? res.data.data : [];
+    },
+    staleTime: 30_000,
+  });
+
+  const handleSend = async (convId: string, name: string) => {
+    setSending(convId);
+    try {
+      const body = [
+        postBody ? postBody.slice(0, 100) + (postBody.length > 100 ? '…' : '') : '',
+        shareUrl,
+      ].filter(Boolean).join('\n');
+      await api.post(`/group-chat/conversations/${convId}/messages`, { body, type: 'TEXT' });
+      showMessage({ message: `Shared to ${name}`, type: 'success' });
+      onClose();
+    } catch {
+      showMessage({ message: 'Failed to share', type: 'danger' });
+    } finally {
+      setSending(null);
+    }
+  };
+
+  return (
+    <Pressable onPress={e => e.stopPropagation()}>
+      <View style={s.shareSheet}>
+        <Text allowFontScaling={false} style={s.sheetTitle}>Share to Group</Text>
+        {isLoading ? (
+          <ActivityIndicator size="small" color="#4f46e5" style={{ marginVertical: 16 }} />
+        ) : convs.length === 0 ? (
+          <Text allowFontScaling={false} style={{ textAlign: 'center', color: '#9ca3af', paddingVertical: 16, fontSize: 13 }}>
+            No groups yet. Create a group first.
+          </Text>
+        ) : (
+          convs.slice(0, 8).map((conv: any) => {
+            const name = conv.name ?? 'Group';
+            const initials = name.slice(0, 2).toUpperCase();
+            return (
+              <TouchableOpacity
+                key={conv.id}
+                style={s.sheetRow}
+                onPress={() => handleSend(conv.id, name)}
+                disabled={!!sending}
+              >
+                <View style={[s.dmAvatar, { backgroundColor: avatarColor(name) }]}>
+                  {conv.avatarUrl
+                    ? <Image source={{ uri: conv.avatarUrl }} style={s.dmAvatarImg} />
+                    : <Text style={s.dmAvatarTxt}>{initials}</Text>
+                  }
+                </View>
+                <Text allowFontScaling={false} style={[s.sheetRowTxt, { flex: 1 }]} numberOfLines={1}>{name}</Text>
+                {sending === conv.id
+                  ? <ActivityIndicator size="small" color="#4f46e5" />
+                  : <Ionicons name="send-outline" size={16} color="#9ca3af" />
+                }
+              </TouchableOpacity>
+            );
+          })
+        )}
+      </View>
+    </Pressable>
+  );
+}
+
+// ─── Quote Sheet ─────────────────────────────────────────────────────────────────
+// Allowed visibility values as a const so we can validate the original post's value
+const ALLOWED_VISIBILITIES = ['PUBLIC', 'FOLLOWERS', 'PRIVATE', 'SCHOOL_ONLY'] as const;
+type AllowedVisibility = typeof ALLOWED_VISIBILITIES[number];
+
+function QuoteSheet({ post, onClose, onShared }: { post: Post; onClose: () => void; onShared?: () => void }) {
+  const [body, setBody] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const { user } = useAuthStore();
+  const initials = `${user?.firstName?.[0] ?? ''}${user?.lastName?.[0] ?? ''}`.toUpperCase() || '?';
+
+  // Default to the original post's visibility so the quote cannot broaden the audience.
+  // If the original visibility is unrecognised, fail safe to 'PUBLIC' (not SCHOOL_ONLY or PRIVATE).
+  const safeVisibility: AllowedVisibility =
+    (ALLOWED_VISIBILITIES as readonly string[]).includes(post.visibility)
+      ? (post.visibility as AllowedVisibility)
+      : 'PUBLIC';
+
+  const handleQuote = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    try {
+      await api.post('/posts', {
+        type: 'QUOTE',
+        originalPostId: post.id,
+        quotedBody: post.body ?? '',
+        body: body.trim() || undefined,
+        visibility: safeVisibility,
+      });
+      showMessage({ message: '✅ Quote posted!', type: 'success' });
+      onShared?.();
+      onClose();
+    } catch {
+      showMessage({ message: 'Failed to quote post', type: 'danger' });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Pressable onPress={e => e.stopPropagation()}>
+      <View style={[s.shareSheet, { gap: 12 }]}>
+        <Text allowFontScaling={false} style={s.sheetTitle}>Quote Post</Text>
+        {/* Composer */}
+        <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
+          <View style={[s.dmAvatar, { backgroundColor: avatarColor(`${user?.firstName}${user?.lastName}`) }]}>
+            <Text style={s.dmAvatarTxt}>{initials}</Text>
+          </View>
+          <TextInput
+            style={[s.quoteInput]}
+            value={body}
+            onChangeText={setBody}
+            placeholder="Add your thoughts…"
+            placeholderTextColor="#9ca3af"
+            multiline
+            maxLength={500}
+            autoFocus
+          />
+        </View>
+        {/* Original post preview */}
+        <View style={s.quotedPreview}>
+          <Text allowFontScaling={false} style={s.quotedPreviewAuthor}>
+            {post.author.firstName} {post.author.lastName}
+          </Text>
+          <Text allowFontScaling={false} style={s.quotedPreviewBody} numberOfLines={3}>
+            {post.body ?? '(no text)'}
+          </Text>
+        </View>
+        {/* Visibility indicator — read-only; quote inherits original post's visibility */}
+        <View style={s.quoteVisRow}>
+          <Ionicons name="eye-outline" size={12} color="#6b7280" />
+          <Text allowFontScaling={false} style={s.quoteVisTxt}>
+            Audience: {safeVisibility === 'SCHOOL_ONLY' ? 'School only' : safeVisibility === 'FOLLOWERS' ? 'Followers' : safeVisibility === 'PRIVATE' ? 'Only me' : 'Everyone'}
+          </Text>
+        </View>
+        {/* Post button */}
+        <TouchableOpacity
+          style={[s.quotePostBtn, submitting && { opacity: 0.5 }]}
+          onPress={handleQuote}
+          disabled={submitting}
+        >
+          {submitting
+            ? <ActivityIndicator size="small" color="#fff" />
+            : <Text allowFontScaling={false} style={s.quotePostBtnTxt}>Quote</Text>
+          }
+        </TouchableOpacity>
+      </View>
+    </Pressable>
+  );
+}
+
+// ─── DM Picker Sheet ────────────────────────────────────────────────────────────
+function DmPickerSheet({ postId, postBody, onClose }: { postId: string; postBody: string | null; onClose: () => void }) {
+  const [sending, setSending] = useState<string | null>(null);
+  const shareUrl = `${getBaseURL().replace('/api/v1', '')}/feed/post/${postId}`;
+
+  const { data: convs = [], isLoading } = useQuery({
+    queryKey: ['dm-conversations'],
+    queryFn: async () => {
+      const res = await api.get('/dm/conversations');
+      return Array.isArray(res.data?.data) ? res.data.data : [];
+    },
+    staleTime: 60_000,
+  });
+
+  const handleSend = async (convId: string, name: string) => {
+    setSending(convId);
+    try {
+      const body = [
+        postBody ? postBody.slice(0, 100) + (postBody.length > 100 ? '…' : '') : '',
+        shareUrl,
+      ].filter(Boolean).join('\n');
+      await api.post(`/dm/conversations/${convId}/messages`, { body, msgType: 'TEXT' });
+      showMessage({ message: `Shared to ${name}`, type: 'success' });
+      onClose();
+    } catch {
+      showMessage({ message: 'Failed to share', type: 'danger' });
+    } finally {
+      setSending(null);
+    }
+  };
+
+  return (
+    <Pressable onPress={e => e.stopPropagation()}>
+      <View style={s.shareSheet}>
+        <Text allowFontScaling={false} style={s.sheetTitle}>Share via DM</Text>
+        {isLoading ? (
+          <ActivityIndicator size="small" color="#4f46e5" style={{ marginVertical: 16 }} />
+        ) : convs.length === 0 ? (
+          <Text allowFontScaling={false} style={{ textAlign: 'center', color: '#9ca3af', paddingVertical: 16, fontSize: 13 }}>
+            No conversations yet. Start a DM first.
+          </Text>
+        ) : (
+          convs.slice(0, 8).map((conv: any) => {
+            const other = conv.other ?? {};
+            const name = `${other.firstName ?? ''} ${other.lastName ?? ''}`.trim() || 'Unknown';
+            const initials = `${other.firstName?.[0] ?? ''}${other.lastName?.[0] ?? ''}`.toUpperCase() || '?';
+            return (
+              <TouchableOpacity
+                key={conv.id}
+                style={s.sheetRow}
+                onPress={() => handleSend(conv.id, name)}
+                disabled={!!sending}
+              >
+                <View style={[s.dmAvatar, { backgroundColor: avatarColor(name) }]}>
+                  {other.avatarUrl
+                    ? <Image source={{ uri: other.avatarUrl }} style={s.dmAvatarImg} />
+                    : <Text style={s.dmAvatarTxt}>{initials}</Text>
+                  }
+                </View>
+                <Text allowFontScaling={false} style={[s.sheetRowTxt, { flex: 1 }]} numberOfLines={1}>{name}</Text>
+                {sending === conv.id
+                  ? <ActivityIndicator size="small" color="#4f46e5" />
+                  : <Ionicons name="send-outline" size={16} color="#9ca3af" />
+                }
+              </TouchableOpacity>
+            );
+          })
+        )}
+      </View>
+    </Pressable>
   );
 }
 
@@ -866,6 +1329,24 @@ const s = StyleSheet.create({
   sheetTitle:        { fontSize: 16, fontWeight: '700', color: '#111827', marginBottom: 8 },
   sheetRow:          { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
   sheetRowTxt:       { fontSize: 15, color: '#374151', flex: 1 },
+  dmAvatar:          { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
+  dmAvatarImg:       { width: 36, height: 36, borderRadius: 18 },
+  dmAvatarTxt:       { fontSize: 13, fontWeight: '700', color: '#fff' },
+  quoteInput:        { flex: 1, fontSize: 14, color: '#111827', minHeight: 72, textAlignVertical: 'top', borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 10, padding: 8 },
+  quotedPreview:     { borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 10, padding: 10, backgroundColor: '#f9fafb' },
+  quotedPreviewAuthor: { fontSize: 12, fontWeight: '700', color: '#374151', marginBottom: 4 },
+  quotedPreviewBody: { fontSize: 12, color: '#6b7280', lineHeight: 17 },
+  quotePostBtn:      { backgroundColor: '#4f46e5', borderRadius: 10, paddingVertical: 10, alignItems: 'center' },
+  quotePostBtnTxt:   { color: '#fff', fontWeight: '700', fontSize: 15 },
+  quoteVisRow:       { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  quoteVisTxt:       { fontSize: 11, color: '#6b7280' },
+  // Post ⋯ menu + edit sheet
+  menuBackdrop:      { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
+  menuSheet:         { backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 16, paddingBottom: 32, gap: 2 },
+  menuRow:           { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 13, paddingHorizontal: 4 },
+  menuRowTxt:        { fontSize: 15, fontWeight: '600', color: '#111827' },
+  editPostInput:     { borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 12, padding: 12, fontSize: 15, color: '#111827', minHeight: 120, textAlignVertical: 'top', backgroundColor: '#f9fafb' },
+  editPostBtn:       { borderRadius: 12, paddingVertical: 11, alignItems: 'center', justifyContent: 'center' },
   // Comments section
   commentSec:        { marginTop: 10, borderTopWidth: 1, borderTopColor: '#f3f4f6', paddingTop: 8, gap: 10 },
   commentRow:        { flexDirection: 'row', gap: 8 },
@@ -875,9 +1356,11 @@ const s = StyleSheet.create({
   commentBubble:     { backgroundColor: '#f3f4f6', borderRadius: 14, paddingHorizontal: 10, paddingVertical: 7, flex: 1 },
   commentAuthor:     { fontSize: 12, fontWeight: '700', color: '#111827', marginBottom: 2 },
   commentBody:       { fontSize: 13, color: '#374151', lineHeight: 18 },
-  commentMeta:       { flexDirection: 'row', gap: 10, marginTop: 4, marginLeft: 2, flexWrap: 'wrap' },
+  commentMeta:       { flexDirection: 'row', gap: 10, marginTop: 4, marginLeft: 2, flexWrap: 'wrap', alignItems: 'center' },
   commentTime:       { fontSize: 11, color: '#9ca3af' },
   commentAction:     { fontSize: 11, color: '#4f46e5', fontWeight: '600' },
+  commentLikeBtn:    { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  commentLikeCount:  { fontSize: 11, color: '#9ca3af' },
   editInput:         { borderWidth: 1, borderColor: '#c7d2fe', borderRadius: 8, padding: 6, fontSize: 13, color: '#374151', marginTop: 4 },
   loadMoreTxt:       { fontSize: 12, color: '#4f46e5', fontWeight: '600' },
   replyBanner:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#ede9fe', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 },

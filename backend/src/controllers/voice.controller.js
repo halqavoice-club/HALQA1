@@ -818,8 +818,10 @@ async function joinRoom(req, res, next) {
       try {
         const stageRows = await prisma.$queryRaw`
           SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
-                 vp.handRaised, vp.mutedByModerator, vp.joinedAt
+                 vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+                 u.firstName, u.lastName, u.avatarUrl
           FROM voice_participants vp
+          LEFT JOIN users u ON u.id = vp.userId
           WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
           ORDER BY vp.seatNumber ASC
         `;
@@ -835,6 +837,9 @@ async function joinRoom(req, res, next) {
               handRaised:       Boolean(r.handRaised),
               mutedByModerator: Boolean(r.mutedByModerator),
               joinedAt:         r.joinedAt,
+              firstName:        r.firstName ?? null,
+              lastName:         r.lastName ?? null,
+              avatarUrl:        r.avatarUrl ?? null,
             })),
             stageCount: stageRows.length,
           });
@@ -1372,6 +1377,17 @@ async function promoteParticipant(req, res, next) {
 
     await safeDeleteCache(roomCacheKey(roomId));
 
+    // VC-SYNC-005 FIX: Revoke SFU publish capability on SPEAKER → AUDIENCE demotion.
+    // A demoted user's existing LiveKit token may still have canPublish:true from
+    // when they were promoted to SPEAKER. sfuRevokePublish forces canPublish=false
+    // on the live SFU connection immediately — no reconnect needed.
+    // Called AFTER the transaction commits so the DB state is already authoritative.
+    if (role === VOICE_ROLES.AUDIENCE) {
+      sfuRevokePublish(roomId, targetUserId, false, '[voice:demote]').catch(err => {
+        logger.warn('[voice:demote] sfuRevokePublish failed:', err?.message || err);
+      });
+    }
+
     // assignedSeatNumber was captured inside the transaction — always reliable.
     // No need for a separate post-transaction DB read.
 
@@ -1404,20 +1420,27 @@ async function promoteParticipant(req, res, next) {
         try {
           const stageRows = await prisma.$queryRaw`
             SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
-                   vp.handRaised, vp.mutedByModerator, vp.joinedAt
+                   vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+                   u.firstName, u.lastName, u.avatarUrl
             FROM voice_participants vp
+            LEFT JOIN users u ON u.id = vp.userId
             WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
             ORDER BY vp.seatNumber ASC
           `;
           io.to(`voice:${roomId}`).emit('voice:stage_state', {
             roomId,
             stageParticipants: stageRows.map(r => ({
-              ...r,
-              seatNumber: Number(r.seatNumber),
-              isMuted: Boolean(r.isMuted),
-              isPinned: Boolean(r.isPinned),
-              handRaised: Boolean(r.handRaised),
+              userId:           r.userId,
+              role:             r.role,
+              isMuted:          Boolean(r.isMuted),
+              seatNumber:       Number(r.seatNumber),
+              isPinned:         Boolean(r.isPinned),
+              handRaised:       Boolean(r.handRaised),
               mutedByModerator: Boolean(r.mutedByModerator),
+              joinedAt:         r.joinedAt,
+              firstName:        r.firstName ?? null,
+              lastName:         r.lastName ?? null,
+              avatarUrl:        r.avatarUrl ?? null,
             })),
             stageCount: stageRows.length,
           });
@@ -2207,20 +2230,27 @@ async function grabMic(req, res, next) {
       try {
         const stageRows = await prisma.$queryRaw`
           SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
-                 vp.handRaised, vp.mutedByModerator, vp.joinedAt
+                 vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+                 u.firstName, u.lastName, u.avatarUrl
           FROM voice_participants vp
+          LEFT JOIN users u ON u.id = vp.userId
           WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
           ORDER BY vp.seatNumber ASC
         `;
         io.to(`voice:${roomId}`).emit('voice:stage_state', {
           roomId,
           stageParticipants: stageRows.map(r => ({
-            ...r,
-            seatNumber: Number(r.seatNumber),
-            isMuted: Boolean(r.isMuted),
-            isPinned: Boolean(r.isPinned),
-            handRaised: Boolean(r.handRaised),
+            userId:           r.userId,
+            role:             r.role,
+            isMuted:          Boolean(r.isMuted),
+            seatNumber:       Number(r.seatNumber),
+            isPinned:         Boolean(r.isPinned),
+            handRaised:       Boolean(r.handRaised),
             mutedByModerator: Boolean(r.mutedByModerator),
+            joinedAt:         r.joinedAt,
+            firstName:        r.firstName ?? null,
+            lastName:         r.lastName ?? null,
+            avatarUrl:        r.avatarUrl ?? null,
           })),
           stageCount: stageRows.length,
         });
@@ -2314,20 +2344,27 @@ async function dropMic(req, res, next) {
       try {
         const stageRows = await prisma.$queryRaw`
           SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
-                 vp.handRaised, vp.mutedByModerator, vp.joinedAt
+                 vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+                 u.firstName, u.lastName, u.avatarUrl
           FROM voice_participants vp
+          LEFT JOIN users u ON u.id = vp.userId
           WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
           ORDER BY vp.seatNumber ASC
         `;
         io.to(`voice:${roomId}`).emit('voice:stage_state', {
           roomId,
           stageParticipants: stageRows.map(r => ({
-            ...r,
-            seatNumber:       Number(r.seatNumber),
+            userId:           r.userId,
+            role:             r.role,
             isMuted:          Boolean(r.isMuted),
+            seatNumber:       Number(r.seatNumber),
             isPinned:         Boolean(r.isPinned),
             handRaised:       Boolean(r.handRaised),
             mutedByModerator: Boolean(r.mutedByModerator),
+            joinedAt:         r.joinedAt,
+            firstName:        r.firstName ?? null,
+            lastName:         r.lastName ?? null,
+            avatarUrl:        r.avatarUrl ?? null,
           })),
           stageCount: stageRows.length,
         });
@@ -2540,6 +2577,57 @@ async function _notifyFollowersVoiceLive(room, roomId) {
   } catch {}
 }
 
+// --- GET STAGE STATE ---------------------------------------------------------
+// Returns the current authoritative stage snapshot for an active participant.
+// Used by clients to pull state after a successful join or reconnect, providing
+// a guaranteed-delivery alternative to the socket event that may be missed
+// during the join race window.
+async function getStageState(req, res, next) {
+  try {
+    const { id: roomId } = req.params;
+    const userId = req.user.id;
+
+    // Only active participants may fetch the stage state — prevents unauthorized
+    // users from reading another room's participant data.
+    const participant = await prisma.voiceParticipant.findUnique({
+      where: { roomId_userId: { roomId, userId } },
+    });
+    if (!participant || !participant.isActive) {
+      return errorResponse(res, 'You are not an active participant in this room', 403);
+    }
+
+    const stageRows = await prisma.$queryRaw`
+      SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
+             vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+             u.firstName, u.lastName, u.avatarUrl
+      FROM voice_participants vp
+      LEFT JOIN users u ON u.id = vp.userId
+      WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
+      ORDER BY vp.seatNumber ASC
+    `;
+
+    return successResponse(res, {
+      roomId,
+      stageParticipants: stageRows.map(r => ({
+        userId:           r.userId,
+        role:             r.role,
+        isMuted:          Boolean(r.isMuted),
+        seatNumber:       Number(r.seatNumber),
+        isPinned:         Boolean(r.isPinned),
+        handRaised:       Boolean(r.handRaised),
+        mutedByModerator: Boolean(r.mutedByModerator),
+        joinedAt:         r.joinedAt,
+        firstName:        r.firstName ?? null,
+        lastName:         r.lastName ?? null,
+        avatarUrl:        r.avatarUrl ?? null,
+      })),
+      stageCount: stageRows.length,
+    }, 'Stage state');
+  } catch (error) {
+    next(error);
+  }
+}
+
 // ─── MODULE EXPORTS ──────────────────────────────────────────────────────────
 module.exports = {
   listRooms,
@@ -2569,4 +2657,5 @@ module.exports = {
   getMyRooms,
   getScheduledRooms,
   uploadRoomCover,
+  getStageState,
 };

@@ -301,6 +301,10 @@ export function Sidebar() {
       ...(canEducation('VIEW_EXAMS') ? [
         { label: 'Exams', href: '/exams', icon: BookMarked }
       ] : []),
+      // Quizzes — teachers create, students take
+      ...(activeRole === 'TEACHER' || activeRole === 'SCHOOL_ADMIN' || activeRole === 'STUDENT' ? [
+        { label: 'Quizzes', href: '/quizzes', icon: ClipboardCheck }
+      ] : []),
       { label: 'Leaderboard', href: '/leaderboard', icon: Trophy },
       ...(canEducation('VIEW_LIBRARY') ? [
         { label: t.library, href: '/library', icon: BookOpen }
@@ -360,6 +364,7 @@ export function Sidebar() {
         icon: Rss,
         items: [
           { label: 'Feed', href: '/feed', icon: Rss },
+          { label: 'Reels', href: '/reels', icon: Video },
           { label: 'Explore', href: '/explore', icon: Compass },
           { label: 'Communities', href: '/communities', icon: UsersRound },
           { label: t.voiceClub, href: '/voice-club', icon: Radio },

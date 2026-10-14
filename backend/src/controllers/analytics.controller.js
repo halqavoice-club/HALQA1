@@ -48,8 +48,10 @@ function handleError(res, error, fallbackMessage) {
  * Must be used on routes that also apply requireSchoolMember().
  */
 function assertSchoolStatsWriteAccess(req) {
+  // P2-003 FIX: Removed 'SUPER_ADMIN' — requireSchoolMember blocks all platform SA before here.
+  // Only 'SCHOOL_ADMIN' membership role is authorized per ARCH-01.
   const effectiveRole = req.schoolMembership?.role || req.user.role;
-  if (!['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(effectiveRole)) {
+  if (effectiveRole !== 'SCHOOL_ADMIN') {
     const err = new Error('Only school admins can update school analytics');
     err.status = 403;
     throw err;

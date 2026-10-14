@@ -40,6 +40,33 @@ export default function VoiceRoomPage() {
   const [joining, setJoining] = useState(false)
   const [error, setError]     = useState<string | null>(null)
 
+  // P0-A FIX: Register an early voice:stage_state listener on mount (before
+  // the user clicks Join and before useVoiceRoom mounts). Any snapshot events
+  // that arrive during the race window between POST /join returning and
+  // useVoiceRoom registering its own listener are buffered in the store.
+  // useVoiceRoom drains this buffer after all listeners are registered.
+  useEffect(() => {
+    if (!id) return
+    const socket = getSocket()
+    if (!socket) return
+    const earlyStageHandler = (payload: {
+      roomId: string
+      stageParticipants: Array<{
+        userId: string; role: string; isMuted: boolean; seatNumber: number | null
+        isPinned: boolean; handRaised: boolean; mutedByModerator: boolean
+        joinedAt: string; firstName?: string | null; lastName?: string | null; avatarUrl?: string | null
+      }>
+      stageCount: number
+    }) => {
+      if (payload.roomId !== id) return
+      useVoiceStore.getState().pushSyncEvent(payload)
+    }
+    socket.on('voice:stage_state', earlyStageHandler)
+    return () => {
+      socket.off('voice:stage_state', earlyStageHandler)
+    }
+  }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Active-session conflict state — shown when user tries to join while in another room.
   // conflictRoom holds the full metadata of room B returned by the 409 response.
   const [conflictRoom, setConflictRoom] = useState<{
@@ -95,6 +122,8 @@ export default function VoiceRoomPage() {
         return
       }
       toast({ title: e?.response?.data?.message || 'Failed to join room', variant: 'destructive' })
+      // Discard any buffered stage_state events so they don't replay on next attempt
+      useVoiceStore.getState().drainSyncEvents()
       setJoining(false)
     }
   }
