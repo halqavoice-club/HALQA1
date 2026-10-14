@@ -858,19 +858,35 @@ async function reactToPost(req, res, next) {
 // ─── GET REACTIONS ───────────────────────────────────────────────────────────
 async function getReactions(req, res, next) {
   try {
+    const viewerId = req.user.id;
     const reactions = await prisma.postReaction.findMany({
       where: { postId: req.params.id },
       include: { user: { select: AUTHOR_SELECT } },
       orderBy: { createdAt: 'desc' },
       take: 100
     });
-    // Group by type
+
+    // REACTION-BLOCK FIX (FIND-007): Filter out reactions from/to blocked users.
+    const rBlocks = await prisma.userBlock.findMany({
+      where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
+      select: { blockerId: true, blockedId: true }
+    }).catch(() => []);
+
+    const blockedIds = new Set(
+      rBlocks.flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== viewerId)
+    );
+
+    const visible = blockedIds.size > 0
+      ? reactions.filter(r => !blockedIds.has(r.user.id))
+      : reactions;
+
+    // Group by type (uses visible, not reactions)
     const grouped = {};
-    reactions.forEach(r => {
+    visible.forEach(r => {
       if (!grouped[r.type]) grouped[r.type] = [];
       grouped[r.type].push(r.user);
     });
-    return successResponse(res, { reactions, grouped, total: reactions.length });
+    return successResponse(res, { reactions: visible, grouped, total: visible.length });
   } catch (e) { next(e); }
 }
 
