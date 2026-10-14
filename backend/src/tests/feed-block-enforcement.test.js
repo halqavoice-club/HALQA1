@@ -456,3 +456,163 @@ describe('getExploreFeed -- block enforcement', function() {
     expect(notInList).toHaveLength(1);
   });
 });
+
+// ===========================================================================
+// Fix 1 — getFeed filter=following bilateral block enforcement
+// ===========================================================================
+describe('getFeed filter=following — bilateral block enforcement', () => {
+  let app;
+  beforeAll(() => { app = buildPostApp(); });
+
+  test('F1: viewer blocks a followed author — blocked author excluded from Post.findMany OR clause', async () => {
+    const viewerId  = 'viewer-ff1';
+    const blockedId = 'blocked-followed-1';
+    asUser(viewerId, 'MEMBER', null);
+
+    // Viewer follows and blocks the same author
+    prisma.follow.findMany.mockResolvedValue([{ followingId: blockedId }]);
+    prisma.userBlock.findMany.mockResolvedValue([
+      { blockerId: viewerId, blockedId: blockedId }
+    ]);
+    prisma.post.findMany.mockResolvedValue([]);
+    // enrichLivePosts / stampFollowing stubs
+    prisma.voiceRoom.findMany   = jest.fn().mockResolvedValue([]);
+    prisma.liveClass.findMany   = jest.fn().mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/v1/posts/feed?filter=following')
+      .set('Authorization', tok(viewerId));
+
+    expect(res.status).toBe(200);
+
+    const callArgs = prisma.post.findMany.mock.calls[0][0];
+    // NOT clause must be present and exclude the blocked author
+    expect(callArgs.where.NOT).toBeDefined();
+    const notClause = Array.isArray(callArgs.where.NOT) ? callArgs.where.NOT : [callArgs.where.NOT];
+    const blockNot = notClause.find(n => n.authorId);
+    expect(blockNot).toBeDefined();
+    expect(blockNot.authorId.in).toContain(blockedId);
+  });
+
+  test('F2: followed author blocks viewer — that author excluded via NOT clause', async () => {
+    const viewerId  = 'viewer-ff2';
+    const blockerId = 'blocker-author-2';
+    asUser(viewerId, 'MEMBER', null);
+
+    prisma.follow.findMany.mockResolvedValue([{ followingId: blockerId }]);
+    // Reverse direction: author blocked the viewer
+    prisma.userBlock.findMany.mockResolvedValue([
+      { blockerId: blockerId, blockedId: viewerId }
+    ]);
+    prisma.post.findMany.mockResolvedValue([]);
+    prisma.voiceRoom.findMany  = jest.fn().mockResolvedValue([]);
+    prisma.liveClass.findMany  = jest.fn().mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/v1/posts/feed?filter=following')
+      .set('Authorization', tok(viewerId));
+
+    expect(res.status).toBe(200);
+
+    const callArgs = prisma.post.findMany.mock.calls[0][0];
+    expect(callArgs.where.NOT).toBeDefined();
+    const notClause = Array.isArray(callArgs.where.NOT) ? callArgs.where.NOT : [callArgs.where.NOT];
+    const blockNot = notClause.find(n => n.authorId);
+    expect(blockNot).toBeDefined();
+    expect(blockNot.authorId.in).toContain(blockerId);
+  });
+
+  test('F3: no blocks — where.NOT is absent, following feed behaves as before', async () => {
+    const viewerId  = 'viewer-ff3';
+    const authorId  = 'unblocked-author-3';
+    asUser(viewerId, 'MEMBER', null);
+
+    prisma.follow.findMany.mockResolvedValue([{ followingId: authorId }]);
+    prisma.userBlock.findMany.mockResolvedValue([]); // no blocks
+    prisma.post.findMany.mockResolvedValue([]);
+    prisma.voiceRoom.findMany  = jest.fn().mockResolvedValue([]);
+    prisma.liveClass.findMany  = jest.fn().mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/v1/posts/feed?filter=following')
+      .set('Authorization', tok(viewerId));
+
+    expect(res.status).toBe(200);
+
+    const callArgs = prisma.post.findMany.mock.calls[0][0];
+    // No block exclusion → where.NOT must be absent (no empty-set predicate)
+    expect(callArgs.where.NOT).toBeUndefined();
+    // The OR clause must still include the followed author and the viewer
+    const orAuthors = callArgs.where.OR.flatMap(o => o.authorId ? [o.authorId] : [o.authorId?.in ?? []]).flat();
+    expect(callArgs.where.OR).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ authorId: { in: [authorId] } }),
+        expect.objectContaining({ authorId: viewerId }),
+      ])
+    );
+  });
+
+  test('F4: cursor pagination preserves block NOT clause alongside cursor NOT on following feed', async () => {
+    const viewerId   = 'viewer-ff4';
+    const blockedId  = 'blocked-ff4';
+    const cursorTime = new Date('2024-01-10T10:00:00Z').toISOString();
+    const cursorId   = 'post-cursor-ff4';
+    const cursor     = `${cursorTime}_${cursorId}`;
+    asUser(viewerId, 'MEMBER', null);
+
+    prisma.follow.findMany.mockResolvedValue([{ followingId: blockedId }]);
+    prisma.userBlock.findMany.mockResolvedValue([
+      { blockerId: viewerId, blockedId: blockedId }
+    ]);
+    prisma.post.findMany.mockResolvedValue([]);
+    prisma.voiceRoom.findMany  = jest.fn().mockResolvedValue([]);
+    prisma.liveClass.findMany  = jest.fn().mockResolvedValue([]);
+
+    const res = await request(app)
+      .get(`/api/v1/posts/feed?filter=following&cursor=${encodeURIComponent(cursor)}`)
+      .set('Authorization', tok(viewerId));
+
+    expect(res.status).toBe(200);
+
+    const callArgs = prisma.post.findMany.mock.calls[0][0];
+    // With both a block exclusion AND a cursor, where.NOT must be an array
+    expect(Array.isArray(callArgs.where.NOT)).toBe(true);
+    const blockNot  = callArgs.where.NOT.find(n => n.authorId);
+    const cursorNot = callArgs.where.NOT.find(n => n.id);
+    expect(blockNot).toBeDefined();
+    expect(blockNot.authorId.in).toContain(blockedId);
+    expect(cursorNot).toBeDefined();
+    expect(cursorNot.id).toBe(cursorId);
+  });
+
+  test('F5: viewer own posts always present — viewerId in OR clause, not in blocked set', async () => {
+    const viewerId  = 'viewer-ff5';
+    const blockedId = 'blocked-ff5';
+    asUser(viewerId, 'MEMBER', null);
+
+    prisma.follow.findMany.mockResolvedValue([{ followingId: blockedId }]);
+    prisma.userBlock.findMany.mockResolvedValue([
+      { blockerId: viewerId, blockedId: blockedId }
+    ]);
+    prisma.post.findMany.mockResolvedValue([]);
+    prisma.voiceRoom.findMany  = jest.fn().mockResolvedValue([]);
+    prisma.liveClass.findMany  = jest.fn().mockResolvedValue([]);
+
+    await request(app)
+      .get('/api/v1/posts/feed?filter=following')
+      .set('Authorization', tok(viewerId));
+
+    const callArgs = prisma.post.findMany.mock.calls[0][0];
+    // viewerId must appear in OR as own-posts branch
+    const hasOwn = callArgs.where.OR.some(o => o.authorId === viewerId);
+    expect(hasOwn).toBe(true);
+    // viewerId must NOT appear in the block exclusion list
+    if (callArgs.where.NOT) {
+      const notClause = Array.isArray(callArgs.where.NOT) ? callArgs.where.NOT : [callArgs.where.NOT];
+      const blockNot = notClause.find(n => n.authorId);
+      if (blockNot) {
+        expect(blockNot.authorId.in).not.toContain(viewerId);
+      }
+    }
+  });
+});

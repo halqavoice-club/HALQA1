@@ -65,12 +65,34 @@ async function getStoriesFeed(req, res, next) {
   try {
     const viewerId = req.user.id;
 
-    // Get IDs of users this person follows + self
-    const following = await prisma.follow.findMany({
-      where: { followerId: viewerId },
-      select: { followingId: true }
-    });
-    const authorIds = [viewerId, ...following.map(f => f.followingId)];
+    // Get IDs of users this person follows + self, and bilateral block list in parallel.
+    // STORY-BLOCK FIX: Apply bilateral block policy to the story feed.
+    // Previously no UserBlock lookup was performed here, allowing blocked/blocking
+    // followed users' stories to appear in the story bar. Mirrors the block-query
+    // pattern from visibilityFilter() and the verified P1 feed fixes.
+    const [following, blocks] = await Promise.all([
+      prisma.follow.findMany({
+        where: { followerId: viewerId },
+        select: { followingId: true }
+      }),
+      prisma.userBlock.findMany({
+        where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
+        select: { blockerId: true, blockedId: true }
+      }).catch(() => [])  // non-fatal — degrade safely if query fails
+    ]);
+
+    // Build the blocked-ID set (both directions, excluding the viewer's own ID).
+    // viewerId cannot appear because UserBlock @@unique prevents self-blocks.
+    const blockedIds = new Set(
+      blocks.flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== viewerId)
+    );
+
+    // The viewer always sees their own stories regardless of any block relationships.
+    // Filter followed authors to exclude blocked users.
+    const authorIds = [
+      viewerId,
+      ...following.map(f => f.followingId).filter(id => !blockedIds.has(id))
+    ];
 
     // Fetch all active stories from those authors
     const stories = await prisma.story.findMany({
@@ -126,6 +148,19 @@ async function getUserStories(req, res, next) {
   try {
     const { userId } = req.params;
     const viewerId   = req.user.id;
+
+    // STORY-BLOCK FIX: Enforce bilateral block policy for non-owner viewers.
+    // Mirrors the pattern established in getUserPosts (P1-C) and getUserProfile.
+    // Owner (viewer IS the story author) always skips the block check.
+    if (userId !== viewerId) {
+      const block = await prisma.userBlock.findFirst({
+        where: { OR: [
+          { blockerId: viewerId, blockedId: userId },
+          { blockerId: userId,   blockedId: viewerId }
+        ]}
+      });
+      if (block) return errorResponse(res, 'User not found', 404);
+    }
 
     const stories = await prisma.story.findMany({
       where: { ...activeWhere(), authorId: userId },

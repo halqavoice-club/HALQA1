@@ -373,6 +373,88 @@ async function getPost(req, res, next) {
     });
     if (!post) return errorResponse(res, 'Post not found', 404);
 
+    // P1-B: Visibility and block enforcement for direct post retrieval.
+    // The owner (post author) bypasses all checks — they can always view their own post.
+    // All other callers must pass every applicable gate; failure returns 404 to
+    // avoid leaking the existence of a protected post (no oracle attack).
+    const requesterId = req.user.id;
+    if (post.authorId !== requesterId) {
+      // 1. Bilateral block check: viewer blocked author OR author blocked viewer
+      const block = await prisma.userBlock.findFirst({
+        where: { OR: [
+          { blockerId: requesterId, blockedId: post.authorId },
+          { blockerId: post.authorId, blockedId: requesterId }
+        ]}
+      });
+      if (block) return errorResponse(res, 'Post not found', 404);
+
+      // 2. PRIVATE posts: only the author may view
+      if (post.visibility === 'PRIVATE') {
+        return errorResponse(res, 'Post not found', 404);
+      }
+
+      // 3. FOLLOWERS: viewer must follow the author
+      if (post.visibility === 'FOLLOWERS') {
+        const follows = await prisma.follow.findFirst({
+          where: { followerId: requesterId, followingId: post.authorId }
+        });
+        if (!follows) return errorResponse(res, 'Post not found', 404);
+      }
+
+      // 4. SCHOOL_ONLY: viewer must belong to the same school as the author.
+      // Resolve both schoolIds via User.schoolId (legacy) with SchoolMembership fallback
+      // (new MEMBER-role users), matching the pattern in visibilityFilter().
+      if (post.visibility === 'SCHOOL_ONLY') {
+        let viewerSchoolId = req.user.schoolId || null;
+        if (!viewerSchoolId) {
+          const membership = await prisma.schoolMembership.findFirst({
+            where: { userId: requesterId, status: 'ACTIVE', deletedAt: null },
+            select: { schoolId: true }
+          });
+          viewerSchoolId = membership?.schoolId || null;
+        }
+        // Author schoolId: prefer post.author.schoolId (included via POST_INCLUDE)
+        let authorSchoolId = post.author?.schoolId || null;
+        if (!authorSchoolId) {
+          const authorMembership = await prisma.schoolMembership.findFirst({
+            where: { userId: post.authorId, status: 'ACTIVE', deletedAt: null },
+            select: { schoolId: true }
+          });
+          authorSchoolId = authorMembership?.schoolId || null;
+        }
+        if (!viewerSchoolId || !authorSchoolId || viewerSchoolId !== authorSchoolId) {
+          return errorResponse(res, 'Post not found', 404);
+        }
+      }
+
+      // 5. isExclusive: viewer must have an active CreatorSubscription for the author.
+      // CreatorSubscription.creatorId references CreatorProfile.id (not User.id),
+      // so we must first resolve the author's CreatorProfile id before checking.
+      if (post.isExclusive) {
+        let hasSubscription = false;
+        try {
+          const creatorProfile = await prisma.creatorProfile.findUnique({
+            where: { userId: post.authorId },
+            select: { id: true }
+          });
+          if (creatorProfile) {
+            const sub = await prisma.creatorSubscription.findFirst({
+              where: {
+                subscriberId: requesterId,
+                creatorId: creatorProfile.id,
+                status: 'ACTIVE',
+                expiresAt: { gt: new Date() }
+              }
+            });
+            hasSubscription = !!sub;
+          }
+        } catch {
+          // Non-fatal: if subscription check fails, treat as no subscription
+        }
+        if (!hasSubscription) return errorResponse(res, 'Post not found', 404);
+      }
+    }
+
     // Record view (fire-and-forget).
     // VIEW-COUNT FIX: Use try/create/catch(P2002) so viewCount is only
     // incremented on the FIRST view from this user. The previous upsert+then
@@ -553,11 +635,32 @@ async function getFeed(req, res, next) {
 
     if (filter === 'following') {
       // Pure following feed: only posts from people the viewer follows + own posts
-      const following = await prisma.follow.findMany({
-        where: { followerId: viewerId },
-        select: { followingId: true }
-      });
+      const [following, followingBlocks] = await Promise.all([
+        prisma.follow.findMany({
+          where: { followerId: viewerId },
+          select: { followingId: true }
+        }),
+        // FOLLOW-BLOCK FIX: Apply bilateral block policy to the following feed.
+        // The main feed (filter=all) delegates to visibilityFilter() which already
+        // handles blocks. The following-feed branch built its own where clause
+        // without consulting UserBlock, allowing blocked/blocking followed users'
+        // posts to appear here. Mirrors the visibilityFilter() block-query pattern.
+        // SOC-P0-03 precedent: same fix applied to reportUser and all other social ops.
+        prisma.userBlock.findMany({
+          where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
+          select: { blockerId: true, blockedId: true }
+        }).catch(() => [])  // non-fatal — degrade safely if query fails
+      ]);
       const followingIds = following.map(f => f.followingId);
+
+      // Build set of all blocked user IDs (both directions), excluding the viewer's own ID.
+      // The viewer's own posts are always included via the { authorId: viewerId } OR branch,
+      // and UserBlock @@unique prevents self-blocks, so viewerId can never appear here.
+      const blockedFollowingIds = new Set(
+        followingBlocks
+          .flatMap(b => [b.blockerId, b.blockedId])
+          .filter(id => id !== viewerId)
+      );
 
       where = {
         deletedAt: null,
@@ -569,6 +672,13 @@ async function getFeed(req, res, next) {
           { authorId: viewerId },
         ]
       };
+
+      // Inject block exclusion only when there are blocked users to avoid an
+      // unnecessary empty-set predicate that could affect query plans (same
+      // guard used in visibilityFilter()).
+      if (blockedFollowingIds.size > 0) {
+        where.NOT = { authorId: { in: [...blockedFollowingIds] } };
+      }
     } else {
       // Default: full public feed (existing behaviour)
       where = await visibilityFilter(viewerId);
@@ -578,7 +688,13 @@ async function getFeed(req, res, next) {
     if (cursor) {
       const [cursorTime, cursorId] = cursor.split('_');
       where.createdAt = { lte: new Date(cursorTime) };
-      where.NOT = { id: cursorId };
+      // P1-A FIX: Merge cursor id exclusion with any existing NOT clause instead of
+      // unconditionally overwriting it. Overwriting would drop the block-exclusion
+      // predicate set by visibilityFilter(), allowing blocked-author posts to leak
+      // through on pages 2+. Prisma 5 accepts NOT as a single object or an array
+      // (AND-NOT semantics), so both forms are valid and equivalent here.
+      const cursorNot = { id: cursorId };
+      where.NOT = where.NOT ? [where.NOT, cursorNot] : cursorNot;
     }
 
     const posts = await prisma.post.findMany({
@@ -612,6 +728,20 @@ async function getUserPosts(req, res, next) {
     const take = Math.min(50, Math.max(1, parseInt(limit)));
     const viewerId = req.user.id;
     const isOwner = userId === viewerId;
+
+    // P1-C FIX: Enforce bilateral block policy for non-owner viewers.
+    // If the viewer has blocked the profile owner, or the profile owner has
+    // blocked the viewer, return 404 (consistent with getUserProfile conventions).
+    // Owner always skips this check — a user can always view their own posts.
+    if (!isOwner) {
+      const block = await prisma.userBlock.findFirst({
+        where: { OR: [
+          { blockerId: viewerId, blockedId: userId },
+          { blockerId: userId,   blockedId: viewerId }
+        ]}
+      });
+      if (block) return errorResponse(res, 'User not found', 404);
+    }
 
     let where = { authorId: userId, deletedAt: null, isDraft: false };
 
@@ -1114,11 +1244,18 @@ async function reportPost(req, res, next) {
       reportedAt:  new Date().toISOString(),
     };
 
-    // Broadcast to admin role rooms for real-time dashboard updates
+    // Broadcast to platform admin room for real-time dashboard updates.
+    // SOC-P0-03 / REPORT-POST-SOCKET FIX: Emit to role:SUPER_ADMIN only.
+    // Previously emitted to both role:SUPER_ADMIN and role:SCHOOL_ADMIN, which
+    // leaked reporter identity (name, userId) and report metadata to every
+    // connected SCHOOL_ADMIN on the platform — regardless of whether the
+    // reported post belongs to their school. Social content moderation is a
+    // PLATFORM-LEVEL operation (SUPER_ADMIN only); school-scoped admins receive
+    // a targeted notify() call below when the post actually belongs to their school.
+    // Mirrors the identical fix already applied to reportUser() (SOC-P0-03).
     const io = getIo();
     if (io) {
       io.to('role:SUPER_ADMIN').emit('admin:post_reported', reportPayload);
-      io.to('role:SCHOOL_ADMIN').emit('admin:post_reported', reportPayload);
     }
 
     // Notify the post author's school admin if the post belongs to a school
