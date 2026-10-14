@@ -8,7 +8,7 @@
  * - Author info + caption overlay
  * - Infinite scroll
  */
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   Image, ActivityIndicator, Dimensions, StatusBar,
