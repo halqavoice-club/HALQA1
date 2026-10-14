@@ -1779,7 +1779,7 @@ async function votePoll(req, res, next) {
     try {
       const votes = await prisma.$queryRaw`
         SELECT votedOptionId, COUNT(*) as cnt
-        FROM PostView
+        FROM post_views
         WHERE postId = ${postId} AND votedOptionId IS NOT NULL
         GROUP BY votedOptionId
       `;
