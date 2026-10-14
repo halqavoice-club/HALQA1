@@ -59,40 +59,80 @@ async function unfollowUser(req, res, next) {
 async function getFollowers(req, res, next) {
   try {
     const { userId } = req.params;
-    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    const limit  = Math.min(parseInt(req.query.limit) || 50, 100);
+    const cursor = req.query.cursor; // format: "isoDate_id"
+
+    const where = { followingId: userId };
+    if (cursor) {
+      const [cursorTime, cursorId] = cursor.split('_');
+      where.OR = [
+        { createdAt: { lt: new Date(cursorTime) } },
+        { createdAt: new Date(cursorTime), id: { lt: cursorId } }
+      ];
+    }
 
     const rows = await prisma.follow.findMany({
-      where: { followingId: userId },
+      where,
       include: { follower: { select: USER_SELECT } },
-      orderBy: { createdAt: 'desc' },
-      take: limit
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1
     });
 
+    const hasMore = rows.length > limit;
+    const items   = hasMore ? rows.slice(0, limit) : rows;
+
     const myFollowing = await prisma.follow.findMany({
-      where: { followerId: req.user.id, followingId: { in: rows.map(r => r.followerId) } },
+      where: { followerId: req.user.id, followingId: { in: items.map(r => r.followerId) } },
       select: { followingId: true }
     });
     const followingSet = new Set(myFollowing.map(f => f.followingId));
 
-    return successResponse(res, rows.map(r => ({
-      ...r.follower, followedAt: r.createdAt, iFollowThem: followingSet.has(r.followerId)
-    })));
+    const nextCursor = hasMore && items.length > 0
+      ? `${items[items.length - 1].createdAt.toISOString()}_${items[items.length - 1].id}`
+      : null;
+
+    return successResponse(res, {
+      items:      items.map(r => ({ ...r.follower, followedAt: r.createdAt, iFollowThem: followingSet.has(r.followerId) })),
+      nextCursor,
+      hasMore,
+    });
   } catch (err) { next(err); }
 }
 
 async function getFollowing(req, res, next) {
   try {
     const { userId } = req.params;
-    const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+    const limit  = Math.min(parseInt(req.query.limit) || 50, 100);
+    const cursor = req.query.cursor; // format: "isoDate_id"
+
+    const where = { followerId: userId };
+    if (cursor) {
+      const [cursorTime, cursorId] = cursor.split('_');
+      where.OR = [
+        { createdAt: { lt: new Date(cursorTime) } },
+        { createdAt: new Date(cursorTime), id: { lt: cursorId } }
+      ];
+    }
 
     const rows = await prisma.follow.findMany({
-      where: { followerId: userId },
+      where,
       include: { following: { select: USER_SELECT } },
-      orderBy: { createdAt: 'desc' },
-      take: limit
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1
     });
 
-    return successResponse(res, rows.map(r => ({ ...r.following, followedAt: r.createdAt })));
+    const hasMore = rows.length > limit;
+    const items   = hasMore ? rows.slice(0, limit) : rows;
+
+    const nextCursor = hasMore && items.length > 0
+      ? `${items[items.length - 1].createdAt.toISOString()}_${items[items.length - 1].id}`
+      : null;
+
+    return successResponse(res, {
+      items:      items.map(r => ({ ...r.following, followedAt: r.createdAt })),
+      nextCursor,
+      hasMore,
+    });
   } catch (err) { next(err); }
 }
 
@@ -101,12 +141,14 @@ async function getSocialCounts(req, res, next) {
     const { userId } = req.params;
     const meId = req.user.id;
 
-    const [followers, following, friends] = await Promise.all([
+    const [followers, following, friends, posts] = await Promise.all([
       prisma.follow.count({ where: { followingId: userId } }),
       prisma.follow.count({ where: { followerId: userId } }),
       prisma.friendRequest.count({
         where: { status: 'ACCEPTED', OR: [{ senderId: userId }, { receiverId: userId }] }
-      })
+      }),
+      // Count published (non-draft, non-deleted) posts for profile stat display
+      prisma.post.count({ where: { authorId: userId, deletedAt: null, isDraft: false } })
     ]);
 
     let isFollowing = false;
@@ -145,7 +187,7 @@ async function getSocialCounts(req, res, next) {
       mutualFriends  = [...myIds].filter(id => theirIds.has(id) && id !== meId && id !== userId).length;
     }
 
-    return successResponse(res, { followers, following, friends, isFollowing, friendStatus, mutualFriends });
+    return successResponse(res, { followers, following, friends, posts, isFollowing, friendStatus, mutualFriends });
   } catch (err) { next(err); }
 }
 
@@ -330,10 +372,23 @@ async function searchUsers(req, res, next) {
     // Social discovery must be platform-wide — no schoolId filter here.
     // Education-scoped search (students/teachers/classes) lives at GET /api/v1/search.
 
+    // MF-002 FIX: Exclude bilaterally blocked users from search results.
+    // Fetch all block relationships involving the searcher in one query, then
+    // pass the excluded IDs into the main findMany to avoid N+1.
+    const myBlocks = await prisma.userBlock.findMany({
+      where: { OR: [{ blockerId: meId }, { blockedId: meId }] },
+      select: { blockerId: true, blockedId: true }
+    }).catch(() => []);
+    const blockedUserIds = [...new Set(
+      myBlocks.flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== meId)
+    )];
+
     const users = await prisma.user.findMany({
       where: {
         deletedAt: null,
         id: { not: meId },
+        // MF-002: exclude blocked/blocking users
+        ...(blockedUserIds.length > 0 && { NOT: { id: { in: blockedUserIds } } }),
         OR: [
           { firstName: { contains: q.trim() } },
           { lastName:  { contains: q.trim() } },

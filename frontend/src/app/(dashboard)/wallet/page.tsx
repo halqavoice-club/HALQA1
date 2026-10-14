@@ -10,7 +10,7 @@ import { useSearchParams } from 'next/navigation'
 import { getSocket } from '@/lib/socket'
 import { cn } from '@/lib/utils'
 import {
-  Coins, ArrowUpRight, ArrowDownLeft, Gift,
+  Coins, Gift, ArrowUpRight, ArrowDownLeft,
   Sparkles, CheckCircle, Loader2, History, Wallet, ExternalLink,
 } from 'lucide-react'
 
@@ -33,13 +33,25 @@ interface CoinPackage {
   sortOrder:  number
 }
 
-interface GiftTx {
-  id:        string
-  createdAt: string
-  gift:      { name: string; emoji: string; priceCoins: number }
-  sender?:   { id: string; firstName: string; lastName: string }
-  receiver?: { id: string; firstName: string; lastName: string }
-  room?:     { id: string; title: string } | null
+// Unified WalletTransaction shape returned by GET /wallet/history
+interface WalletTx {
+  id:          string
+  type:        string
+  coins:       number
+  diamonds:    number
+  description: string | null
+  createdAt:   string
+  // GIFT_SEND enrichment (optional)
+  giftDetails?: {
+    gift:     { name: string; emoji: string; priceCoins: number }
+    receiver: { id: string; firstName: string; lastName: string; avatarUrl?: string | null }
+  }
+  packageId?: string | null
+}
+
+interface HistoryResponse {
+  data:       WalletTx[]
+  pagination: { page: number; limit: number; total: number }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -143,30 +155,71 @@ function PackageCard({
   )
 }
 
-// ─── Tx row ───────────────────────────────────────────────────────────────────
-function TxRow({ tx, isSent }: { tx: GiftTx; isSent: boolean }) {
-  const other = isSent ? tx.receiver : tx.sender
+// ─── Tx row — handles ALL WalletTransaction types ────────────────────────────
+const TX_META: Record<string, { icon: string; label: string; bgClass: string }> = {
+  STRIPE_PURCHASE:    { icon: '💳', label: 'Coin Purchase',      bgClass: 'bg-blue-50'   },
+  GIFT_SEND:          { icon: '🎁', label: 'Gift Sent',          bgClass: 'bg-red-50'    },
+  GIFT_RECEIVE:       { icon: '🎁', label: 'Gift Received',      bgClass: 'bg-green-50'  },
+  TIP_SEND:           { icon: '💸', label: 'Tip Sent',           bgClass: 'bg-red-50'    },
+  TIP_RECEIVE:        { icon: '💰', label: 'Tip Received',       bgClass: 'bg-green-50'  },
+  SUBSCRIPTION:       { icon: '⭐', label: 'Subscription',       bgClass: 'bg-purple-50' },
+  SUBSCRIPTION_RECEIVE:{ icon: '⭐', label: 'Subscription Income', bgClass: 'bg-green-50'},
+  ADMIN_GRANT:        { icon: '🛡️', label: 'Admin Grant',        bgClass: 'bg-indigo-50' },
+  REFUND:             { icon: '↩️', label: 'Refund',             bgClass: 'bg-yellow-50' },
+  PAYOUT:             { icon: '💎', label: 'Payout Request',     bgClass: 'bg-orange-50' },
+  PAYOUT_REVERSAL:    { icon: '💎', label: 'Payout Reversed',    bgClass: 'bg-green-50'  },
+  DISPUTED:           { icon: '⚠️', label: 'Disputed',           bgClass: 'bg-red-50'    },
+}
+
+function TxRow({ tx }: { tx: WalletTx }) {
+  const meta  = TX_META[tx.type] ?? { icon: '🪙', label: tx.type, bgClass: 'bg-gray-50' }
+
+  // Determine display icon — for gifts use gift emoji when available
+  const displayEmoji = (tx.type === 'GIFT_SEND' || tx.type === 'GIFT_RECEIVE')
+    ? (tx.giftDetails?.gift?.emoji ?? meta.icon)
+    : meta.icon
+
+  // Determine the primary display label
+  const displayLabel = tx.type === 'GIFT_SEND' && tx.giftDetails
+    ? `${tx.giftDetails.gift.name} → ${tx.giftDetails.receiver.firstName} ${tx.giftDetails.receiver.lastName}`
+    : (tx.description ?? meta.label)
+
+  // Determine the amount to show and its sign/currency
+  const isDebit     = tx.coins < 0 || tx.diamonds < 0
+  const isCredit    = tx.coins > 0 || tx.diamonds > 0
+  const coinAmt     = Math.abs(tx.coins)
+  const diamondAmt  = Math.abs(tx.diamonds)
+  const showCoins   = coinAmt > 0
+  const showDiamonds = diamondAmt > 0
+
   return (
     <div className="flex items-center gap-3 py-2.5 border-b border-gray-50 last:border-0">
       <div className={cn(
         'w-8 h-8 rounded-full flex items-center justify-center text-base flex-shrink-0',
-        isSent ? 'bg-red-50' : 'bg-green-50'
+        meta.bgClass
       )}>
-        {tx.gift.emoji}
+        {displayEmoji}
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-xs font-semibold text-gray-800 truncate">
-          {isSent ? '→' : '←'} {other?.firstName} {other?.lastName}
-        </p>
-        <p className="text-[11px] text-gray-400 truncate">
-          {tx.gift.name}{tx.room ? ` · ${tx.room.title}` : ''}
-        </p>
+        <p className="text-xs font-semibold text-gray-800 truncate">{meta.label}</p>
+        <p className="text-[11px] text-gray-400 truncate">{displayLabel}</p>
       </div>
-      <div className="text-right flex-shrink-0">
-        <p className={cn('text-xs font-bold', isSent ? 'text-red-500' : 'text-green-500')}>
-          {isSent ? '-' : '+'}{fmt(tx.gift.priceCoins)}
-          <span className="text-gray-400 font-normal"> 🪙</span>
-        </p>
+      <div className="text-right flex-shrink-0 space-y-0.5">
+        {showCoins && (
+          <p className={cn('text-xs font-bold', isDebit && tx.coins < 0 ? 'text-red-500' : 'text-green-500')}>
+            {tx.coins < 0 ? '-' : '+'}{fmt(coinAmt)}
+            <span className="text-gray-400 font-normal"> 🪙</span>
+          </p>
+        )}
+        {showDiamonds && (
+          <p className={cn('text-xs font-bold', tx.diamonds < 0 ? 'text-red-500' : 'text-green-500')}>
+            {tx.diamonds < 0 ? '-' : '+'}{fmt(diamondAmt)}
+            <span className="text-gray-400 font-normal"> 💎</span>
+          </p>
+        )}
+        {!showCoins && !showDiamonds && (
+          <p className="text-xs text-gray-400">—</p>
+        )}
         <p className="text-[10px] text-gray-400">{timeAgo(tx.createdAt)}</p>
       </div>
     </div>
@@ -202,6 +255,8 @@ function WalletContent() {
     const onCredited = (d: { coins: number }) => {
       toast({ title: `✅ ${d.coins.toLocaleString()} coins added to your wallet!` })
       queryClient.invalidateQueries({ queryKey: ['wallet-me'] })
+      // F-09: also invalidate history so the new transaction shows without a tab switch
+      queryClient.invalidateQueries({ queryKey: ['wallet-history'] })
     }
     socket.on('wallet:coins_credited', onCredited)
 
@@ -222,9 +277,12 @@ function WalletContent() {
     staleTime: 5 * 60 * 1000,
   })
 
-  const { data: history, isLoading: loadingHistory } = useQuery<{ sent: GiftTx[]; received: GiftTx[] }>({
+  const { data: history, isLoading: loadingHistory } = useQuery<HistoryResponse>({
     queryKey: ['wallet-history'],
-    queryFn:  () => api.get('/wallet/history').then(r => r.data.data),
+    // Backend: GET /wallet/history → successResponse(res, { data: [...], pagination: {...} })
+    // successResponse wraps in { success, message, data: <payload>, timestamp }
+    // So r.data.data = { data: WalletTx[], pagination: {...} }
+    queryFn:  () => api.get('/wallet/history').then(r => r.data.data as HistoryResponse),
     enabled:  activeTab === 'history',
   })
 
@@ -414,29 +472,19 @@ function WalletContent() {
             <div className="p-6 flex items-center justify-center">
               <Loader2 className="w-5 h-5 animate-spin text-gray-400" />
             </div>
-          ) : !history || (history.sent.length === 0 && history.received.length === 0) ? (
+          ) : !history || !history.data || history.data.length === 0 ? (
             <div className="text-center py-12 text-gray-400">
               <Gift className="w-10 h-10 mx-auto mb-2 opacity-30" />
               <p className="text-sm">No transactions yet</p>
               <p className="text-xs mt-1">Send a gift in a Voice Club room to get started</p>
             </div>
           ) : (
-            <div className="px-4">
-              {history.sent.length > 0 && (
-                <div className="py-3">
-                  <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide mb-2 flex items-center gap-1">
-                    <ArrowUpRight className="w-3 h-3 text-red-400" /> Gifts Sent
-                  </p>
-                  {history.sent.map(tx => <TxRow key={tx.id} tx={tx} isSent />)}
-                </div>
-              )}
-              {history.received.length > 0 && (
-                <div className="py-3">
-                  <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide mb-2 flex items-center gap-1">
-                    <ArrowDownLeft className="w-3 h-3 text-green-400" /> Gifts Received
-                  </p>
-                  {history.received.map(tx => <TxRow key={tx.id} tx={tx} isSent={false} />)}
-                </div>
+            <div className="px-4 py-2">
+              {history.data.map(tx => <TxRow key={tx.id} tx={tx} />)}
+              {history.pagination.total > history.data.length && (
+                <p className="text-center text-xs text-gray-400 py-3">
+                  Showing {history.data.length} of {history.pagination.total} transactions
+                </p>
               )}
             </div>
           )}

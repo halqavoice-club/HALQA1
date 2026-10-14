@@ -288,7 +288,7 @@ describe('PH17-004: sfuRevokePublish on live-class demoteFromStage', () => {
     const src = fs.readFileSync(
       path.join(__dirname, '../controllers/live-class.controller.js'), 'utf8'
     );
-    const fn = extractFn(src, 'demoteFromStage', 'dropMicLiveClass');
+    const fn = extractFn(src, 'demoteSpeaker', 'inviteToStage');
     expect(fn).toMatch(/sfuRevokePublish\s*\(/);
     expect(fn).toMatch(/false.*\[live-class:demote\]|\[live-class:demote\].*false/);
   });
@@ -297,7 +297,7 @@ describe('PH17-004: sfuRevokePublish on live-class demoteFromStage', () => {
     const src = fs.readFileSync(
       path.join(__dirname, '../controllers/live-class.controller.js'), 'utf8'
     );
-    const fn = extractFn(src, 'demoteFromStage', 'dropMicLiveClass');
+    const fn = extractFn(src, 'demoteSpeaker', 'inviteToStage');
     expect(fn).toMatch(/liveclass:revoke_mic/);
     expect(fn).toMatch(/liveclass:speaker_removed/);
   });

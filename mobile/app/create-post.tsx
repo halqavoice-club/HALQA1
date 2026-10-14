@@ -19,11 +19,14 @@ import * as DocumentPicker from 'expo-document-picker';
 import api from '@/lib/api';
 import { useAuthStore } from '@/store/auth.store';
 
-const VISIBILITY_OPTIONS = [
-  { value: 'PUBLIC',    label: '🌍 Everyone'    },
-  { value: 'FOLLOWERS', label: '👥 Followers'   },
-  { value: 'PRIVATE',   label: '🔒 Only me'     },
+const BASE_VISIBILITY_OPTIONS = [
+  { value: 'PUBLIC',      label: '🌍 Everyone'    },
+  { value: 'FOLLOWERS',   label: '👥 Followers'   },
+  { value: 'PRIVATE',     label: '🔒 Only me'     },
 ];
+
+// SCHOOL_ONLY is appended at runtime for users who belong to a school
+const SCHOOL_ONLY_OPTION = { value: 'SCHOOL_ONLY', label: '🏫 School only' };
 
 type MediaItem = {
   uri: string;
@@ -146,6 +149,11 @@ export default function CreatePostScreen() {
       setUploading(false);
     }
   }, [body, media, visibility, location, communityId, queryClient, router]);
+
+  // Build visibility options: include SCHOOL_ONLY only when user has a school
+  const VISIBILITY_OPTIONS = user?.schoolId
+    ? [...BASE_VISIBILITY_OPTIONS, SCHOOL_ONLY_OPTION]
+    : BASE_VISIBILITY_OPTIONS;
 
   const canPost = (body.trim().length > 0 || !!media) && !uploading;
   const visLabel = VISIBILITY_OPTIONS.find(v => v.value === visibility)?.label ?? '';

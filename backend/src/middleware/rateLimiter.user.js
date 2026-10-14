@@ -100,36 +100,69 @@ function createUserRateLimiter(options = {}) {
 }
 
 /**
- * Pre-configured rate limiters for common use cases
+ * Pre-configured rate limiters for common use cases.
+ *
+ * Each export is a lazy-proxy middleware function. The real limiter instance
+ * is created on the first HTTP request (not at module-load time), ensuring
+ * that isRedisReady() is evaluated after connectRedis() has resolved.
  */
 
+let _strictLimiter = null;
+let _moderateLimiter = null;
+let _lenientLimiter = null;
+let _writeLimiter = null;
+
 // Strict limiter for sensitive operations (password change, email update, etc.)
-const strictLimiter = createUserRateLimiter({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isDev ? 1000 : 5,
-  message: 'Too many sensitive operations, please try again later'
-});
+const strictLimiter = (req, res, next) => {
+  if (!_strictLimiter) {
+    logger.debug('[userRateLimiter] Lazy-initializing strictLimiter instance');
+    _strictLimiter = createUserRateLimiter({
+      windowMs: 15 * 60 * 1000,
+      max: isDev ? 1000 : 5,
+      message: 'Too many sensitive operations, please try again later'
+    });
+  }
+  return _strictLimiter(req, res, next);
+};
 
 // Moderate limiter for regular API calls
-const moderateLimiter = createUserRateLimiter({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isDev ? 5000 : 100,
-  message: 'Rate limit exceeded, please try again later'
-});
+const moderateLimiter = (req, res, next) => {
+  if (!_moderateLimiter) {
+    logger.debug('[userRateLimiter] Lazy-initializing moderateLimiter instance');
+    _moderateLimiter = createUserRateLimiter({
+      windowMs: 15 * 60 * 1000,
+      max: isDev ? 5000 : 100,
+      message: 'Rate limit exceeded, please try again later'
+    });
+  }
+  return _moderateLimiter(req, res, next);
+};
 
 // Lenient limiter for read operations
-const lenientLimiter = createUserRateLimiter({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isDev ? 10000 : 500,
-  message: 'Too many read requests, please try again later'
-});
+const lenientLimiter = (req, res, next) => {
+  if (!_lenientLimiter) {
+    logger.debug('[userRateLimiter] Lazy-initializing lenientLimiter instance');
+    _lenientLimiter = createUserRateLimiter({
+      windowMs: 15 * 60 * 1000,
+      max: isDev ? 10000 : 500,
+      message: 'Too many read requests, please try again later'
+    });
+  }
+  return _lenientLimiter(req, res, next);
+};
 
 // Write operations limiter (create, update, delete)
-const writeLimiter = createUserRateLimiter({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isDev ? 2000 : 50,
-  message: 'Too many write operations, please try again later'
-});
+const writeLimiter = (req, res, next) => {
+  if (!_writeLimiter) {
+    logger.debug('[userRateLimiter] Lazy-initializing writeLimiter instance');
+    _writeLimiter = createUserRateLimiter({
+      windowMs: 15 * 60 * 1000,
+      max: isDev ? 2000 : 50,
+      message: 'Too many write operations, please try again later'
+    });
+  }
+  return _writeLimiter(req, res, next);
+};
 
 module.exports = {
   createUserRateLimiter,

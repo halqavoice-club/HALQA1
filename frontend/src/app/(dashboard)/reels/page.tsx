@@ -12,6 +12,7 @@
 import { useEffect, useRef, useState, useCallback, Suspense } from 'react'
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { postsApi, type Post, type ReactionType } from '@/lib/posts'
+import { getSocket } from '@/lib/socket'
 import { socialApi } from '@/lib/social'
 import { useAuthStore } from '@/store/auth.store'
 import { useToast } from '@/components/ui/use-toast'
@@ -25,6 +26,7 @@ import {
 import Link from 'next/link'
 import { formatDistanceToNow } from 'date-fns'
 import { CommentsSection } from '@/components/feed/CommentsSection'
+import { ShareMenu } from '@/components/feed/ShareMenu'
 
 // ─── Single reel item ─────────────────────────────────────────────────────────
 function ReelItem({
@@ -53,18 +55,21 @@ function ReelItem({
   const [localReactionCount, setLocalReactionCount] = useState(post._count.reactions)
   const [isFollowing,        setIsFollowing]        = useState(post.isFollowing ?? false)
   const [isBookmarked,       setIsBookmarked]       = useState((post.bookmarks?.length ?? 0) > 0)
+  const [localShare,         setLocalShare]         = useState(post.shareCount ?? 0)
 
   const isOwn = user?.id === post.authorId
   const video = post.media.find(m => m.type === 'VIDEO')
   const avatarSrc = getAvatarUrl(post.author.avatarUrl)
   const initials  = `${post.author.firstName?.charAt(0) ?? ''}${post.author.lastName?.charAt(0) ?? ''}`.toUpperCase() || '?'
 
-  // Auto-play/pause based on isActive
+  // Auto-play/pause based on isActive; also record a view on activation
   useEffect(() => {
     const v = videoRef.current
     if (!v) return
     if (isActive) {
       v.play().then(() => setPlaying(true)).catch(() => {})
+      // Fire-and-forget view tracking — backend deduplicates per user
+      postsApi.recordView(post.id).catch(() => {})
     } else {
       v.pause()
       setPlaying(false)
@@ -129,8 +134,8 @@ function ReelItem({
     : String(n)
 
   return (
-    <div className="relative w-full h-screen flex-shrink-0 snap-start snap-always bg-black overflow-hidden">
-      {/* ── Video ────────────────────────────────────────────────────────────── */}
+    <div className="relative w-full h-screen flex-shrink-0 snap-start snap-always bg-black">
+      {/* ── Video — clipped by its own inset-0 bounds, no overflow-hidden needed ── */}
       <video
         ref={videoRef}
         src={resolveMediaUrl(video.url)}
@@ -163,7 +168,7 @@ function ReelItem({
       </button>
 
       {/* ── Right action bar ─────────────────────────────────────────────────── */}
-      <div className="absolute right-3 bottom-28 z-20 flex flex-col items-center gap-5">
+      <div className="absolute right-4 bottom-28 z-20 flex flex-col items-center gap-5">
         {/* Avatar + Follow */}
         <div className="relative flex flex-col items-center gap-1">
           <Link href={`/social/profile/${post.authorId}`}>
@@ -223,19 +228,16 @@ function ReelItem({
           </span>
         </button>
 
-        {/* Share */}
-        <button
-          onClick={() => {
-            navigator.clipboard.writeText(`${window.location.origin}/feed/post/${post.id}`)
-            toast({ title: '🔗 Link copied!' })
-          }}
-          className="flex flex-col items-center gap-1"
-        >
-          <div className="w-12 h-12 rounded-full bg-black/30 flex items-center justify-center">
-            <Share2 className="w-6 h-6 text-white" />
-          </div>
+        {/* Share — full ShareMenu with dark variant for video overlay */}
+        <div className="flex flex-col items-center gap-1">
+          <ShareMenu
+            post={post}
+            shareCount={localShare}
+            onShared={() => setLocalShare(c => c + 1)}
+            variant="dark"
+          />
           <span className="text-white text-xs font-semibold drop-shadow">Share</span>
-        </button>
+        </div>
 
         {/* Bookmark */}
         <button
@@ -301,6 +303,7 @@ function ReelItem({
 // ─── Reels feed ───────────────────────────────────────────────────────────────
 function ReelsFeed() {
   const { toast }       = useToast()
+  const queryClient     = useQueryClient()
   const containerRef    = useRef<HTMLDivElement>(null)
   const [activeIdx,     setActiveIdx]  = useState(0)
   const [globalMuted,   setGlobalMuted] = useState(true)
@@ -369,6 +372,26 @@ function ReelsFeed() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [activeIdx, reels.length])
+
+  // ── Socket — invalidate reels cache when a new VIDEO post is created ────────
+  useEffect(() => {
+    const socket = getSocket()
+    if (!socket) return
+    socket.emit('feed:join')
+
+    const onPostCreate = (d: { post: Post }) => {
+      // Only invalidate if the new post has video media — avoids spurious refetches
+      if (d.post.media?.some(m => m.type === 'VIDEO')) {
+        queryClient.invalidateQueries({ queryKey: ['reels'] })
+      }
+    }
+
+    socket.on('post:create', onPostCreate)
+    return () => {
+      socket.emit('feed:leave')
+      socket.off('post:create', onPostCreate)
+    }
+  }, [queryClient])
 
   if (isLoading) {
     return (

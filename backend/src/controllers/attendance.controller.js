@@ -23,6 +23,17 @@ async function markAttendance(req, res, next) {
       teacherId = teacher?.id ?? null;
     }
 
+    // P2-002 FIX: Verify classId and studentId both belong to the caller's school.
+    const schoolId = req.schoolId || req.user.schoolId;
+    if (schoolId) {
+      const [cls, student] = await Promise.all([
+        prisma.class.findFirst({ where: { id: classId, schoolId, deletedAt: null }, select: { id: true } }),
+        prisma.student.findFirst({ where: { id: studentId, schoolId, deletedAt: null }, select: { id: true } })
+      ]);
+      if (!cls)     return errorResponse(res, 'Class not found in your school', 403);
+      if (!student) return errorResponse(res, 'Student not found in your school', 403);
+    }
+
     // Upsert attendance record — handle concurrent requests gracefully
     let attendance;
     try {
@@ -226,8 +237,14 @@ async function bulkMarkAttendance(req, res, next) {
     const schoolId = req.schoolId || req.user.schoolId;
     const effectiveRole = req.schoolMembership?.role || req.user.role;
 
-    // M-6 FIX: Validate that all studentIds belong to the caller's school.
-    if (effectiveRole !== 'SUPER_ADMIN' && schoolId) {
+    // P2-002/P2-003 FIX: Validate classId and all studentIds belong to the caller's school.
+    // Removed dead SUPER_ADMIN bypass — requireSchoolMember already blocks SUPER_ADMIN upstream.
+    if (schoolId) {
+      // Validate classId belongs to this school
+      const cls = await prisma.class.findFirst({ where: { id: classId, schoolId, deletedAt: null }, select: { id: true } });
+      if (!cls) return errorResponse(res, 'Class not found in your school', 403);
+
+      // Validate all studentIds belong to this school
       const studentIds = [...new Set(records.map(r => r.studentId))];
       const validStudents = await prisma.student.findMany({
         where: { id: { in: studentIds }, schoolId, deletedAt: null },

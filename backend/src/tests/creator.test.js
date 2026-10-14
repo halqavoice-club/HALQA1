@@ -295,6 +295,18 @@ describe('POST /api/v1/creators/:userId/subscribe', () => {
         }),
       })
     );
+
+    // F-05: verify SUBSCRIPTION_RECEIVE ledger entry written for creator (diamond credit)
+    expect(mockLedgerCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type:           'SUBSCRIPTION_RECEIVE',
+          userId:         CREATOR_USER.id,
+          diamonds:       expect.any(Number),
+          subscriptionId: SUBSCRIPTION.id,
+        }),
+      })
+    );
   });
 
   // ── Insufficient balance (sync pre-check path) ──────────────────────────────
@@ -485,6 +497,18 @@ describe('POST /api/v1/creators/:userId/tip', () => {
         data: expect.objectContaining({
           type:  'TIP_SEND',
           coins: -50,
+        }),
+      })
+    );
+
+    // F-05: verify TIP_RECEIVE ledger entry written for creator (diamond credit)
+    expect(mockLedgerCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type:     'TIP_RECEIVE',
+          userId:   CREATOR_USER.id,
+          diamonds: 25,
+          tipId:    TIP.id,
         }),
       })
     );

@@ -26,19 +26,30 @@ interface UserProfile {
   followersCount: number;
   followingCount: number;
   postsCount: number;
+  friendsCount: number;
   isFollowing: boolean;
-  isFriend: boolean;
+  /** Backend returns friendStatus enum, not a boolean isFriend */
+  friendStatus: 'none' | 'pending_sent' | 'pending_received' | 'friends';
   role: string;
   createdAt: string;
 }
 
+interface PostMedia {
+  url: string;
+  type: string;
+}
+
 interface Post {
   id: string;
-  content: string;
-  mediaUrl?: string;
-  mediaType?: string;
-  likesCount: number;
-  commentsCount: number;
+  /** API returns 'body', not 'content' */
+  body: string;
+  media?: PostMedia[];
+  type: string;
+  /** API returns nested _count object, not flat counters */
+  _count: {
+    reactions: number;
+    comments: number;
+  };
   createdAt: string;
 }
 
@@ -54,13 +65,15 @@ function StatBox({ label, value }: { label: string; value: number }) {
 
 // ─── Post Grid Item ────────────────────────────────────────────────────────────
 function PostGridItem({ post, onPress }: { post: Post; onPress: () => void }) {
+  // API returns media[] array; use first item's url if present
+  const firstMediaUrl = post.media?.[0]?.url;
   return (
     <TouchableOpacity style={styles.gridItem} onPress={onPress}>
-      {post.mediaUrl ? (
-        <Image source={{ uri: post.mediaUrl }} style={styles.gridImage} />
+      {firstMediaUrl ? (
+        <Image source={{ uri: firstMediaUrl }} style={styles.gridImage} />
       ) : (
         <View style={[styles.gridImage, styles.textPost]}>
-          <Text numberOfLines={4} style={styles.textPostContent}>{post.content}</Text>
+          <Text numberOfLines={4} style={styles.textPostContent}>{post.body}</Text>
         </View>
       )}
     </TouchableOpacity>
@@ -92,8 +105,9 @@ export default function PublicProfileScreen() {
         followersCount: c.followers ?? 0,
         followingCount: c.following ?? 0,
         postsCount: c.posts ?? 0,
+        friendsCount: c.friends ?? 0,
         isFollowing: c.isFollowing ?? false,
-        isFriend: c.isFriend ?? false,
+        friendStatus: (c.friendStatus ?? 'none') as UserProfile['friendStatus'],
       } as UserProfile;
     },
     enabled: !!id,
@@ -126,18 +140,33 @@ export default function PublicProfileScreen() {
     },
   });
 
-  // Friend request
+  // Friend request — branches on friendStatus enum
+  // friends        → DELETE /social/friends/:id       (remove friend)
+  // pending_received → POST /social/friends/accept/:id (accept their request)
+  // pending_sent   → DELETE /social/friends/request/:id (cancel own request)
+  // none           → POST /social/friends/request/:id  (send request)
   const friendMutation = useMutation({
     mutationFn: async () => {
-      if (profile?.isFriend) {
+      const status = profile?.friendStatus ?? 'none';
+      if (status === 'friends') {
         await api.delete(`/social/friends/${id}`);
+      } else if (status === 'pending_received') {
+        await api.post(`/social/friends/accept/${id}`);
+      } else if (status === 'pending_sent') {
+        await api.delete(`/social/friends/request/${id}`);
       } else {
         await api.post(`/social/friends/request/${id}`);
       }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['profile', id] });
-      showMessage({ message: profile?.isFriend ? 'Friend removed' : 'Friend request sent!', type: 'success' });
+      const status = profile?.friendStatus ?? 'none';
+      const msg =
+        status === 'friends' ? 'Friend removed' :
+        status === 'pending_received' ? 'Friend request accepted!' :
+        status === 'pending_sent' ? 'Request cancelled' :
+        'Friend request sent!';
+      showMessage({ message: msg, type: 'success' });
     },
     onError: () => showMessage({ message: 'Action failed', type: 'danger' }),
   });
@@ -202,6 +231,7 @@ export default function PublicProfileScreen() {
           <StatBox label="Posts" value={profile.postsCount} />
           <StatBox label="Followers" value={profile.followersCount} />
           <StatBox label="Following" value={profile.followingCount} />
+          <StatBox label="Friends" value={profile.friendsCount} />
         </View>
 
         {/* Action buttons */}
@@ -220,18 +250,45 @@ export default function PublicProfileScreen() {
               }
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.btn, profile.isFriend ? styles.btnSecondary : styles.btnFriend]}
+              style={[
+                styles.btn,
+                profile.friendStatus === 'friends' ? styles.btnSecondary :
+                profile.friendStatus === 'pending_sent' ? styles.btnPending :
+                profile.friendStatus === 'pending_received' ? styles.btnFriend :
+                styles.btnFriend,
+              ]}
               onPress={() => friendMutation.mutate()}
               disabled={friendMutation.isPending}
             >
               {friendMutation.isPending
-                ? <ActivityIndicator size="small" color="#fff" />
-                : <>
-                    <Ionicons name={profile.isFriend ? 'person-remove-outline' : 'person-add-outline'} size={14} color={profile.isFriend ? '#4f46e5' : '#fff'} />
-                    <Text style={[{ marginLeft: 4, fontSize: 13, fontWeight: '600' }, profile.isFriend ? styles.btnSecondaryText : { color: '#fff' }]}>
-                      {profile.isFriend ? 'Friends' : 'Add Friend'}
-                    </Text>
-                  </>
+                ? <ActivityIndicator size="small" color={profile.friendStatus === 'friends' ? '#4f46e5' : '#fff'} />
+                : (() => {
+                    const fs = profile.friendStatus;
+                    if (fs === 'friends') return (
+                      <>
+                        <Ionicons name="person-remove-outline" size={14} color="#4f46e5" />
+                        <Text style={[{ marginLeft: 4, fontSize: 13, fontWeight: '600' }, styles.btnSecondaryText]}>Friends</Text>
+                      </>
+                    );
+                    if (fs === 'pending_sent') return (
+                      <>
+                        <Ionicons name="time-outline" size={14} color="#6b7280" />
+                        <Text style={[{ marginLeft: 4, fontSize: 13, fontWeight: '600' }, styles.btnPendingText]}>Pending (cancel)</Text>
+                      </>
+                    );
+                    if (fs === 'pending_received') return (
+                      <>
+                        <Ionicons name="checkmark-outline" size={14} color="#fff" />
+                        <Text style={{ marginLeft: 4, fontSize: 13, fontWeight: '600', color: '#fff' }}>Accept Request</Text>
+                      </>
+                    );
+                    return (
+                      <>
+                        <Ionicons name="person-add-outline" size={14} color="#fff" />
+                        <Text style={{ marginLeft: 4, fontSize: 13, fontWeight: '600', color: '#fff' }}>Add Friend</Text>
+                      </>
+                    );
+                  })()
               }
             </TouchableOpacity>
             <TouchableOpacity style={[styles.btn, styles.btnSecondary, { flex: 0, paddingHorizontal: 14 }]} onPress={handleDm}>
@@ -293,6 +350,8 @@ const styles = StyleSheet.create({
   btnSecondary: { backgroundColor: '#fff', borderWidth: 1.5, borderColor: '#4f46e5' },
   btnSecondaryText: { color: '#4f46e5', fontWeight: '600', fontSize: 14 },
   btnFriend: { backgroundColor: '#10b981', borderWidth: 0 },
+  btnPending: { backgroundColor: '#fff', borderWidth: 1.5, borderColor: '#d1d5db' },
+  btnPendingText: { color: '#6b7280', fontWeight: '600', fontSize: 14 },
   sectionTitle: { fontSize: 16, fontWeight: '700', color: '#111827', paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8 },
   emptyText: { textAlign: 'center', color: '#9ca3af', paddingVertical: 24 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 8 },

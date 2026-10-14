@@ -21,7 +21,7 @@ const {
   getMessages, sendMessage, getHandQueue,
   toggleOpenMic, toggleMicLock, grabMic, dropMic,
   updateRoom, deleteRoom, getMyRooms, getScheduledRooms, uploadRoomCover, toggleSeatLock,
-  deleteMessage
+  deleteMessage, getStageState
 } = require('../controllers/voice.controller');
 
 // ─── Multer — room cover image (2 MB, images only, memory storage) ───────────
@@ -265,6 +265,9 @@ router.patch('/:id/pin/:userId',
 
 // Get participants grouped by role
 router.get('/:id/participants', getParticipants);
+
+// Authoritative stage snapshot — for active participants only (post-join pull)
+router.get('/:id/stage-state', moderateLimiter, getStageState);
 
 // ─── OPEN MIC ─────────────────────────────────────────────────────────────────
 // HOST/MOD toggles open mic mode — route-level guard added for defence-in-depth

@@ -2,9 +2,16 @@
 
 on:
   push:
-    branches: [main, develop, fix/live-class-gap-analysis]
+    branches:
+      - main
+      - develop
+      - 'fix/**'
+      - 'feat/**'
+      - 'hotfix/**'
   pull_request:
-    branches: [main, develop, fix/live-class-gap-analysis]
+    branches:
+      - main
+      - develop
   workflow_dispatch:
     inputs:
       reason:
@@ -191,7 +198,7 @@ jobs:
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-cmd="mysqladmin ping -h localhost -u root --password=root --silent"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=10
@@ -313,7 +320,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [backend, backend-tests, backend-integration, frontend]
     # Only run on main branch or PRs to main (not on every push to develop)
-    if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
 
     steps:
       - name: Checkout
@@ -411,7 +418,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [frontend, backend-integration]
     # Only run on main or PRs to main -- E2E is expensive, skip feature branches
-    if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
 
     services:
       mysql:
@@ -424,7 +431,7 @@ jobs:
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-cmd="mysqladmin ping -h localhost -u root --password=root --silent"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=10
@@ -546,3 +553,156 @@ jobs:
           name: playwright-report
           path: frontend/playwright-report/
           retention-days: 7
+
+  # --- Dependency-Aware Regression: Classify changed files ------------------
+  # Runs on every push/PR. Diffs HEAD against the PR base (or previous commit
+  # on a push). Outputs a comma-separated group list, e.g. "G1,G3".
+  # Falls back to "G1,G2,G3,G4,G5" (all groups) on any error.
+  # Does NOT require MySQL/Redis — pure bash + git.
+  classify:
+    name: Classify Changed Files
+    runs-on: ubuntu-latest
+    outputs:
+      groups: ${{ steps.classify.outputs.groups }}
+
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine diff base
+        id: base
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -n "$PR_BASE" ]; then
+            echo "base=$PR_BASE" >> "$GITHUB_OUTPUT"
+          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            echo "base=$PUSH_BEFORE" >> "$GITHUB_OUTPUT"
+          else
+            # First push, force-push, or workflow_dispatch: compare against HEAD~1; fall back to all groups
+            echo "base=HEAD~1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run classifier
+        id: classify
+        run: |
+          chmod +x scripts/ci-group-classifier.sh
+          CI_GROUPS=$(bash scripts/ci-group-classifier.sh "${{ steps.base.outputs.base }}" HEAD 2>/dev/null) || CI_GROUPS=""
+          if [ -z "$CI_GROUPS" ]; then
+            CI_GROUPS="G1,G2,G3,G4,G5"
+          fi
+          echo "groups=$CI_GROUPS" >> "$GITHUB_OUTPUT"
+          echo "Selected groups: $CI_GROUPS"
+
+      - name: Verify classifier tests pass
+        run: |
+          chmod +x scripts/ci-group-classifier.test.sh
+          bash scripts/ci-group-classifier.test.sh
+
+  # --- Dependency-Aware Regression: Run selected groups --------------------
+  # Runs only the test groups that cover the changed files.
+  # Needs backend-tests (unit gate) + classify (group selection) to complete.
+  # Each group step is conditional on its group letter appearing in the output.
+  # A group that is NOT selected is skipped (not failed).
+  # If any selected group fails, this job fails and blocks the Docker build.
+  regression-groups:
+    name: Regression -- Selected Groups
+    runs-on: ubuntu-latest
+    needs: [backend-tests, classify]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      - name: Show selected groups
+        run: |
+          echo "Groups selected by classifier: ${{ needs.classify.outputs.groups }}"
+
+      # G1 — Feed / Social
+      - name: G1 -- Feed / Social
+        if: contains(needs.classify.outputs.groups, 'G1')
+        run: npm run test:group:social -- --ci --reporters=default
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
+          JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'
+          JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
+          PORT: '5001'
+          SERVICE_NAME: 'halqa-ci'
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'
+
+      # G2 — Voice Club
+      - name: G2 -- Voice Club
+        if: contains(needs.classify.outputs.groups, 'G2')
+        run: npm run test:group:voice -- --ci --reporters=default
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
+          JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'
+          JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
+          PORT: '5001'
+          SERVICE_NAME: 'halqa-ci'
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'
+
+      # G3 — School Live Classes
+      - name: G3 -- School Live Classes
+        if: contains(needs.classify.outputs.groups, 'G3')
+        run: npm run test:group:live-class -- --ci --reporters=default
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
+          JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'
+          JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
+          PORT: '5001'
+          SERVICE_NAME: 'halqa-ci'
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'
+
+      # G4 — Authentication / Authorization
+      - name: G4 -- Auth / Authorization
+        if: contains(needs.classify.outputs.groups, 'G4')
+        run: npm run test:group:auth -- --ci --reporters=default
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
+          JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'
+          JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
+          PORT: '5001'
+          SERVICE_NAME: 'halqa-ci'
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'
+
+      # G5 — Shared Realtime
+      - name: G5 -- Shared Realtime
+        if: contains(needs.classify.outputs.groups, 'G5')
+        run: npm run test:group:realtime -- --ci --reporters=default
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
+          JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'
+          JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
+          PORT: '5001'
+          SERVICE_NAME: 'halqa-ci'
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'

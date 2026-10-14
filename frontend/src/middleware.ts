@@ -22,10 +22,17 @@ const SECURITY_HEADERS: Record<string, string> = {
   // Restrict Referer leakage on cross-origin navigations
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   // Control browser feature access
-  // camera=* — required for LiveKit camera in live classes (top-level page access)
-  // microphone=* — required for LiveKit audio in voice club and live classes
-  // geolocation=() — not used, deny it
-  'Permissions-Policy': 'camera=*, microphone=*, geolocation=()',
+  // camera=*          — required for LiveKit camera in Live Class (top-level page)
+  // microphone=*      — required for LiveKit audio in Voice Club and Live Class
+  // display-capture=* — required for screen sharing in Live Class
+  // geolocation=()    — not used by HALQA, deny it
+  //
+  // AUDIT-043-SEC: This is the SINGLE authoritative source for Permissions-Policy.
+  // The duplicate in next.config.js headers() has been removed, and the nginx
+  // Permissions-Policy directive has been removed, to prevent conflicting values.
+  // Browsers take the intersection of duplicate headers — camera=() would have
+  // won over camera=*, breaking LiveKit camera access.
+  'Permissions-Policy': 'camera=*, microphone=*, display-capture=*, geolocation=()',
   // Step 9 — CSP (Report-Only mode): collects violations without blocking anything.
   // This allows us to discover any sources we need to allow before switching to
   // enforcing mode. Review the report-uri endpoint and gradually tighten the policy.
