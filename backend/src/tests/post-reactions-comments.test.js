@@ -774,3 +774,92 @@ describe('Block enforcement — addComment', () => {
     expect(prisma.userBlock.findFirst).not.toHaveBeenCalled();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FIND-007 — getReactions block enforcement
+// ═══════════════════════════════════════════════════════════════════════════════
+describe('FIND-007 — getReactions block enforcement', () => {
+  let app;
+  beforeAll(() => { app = buildPostApp(); });
+
+  test('viewer blocked a reaction author → that author absent from reactions array', async () => {
+    asUser('viewer-007');
+    prisma.postReaction.findMany.mockResolvedValue([
+      { type: 'LIKE', createdAt: new Date(), user: { id: 'visible-user', firstName: 'V', lastName: 'U', avatarUrl: null, role: 'MEMBER', schoolId: null } },
+      { type: 'LOVE', createdAt: new Date(), user: { id: 'blocked-user-id', firstName: 'B', lastName: 'U', avatarUrl: null, role: 'MEMBER', schoolId: null } },
+    ]);
+    prisma.userBlock.findMany.mockResolvedValue([
+      { blockerId: 'viewer-007', blockedId: 'blocked-user-id' },
+    ]);
+
+    const res = await request(app)
+      .get('/api/v1/posts/post-007-a/reactions')
+      .set('Authorization', tok('viewer-007'));
+
+    expect(res.status).toBe(200);
+    const ids = res.body.data.reactions.map(r => r.user.id);
+    expect(ids).not.toContain('blocked-user-id');
+    expect(ids).toContain('visible-user');
+    expect(res.body.data.total).toBe(1);
+  });
+
+  test('reaction author blocked viewer → that author absent from response', async () => {
+    asUser('viewer-007b');
+    prisma.postReaction.findMany.mockResolvedValue([
+      { type: 'LIKE', createdAt: new Date(), user: { id: 'blocker-user', firstName: 'B', lastName: 'U', avatarUrl: null, role: 'MEMBER', schoolId: null } },
+      { type: 'LIKE', createdAt: new Date(), user: { id: 'safe-user', firstName: 'S', lastName: 'U', avatarUrl: null, role: 'MEMBER', schoolId: null } },
+    ]);
+    prisma.userBlock.findMany.mockResolvedValue([
+      { blockerId: 'blocker-user', blockedId: 'viewer-007b' },
+    ]);
+
+    const res = await request(app)
+      .get('/api/v1/posts/post-007-b/reactions')
+      .set('Authorization', tok('viewer-007b'));
+
+    expect(res.status).toBe(200);
+    const ids = res.body.data.reactions.map(r => r.user.id);
+    expect(ids).not.toContain('blocker-user');
+    expect(ids).toContain('safe-user');
+    expect(res.body.data.total).toBe(1);
+  });
+
+  test('no blocks → all reactions returned unchanged', async () => {
+    asUser('viewer-007c');
+    prisma.postReaction.findMany.mockResolvedValue([
+      { type: 'LIKE', createdAt: new Date(), user: { id: 'u1', firstName: 'A', lastName: 'B', avatarUrl: null, role: 'MEMBER', schoolId: null } },
+      { type: 'LOVE', createdAt: new Date(), user: { id: 'u2', firstName: 'C', lastName: 'D', avatarUrl: null, role: 'MEMBER', schoolId: null } },
+    ]);
+    // global beforeEach already sets findMany to return [] — override to be explicit
+    prisma.userBlock.findMany.mockResolvedValue([]);
+
+    const res = await request(app)
+      .get('/api/v1/posts/post-007-c/reactions')
+      .set('Authorization', tok('viewer-007c'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.total).toBe(2);
+    expect(res.body.data.reactions).toHaveLength(2);
+  });
+
+  test('viewer own reactions are always visible (viewerId excluded from blocked set)', async () => {
+    asUser('viewer-self-007');
+    prisma.postReaction.findMany.mockResolvedValue([
+      { type: 'LIKE', createdAt: new Date(), user: { id: 'viewer-self-007', firstName: 'Me', lastName: 'U', avatarUrl: null, role: 'MEMBER', schoolId: null } },
+    ]);
+    // A block record where the viewer appears (viewer blocked someone else)
+    prisma.userBlock.findMany.mockResolvedValue([
+      { blockerId: 'viewer-self-007', blockedId: 'someone-else' },
+    ]);
+
+    const res = await request(app)
+      .get('/api/v1/posts/post-007-d/reactions')
+      .set('Authorization', tok('viewer-self-007'));
+
+    expect(res.status).toBe(200);
+    // Own reaction must survive; viewerId must NOT be in blockedIds
+    const ids = res.body.data.reactions.map(r => r.user.id);
+    expect(ids).toContain('viewer-self-007');
+    expect(res.body.data.total).toBe(1);
+  });
+});

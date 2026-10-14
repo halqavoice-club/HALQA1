@@ -28,6 +28,7 @@ jest.mock('../utils/prisma', () => ({
   communityInvite: { findFirst: jest.fn() },
   communityJoinRequest: { findFirst: jest.fn(), create: jest.fn() },
   post:            { findMany: jest.fn() },
+  userBlock:       { findMany: jest.fn() },
   $transaction:    jest.fn(ops => Array.isArray(ops) ? Promise.all(ops) : ops(mockTx)),
 }));
 
@@ -90,6 +91,7 @@ beforeEach(() => {
   prisma.communityMember.count.mockResolvedValue(0);
   prisma.communityMember.findMany.mockResolvedValue([]);
   prisma.post.findMany.mockResolvedValue([]);
+  prisma.userBlock.findMany.mockResolvedValue([]);
   mockTx.communityMember.delete.mockResolvedValue({});
   mockTx.community.update.mockResolvedValue({});
   mockTx.communityMember.create.mockResolvedValue({});
@@ -453,6 +455,74 @@ describe('COMM-P3-001 — joinCommunity existing-member before ban ordering', ()
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ success: true, message: 'Joined community' })
     );
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FIND-008: getCommunityFeed bilateral block enforcement
+// ═══════════════════════════════════════════════════════════════════════════════
+describe('FIND-008 — getCommunityFeed block enforcement', () => {
+  // Shared setup: PUBLIC community with viewer as member
+  function setupFeed(blocks) {
+    prisma.community.findFirst.mockResolvedValue({
+      ...COMMUNITY,
+      privacy: 'PUBLIC',
+      members: [{ role: 'MEMBER' }],
+    });
+    prisma.userBlock.findMany.mockResolvedValue(blocks || []);
+    prisma.post.findMany.mockResolvedValue([]);
+  }
+
+  test('viewer blocks an author → where.NOT excludes that author', async () => {
+    setupFeed([{ blockerId: 'caller-id', blockedId: 'author-blocked' }]);
+    const req = makeReq({ params: { idOrSlug: 'comm-1' } });
+    const res = makeRes();
+    await getCommunityFeed(req, res, jest.fn());
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+    const findManyArgs = prisma.post.findMany.mock.calls[0][0];
+    expect(findManyArgs.where.NOT).toEqual({ authorId: { in: ['author-blocked'] } });
+  });
+
+  test('author blocks viewer → where.NOT excludes that author', async () => {
+    setupFeed([{ blockerId: 'author-who-blocked', blockedId: 'caller-id' }]);
+    const req = makeReq({ params: { idOrSlug: 'comm-1' } });
+    const res = makeRes();
+    await getCommunityFeed(req, res, jest.fn());
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+    const findManyArgs = prisma.post.findMany.mock.calls[0][0];
+    expect(findManyArgs.where.NOT).toEqual({ authorId: { in: ['author-who-blocked'] } });
+  });
+
+  test('no blocks → where.NOT is absent (no empty predicate injected)', async () => {
+    setupFeed([]);
+    const req = makeReq({ params: { idOrSlug: 'comm-1' } });
+    const res = makeRes();
+    await getCommunityFeed(req, res, jest.fn());
+
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+    const findManyArgs = prisma.post.findMany.mock.calls[0][0];
+    expect(findManyArgs.where.NOT).toBeUndefined();
+  });
+
+  test('block DB query fails → degrades safely, feed still returns 200', async () => {
+    prisma.community.findFirst.mockResolvedValue({
+      ...COMMUNITY,
+      privacy: 'PUBLIC',
+      members: [{ role: 'MEMBER' }],
+    });
+    prisma.userBlock.findMany.mockRejectedValue(new Error('DB down'));
+    prisma.post.findMany.mockResolvedValue([]);
+
+    const req = makeReq({ params: { idOrSlug: 'comm-1' } });
+    const res = makeRes();
+    await getCommunityFeed(req, res, jest.fn());
+
+    // .catch(() => []) must swallow the error and continue with no block filter
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+    const findManyArgs = prisma.post.findMany.mock.calls[0][0];
+    expect(findManyArgs.where.NOT).toBeUndefined();
   });
 });
 

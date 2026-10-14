@@ -668,6 +668,21 @@ async function getCommunityFeed(req, res, next) {
     const where = { communityId: community.id, deletedAt: null, isDraft: false };
     if (cursor) where.createdAt = { lte: new Date(cursor.split('_')[0]) };
 
+    // COMMUNITY-BLOCK FIX (FIND-008): Apply bilateral block policy to community feed.
+    const viewerId = req.user.id;
+    const blocks = await prisma.userBlock.findMany({
+      where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
+      select: { blockerId: true, blockedId: true }
+    }).catch(() => []);
+
+    const blockedAuthorIds = new Set(
+      blocks.flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== viewerId)
+    );
+
+    if (blockedAuthorIds.size > 0) {
+      where.NOT = { authorId: { in: [...blockedAuthorIds] } };
+    }
+
     const posts = await prisma.post.findMany({
       where,
       include: {
