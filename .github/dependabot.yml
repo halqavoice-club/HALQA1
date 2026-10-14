@@ -1,0 +1,65 @@
+version: 2
+updates:
+  # Root-level dependencies
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-and-yarn:
+        patterns:
+          - "*"
+
+  # Backend — ignore breaking majors that require migration
+  - package-ecosystem: "npm"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-and-yarn:
+        patterns:
+          - "*"
+    ignore:
+      # uuid v12+ is ESM-only — breaks all require() calls
+      - dependency-name: "uuid"
+        update-types: ["version-update:semver-major"]
+      # multer 2.x has breaking API changes
+      - dependency-name: "multer"
+        update-types: ["version-update:semver-major"]
+      # nodemailer 10.x requires migration of email flows
+      - dependency-name: "nodemailer"
+        update-types: ["version-update:semver-major"]
+      # @graphql-tools/schema major bumps need Apollo migration
+      - dependency-name: "@graphql-tools/schema"
+        update-types: ["version-update:semver-major"]
+
+  # Frontend — ignore next major (14->16 requires App Router migration + React 19)
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-and-yarn:
+        patterns:
+          - "*"
+    ignore:
+      - dependency-name: "next"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+
+  # Mobile — safe patches only
+  - package-ecosystem: "npm"
+    directory: "/mobile"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-and-yarn:
+        patterns:
+          - "*"
