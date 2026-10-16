@@ -174,6 +174,38 @@ async function removeModerator(req, res, next) {
         roomId,
         message: 'Your moderator role has been removed.'
       });
+
+      // BUG-2 FIX: Emit authoritative stage snapshot after moderator removal so
+      // the stale-seat sweep in onStageState fires and clears the vacated slot on
+      // all connected clients — mirrors the fix applied to promoteParticipant().
+      try {
+        const stageRows = await prisma.$queryRaw`
+          SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
+                 vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+                 u.firstName, u.lastName, u.avatarUrl
+          FROM voice_participants vp
+          LEFT JOIN users u ON u.id = vp.userId
+          WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+          ORDER BY vp.role ASC, vp.joinedAt ASC
+        `;
+        io.to(`voice:${roomId}`).emit('voice:stage_state', {
+          roomId,
+          stageParticipants: stageRows.map(r => ({
+            userId:           r.userId,
+            role:             r.role,
+            isMuted:          Boolean(r.isMuted),
+            seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
+            isPinned:         Boolean(r.isPinned),
+            handRaised:       Boolean(r.handRaised),
+            mutedByModerator: Boolean(r.mutedByModerator),
+            joinedAt:         r.joinedAt,
+            firstName:        r.firstName ?? null,
+            lastName:         r.lastName ?? null,
+            avatarUrl:        r.avatarUrl ?? null,
+          })),
+          stageCount: stageRows.length,
+        });
+      } catch { /* non-fatal */ }
     }
 
     _rolesAudit(req.user.id, 'REMOVE_MODERATOR', roomId, { targetUserId });

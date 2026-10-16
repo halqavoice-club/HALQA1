@@ -821,23 +821,36 @@ async function joinRoom(req, res, next) {
           ORDER BY vp.role ASC, vp.joinedAt ASC
         `;
         if (stageRows.length > 0) {
+          const mappedStageRows = stageRows.map(r => ({
+            userId:           r.userId,
+            role:             r.role,
+            isMuted:          Boolean(r.isMuted),
+            seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
+            isPinned:         Boolean(r.isPinned),
+            handRaised:       Boolean(r.handRaised),
+            mutedByModerator: Boolean(r.mutedByModerator),
+            joinedAt:         r.joinedAt,
+            firstName:        r.firstName ?? null,
+            lastName:         r.lastName ?? null,
+            avatarUrl:        r.avatarUrl ?? null,
+          }));
+          // Personal snapshot for the joining user.
           io.to(`user:${userId}`).emit('voice:stage_state', {
             roomId,
-            stageParticipants: stageRows.map(r => ({
-              userId:           r.userId,
-              role:             r.role,
-              isMuted:          Boolean(r.isMuted),
-              seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
-              isPinned:         Boolean(r.isPinned),
-              handRaised:       Boolean(r.handRaised),
-              mutedByModerator: Boolean(r.mutedByModerator),
-              joinedAt:         r.joinedAt,
-              firstName:        r.firstName ?? null,
-              lastName:         r.lastName ?? null,
-              avatarUrl:        r.avatarUrl ?? null,
-            })),
+            stageParticipants: mappedStageRows,
             stageCount: stageRows.length,
           });
+          // BUG-1 FIX: Also broadcast the snapshot room-wide so existing clients
+          // pick up the new joiner even if they missed voice:user_joined (e.g. the
+          // addParticipant null-guard silently dropped it). Guard at < 100 on-stage
+          // participants to avoid O(N²) snapshot traffic on large rooms.
+          if (stageRows.length < 100) {
+            io.to(`voice:${roomId}`).emit('voice:stage_state', {
+              roomId,
+              stageParticipants: mappedStageRows,
+              stageCount: stageRows.length,
+            });
+          }
         }
       } catch { /* non-fatal */ }
     }
@@ -1386,38 +1399,38 @@ async function promoteParticipant(req, res, next) {
         try { await autoPromoteNext(roomId, io); } catch {}
       }
 
-      // Authoritative stage snapshot — clients reconcile from this after any
-      // promotion to prevent stale seat positions on slow connections.
-      if (role === VOICE_ROLES.SPEAKER && assignedSeatNumber != null) {
-        try {
-          const stageRows = await prisma.$queryRaw`
-            SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
-                   vp.handRaised, vp.mutedByModerator, vp.joinedAt,
-                   u.firstName, u.lastName, u.avatarUrl
-            FROM voice_participants vp
-            LEFT JOIN users u ON u.id = vp.userId
-            WHERE vp.roomId = ${roomId} AND vp.isActive = 1
-            ORDER BY vp.role ASC, vp.joinedAt ASC
-          `;
-          io.to(`voice:${roomId}`).emit('voice:stage_state', {
-            roomId,
-            stageParticipants: stageRows.map(r => ({
-              userId:           r.userId,
-              role:             r.role,
-              isMuted:          Boolean(r.isMuted),
-              seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
-              isPinned:         Boolean(r.isPinned),
-              handRaised:       Boolean(r.handRaised),
-              mutedByModerator: Boolean(r.mutedByModerator),
-              joinedAt:         r.joinedAt,
-              firstName:        r.firstName ?? null,
-              lastName:         r.lastName ?? null,
-              avatarUrl:        r.avatarUrl ?? null,
-            })),
-            stageCount: stageRows.length,
-          });
-        } catch { /* non-fatal */ }
-      }
+      // BUG-2 FIX: Authoritative stage snapshot — emit for ALL role changes
+      // (promotion AND demotion), not just SPEAKER promotion. This ensures the
+      // stale-seat sweep in onStageState fires on AUDIENCE demotion, clearing
+      // the vacated slot on every connected client without requiring a refresh.
+      try {
+        const stageRows = await prisma.$queryRaw`
+          SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
+                 vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+                 u.firstName, u.lastName, u.avatarUrl
+          FROM voice_participants vp
+          LEFT JOIN users u ON u.id = vp.userId
+          WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+          ORDER BY vp.role ASC, vp.joinedAt ASC
+        `;
+        io.to(`voice:${roomId}`).emit('voice:stage_state', {
+          roomId,
+          stageParticipants: stageRows.map(r => ({
+            userId:           r.userId,
+            role:             r.role,
+            isMuted:          Boolean(r.isMuted),
+            seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
+            isPinned:         Boolean(r.isPinned),
+            handRaised:       Boolean(r.handRaised),
+            mutedByModerator: Boolean(r.mutedByModerator),
+            joinedAt:         r.joinedAt,
+            firstName:        r.firstName ?? null,
+            lastName:         r.lastName ?? null,
+            avatarUrl:        r.avatarUrl ?? null,
+          })),
+          stageCount: stageRows.length,
+        });
+      } catch { /* non-fatal */ }
     }
 
     // Remove from queue if they were in it (e.g. direct promotion bypassing FIFO)
