@@ -329,12 +329,14 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   removeParticipant: (userId) => {
     const room = get().activeRoom
     if (!room) return
+    // STEP-5 FIX: Remove participant entirely (aligned with mobile behavior).
+    // Previously this marked isActive:false and kept the entry; mobile filtered
+    // it out entirely. Using filter on both platforms ensures clean state and
+    // avoids stale inactive entries accumulating on long sessions.
     set({
       activeRoom: {
         ...room,
-        participants: room.participants.map(p =>
-          p.userId === userId ? { ...p, isActive: false } : p
-        )
+        participants: room.participants.filter(p => p.userId !== userId)
       }
     })
   },

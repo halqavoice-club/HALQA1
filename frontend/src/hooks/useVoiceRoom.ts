@@ -79,15 +79,22 @@ export function useVoiceRoom(roomId: string | null) {
     const socket = getSocket()
     if (!socket) return
 
-    socket.emit('voice:join_room', roomId)
-
     // ── Re-join the socket room after a reconnect ─────────────────────────
     // When the socket disconnects and reconnects (e.g. token refresh, network
     // blip), the socket no longer belongs to the voice:${roomId} Socket.IO room.
     // Re-emitting voice:join_room re-registers it so all room broadcasts
     // (gifts, reactions, role changes) continue to arrive.
+    // STEP-4 FIX: Also re-fetch the full participant list so anyone who
+    // joined or left while the socket was down is reflected immediately.
     const onReconnect = () => {
       socket.emit('voice:join_room', roomId)
+      // Re-hydrate full participant list (audience + stage) after reconnect.
+      // getStageState now returns ALL active participants — not just on-stage.
+      api.get(`/voice/${roomId}/stage-state`)
+        .then((r: { data: { data: Parameters<typeof onStageState>[0] } }) => {
+          if (r.data?.data) onStageState(r.data.data)
+        })
+        .catch(() => { /* non-fatal — socket events will catch up */ })
     }
     socket.on('connect', onReconnect)
 
@@ -508,6 +515,13 @@ export function useVoiceRoom(roomId: string | null) {
     // P1 FIX: Extended type includes optional profile fields from the enriched
     // backend query (LEFT JOIN users). onStageState now upserts participants
     // absent from the store so a buffered snapshot can backfill missed joins.
+    // BUG-005 FIX: Stale-seat sweep — clear seatNumber for any store participant
+    // whose userId is absent from a verified full-room snapshot. This corrects
+    // ghost stage slots left behind when a voice:role_changed or voice:mute_changed
+    // event was dropped during a network blip. Only runs when the snapshot has
+    // content (stageParticipants.length > 0) so an empty or malformed payload
+    // cannot accidentally clear all seats. Does not remove participants from the
+    // store or change their role — only seatNumber is cleared to null.
     const onStageState = (data: {
       roomId: string
       stageParticipants: Array<{
@@ -558,6 +572,22 @@ export function useVoiceRoom(roomId: string | null) {
           })
         }
       })
+      // BUG-005 FIX: Stale-seat sweep.
+      // A full-room snapshot guarantees all active participants are included.
+      // Any participant in the store with a non-null seatNumber who is NOT in
+      // the snapshot has already dropped their seat on the server — clear it.
+      // Guard: only sweep when snapshot has participants (prevents clearing all
+      // seats if a malformed empty snapshot ever arrives).
+      if (data.stageParticipants.length > 0) {
+        const snapshotIds = new Set(data.stageParticipants.map(sp => sp.userId))
+        const storeParticipants = useVoiceStore.getState().activeRoom?.participants ?? []
+        storeParticipants.forEach(p => {
+          if (p.seatNumber != null && !snapshotIds.has(p.userId)) {
+            // Participant has a stale seat not reflected in the authoritative snapshot
+            updateParticipant(p.userId, { seatNumber: null })
+          }
+        })
+      }
     }
 
     // ── FIFO queue updates ─────────────────────────────────────────────────
@@ -753,6 +783,13 @@ export function useVoiceRoom(roomId: string | null) {
     // race window between POST /join completing and this useEffect registering
     // all listeners. The early listener in page.tsx buffered them in the store.
     useVoiceStore.getState().drainSyncEvents().forEach(payload => onStageState(payload))
+
+    // STEP-3 FIX: Emit voice:join_room AFTER all socket.on() listeners are registered.
+    // Previously this was the first statement in the effect (before any socket.on calls),
+    // so voice:stage_state / voice:user_joined events that arrived in the same microtask
+    // burst were silently dropped. Now all handlers are in place before the server
+    // starts delivering room events to this socket.
+    socket.emit('voice:join_room', roomId)
 
     return () => {
       socket.off('connect', onReconnect)
@@ -1164,11 +1201,15 @@ export function useVoiceRoom(roomId: string | null) {
       // SPEAKER: set role=AUDIENCE, isMuted=true
       const isHostOrMod = myParticipant.role === VOICE_ROLES.HOST || myParticipant.role === VOICE_ROLES.MODERATOR
       if (isHostOrMod) {
-        useVoiceStore.getState().updateParticipant(myParticipant.userId, { isMuted: true })
+        // BUG-011 FIX: Include seatNumber:null so the stage grid clears immediately.
+        // HOST/MOD drop mic stays in their role but releases their seat.
+        useVoiceStore.getState().updateParticipant(myParticipant.userId, { isMuted: true, seatNumber: null })
       } else {
+        // BUG-011 FIX: Include seatNumber:null — SPEAKER demoted to AUDIENCE releases seat.
         useVoiceStore.getState().updateParticipant(myParticipant.userId, {
           role: VOICE_ROLES.AUDIENCE,
           isMuted: true,
+          seatNumber: null,
         })
       }
       await api.post(`/voice/${roomId}/drop-mic`)

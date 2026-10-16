@@ -229,25 +229,34 @@ async function autoPromoteNext(roomId, io) {
       roomId, queue: q, queueLength: q.length
     });
 
-    // Authoritative stage snapshot — ensures all clients reconcile seat positions
-    // even if voice:role_changed arrives out of order on slow connections.
+    // BUG-003 FIX: Full-room snapshot — all active participants, not stage-only.
+    // Contract: voice:stage_state includes every active participant with authoritative
+    // nullable seatNumber. Audience members have seatNumber=null. Profile fields are
+    // populated from the users table so upsert paths have correct names/avatars.
+    // Previously: AND vp.seatNumber IS NOT NULL excluded audience; no LEFT JOIN users
+    // meant firstName/lastName/avatarUrl were missing from the snapshot payload.
     try {
       const stageRows = await prisma.$queryRaw`
         SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
-               vp.handRaised, vp.mutedByModerator, vp.joinedAt
+               vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+               u.firstName, u.lastName, u.avatarUrl
         FROM voice_participants vp
-        WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
-        ORDER BY vp.seatNumber ASC
+        LEFT JOIN users u ON u.id = vp.userId
+        WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+        ORDER BY vp.role ASC, vp.joinedAt ASC
       `;
       io.to(`voice:${roomId}`).emit('voice:stage_state', {
         roomId,
         stageParticipants: stageRows.map(r => ({
           ...r,
-          seatNumber: Number(r.seatNumber),
-          isMuted: Boolean(r.isMuted),
-          isPinned: Boolean(r.isPinned),
-          handRaised: Boolean(r.handRaised),
+          seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
+          isMuted:          Boolean(r.isMuted),
+          isPinned:         Boolean(r.isPinned),
+          handRaised:       Boolean(r.handRaised),
           mutedByModerator: Boolean(r.mutedByModerator),
+          firstName:        r.firstName  ?? null,
+          lastName:         r.lastName   ?? null,
+          avatarUrl:        r.avatarUrl  ?? null,
         })),
         stageCount: stageRows.length,
       });

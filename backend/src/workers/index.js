@@ -13,6 +13,7 @@ const { createRoomReminderWorker      } = require('./room-reminder.worker');
 const { createLiveClassAutoEndWorker  } = require('./live-class-autoend.worker');
 const { createEconomyReconciliationWorker } = require('./economy-reconciliation.worker');
 const { createVoiceStaleSessionWorker } = require('./voice-stale-session.worker');
+const { createVoiceRoomSleepWorker    } = require('./voice-room-sleep.worker');
 
 module.exports = {
   createEmailWorker,
@@ -25,4 +26,5 @@ module.exports = {
   createLiveClassAutoEndWorker,
   createEconomyReconciliationWorker,
   createVoiceStaleSessionWorker,
+  createVoiceRoomSleepWorker,
 };

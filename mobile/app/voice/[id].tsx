@@ -489,6 +489,7 @@ interface Participant {
   mutedByModerator: boolean;  // true = muted by HOST/MOD; self-unmute is blocked
   isActive: boolean;          // true for all active participants in the room
   seatNumber: number | null;  // 1–12 when on stage; null when in audience (authoritative)
+  isPinned: boolean;          // pinned to top of stage grid by host/mod
   _joinedAt?: string;         // for deterministic sort (not required but helps)
 }
 interface Gift {
@@ -1229,6 +1230,7 @@ export default function VoiceRoomScreen() {
             mutedByModerator: sp.mutedByModerator,
             isActive:         true,
             seatNumber:       sp.seatNumber,
+            isPinned:         (sp as any).isPinned ?? false,
             _joinedAt:        typeof sp.joinedAt === 'string' ? sp.joinedAt : '',
           });
         }
@@ -1262,6 +1264,12 @@ export default function VoiceRoomScreen() {
       // Re-fetch room state so participant list and roles reflect server truth
       // after a disconnect (stale data risk while socket was down).
       queryClient.invalidateQueries({ queryKey: ['voice-room', id] });
+      // STEP-4 FIX: Re-hydrate full participant list (audience + stage) after
+      // reconnect. getStageState now returns ALL active participants so anyone
+      // who joined or left while the socket was down appears immediately.
+      api.get(`/voice/${id}/stage-state`)
+        .then((r: any) => { if (r.data?.data) applyStageSnapshot(r.data.data); })
+        .catch(() => { /* non-fatal — socket events will catch up */ });
     };
     socket.on('connect', onReconnect);
 
@@ -1339,18 +1347,21 @@ export default function VoiceRoomScreen() {
     };
 
     // Kicked — if it's me, leave immediately
-    const onKicked = (d: { userId: string }) => {
-      if (d.userId === user?.id) {
-        showMessage({ message: '🚫 You were removed from this room', type: 'danger' });
-        lk.disconnect();
-        api.post(`/voice/${id}/leave`).catch(() => {});
-        clearActiveRoom();
-        clearQueuePosition();
-        setIsJoined(false);
-        router.back();
-      } else {
-        setParticipants(prev => prev.filter(p => p.id !== d.userId));
-      }
+    // BUG-001 FIX: Backend emits voice:kicked on the personal user:{id} channel
+    // with payload { roomId } only — there is no userId field in the payload.
+    // The personal channel guarantees this event is only received by the kicked
+    // user, so we self-evict whenever roomId matches without checking d.userId.
+    // Web useVoiceRoom.ts uses the same roomId-only pattern (no userId check).
+    const onKicked = (d: { roomId: string; userId?: string }) => {
+      if (d.roomId !== id) return;
+      // Always self-evict — this channel is user-specific
+      showMessage({ message: '🚫 You were removed from this room', type: 'danger' });
+      lk.disconnect();
+      api.post(`/voice/${id}/leave`).catch(() => {});
+      clearActiveRoom();
+      clearQueuePosition();
+      setIsJoined(false);
+      router.back();
     };
 
     // Hand raised/lowered
@@ -1358,16 +1369,24 @@ export default function VoiceRoomScreen() {
       setParticipants(prev => prev.map(p => p.id === d.userId ? { ...p, handRaised: d.raised } : p));
     };
 
-    // RT-FIX-6: Moderator removed — clear seatNumber so stage grid stays consistent.
-    // Backend emits voice:moderator_removed when HOST removes a MODERATOR.
-    // The demoted user's seat must be cleared immediately on all clients.
-    const onModeratorRemoved = (d: { roomId: string; userId: string }) => {
+    // BUG-002 FIX: Consolidated voice:moderator_removed handler.
+    // Previously two socket.on() registrations fired on the same event:
+    //   Handler 1 (onModeratorRemoved): correctly cleared seatNumber, isMuted, role
+    //   Handler 2 (inline): only updated role, overwriting Handler 1's seatNumber clear
+    // Net result: demoted moderator kept their stage seat on all mobile clients.
+    // Fix: remove Handler 2; move its personal notification into onModeratorRemoved.
+    const onModeratorRemoved = (d: { roomId: string; userId: string; message?: string }) => {
       if (d.roomId !== id) return;
+      // Clear seat, mute, role, and handRaised — all authoritative from backend
       setParticipants(prev => prev.map(p =>
         p.id === d.userId
           ? { ...p, role: 'AUDIENCE' as const, isMuted: true, seatNumber: null, handRaised: false }
           : p
       ));
+      // Personal notification — only show to the affected user
+      if (d.userId === user?.id) {
+        showMessage({ message: d.message ?? 'Your moderator role has been removed.', type: 'info' });
+      }
     };
 
     // Room went IDLE (all left) or was explicitly terminated by host/admin
@@ -1562,7 +1581,37 @@ export default function VoiceRoomScreen() {
       clearActiveRoom(); clearQueuePosition();
       router.back();
     });
-    socket.on('voice:speaker_pinned',    (d: any) => { if (d.roomId !== id) return; setParticipants(prev => prev.map(p => ({ ...p, handRaised: p.id === d.userId ? false : p.handRaised }))); });
+
+    // ROOM DELETED — host permanently deleted the room (soft-delete).
+    // Distinct from voice:room_ended (room went IDLE/archived). After deletion
+    // the room cannot be rejoined — evict the local user immediately.
+    socket.on('voice:room_deleted', (d: { roomId: string }) => {
+      if (d.roomId !== id) return;
+      lk.disconnect();
+      clearActiveRoom();
+      clearQueuePosition();
+      showMessage({ message: '🗑️ This room has been deleted by the host', type: 'warning', duration: 4000 });
+      router.back();
+    });
+
+    // MESSAGE DELETED — host/mod/author removed a chat message
+    socket.on('voice:message_deleted', (d: { roomId: string; msgId: string }) => {
+      if (d.roomId !== id) return;
+      setChatMessages(prev => prev.filter(m => m.id !== d.msgId));
+    });
+
+    socket.on('voice:speaker_pinned',    (d: any) => {
+      if (d.roomId !== id) return;
+      setParticipants(prev => prev.map(p => {
+        if (p.id === d.userId) {
+          // Pin the target participant and clear any stale handRaised
+          return { ...p, isPinned: Boolean(d.isPinned), handRaised: false };
+        }
+        // If pinning someone new, unpin all others (only one can be pinned at a time)
+        if (d.isPinned) return { ...p, isPinned: false };
+        return p;
+      }));
+    });
 
     // ── Emoji reactions (broadcast from other participants) ───────────────────
     // Parity with web: voice:reaction { userId, emoji } is broadcast by the backend
@@ -1631,25 +1680,16 @@ export default function VoiceRoomScreen() {
     // voice:moderator_assigned: HOST assigned someone as MODERATOR
     socket.on('voice:moderator_assigned', (d: { roomId: string; userId: string; firstName?: string; lastName?: string }) => {
       if (d.roomId !== id) return;
-      // Update the participant's role to MODERATOR — does NOT change seatNumber
+      // BUG-008 FIX: Set isMuted:false — backend sets isMuted=false when assigning
+      // moderator (voice-roles.controller.js assignModerator). Web onModeratorAssigned
+      // already sets isMuted:false; mobile must do the same so newly assigned moderators
+      // do not show as muted on other clients until the next stage_state snapshot.
+      // seatNumber is intentionally not changed — the new moderator retains their seat.
       setParticipants(prev => prev.map(p =>
-        p.id === d.userId ? { ...p, role: 'MODERATOR' as const } : p
+        p.id === d.userId ? { ...p, role: 'MODERATOR' as const, isMuted: false } : p
       ));
       if (d.userId === user?.id) {
         showMessage({ message: '🛡️ You are now a moderator!', type: 'success' });
-      }
-    });
-
-    // MODERATOR REMOVAL — realtime update for all participants
-    // voice:moderator_removed: HOST removed someone's MODERATOR role
-    socket.on('voice:moderator_removed', (d: { roomId: string; userId: string; message?: string }) => {
-      if (d.roomId !== id) return;
-      // Demote to AUDIENCE — does NOT change seatNumber (they keep their seat if on stage)
-      setParticipants(prev => prev.map(p =>
-        p.id === d.userId ? { ...p, role: 'AUDIENCE' as const } : p
-      ));
-      if (d.userId === user?.id) {
-        showMessage({ message: d.message ?? 'Your moderator role has been removed.', type: 'info' });
       }
     });
 
@@ -1663,6 +1703,33 @@ export default function VoiceRoomScreen() {
     socket.on('voice:you_are_host', (d: { roomId: string; message?: string }) => {
       if (d.roomId !== id) return;
       showMessage({ message: d.message ?? '👑 You are now the host!', type: 'success' });
+    });
+
+    // HOST TRANSFER — ownership changes in realtime (parity with web)
+    // voice:admin_transferred is emitted by transferAdmin() to the whole room.
+    // Without this handler, the old HOST retains HOST controls and the new HOST
+    // appears as their old role until a screen refresh.
+    socket.on('voice:admin_transferred', (d: {
+      roomId: string;
+      newHostId: string;
+      prevHostId: string;
+      newHostName: string;
+    }) => {
+      if (d.roomId !== id) return;
+      // Update both participants' roles in local state
+      setParticipants(prev => prev.map(p => {
+        if (p.id === d.newHostId) return { ...p, role: 'HOST' as const };
+        if (p.id === d.prevHostId) return { ...p, role: 'MODERATOR' as const };
+        return p;
+      }));
+      // Notify the new host
+      if (d.newHostId === user?.id) {
+        showMessage({ message: '👑 You are now the host of this room!', type: 'success' });
+      }
+      // Notify the previous host
+      if (d.prevHostId === user?.id) {
+        showMessage({ message: `👑 ${d.newHostName} is now the host`, type: 'info' });
+      }
     });
 
     // ── PK room events ────────────────────────────────────────────────────────
@@ -1733,13 +1800,21 @@ export default function VoiceRoomScreen() {
       socket.off('voice:moderator_removed');
       socket.off('voice:you_are_moderator');
       socket.off('voice:you_are_host');
+      // Host transfer + room/message deletion (parity with web)
+      socket.off('voice:admin_transferred');
+      socket.off('voice:room_deleted');
+      socket.off('voice:message_deleted');
       // Emoji reactions
       socket.off('voice:reaction', onReaction);
     };
   // FEAT-002: removed isJoined, gifts, queryClient from deps — listeners
   // register on mount; hasJoinedRef guards the join_room emit instead.
+  // Dep array is [id] only (matching web useVoiceRoom pattern) to prevent
+  // double-listener registration when the `user` object reference changes
+  // (e.g. token refresh). user.id is stable during a session, so closures
+  // capturing the first non-null user remain correct for all role checks.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, user]);
+  }, [id]);
 
   const handleJoin = useCallback(async () => {
     // SA-VOICE-MOBILE-01: SUPER_ADMIN = Platform Administration ONLY.

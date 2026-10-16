@@ -575,9 +575,9 @@ describe('S12 — Moderator removed: seat cleared immediately', () => {
 
   test('mobile moderator_removed handler clears seatNumber (RT-FIX-6)', () => {
     if (!mobileSrc) return;
-    const idx = mobileSrc.indexOf('voice:moderator_removed');
+    const idx = mobileSrc.indexOf('const onModeratorRemoved');
     expect(idx).toBeGreaterThan(-1);
-    expect(mobileSrc.slice(idx, idx + 800)).toMatch(/seatNumber.*null/);
+    expect(mobileSrc.slice(idx, idx + 1200)).toMatch(/seatNumber.*null/);
   });
 });
 
@@ -870,3 +870,342 @@ describe('S19 — Backend event ordering: socketsJoin before stage_state', () =>
   });
 });
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S17 — Mobile parity regression tests (added by audit gap-fix pass)
+// Verifies that the mobile voice screen handles all required socket events
+// that were identified as missing or incorrect in the VC audit.
+// All tests are pure source-analysis — no DB, Redis, or Socket.IO required.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('S17: Mobile parity — voice:admin_transferred handled (VC-MOB-001 fix)', () => {
+  test('mobile registers voice:admin_transferred listener', () => {
+    expect(mobileSrc).toMatch(/voice:admin_transferred/);
+  });
+
+  test('mobile handler updates newHostId participant to HOST role', () => {
+    const idx = mobileSrc.indexOf("voice:admin_transferred");
+    const block = mobileSrc.slice(idx, idx + 800);
+    expect(block).toMatch(/newHostId/);
+    expect(block).toMatch(/HOST/);
+  });
+
+  test('mobile handler updates prevHostId participant to MODERATOR role', () => {
+    const idx = mobileSrc.indexOf("voice:admin_transferred");
+    const block = mobileSrc.slice(idx, idx + 800);
+    expect(block).toMatch(/prevHostId/);
+    expect(block).toMatch(/MODERATOR/);
+  });
+
+  test('mobile cleanup block removes voice:admin_transferred listener', () => {
+    // Find the return () => { cleanup block
+    const cleanupIdx = mobileSrc.lastIndexOf("socket.off('voice:you_are_host')");
+    const cleanupBlock = mobileSrc.slice(cleanupIdx, cleanupIdx + 400);
+    expect(cleanupBlock).toMatch(/voice:admin_transferred/);
+  });
+});
+
+describe('S17: Mobile parity — voice:speaker_pinned updates isPinned (VC-MOB-002 fix)', () => {
+  test('mobile voice:speaker_pinned handler sets isPinned on the target participant', () => {
+    const idx = mobileSrc.indexOf("voice:speaker_pinned");
+    const block = mobileSrc.slice(idx, idx + 400);
+    expect(block).toMatch(/isPinned/);
+  });
+
+  test('mobile voice:speaker_pinned clears isPinned on all other participants when pinning', () => {
+    const idx = mobileSrc.indexOf("voice:speaker_pinned");
+    const block = mobileSrc.slice(idx, idx + 400);
+    // When d.isPinned is true, all other participants must have isPinned:false
+    expect(block).toMatch(/isPinned.*false|false.*isPinned/);
+  });
+
+  test('Participant interface includes isPinned field', () => {
+    expect(mobileSrc).toMatch(/isPinned\s*:\s*boolean/);
+  });
+});
+
+describe('S17: Mobile parity — voice:room_deleted and voice:message_deleted handled (VC-SYNC-005/006 fix)', () => {
+  test('mobile registers voice:room_deleted listener', () => {
+    expect(mobileSrc).toMatch(/voice:room_deleted/);
+  });
+
+  test('mobile voice:room_deleted disconnects LiveKit and navigates back', () => {
+    const idx = mobileSrc.indexOf("voice:room_deleted");
+    const block = mobileSrc.slice(idx, idx + 300);
+    expect(block).toMatch(/lk\.disconnect|disconnect/);
+    expect(block).toMatch(/router\.back|back()/);
+  });
+
+  test('mobile registers voice:message_deleted listener', () => {
+    expect(mobileSrc).toMatch(/voice:message_deleted/);
+  });
+
+  test('mobile voice:message_deleted filters the message out of chat state', () => {
+    const idx = mobileSrc.indexOf("voice:message_deleted");
+    const block = mobileSrc.slice(idx, idx + 200);
+    expect(block).toMatch(/filter|msgId/);
+  });
+
+  test('mobile cleanup block removes voice:room_deleted listener', () => {
+    const cleanupIdx = mobileSrc.lastIndexOf('socket.off(');
+    const cleanupBlock = mobileSrc.slice(
+      mobileSrc.lastIndexOf("socket.off('voice:blocked_from_room')"),
+      mobileSrc.indexOf('socket.off(\'voice:reaction\'')
+    );
+    expect(cleanupBlock).toMatch(/voice:room_deleted/);
+    expect(cleanupBlock).toMatch(/voice:message_deleted/);
+  });
+});
+
+describe('S17: Mobile socket dep array — [id] only prevents double-listener registration (VC-CONC-006 fix)', () => {
+  test('socket useEffect dependency array is [id] not [id, user]', () => {
+    // The dep array immediately follows the eslint-disable comment
+    expect(mobileSrc).not.toMatch(/\}, \[id, user\]/);
+    expect(mobileSrc).toMatch(/\}, \[id\]/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4 regression tests — realtime defect fixes (BUG-001 through BUG-011)
+// All tests are pure source-analysis. No DB, Redis, Socket.IO, or LiveKit.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── BUG-001: Mobile voice:kicked self-eviction ───────────────────────────────
+describe('BUG-001: Mobile voice:kicked — roomId-only guard (personal channel)', () => {
+  test('onKicked handler does NOT check d.userId — uses d.roomId only', () => {
+    const idx = mobileSrc.indexOf('const onKicked');
+    const handler = mobileSrc.slice(idx, idx + 600);
+    // Must NOT contain the old d.userId === user?.id check
+    expect(handler).not.toMatch(/d\.userId\s*===\s*user/);
+  });
+
+  test('onKicked self-eviction fires when roomId matches', () => {
+    const idx = mobileSrc.indexOf('const onKicked');
+    const handler = mobileSrc.slice(idx, idx + 600);
+    expect(handler).toMatch(/d\.roomId\s*!==\s*id/);
+    expect(handler).toMatch(/router\.back/);
+  });
+
+  test('onKicked type signature accepts roomId-only payload (userId optional)', () => {
+    const idx = mobileSrc.indexOf('const onKicked');
+    const handler = mobileSrc.slice(idx, idx + 200);
+    expect(handler).toMatch(/userId\?|roomId: string/);
+  });
+
+  test('web onKicked does not check d.userId either — baseline parity', () => {
+    const idx = hookSrc.indexOf('const onKicked');
+    const handler = hookSrc.slice(idx, idx + 400);
+    expect(handler).not.toMatch(/d\.userId\s*===\s*user/);
+    expect(handler).toMatch(/data\.roomId\s*!==\s*roomId/);
+  });
+});
+
+// ─── BUG-002: Mobile duplicate voice:moderator_removed handler ────────────────
+describe('BUG-002: Mobile voice:moderator_removed — single consolidated handler', () => {
+  test('exactly one socket.on(voice:moderator_removed) registration in mobile', () => {
+    const matches = [...mobileSrc.matchAll(/socket\.on\('voice:moderator_removed'/g)];
+    expect(matches).toHaveLength(1);
+  });
+
+  test('onModeratorRemoved clears seatNumber, isMuted, role, and handRaised', () => {
+    const idx = mobileSrc.indexOf('const onModeratorRemoved');
+    // Use 1200-char window to ensure the full handler body is captured
+    const handler = mobileSrc.slice(idx, idx + 1200);
+    expect(handler).toMatch(/role.*AUDIENCE|AUDIENCE.*role/);
+    expect(handler).toMatch(/isMuted.*true/);
+    expect(handler).toMatch(/seatNumber.*null/);
+    expect(handler).toMatch(/handRaised.*false/);
+  });
+
+  test('onModeratorRemoved shows personal notification only to affected user', () => {
+    const idx = mobileSrc.indexOf('const onModeratorRemoved');
+    const handler = mobileSrc.slice(idx, idx + 1200);
+    expect(handler).toMatch(/d\.userId\s*===\s*user/);
+  });
+
+  test('moderator removal only changes the target participant', () => {
+    const idx = mobileSrc.indexOf('const onModeratorRemoved');
+    const handler = mobileSrc.slice(idx, idx + 1200);
+    expect(handler).toMatch(/p\.id\s*===\s*d\.userId/);
+    // Non-target participants returned unchanged: `: p`
+    expect(handler).toMatch(/:\s*p\b/);
+  });
+});
+
+// ─── BUG-003: autoPromote.js voice:stage_state full-room contract ─────────────
+describe('BUG-003: autoPromote.js voice:stage_state — full-room snapshot with user names', () => {
+  const AUTOPROMOTE_PATH = path.join(__dirname, '../utils/autoPromote.js');
+  const autoSrc = fs.readFileSync(AUTOPROMOTE_PATH, 'utf8');
+
+  test('autoPromote does NOT filter by seatNumber IS NOT NULL in stage_state query', () => {
+    const emitIdx = autoSrc.indexOf("emit('voice:stage_state'");
+    const queryBlock = autoSrc.slice(Math.max(0, emitIdx - 500), emitIdx);
+    expect(queryBlock).not.toMatch(/seatNumber IS NOT NULL/);
+  });
+
+  test('autoPromote LEFT JOINs users table for profile fields', () => {
+    expect(autoSrc).toMatch(/LEFT JOIN users u ON u\.id = vp\.userId/);
+  });
+
+  test('autoPromote selects u.firstName, u.lastName, u.avatarUrl', () => {
+    const joinIdx = autoSrc.indexOf('LEFT JOIN users u ON u.id = vp.userId');
+    const selectBlock = autoSrc.slice(Math.max(0, joinIdx - 400), joinIdx + 50);
+    expect(selectBlock).toMatch(/u\.firstName/);
+    expect(selectBlock).toMatch(/u\.lastName/);
+    expect(selectBlock).toMatch(/u\.avatarUrl/);
+  });
+
+  test('autoPromote orders by role ASC, joinedAt ASC (not seatNumber)', () => {
+    const emitIdx = autoSrc.indexOf("emit('voice:stage_state'");
+    const queryBlock = autoSrc.slice(Math.max(0, emitIdx - 500), emitIdx);
+    expect(queryBlock).toMatch(/ORDER BY vp\.role ASC/);
+    expect(queryBlock).not.toMatch(/ORDER BY vp\.seatNumber/);
+  });
+
+  test('autoPromote maps seatNumber null-safe', () => {
+    const emitIdx = autoSrc.indexOf("emit('voice:stage_state'");
+    const mapBlock = autoSrc.slice(emitIdx, emitIdx + 600);
+    expect(mapBlock).toMatch(/seatNumber.*!=.*null.*Number|Number.*seatNumber.*null/);
+    expect(mapBlock).not.toMatch(/seatNumber:\s*Number\(r\.seatNumber\)/);
+  });
+
+  test('autoPromote payload includes firstName, lastName, avatarUrl with null fallback', () => {
+    const emitIdx = autoSrc.indexOf("emit('voice:stage_state'");
+    const mapBlock = autoSrc.slice(emitIdx, emitIdx + 600);
+    expect(mapBlock).toMatch(/firstName.*r\.firstName|r\.firstName.*null/);
+    expect(mapBlock).toMatch(/lastName.*r\.lastName|r\.lastName.*null/);
+    expect(mapBlock).toMatch(/avatarUrl.*r\.avatarUrl|r\.avatarUrl.*null/);
+  });
+});
+
+// ─── BUG-004: voice-queue.controller.js _promoteUser profile fields ───────────
+describe('BUG-004: voice-queue _promoteUser — full-room snapshot with user names', () => {
+  test('_promoteUser stage_state does NOT filter by seatNumber IS NOT NULL', () => {
+    const emitIdx = queueSrc.indexOf("emit('voice:stage_state'");
+    const queryBlock = queueSrc.slice(Math.max(0, emitIdx - 600), emitIdx);
+    expect(queryBlock).not.toMatch(/seatNumber IS NOT NULL/);
+  });
+
+  test('_promoteUser LEFT JOINs users table', () => {
+    const emitIdx = queueSrc.indexOf("emit('voice:stage_state'");
+    const block = queueSrc.slice(Math.max(0, emitIdx - 600), emitIdx + 200);
+    expect(block).toMatch(/LEFT JOIN users u ON u\.id = vp\.userId/);
+  });
+
+  test('_promoteUser selects and maps u.firstName', () => {
+    const emitIdx = queueSrc.indexOf("emit('voice:stage_state'");
+    const block = queueSrc.slice(Math.max(0, emitIdx - 600), emitIdx + 600);
+    expect(block).toMatch(/u\.firstName/);
+    expect(block).toMatch(/firstName.*r\.firstName|r\.firstName.*null/);
+  });
+});
+
+// ─── BUG-005: Web onStageState stale-seat sweep ───────────────────────────────
+describe('BUG-005: Web onStageState — stale-seat sweep for absent participants', () => {
+  test('onStageState has a snapshotIds set for the sweep', () => {
+    const stageIdx = hookSrc.indexOf('const onStageState');
+    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 3000);
+    expect(handlerBlock).toMatch(/snapshotIds/);
+  });
+
+  test('stale-seat sweep only fires when snapshot has content (length > 0 guard)', () => {
+    const stageIdx = hookSrc.indexOf('const onStageState');
+    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 3000);
+    expect(handlerBlock).toMatch(/stageParticipants\.length\s*>\s*0/);
+  });
+
+  test('stale-seat sweep clears seatNumber to null for absent participants', () => {
+    const stageIdx = hookSrc.indexOf('const onStageState');
+    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 3000);
+    // Sweep exists and sets seatNumber: null
+    expect(handlerBlock).toMatch(/snapshotIds/);
+    expect(handlerBlock).toMatch(/seatNumber.*null/);
+    // updateParticipant is called in the sweep (may be on a separate line)
+    expect(handlerBlock).toMatch(/updateParticipant/);
+  });
+
+  test('stale-seat sweep does NOT remove participants from store', () => {
+    const stageIdx = hookSrc.indexOf('const onStageState');
+    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 3000);
+    expect(handlerBlock).not.toMatch(/removeParticipant/);
+  });
+
+  test('stale-seat sweep does NOT change participant role (only seatNumber cleared)', () => {
+    // Find the sweep block specifically — after 'snapshotIds' set is created
+    const sweepStart = hookSrc.indexOf('snapshotIds');
+    const sweepBlock = hookSrc.slice(sweepStart, sweepStart + 700);
+    // The updateParticipant in the sweep only sets seatNumber, not role
+    // Verify: no role: AUDIENCE assignment in the sweep section
+    const updateCall = sweepBlock.slice(sweepBlock.indexOf('updateParticipant'));
+    expect(updateCall.slice(0, 200)).not.toMatch(/role.*AUDIENCE/);
+  });
+
+  test('mobile applyStageSnapshot sweeps stale seatNumbers (pre-existing baseline)', () => {
+    expect(mobileSrc).toMatch(/inStageIds/);
+    // Mobile clears seatNumber for participants not in inStageIds
+    expect(mobileSrc).toMatch(/seatNumber: null/);
+    // And uses !inStageIds.has() to identify them
+    expect(mobileSrc).toMatch(/!inStageIds\.has/);
+  });
+});
+
+// ─── BUG-008: Mobile voice:moderator_assigned isMuted sync ───────────────────
+describe('BUG-008: Mobile moderator assignment — isMuted:false set immediately', () => {
+  test('mobile voice:moderator_assigned sets isMuted:false', () => {
+    const idx = mobileSrc.indexOf("voice:moderator_assigned");
+    const handler = mobileSrc.slice(idx, idx + 600);
+    expect(handler).toMatch(/isMuted.*false|false.*isMuted/);
+  });
+
+  test('mobile moderator_assigned sets role MODERATOR', () => {
+    const idx = mobileSrc.indexOf("voice:moderator_assigned");
+    const handler = mobileSrc.slice(idx, idx + 600);
+    expect(handler).toMatch(/MODERATOR/);
+  });
+
+  test('web onModeratorAssigned also sets isMuted:false — parity baseline', () => {
+    const idx = hookSrc.indexOf('const onModeratorAssigned');
+    const handler = hookSrc.slice(idx, idx + 300);
+    expect(handler).toMatch(/isMuted.*false/);
+  });
+});
+
+// ─── BUG-011: Web dropMic optimistic seat clear ───────────────────────────────
+describe('BUG-011: Web dropMic — optimistic update clears seatNumber immediately', () => {
+  test('HOST/MOD branch clears seatNumber:null in optimistic update', () => {
+    const dropMicIdx = hookSrc.indexOf('const dropMic');
+    const handler = hookSrc.slice(dropMicIdx, dropMicIdx + 2000);
+    // Extract the isHostOrMod=true branch (before else)
+    const elseIdx = handler.indexOf('} else {');
+    const hostModBranch = handler.slice(0, elseIdx);
+    expect(hostModBranch).toMatch(/seatNumber.*null/);
+  });
+
+  test('SPEAKER→AUDIENCE branch clears seatNumber:null in optimistic update', () => {
+    const dropMicIdx = hookSrc.indexOf('const dropMic');
+    const handler = hookSrc.slice(dropMicIdx, dropMicIdx + 2000);
+    const elseIdx = handler.indexOf('} else {');
+    const elseBranch = handler.slice(elseIdx);
+    expect(elseBranch).toMatch(/seatNumber.*null/);
+  });
+
+  test('dropMic rollback on error includes role and isMuted', () => {
+    const dropMicIdx = hookSrc.indexOf('const dropMic');
+    // Use a 2500-char window to include the catch block
+    const handler = hookSrc.slice(dropMicIdx, dropMicIdx + 2500);
+    expect(handler).toMatch(/myParticipant\.role/);
+    // isMuted rollback: restores myParticipant.isMuted
+    expect(handler).toMatch(/myParticipant\.isMuted/);
+  });
+
+  test('dropMic HOST/MOD optimistic update does not set role to AUDIENCE', () => {
+    const dropMicIdx = hookSrc.indexOf('const dropMic');
+    const handler = hookSrc.slice(dropMicIdx, dropMicIdx + 2000);
+    const elseIdx = handler.indexOf('} else {');
+    const hostModBranch = handler.slice(0, elseIdx);
+    // HOST/MOD path must only set isMuted and seatNumber, not change role to AUDIENCE
+    // Strip comments first to avoid matching comment text
+    const codeOnly = hostModBranch.replace(/\/\/[^\n]*/g, '');
+    expect(codeOnly).not.toMatch(/role.*AUDIENCE/);
+  });
+});

@@ -664,6 +664,10 @@ export function VoiceRoomView({ onLeave }: Props) {
 
   if (!activeRoom) return null
 
+  // STEP-5 FIX: removeParticipant now removes entirely (filter) instead of
+  // marking isActive:false, so the p.isActive filter here is no longer needed.
+  // Keeping it as a safety guard costs nothing and prevents any stale entry
+  // from rendering if something else sets isActive:false in the future.
   const participants = activeRoom.participants.filter(p => p.isActive)
 
   // SEAT SYNC FIX: Sort participants with the same deterministic order as the backend
@@ -681,10 +685,8 @@ export function VoiceRoomView({ onLeave }: Props) {
   // ── STAGE / AUDIENCE SPLIT ───────────────────────────────────────────────
   // On stage = has a seatNumber (authoritative from backend).
   // In audience = active but no seatNumber.
-  const speakers = participants.filter(p => p.isActive && p.seatNumber != null)
-  const audience = sortedParticipants.filter(p =>
-    p.isActive && p.seatNumber == null
-  )
+  const speakers = participants.filter(p => p.seatNumber != null)
+  const audience = sortedParticipants.filter(p => p.seatNumber == null)
   const filteredAudience = participantSearch
     ? audience.filter(p =>
         `${p.user.firstName} ${p.user.lastName}`.toLowerCase().includes(participantSearch.toLowerCase())
@@ -712,7 +714,7 @@ export function VoiceRoomView({ onLeave }: Props) {
     { length: maxSlots },
     (_, i) => {
       const seatNum = i + 1 // index 0 = Seat 1, index 11 = Seat 12
-      return participants.find(p => p.isActive && p.seatNumber === seatNum) ?? null
+      return participants.find(p => p.seatNumber === seatNum) ?? null
     }
   )
   const isSpeaking = (uid: string) => activeSpeakers.has(uid) || !!speakingUsers[uid]

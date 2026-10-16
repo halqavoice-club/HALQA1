@@ -580,13 +580,15 @@ describe('T9 — Room changes and unmounts do not produce duplicate listeners', 
 
   test('mobile: listener useEffect dependency array is [id, user] (FEAT-002)', () => {
     if (!mobileSrc) return;
-    // After FEAT-002 the dep array must be exactly [id, user].
+    // After FEAT-002 the dep array must be [id] only — user is intentionally excluded
+    // to prevent double-listener registration on token refresh (user.id is stable
+    // within a session, so closures capturing the first non-null user stay correct).
     // The comment block and eslint-disable line sit between the closing brace
     // and the dep array. Check for the comment marker and the dep array separately.
     expect(mobileSrc).toMatch(/FEAT-002: removed isJoined/);
     expect(mobileSrc).toMatch(/\},\s*\/\/ FEAT-002|eslint-disable-next-line/);
-    // Dep array must be [id, user] — not the old [isJoined, id, user, gifts, queryClient]
-    expect(mobileSrc).toMatch(/\[id, user\]\s*\)/);
+    // Dep array must be [id] — not the old [isJoined, id, user, gifts, queryClient]
+    expect(mobileSrc).toMatch(/\[id\]\s*\)/);
     expect(mobileSrc).not.toMatch(/\[isJoined, id, user, gifts, queryClient\]/);
   });
 

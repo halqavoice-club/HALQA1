@@ -434,3 +434,168 @@ describe('AUDIT-FIX: voiceQueue Redis flush recovery (VC-GAP-006)', () => {
     expect(src).toMatch(/isRedisReady.*return.*getQueueFromDB|!isRedisReady.*getQueueFromDB/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VC-BACK-001 VERIFICATION: unkickParticipant endpoint exists (audit gap-fix pass)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('VC-BACK-001 VERIFIED: unkickParticipant endpoint exists and is correctly guarded', () => {
+  const ROUTES_PATH = path.join(__dirname, '../routes/voice.routes.js');
+
+  test('unkickParticipant is exported from voice.controller.js', () => {
+    const src = fs.readFileSync(CONTROLLER_PATH, 'utf8');
+    expect(src).toMatch(/async function unkickParticipant/);
+    expect(src).toMatch(/unkickParticipant/);
+    // Verify it is in module.exports
+    const exportsIdx = src.lastIndexOf('module.exports');
+    const exportsBlock = src.slice(exportsIdx);
+    expect(exportsBlock).toMatch(/unkickParticipant/);
+  });
+
+  test('unkickParticipant resets wasKicked to false', () => {
+    const src = fs.readFileSync(CONTROLLER_PATH, 'utf8');
+    const fnStart = src.indexOf('async function unkickParticipant');
+    const fnEnd   = src.indexOf('async function', fnStart + 1);
+    const fnBody  = src.slice(fnStart, fnEnd);
+    expect(fnBody).toMatch(/wasKicked.*false|false.*wasKicked/);
+    expect(fnBody).toMatch(/prisma\.voiceParticipant\.update/);
+  });
+
+  test('unkickParticipant is HOST-only (not moderator)', () => {
+    const src = fs.readFileSync(CONTROLLER_PATH, 'utf8');
+    const fnStart = src.indexOf('async function unkickParticipant');
+    const fnEnd   = src.indexOf('async function', fnStart + 1);
+    const fnBody  = src.slice(fnStart, fnEnd);
+    // Must check for HOST role specifically, not MODERATOR_ROLES
+    expect(fnBody).toMatch(/VOICE_ROLES\.HOST/);
+    expect(fnBody).toMatch(/403/);
+  });
+
+  test('unkickParticipant returns 404 when user was not kicked', () => {
+    const src = fs.readFileSync(CONTROLLER_PATH, 'utf8');
+    const fnStart = src.indexOf('async function unkickParticipant');
+    const fnEnd   = src.indexOf('async function', fnStart + 1);
+    const fnBody  = src.slice(fnStart, fnEnd);
+    // Either checks wasKicked directly or uses updateMany count === 0 pattern
+    const hasWasKickedCheck = fnBody.includes('!target.wasKicked') ||
+                              fnBody.includes('wasKicked: true') ||
+                              fnBody.includes('count === 0');
+    expect(hasWasKickedCheck).toBe(true);
+    expect(fnBody).toMatch(/User was not kicked/);
+  });
+
+  test('unkickParticipant is audit-logged with PARTICIPANT_UNKICKED', () => {
+    const src = fs.readFileSync(CONTROLLER_PATH, 'utf8');
+    const fnStart = src.indexOf('async function unkickParticipant');
+    const fnEnd   = src.indexOf('async function', fnStart + 1);
+    const fnBody  = src.slice(fnStart, fnEnd);
+    expect(fnBody).toMatch(/voiceAudit/);
+    expect(fnBody).toMatch(/PARTICIPANT_UNKICKED/);
+  });
+
+  test('DELETE /voice/:id/kick/:userId/unkick route is registered', () => {
+    const routesSrc = fs.readFileSync(ROUTES_PATH, 'utf8');
+    expect(routesSrc).toMatch(/router\.delete.*kick.*unkick/);
+    expect(routesSrc).toMatch(/unkickParticipant/);
+  });
+
+  test('unkick route is guarded by checkVoiceRole HOST', () => {
+    const routesSrc = fs.readFileSync(ROUTES_PATH, 'utf8');
+    const routeIdx  = routesSrc.indexOf('kick/:userId/unkick');
+    const routeBlock = routesSrc.slice(routeIdx, routeIdx + 200);
+    expect(routeBlock).toMatch(/checkVoiceRole/);
+    expect(routeBlock).toMatch(/VOICE_ROLES\.HOST/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VC-CONC-005 VERIFICATION: BullMQ room sleep replaces setTimeout (audit gap-fix pass)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('VC-CONC-005 VERIFIED: BullMQ room sleep replaces in-memory setTimeout', () => {
+  const QUEUE_SERVICE_PATH = path.join(__dirname, '../services/queue.service.js');
+  const WORKER_PATH        = path.join(__dirname, '../workers/voice-room-sleep.worker.js');
+  const WORKERS_INDEX_PATH = path.join(__dirname, '../workers/index.js');
+
+  test('leaveRoom no longer uses setTimeout for IDLE transition', () => {
+    const src = fs.readFileSync(CONTROLLER_PATH, 'utf8');
+    const leaveRoomStart = src.indexOf('async function leaveRoom');
+    const leaveRoomEnd   = src.indexOf('async function', leaveRoomStart + 1);
+    const leaveRoomBody  = src.slice(leaveRoomStart, leaveRoomEnd);
+    // Strip single-line comments so comment text does not trigger the assertion
+    const leaveRoomCode  = leaveRoomBody.replace(/\/\/[^\n]*/g, '');
+    // No actual setTimeout() call should remain for the IDLE sleep transition
+    expect(leaveRoomCode).not.toMatch(/setTimeout\s*\(/);
+    // BullMQ scheduleRoomSleep must be called instead
+    expect(leaveRoomBody).toMatch(/scheduleRoomSleep/);
+  });
+
+  test('joinRoom calls cancelRoomSleep to abort the grace timer on rejoin', () => {
+    const src = fs.readFileSync(CONTROLLER_PATH, 'utf8');
+    const joinRoomStart = src.indexOf('async function joinRoom');
+    const joinRoomEnd   = src.indexOf('async function', joinRoomStart + 1);
+    const joinRoomBody  = src.slice(joinRoomStart, joinRoomEnd);
+    expect(joinRoomBody).toMatch(/cancelRoomSleep/);
+  });
+
+  test('queue.service.js exports scheduleRoomSleep and cancelRoomSleep', () => {
+    const src = fs.readFileSync(QUEUE_SERVICE_PATH, 'utf8');
+    expect(src).toMatch(/async function scheduleRoomSleep/);
+    expect(src).toMatch(/async function cancelRoomSleep/);
+    const exportsIdx = src.lastIndexOf('module.exports');
+    const exportsBlock = src.slice(exportsIdx);
+    expect(exportsBlock).toMatch(/scheduleRoomSleep/);
+    expect(exportsBlock).toMatch(/cancelRoomSleep/);
+  });
+
+  test('VOICE_ROOM_SLEEP queue name constant is defined', () => {
+    const src = fs.readFileSync(QUEUE_SERVICE_PATH, 'utf8');
+    expect(src).toMatch(/VOICE_ROOM_SLEEP.*voice-room-sleep|voice-room-sleep.*VOICE_ROOM_SLEEP/);
+  });
+
+  test('voice-room-sleep.worker.js exists and exports createVoiceRoomSleepWorker', () => {
+    expect(require('fs').existsSync(WORKER_PATH)).toBe(true);
+    const src = fs.readFileSync(WORKER_PATH, 'utf8');
+    expect(src).toMatch(/createVoiceRoomSleepWorker/);
+    expect(src).toMatch(/module\.exports/);
+  });
+
+  test('voice-room-sleep worker is registered in workers/index.js', () => {
+    const src = fs.readFileSync(WORKERS_INDEX_PATH, 'utf8');
+    expect(src).toMatch(/createVoiceRoomSleepWorker/);
+    expect(src).toMatch(/voice-room-sleep\.worker/);
+  });
+
+  test('sleep worker checks room is still LIVE before transitioning', () => {
+    const src = fs.readFileSync(WORKER_PATH, 'utf8');
+    expect(src).toMatch(/STATUS_LIVE|LIVE/);
+    // Must bail out if room is no longer LIVE
+    expect(src).toMatch(/status.*!==.*LIVE|!==.*STATUS_LIVE/);
+  });
+
+  test('sleep worker checks 0 active participants before transitioning', () => {
+    const src = fs.readFileSync(WORKER_PATH, 'utf8');
+    expect(src).toMatch(/activeCount|isActive.*true/);
+    expect(src).toMatch(/activeCount > 0/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VC-BACK-003 (previously UNVERIFIED) VERIFIED: voice-stale-session worker is
+// registered and scheduled in queue.service.js startWorkers() + scheduleCleanup()
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('VC-BACK-003 VERIFIED: voice-stale-session worker is registered and scheduled', () => {
+  const QUEUE_SERVICE_PATH = path.join(__dirname, '../services/queue.service.js');
+
+  test('startWorkers() creates voiceStaleSession worker', () => {
+    const src = fs.readFileSync(QUEUE_SERVICE_PATH, 'utf8');
+    expect(src).toMatch(/workers\.voiceStaleSession\s*=\s*createVoiceStaleSessionWorker/);
+  });
+
+  test('scheduleCleanup() adds voice-stale-sweep recurring job', () => {
+    const src = fs.readFileSync(QUEUE_SERVICE_PATH, 'utf8');
+    expect(src).toMatch(/voice-stale-sweep/);
+    expect(src).toMatch(/10 \* 60 \* 1000/);
+  });
+});

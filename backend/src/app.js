@@ -915,8 +915,48 @@ io.on('connection', (socket) => {
     logger.debug(`[socket:community:leave] User ${userId} left community:${id}`);
   });
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', async () => {
     logger.info(`Client disconnected: ${socket.id} (userId: ${userId})`);
+
+    // STEP-6 FIX: Notify room participants immediately when a user's socket
+    // disconnects so ghost participants disappear from the audience list right
+    // away — not after the 90-minute stale-session sweep.
+    //
+    // IMPORTANT: We emit voice:user_left for UI cleanup ONLY.
+    // We do NOT call leaveRoom() or set isActive=false in the DB here because:
+    //   1. Disconnects are often temporary (network blip, app background, refresh)
+    //   2. The user will re-emit voice:join_room on reconnect and re-appear
+    //   3. Changing DB state here would break the reconnect flow
+    //   4. The stale-session worker handles genuine abandonments (> 90 min)
+    // The beforeunload fetch handler in the web client and the explicit leave
+    // button in mobile call POST /leave to set isActive=false in the DB.
+    if (!userId) return;
+    try {
+      const activeParticipations = await prisma.voiceParticipant.findMany({
+        where: { userId, isActive: true },
+        select: { roomId: true },
+      });
+      if (activeParticipations.length > 0) {
+        const io = global.io;
+        for (const { roomId } of activeParticipations) {
+          // Only emit if this socket was actually in the voice room channel
+          // (the user may have multiple sockets — other tabs/devices stay connected)
+          const roomChannel = `voice:${roomId}`;
+          const socketsInRoom = await io?.in(roomChannel).fetchSockets().catch(() => []) ?? [];
+          const stillConnected = socketsInRoom.some(s => s.userId === userId && s.id !== socket.id);
+          if (!stillConnected) {
+            // No other socket from this user is still in the room — safe to signal departure
+            io?.to(roomChannel).emit('voice:user_left', { roomId, userId });
+            logger.debug(`[disconnect] Emitted voice:user_left for ${userId} in ${roomId} (no other sockets remain)`);
+          } else {
+            logger.debug(`[disconnect] User ${userId} still has ${socketsInRoom.filter(s => s.userId === userId && s.id !== socket.id).length} other socket(s) in ${roomId} — not emitting user_left`);
+          }
+        }
+      }
+    } catch (err) {
+      // Non-fatal: log and continue — do not crash the disconnect handler
+      logger.warn(`[disconnect] voice:user_left broadcast failed for ${userId}: ${err.message}`);
+    }
   });
   // ── PK Battle System socket events ─────────────────────────────────────────
   // pk:{pkMatchId} — broadcast events (scores, timer, gifts, votes)

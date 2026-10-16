@@ -17,7 +17,7 @@ const { moderateDeviceLimiter } = require('../middleware/rateLimiter.device');
 const { middleware: idempotency } = require('../middleware/idempotency');
 const {
   listRooms, getRoom, searchRooms, createRoom, joinRoom, leaveRoom, endRoom,
-  toggleMute, raiseHand, promoteParticipant, kickParticipant, banParticipant, unbanParticipant,
+  toggleMute, raiseHand, promoteParticipant, kickParticipant, banParticipant, unbanParticipant, unkickParticipant,
   getMessages, sendMessage, getHandQueue,
   toggleOpenMic, toggleMicLock, grabMic, dropMic,
   updateRoom, deleteRoom, getMyRooms, getScheduledRooms, uploadRoomCover, toggleSeatLock,
@@ -223,6 +223,12 @@ router.post('/:id/ban/:userId',
 );
 // Unban a participant (removes persistent ban)
 router.delete('/:id/ban/:userId', unbanParticipant);
+
+// Unkick a participant (resets wasKicked so they can rejoin — HOST only)
+router.delete('/:id/kick/:userId/unkick',
+  checkVoiceRole([VOICE_ROLES.HOST]),
+  unkickParticipant
+);
 
 // ─── FIFO SPEAKER QUEUE ───────────────────────────────────────────────────────
 router.post('/:id/queue/raise',              queueRaiseHand);
