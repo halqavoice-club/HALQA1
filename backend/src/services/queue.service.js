@@ -1,3 +1,4 @@
+// @ts-nocheck
 const { Queue, Worker, QueueEvents } = require('bullmq');
 const { getBullMQConnection } = require('../utils/redis');
 const logger = require('../utils/logger');
@@ -19,6 +20,7 @@ const QUEUE_NAMES = {
   ROOM_REMINDERS:       'room-reminders',         // Push notifications for scheduled voice rooms
   LIVE_CLASS_AUTOEND:   'live-class-autoend',     // Sprint 3: durable auto-end for duration-limited classes
   ECONOMY_RECONCILIATION: 'economy-reconciliation', // Task 12.2: daily wallet/ledger balance check
+  VOICE_ROOM_SLEEP:       'voice-room-sleep',       // Durable HOST-left grace period (replaces setTimeout)
 };
 
 /**
@@ -94,6 +96,7 @@ function startWorkers() {
     createLiveClassAutoEndWorker,
     createEconomyReconciliationWorker,
     createVoiceStaleSessionWorker,
+    createVoiceRoomSleepWorker,
   } = require('../workers');
 
   workers.email          = createEmailWorker(connection);
@@ -111,6 +114,10 @@ function startWorkers() {
   // Voice stale-session worker — marks orphaned voiceParticipant records inactive
   // every 10 minutes, preventing stale isActive=true records from blocking joins.
   workers.voiceStaleSession = createVoiceStaleSessionWorker(connection);
+
+  // Voice room sleep worker — durable LIVE→IDLE transition after HOST leaves.
+  // Replaces the in-memory setTimeout in leaveRoom() which was lost on restart.
+  workers.voiceRoomSleep = createVoiceRoomSleepWorker(connection);
 
   logger.info('[queue] Core workers started from src/workers/');
 
@@ -613,6 +620,54 @@ async function rehydrateLiveClassAutoEndJobs() {
   }
 }
 
+/**
+ * Schedule a durable LIVE → IDLE sleep transition for a voice room.
+ * Called from leaveRoom() when the HOST leaves and the room has 0 active participants.
+ * The job fires after a 5-minute delay. If someone rejoins before it fires,
+ * cancelRoomSleep() removes the job so the transition never happens.
+ *
+ * Replaces the in-memory setTimeout that was lost on process restart.
+ *
+ * @param {string} roomId
+ */
+async function scheduleRoomSleep(roomId) {
+  try {
+    const queue = createQueue(QUEUE_NAMES.VOICE_ROOM_SLEEP);
+    await queue.add(
+      'room-sleep',
+      { roomId },
+      {
+        delay:    5 * 60 * 1000,            // 5 minutes — same as the old setTimeout
+        jobId:    `room-sleep:${roomId}`,   // one job per room, deduped by BullMQ
+        attempts: 2,
+        backoff:  { type: 'fixed', delay: 30_000 },
+      }
+    );
+    logger.debug(`[queue] Room sleep scheduled for ${roomId} in 5 min`);
+  } catch (err) {
+    // Non-fatal: if scheduling fails, the stale-session worker will catch the
+    // orphaned LIVE room within 90 minutes via its own sweep.
+    logger.warn(`[queue] Failed to schedule room sleep for ${roomId}: ${err.message}`);
+  }
+}
+
+/**
+ * Cancel a previously scheduled room sleep (called when a new participant joins
+ * during the grace period — the room should stay LIVE).
+ *
+ * @param {string} roomId
+ */
+async function cancelRoomSleep(roomId) {
+  try {
+    const queue = createQueue(QUEUE_NAMES.VOICE_ROOM_SLEEP);
+    await queue.remove(`room-sleep:${roomId}`);
+    logger.debug(`[queue] Room sleep cancelled for ${roomId}`);
+  } catch (err) {
+    // Non-fatal: if the job was already processed or never existed, ignore.
+    logger.warn(`[queue] Failed to cancel room sleep for ${roomId}: ${err.message}`);
+  }
+}
+
 module.exports = {
   QUEUE_NAMES,
   createQueue,
@@ -627,6 +682,8 @@ module.exports = {
   scheduleLiveClassAutoEnd,
   cancelLiveClassAutoEnd,
   rehydrateLiveClassAutoEndJobs,
+  scheduleRoomSleep,
+  cancelRoomSleep,
   startWorkers,
   scheduleCleanup
 };

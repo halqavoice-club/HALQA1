@@ -559,25 +559,31 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       message: `You've been approved as a speaker at Seat ${assignedSeat}!`
     });
 
-    // Authoritative stage snapshot — ensures all clients (including the promoted user)
-    // reconcile their seat grid correctly even if voice:role_changed arrives out of order.
+    // BUG-004 FIX: Add LEFT JOIN users so profile fields are included in the snapshot.
+    // Audience was already included (no seatNumber filter) from a previous partial fix.
+    // Previously firstName/lastName/avatarUrl were absent, causing blank names in upsert paths.
     try {
       const stageRows = await prisma.$queryRaw`
         SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
-               vp.handRaised, vp.mutedByModerator, vp.joinedAt
+               vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+               u.firstName, u.lastName, u.avatarUrl
         FROM voice_participants vp
-        WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
-        ORDER BY vp.seatNumber ASC
+        LEFT JOIN users u ON u.id = vp.userId
+        WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+        ORDER BY vp.role ASC, vp.joinedAt ASC
       `;
       io.to(`voice:${roomId}`).emit('voice:stage_state', {
         roomId,
         stageParticipants: stageRows.map(r => ({
           ...r,
-          seatNumber: Number(r.seatNumber),
-          isMuted: Boolean(r.isMuted),
-          isPinned: Boolean(r.isPinned),
-          handRaised: Boolean(r.handRaised),
+          seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
+          isMuted:          Boolean(r.isMuted),
+          isPinned:         Boolean(r.isPinned),
+          handRaised:       Boolean(r.handRaised),
           mutedByModerator: Boolean(r.mutedByModerator),
+          firstName:        r.firstName  ?? null,
+          lastName:         r.lastName   ?? null,
+          avatarUrl:        r.avatarUrl  ?? null,
         })),
         stageCount: stageRows.length,
       });

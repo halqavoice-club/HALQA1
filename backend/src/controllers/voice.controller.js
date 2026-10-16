@@ -1,8 +1,11 @@
+﻿// @ts-nocheck
 const { v4: uuidv4 } = require('uuid');
 const path    = require('path');
 const prisma  = require('../utils/prisma');
 const { setCache, getCache, deleteCache, isRedisReady } = require('../utils/redis');
 const { saveFile, deleteFile } = require('../utils/storage');
+// Shared cache helpers — also used by voice-room-sleep.worker.js (avoids circular dep)
+const { invalidateRoomCache } = require('../utils/voiceRoomCache');
 
 // ── Audit helper — fire-and-forget, never throws ──────────────────────────────
 async function voiceAudit(actorId, action, entityId, meta = {}) {
@@ -117,22 +120,8 @@ async function getRoomWithParticipants(roomId) {
   return room;
 }
 
-async function invalidateRoomCache(roomId, schoolId) {
-  try {
-    // Invalidate the single-room cache
-    await deleteCache(roomCacheKey(roomId));
-    // BE-008: Invalidate all room list cache entries for this school using pattern delete.
-    // This covers every filter/page combination without needing to enumerate them.
-    const { deleteCachePattern } = require('../utils/redis');
-    await deleteCachePattern(`voice:rooms:${schoolId || 'global'}:*`);
-    await deleteCachePattern(`voice:rooms:global:*`);
-  } catch (err) {
-    logger.error(`[voice] Cache DEL failed for room ${roomId}: ${err.message}`);
-  }
-}
+// invalidateRoomCache is imported from ../utils/voiceRoomCache
 
-// Safe wrapper � used for all single-key invalidations inside action handlers.
-// A cache delete failure must never fail an HTTP response; it is always logged.
 async function safeDeleteCache(key) {
   try {
     await deleteCache(key);
@@ -256,7 +245,7 @@ async function listRooms(req, res, next) {
               user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } }
             },
             orderBy: [{ role: 'asc' }, { joinedAt: 'asc' }],
-            take: 20
+            take: 100  // raised from 20: audience members visible in lobby preview
           },
           _count: { select: { participants: { where: { isActive: true } } } }
         },
@@ -748,6 +737,12 @@ async function joinRoom(req, res, next) {
     // BE-005: Previously this was 3 separate sequential calls.
     // syncRoomStatus() already calls invalidateRoomCache internally.
     await syncRoomStatus(roomId, schoolId);
+
+    // Cancel any pending room-sleep job — someone joined during the grace period
+    // and the room should stay LIVE. Fire-and-forget, non-fatal.
+    const { cancelRoomSleep } = require('../services/queue.service');
+    cancelRoomSleep(roomId).catch(() => {});
+
     const updatedRoom = await getRoomWithParticipants(roomId);
 
     // Update participant count on the feed live card
@@ -812,9 +807,9 @@ async function joinRoom(req, res, next) {
         joinedAt:         participant.joinedAt?.toISOString?.() ?? new Date().toISOString(),
       });
 
-      // FIX-JOIN-STAGE: Send the current authoritative stage state directly to
-      // the joining user. This ensures they see who is already on stage the
-      // moment they join, without waiting for a separate event cycle.
+      // FIX-JOIN-STAGE: Send the current authoritative room snapshot directly to
+      // the joining user. Includes ALL active participants (audience + stage) so
+      // the joiner immediately sees the full room — not just on-stage members.
       try {
         const stageRows = await prisma.$queryRaw`
           SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
@@ -822,8 +817,8 @@ async function joinRoom(req, res, next) {
                  u.firstName, u.lastName, u.avatarUrl
           FROM voice_participants vp
           LEFT JOIN users u ON u.id = vp.userId
-          WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
-          ORDER BY vp.seatNumber ASC
+          WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+          ORDER BY vp.role ASC, vp.joinedAt ASC
         `;
         if (stageRows.length > 0) {
           io.to(`user:${userId}`).emit('voice:stage_state', {
@@ -832,7 +827,7 @@ async function joinRoom(req, res, next) {
               userId:           r.userId,
               role:             r.role,
               isMuted:          Boolean(r.isMuted),
-              seatNumber:       Number(r.seatNumber),
+              seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
               isPinned:         Boolean(r.isPinned),
               handRaised:       Boolean(r.handRaised),
               mutedByModerator: Boolean(r.mutedByModerator),
@@ -925,35 +920,12 @@ async function leaveRoom(req, res, next) {
     //
     // Explicit endRoom() is the ONLY path to status=ENDED (terminal).
     if (participant.role === VOICE_ROLES.HOST && remaining === 0) {
-      const AUTO_SLEEP_GRACE_MS = 5 * 60 * 1000; // 5 minutes
-      setTimeout(async () => {
-        try {
-          const liveRoom = await prisma.voiceRoom.findUnique({
-            where: { id: roomId },
-            select: { status: true }
-          });
-          // Only sleep if still LIVE (i.e. not already explicitly ended by endRoom)
-          if (!liveRoom || liveRoom.status !== STATUS.LIVE) return;
-          const stillActive = await countActive(roomId);
-          if (stillActive > 0) return; // someone rejoined during grace period
-
-          // Transition LIVE → IDLE (permanent room sleep — NOT terminal)
-          // Do NOT set endedAt. Do NOT mark status=ENDED.
-          await prisma.voiceRoom.update({
-            where: { id: roomId },
-            data:  { status: STATUS.IDLE, lastActivityAt: new Date(), updatedAt: new Date() }
-          });
-          try { await require('../utils/voiceQueue').clearQueue(roomId); } catch {}
-          await invalidateRoomCache(roomId, null);
-
-          const io2 = getIo();
-          if (io2) io2.to(`voice:${roomId}`).emit('voice:status_changed', { roomId, status: STATUS.IDLE, reason: 'empty_room_sleep' });
-          broadcastLiveEnd('voice_room', roomId);
-          logger.info(`[voice] Room ${roomId} transitioned LIVE → IDLE (permanent room, 0 participants)`);
-        } catch (sleepErr) {
-          logger.warn(`[voice] Room sleep transition failed for ${roomId}: ${sleepErr.message}`);
-        }
-      }, AUTO_SLEEP_GRACE_MS);
+      // Schedule durable LIVE->IDLE transition via BullMQ (survives process restarts).
+      // Replaces the previous in-memory setTimeout which was lost on restart.
+      const { scheduleRoomSleep } = require('../services/queue.service');
+      scheduleRoomSleep(roomId).catch(err =>
+        logger.warn(`[voice] Failed to schedule room sleep for ${roomId}: ${err.message}`)
+      );
     }
 
     // ── L-8 FIX: Track voice listening time in DailyUserStats ──────────────
@@ -1424,8 +1396,8 @@ async function promoteParticipant(req, res, next) {
                    u.firstName, u.lastName, u.avatarUrl
             FROM voice_participants vp
             LEFT JOIN users u ON u.id = vp.userId
-            WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
-            ORDER BY vp.seatNumber ASC
+            WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+            ORDER BY vp.role ASC, vp.joinedAt ASC
           `;
           io.to(`voice:${roomId}`).emit('voice:stage_state', {
             roomId,
@@ -1433,7 +1405,7 @@ async function promoteParticipant(req, res, next) {
               userId:           r.userId,
               role:             r.role,
               isMuted:          Boolean(r.isMuted),
-              seatNumber:       Number(r.seatNumber),
+              seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
               isPinned:         Boolean(r.isPinned),
               handRaised:       Boolean(r.handRaised),
               mutedByModerator: Boolean(r.mutedByModerator),
@@ -1641,6 +1613,39 @@ async function unbanParticipant(req, res, next) {
     await safeDeleteCache(roomCacheKey(roomId));
     voiceAudit(requesterId, 'PARTICIPANT_UNBANNED', roomId, { targetUserId });
     return successResponse(res, null, 'User unbanned');
+  } catch (error) { next(error); }
+}
+
+// --- UNKICK PARTICIPANT -------------------------------------------------------
+// Resets wasKicked=false so a previously-kicked user can rejoin the room.
+// Only the HOST can unkick (mirrors the kick permission model for non-moderators).
+async function unkickParticipant(req, res, next) {
+  try {
+    const { id: roomId, userId: targetUserId } = req.params;
+    const requesterId = req.user.id;
+
+    const requester = await prisma.voiceParticipant.findFirst({
+      where: { roomId, userId: requesterId }
+    });
+    if (!requester || !requester.isActive || requester.role !== VOICE_ROLES.HOST) {
+      return errorResponse(res, 'Only the host can unkick participants', 403);
+    }
+
+    // Reset wasKicked on the session participant record (covers current session).
+    // If the user has already left the room the record still exists with isActive=false —
+    // clearing wasKicked there is harmless and lets them rejoin.
+    const updated = await prisma.voiceParticipant.updateMany({
+      where: { roomId, userId: targetUserId, wasKicked: true },
+      data: { wasKicked: false }
+    });
+
+    if (updated.count === 0) {
+      return errorResponse(res, 'User was not kicked from this room', 404);
+    }
+
+    await safeDeleteCache(roomCacheKey(roomId));
+    voiceAudit(requesterId, 'PARTICIPANT_UNKICKED', roomId, { targetUserId });
+    return successResponse(res, null, 'User unkicked — they may now rejoin');
   } catch (error) { next(error); }
 }
 
@@ -2234,8 +2239,8 @@ async function grabMic(req, res, next) {
                  u.firstName, u.lastName, u.avatarUrl
           FROM voice_participants vp
           LEFT JOIN users u ON u.id = vp.userId
-          WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
-          ORDER BY vp.seatNumber ASC
+          WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+          ORDER BY vp.role ASC, vp.joinedAt ASC
         `;
         io.to(`voice:${roomId}`).emit('voice:stage_state', {
           roomId,
@@ -2348,8 +2353,8 @@ async function dropMic(req, res, next) {
                  u.firstName, u.lastName, u.avatarUrl
           FROM voice_participants vp
           LEFT JOIN users u ON u.id = vp.userId
-          WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
-          ORDER BY vp.seatNumber ASC
+          WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+          ORDER BY vp.role ASC, vp.joinedAt ASC
         `;
         io.to(`voice:${roomId}`).emit('voice:stage_state', {
           roomId,
@@ -2602,8 +2607,8 @@ async function getStageState(req, res, next) {
              u.firstName, u.lastName, u.avatarUrl
       FROM voice_participants vp
       LEFT JOIN users u ON u.id = vp.userId
-      WHERE vp.roomId = ${roomId} AND vp.isActive = 1 AND vp.seatNumber IS NOT NULL
-      ORDER BY vp.seatNumber ASC
+      WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+      ORDER BY vp.role ASC, vp.joinedAt ASC
     `;
 
     return successResponse(res, {
@@ -2643,6 +2648,7 @@ module.exports = {
   kickParticipant,
   banParticipant,
   unbanParticipant,
+  unkickParticipant,
   getMessages,
   sendMessage,
   deleteMessage,
