@@ -1230,6 +1230,7 @@ export default function VoiceRoomScreen() {
             mutedByModerator: sp.mutedByModerator,
             isActive:         true,
             seatNumber:       sp.seatNumber,
+            isPinned:         (sp as any).isPinned ?? false,
             _joinedAt:        typeof sp.joinedAt === 'string' ? sp.joinedAt : '',
           });
         }

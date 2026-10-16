@@ -85,6 +85,8 @@ jest.mock('../services/queue.service', () => ({
   scheduleRoomReminder:  jest.fn(),
   cancelRoomReminder:    jest.fn(),
   queueBulkNotifications: jest.fn(),
+  scheduleRoomSleep:     jest.fn().mockResolvedValue(undefined),
+  cancelRoomSleep:       jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../utils/autoPromote', () => ({
