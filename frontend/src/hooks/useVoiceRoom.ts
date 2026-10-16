@@ -162,7 +162,8 @@ export function useVoiceRoom(roomId: string | null) {
         handRaised: data.raised,
         handRaisedAt: data.raised ? new Date().toISOString() : null
       })
-      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      // Read myRole from store to avoid stale-closure on activeRoom
+      const myRole = useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === user?.id)?.role
       if (canModerate(myRole) && data.raised && data.userId !== user?.id) {
         toast({
           title: `✋ ${data.firstName} ${data.lastName} raised their hand`,
@@ -226,7 +227,9 @@ export function useVoiceRoom(roomId: string | null) {
     }) => {
       if (data.roomId !== roomId) return
       updateParticipant(data.userId, { role: VOICE_ROLES.MODERATOR, isMuted: false })
-      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      // Read myRole from store directly to avoid the stale-closure problem
+      // (activeRoom is captured at effect-mount time and does not reflect later participant changes).
+      const myRole = useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === user?.id)?.role
       if (myRole === VOICE_ROLES.HOST) {
         toast({ title: `🛡️ ${data.firstName} ${data.lastName} is now a moderator` })
       }
@@ -339,9 +342,11 @@ export function useVoiceRoom(roomId: string | null) {
 
     const onSlotFreed = (data: { roomId: string; speakerCount: number; maxSpeakers: number }) => {
       if (data.roomId !== roomId) return
-      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      // Read from store to avoid stale-closure on activeRoom
+      const liveRoom = useVoiceStore.getState().activeRoom
+      const myRole = liveRoom?.participants.find(p => p.userId === user?.id)?.role
       if (canModerate(myRole)) {
-        const queue = activeRoom?.participants.filter(p => p.handRaised && p.role === VOICE_ROLES.AUDIENCE) || []
+        const queue = liveRoom?.participants.filter(p => p.handRaised && p.role === VOICE_ROLES.AUDIENCE) || []
         if (queue.length > 0) {
           toast({ title: `🎙️ Speaker slot freed — ${queue.length} hand${queue.length > 1 ? 's' : ''} waiting` })
         }
@@ -436,7 +441,8 @@ export function useVoiceRoom(roomId: string | null) {
     // ── Membership events ──────────────────────────────────────────────────────
     const onJoinRequest = (d: { roomId: string; userId: string; firstName: string; lastName: string }) => {
       if (d.roomId !== roomId) return
-      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      // Read from store to avoid stale-closure on activeRoom
+      const myRole = useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === user?.id)?.role
       if (canModerate(myRole)) {
         toast({ title: `✋ ${d.firstName} ${d.lastName} wants to join the room`, description: 'Check Member Requests to approve' })
       }
