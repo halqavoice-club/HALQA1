@@ -97,11 +97,15 @@ export function Providers({ children }: { children: React.ReactNode }) {
       disconnectSocket()
       socketReadyRef.current = false
     }
+    // Cleanup only on unmount (logout / app close), NOT on every token refresh.
+    // If accessToken changes while authenticated, updateSocketToken() keeps the
+    // existing socket alive with the new token — no reconnect needed.
     return () => {
       disconnectSocket()
       socketReadyRef.current = false
     }
-  }, [isAuthenticated, accessToken])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated]) // ← removed accessToken from deps intentionally
 
   return (
     <QueryClientProvider client={queryClient}>
