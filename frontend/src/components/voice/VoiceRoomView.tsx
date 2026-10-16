@@ -728,6 +728,10 @@ export function VoiceRoomView({ onLeave }: Props) {
     disconnect()
     // Notify backend (marks participant inactive, room stays LIVE)
     try { await api.post(`/voice/${roomId}/leave`) } catch {}
+    // Emit voice:leave_room so the socket is removed from the Socket.IO room
+    // immediately — this is the authoritative leave signal for clean exit.
+    const socket = getSocket()
+    if (socket && roomId) socket.emit('voice:leave_room', roomId)
     onLeave()
   }
 

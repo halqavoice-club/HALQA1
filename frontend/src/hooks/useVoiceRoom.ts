@@ -793,7 +793,6 @@ export function useVoiceRoom(roomId: string | null) {
 
     return () => {
       socket.off('connect', onReconnect)
-      socket.emit('voice:leave_room', roomId)
       socket.off('voice:user_joined',        onUserJoined)
       socket.off('voice:user_left',          onUserLeft)
       socket.off('voice:mute_changed',       onMuteChanged)
