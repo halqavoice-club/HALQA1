@@ -945,6 +945,14 @@ export function useVoiceRoom(roomId: string | null) {
     if (!roomId) return
     try {
       await api.post(`/voice/${roomId}/queue/approve/${targetUserId}`)
+      // Optimistic update: clear the hand-raised state immediately so the host's
+      // UI shows the approval without waiting for the socket round-trip.
+      // The subsequent voice:role_changed / voice:stage_state events will set the
+      // correct seat and role; this just clears the ✋ badge immediately.
+      useVoiceStore.getState().updateParticipant(targetUserId, {
+        handRaised: false,
+        handRaisedAt: null,
+      })
     } catch (e: any) {
       toast({ title: e?.response?.data?.message || 'Failed to approve speaker', variant: 'destructive' })
     }
@@ -992,6 +1000,15 @@ export function useVoiceRoom(roomId: string | null) {
     if (!roomId) return
     try {
       await api.patch(`/voice/${roomId}/mute-all`)
+      // Optimistic update: mute all SPEAKER and MODERATOR participants in the local store.
+      // The socket voice:mute_changed events will arrive shortly and reconcile any discrepancy.
+      const myId = useAuthStore.getState().user?.id
+      const participants = useVoiceStore.getState().activeRoom?.participants ?? []
+      participants.forEach(p => {
+        if (p.userId !== myId && (p.role === VOICE_ROLES.SPEAKER || p.role === VOICE_ROLES.MODERATOR) && !p.isMuted) {
+          useVoiceStore.getState().updateParticipant(p.userId, { isMuted: true, mutedByModerator: true })
+        }
+      })
       toast({ title: '🔇 All speakers muted' })
     } catch {
       toast({ title: 'Failed to mute all', variant: 'destructive' })
@@ -1002,6 +1019,14 @@ export function useVoiceRoom(roomId: string | null) {
     if (!roomId) return
     try {
       await api.patch(`/voice/${roomId}/unmute-all`)
+      // Optimistic update: unmute all SPEAKER and MODERATOR participants in the local store.
+      const myId = useAuthStore.getState().user?.id
+      const participants = useVoiceStore.getState().activeRoom?.participants ?? []
+      participants.forEach(p => {
+        if (p.userId !== myId && (p.role === VOICE_ROLES.SPEAKER || p.role === VOICE_ROLES.MODERATOR) && p.isMuted) {
+          useVoiceStore.getState().updateParticipant(p.userId, { isMuted: false, mutedByModerator: false })
+        }
+      })
       toast({ title: '🎙️ All speakers unmuted' })
     } catch {
       toast({ title: 'Failed to unmute all', variant: 'destructive' })
@@ -1137,6 +1162,9 @@ export function useVoiceRoom(roomId: string | null) {
         locked !== undefined ? { locked } : {}
       )
       const state = res.data.data?.micLocked
+      // Optimistic update: reflect the new micLocked state immediately in the store
+      // so the host's own UI updates without waiting for the socket event.
+      useVoiceStore.getState().updateRoom({ micLocked: state })
       toast({ title: state ? '🔒 Mic Locked' : '🔓 Mic Unlocked' })
     } catch (e: any) {
       toast({ title: e?.response?.data?.message || 'Failed to toggle Mic Lock', variant: 'destructive' })
