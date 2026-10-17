@@ -165,13 +165,51 @@ export function useVoiceRoom(roomId: string | null) {
 
     const onHandRaised = (data: {
       roomId: string; userId: string; raised: boolean
-      firstName: string; lastName: string
+      firstName: string; lastName: string; avatarUrl?: string | null
     }) => {
       if (data.roomId !== roomId) return
-      updateParticipant(data.userId, {
-        handRaised: data.raised,
-        handRaisedAt: data.raised ? new Date().toISOString() : null
-      })
+
+      // Check if this participant is already in the store.
+      // updateParticipant silently no-ops for unknown userIds — if this user
+      // just joined and voice:user_joined hasn't been processed yet (or was
+      // dropped), the hand-raised flag would never be set and the host's
+      // "Hands" queue panel (which reads participants.filter(p=>p.handRaised))
+      // would never show them. Upsert a minimal AUDIENCE entry using the profile
+      // data that raiseHand already includes in the voice:hand_raised payload.
+      const existing = useVoiceStore.getState().activeRoom?.participants.find(
+        p => p.userId === data.userId
+      )
+      if (existing) {
+        updateParticipant(data.userId, {
+          handRaised: data.raised,
+          handRaisedAt: data.raised ? new Date().toISOString() : null
+        })
+      } else if (data.raised) {
+        // Participant not yet in the store — add them so the host's Hands panel shows them.
+        // The subsequent voice:stage_state snapshot will fill in full details.
+        addParticipant({
+          id:               data.userId,
+          userId:           data.userId,
+          role:             VOICE_ROLES.AUDIENCE,
+          isMuted:          true,
+          mutedByModerator: false,
+          handRaised:       true,
+          handRaisedAt:     new Date().toISOString(),
+          joinedAt:         new Date().toISOString(),
+          isActive:         true,
+          isPinned:         false,
+          seatNumber:       null,
+          user: {
+            id:        data.userId,
+            firstName: data.firstName,
+            lastName:  data.lastName,
+            avatarUrl: data.avatarUrl ?? null,
+          },
+        })
+      } else {
+        // raised=false for unknown user — nothing to update
+      }
+
       // Read myRole from store to avoid stale-closure on activeRoom
       const myRole = useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === user?.id)?.role
       if (canModerate(myRole) && data.raised && data.userId !== user?.id) {
