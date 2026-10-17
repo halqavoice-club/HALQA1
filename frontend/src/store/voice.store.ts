@@ -277,6 +277,13 @@ interface VoiceState {
   }>
   pushQueueUpdatedEvent: (e: VoiceState['pendingQueueUpdatedEvents'][number]) => void
   drainQueueUpdatedEvents: () => VoiceState['pendingQueueUpdatedEvents']
+
+  // Flag: true while page.tsx early handlers are the active listeners.
+  // useVoiceRoom sets this to false before draining the buffers so that
+  // any events arriving in the sub-ms drain gap are handled by useVoiceRoom's
+  // own registered listeners, not buffered again — preventing double-processing.
+  earlyBufferActive: boolean
+  deactivateEarlyBuffer: () => void
 }
 
 export const useVoiceStore = create<VoiceState>((set, get) => ({
@@ -454,6 +461,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     pendingSyncEvents: [],
     pendingUserJoinedEvents: [],
     pendingQueueUpdatedEvents: [],
+    earlyBufferActive: true,  // re-arm for next room join
   }),
 
   // ─── Pre-join sync buffer ─────────────────────────────────────────────────
@@ -472,11 +480,15 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   // ─── Early-buffer: voice:user_joined ─────────────────────────────────────
   // Holds user_joined events that arrive before useVoiceRoom mounts its
-  // listener. Max 20 entries (oldest discarded). Drained on mount.
+  // listener. Max 50 entries (oldest discarded). Drained on mount.
   pendingUserJoinedEvents: [],
-  pushUserJoinedEvent: (e) => set(s => ({
-    pendingUserJoinedEvents: [...s.pendingUserJoinedEvents.slice(-19), e],
-  })),
+  pushUserJoinedEvent: (e) => set(s => {
+    // Stop buffering once useVoiceRoom has taken over — events arriving
+    // after deactivateEarlyBuffer() was called will be handled by
+    // useVoiceRoom's own registered listeners directly.
+    if (!s.earlyBufferActive) return s
+    return { pendingUserJoinedEvents: [...s.pendingUserJoinedEvents.slice(-49), e] }
+  }),
   drainUserJoinedEvents: () => {
     const events = get().pendingUserJoinedEvents
     set({ pendingUserJoinedEvents: [] })
@@ -487,14 +499,23 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   // Only the latest queue snapshot is kept because snapshots supersede each
   // other. Drained on mount.
   pendingQueueUpdatedEvents: [],
-  pushQueueUpdatedEvent: (e) => set(_ => ({
-    pendingQueueUpdatedEvents: [e], // only keep the latest snapshot
-  })),
+  pushQueueUpdatedEvent: (e) => set(s => {
+    if (!s.earlyBufferActive) return s
+    return { pendingQueueUpdatedEvents: [e] } // only keep the latest snapshot
+  }),
   drainQueueUpdatedEvents: () => {
     const events = get().pendingQueueUpdatedEvents
     set({ pendingQueueUpdatedEvents: [] })
     return events
   },
+
+  // ─── Early-buffer active flag ────────────────────────────────────────────
+  // Starts true (page.tsx registers early handlers before user clicks Join).
+  // useVoiceRoom calls deactivateEarlyBuffer() before draining, so any events
+  // that arrive in the sub-ms drain gap go to useVoiceRoom's own listeners
+  // instead of being buffered and processed twice.
+  earlyBufferActive: true,
+  deactivateEarlyBuffer: () => set({ earlyBufferActive: false }),
 
   // ─── LiveKit disconnect ref ───────────────────────────────────────────────
   // VoiceRoomView registers its disconnect() here so that any page (e.g. the

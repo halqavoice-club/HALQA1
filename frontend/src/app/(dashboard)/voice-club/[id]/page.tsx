@@ -153,8 +153,11 @@ export default function VoiceRoomPage() {
         return
       }
       toast({ title: e?.response?.data?.message || 'Failed to join room', variant: 'destructive' })
-      // Discard any buffered stage_state events so they don't replay on next attempt
+      // Discard ALL pre-join buffers so stale events don't replay on the next attempt.
+      // earlyBufferActive stays true — the early handlers remain armed for the next join.
       useVoiceStore.getState().drainSyncEvents()
+      useVoiceStore.getState().drainUserJoinedEvents()
+      useVoiceStore.getState().drainQueueUpdatedEvents()
       setJoining(false)
     }
   }

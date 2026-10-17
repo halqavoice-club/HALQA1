@@ -863,6 +863,12 @@ export function useVoiceRoom(roomId: string | null) {
     // Events that arrived during the race window between POST /join completing
     // and this useEffect registering all listeners are buffered by the early
     // handlers in page.tsx. Drain them now so nothing is silently dropped.
+    //
+    // IMPORTANT: deactivateEarlyBuffer() MUST be called before the drain so
+    // that any events arriving in the sub-ms window between drain and the end
+    // of this effect are handled by the listeners registered above — not pushed
+    // back into the buffers and processed a second time.
+    useVoiceStore.getState().deactivateEarlyBuffer()
     const bufferedUserJoined  = useVoiceStore.getState().drainUserJoinedEvents()
     const bufferedStageEvents = useVoiceStore.getState().drainSyncEvents()
     const bufferedQueueEvents = useVoiceStore.getState().drainQueueUpdatedEvents()
