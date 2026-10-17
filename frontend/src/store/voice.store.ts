@@ -256,6 +256,27 @@ interface VoiceState {
   }>
   pushSyncEvent: (e: VoiceState['pendingSyncEvents'][number]) => void
   drainSyncEvents: () => VoiceState['pendingSyncEvents']
+
+  // Early-buffer: voice:user_joined events that arrive before useVoiceRoom mounts
+  // (max 20 entries — oldest discarded). Drained by useVoiceRoom after all listeners registered.
+  pendingUserJoinedEvents: Array<{
+    roomId: string; userId: string; firstName: string; lastName: string
+    avatarUrl: string | null; role: string; isMuted?: boolean
+    mutedByModerator?: boolean; handRaised?: boolean; handRaisedAt?: string
+    isPinned?: boolean; seatNumber?: number | null; joinedAt?: string
+  }>
+  pushUserJoinedEvent: (e: VoiceState['pendingUserJoinedEvents'][number]) => void
+  drainUserJoinedEvents: () => VoiceState['pendingUserJoinedEvents']
+
+  // Early-buffer: voice:queue_updated events — only the last snapshot is kept
+  // because queue snapshots supersede each other.
+  pendingQueueUpdatedEvents: Array<{
+    roomId: string
+    queue: Array<{ userId: string; firstName: string; lastName: string; avatarUrl: string | null; raisedAt: string }>
+    queueLength: number
+  }>
+  pushQueueUpdatedEvent: (e: VoiceState['pendingQueueUpdatedEvents'][number]) => void
+  drainQueueUpdatedEvents: () => VoiceState['pendingQueueUpdatedEvents']
 }
 
 export const useVoiceStore = create<VoiceState>((set, get) => ({
@@ -431,6 +452,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     isHandQueueOpen: false,
     isWaitingListOpen: false,
     pendingSyncEvents: [],
+    pendingUserJoinedEvents: [],
+    pendingQueueUpdatedEvents: [],
   }),
 
   // ─── Pre-join sync buffer ─────────────────────────────────────────────────
@@ -444,6 +467,32 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   drainSyncEvents: () => {
     const events = get().pendingSyncEvents
     set({ pendingSyncEvents: [] })
+    return events
+  },
+
+  // ─── Early-buffer: voice:user_joined ─────────────────────────────────────
+  // Holds user_joined events that arrive before useVoiceRoom mounts its
+  // listener. Max 20 entries (oldest discarded). Drained on mount.
+  pendingUserJoinedEvents: [],
+  pushUserJoinedEvent: (e) => set(s => ({
+    pendingUserJoinedEvents: [...s.pendingUserJoinedEvents.slice(-19), e],
+  })),
+  drainUserJoinedEvents: () => {
+    const events = get().pendingUserJoinedEvents
+    set({ pendingUserJoinedEvents: [] })
+    return events
+  },
+
+  // ─── Early-buffer: voice:queue_updated ───────────────────────────────────
+  // Only the latest queue snapshot is kept because snapshots supersede each
+  // other. Drained on mount.
+  pendingQueueUpdatedEvents: [],
+  pushQueueUpdatedEvent: (e) => set(_ => ({
+    pendingQueueUpdatedEvents: [e], // only keep the latest snapshot
+  })),
+  drainQueueUpdatedEvents: () => {
+    const events = get().pendingQueueUpdatedEvents
+    set({ pendingQueueUpdatedEvents: [] })
     return events
   },
 

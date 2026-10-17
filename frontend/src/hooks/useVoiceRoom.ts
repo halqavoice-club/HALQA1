@@ -133,6 +133,9 @@ export function useVoiceRoom(roomId: string | null) {
       joinedAt?: string
     }) => {
       if (data.roomId !== roomId) return
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[voice-debug] voice:user_joined received', { userId: data.userId, firstName: data.firstName })
+      }
       addParticipant({
         id: data.userId, userId: data.userId,
         role: asRole(data.role),
@@ -168,6 +171,9 @@ export function useVoiceRoom(roomId: string | null) {
       firstName: string; lastName: string; avatarUrl?: string | null
     }) => {
       if (data.roomId !== roomId) return
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[voice-debug] voice:hand_raised received', { userId: data.userId, raised: data.raised })
+      }
 
       // Check if this participant is already in the store.
       // updateParticipant silently no-ops for unknown userIds — if this user
@@ -587,6 +593,9 @@ export function useVoiceRoom(roomId: string | null) {
       stageCount: number
     }) => {
       if (data.roomId !== roomId) return
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[voice-debug] voice:stage_state received', { participantsCount: data.stageParticipants.length })
+      }
       // P1 FIX (ordering): Capture store state BEFORE the updateParticipant loop so the
       // upsert-pass below uses the original participant list, not the post-mutation version.
       // updateParticipant only maps over existing entries — if a userId is absent from the
@@ -656,6 +665,9 @@ export function useVoiceRoom(roomId: string | null) {
       queueLength: number
     }) => {
       if (data.roomId !== roomId) return
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[voice-debug] voice:queue_updated received', { queueLength: data.queue.length })
+      }
       setSpeakerQueue(data.queue)
     }
 
@@ -838,16 +850,49 @@ export function useVoiceRoom(roomId: string | null) {
     socket.on('gift:received',            onGiftReceived)
     socket.on('voice:gift_all',           onGiftAll)
 
-    // P0-A FIX: Drain any voice:stage_state events that arrived during the
-    // race window between POST /join completing and this useEffect registering
-    // all listeners. The early listener in page.tsx buffered them in the store.
-    useVoiceStore.getState().drainSyncEvents().forEach(payload => onStageState(payload))
+    // ── Dev-mode diagnostic: log mount context ────────────────────────────
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[voice-debug] useVoiceRoom mounted', {
+        roomId,
+        socketId: socket.id,
+        connected: socket.connected,
+      })
+    }
+
+    // ── Drain pre-mount buffers ───────────────────────────────────────────
+    // Events that arrived during the race window between POST /join completing
+    // and this useEffect registering all listeners are buffered by the early
+    // handlers in page.tsx. Drain them now so nothing is silently dropped.
+    const bufferedUserJoined  = useVoiceStore.getState().drainUserJoinedEvents()
+    const bufferedStageEvents = useVoiceStore.getState().drainSyncEvents()
+    const bufferedQueueEvents = useVoiceStore.getState().drainQueueUpdatedEvents()
+
+    if (process.env.NODE_ENV === 'development') {
+      console.log(
+        '[voice-debug] drain on mount: user_joined=%d stage_state=%d queue_updated=%d',
+        bufferedUserJoined.length, bufferedStageEvents.length, bufferedQueueEvents.length,
+      )
+    }
+
+    // Drain voice:user_joined BEFORE voice:stage_state so that if the same
+    // userId appears in both, the stage_state upsert-pass (which skips existing
+    // participants) correctly skips the already-added entry rather than creating
+    // a duplicate.
+    bufferedUserJoined.forEach(payload => onUserJoined(payload))
+    bufferedStageEvents.forEach(payload => onStageState(payload))
+    // Apply only the latest queue snapshot (snapshots supersede each other).
+    if (bufferedQueueEvents.length > 0) {
+      onQueueUpdated(bufferedQueueEvents[bufferedQueueEvents.length - 1])
+    }
 
     // STEP-3 FIX: Emit voice:join_room AFTER all socket.on() listeners are registered.
     // Previously this was the first statement in the effect (before any socket.on calls),
     // so voice:stage_state / voice:user_joined events that arrived in the same microtask
     // burst were silently dropped. Now all handlers are in place before the server
     // starts delivering room events to this socket.
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[voice-debug] emitting voice:join_room', roomId)
+    }
     socket.emit('voice:join_room', roomId)
 
     return () => {

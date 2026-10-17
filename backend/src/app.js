@@ -227,7 +227,7 @@ function createSocketRateLimiter() {
   // Map<eventName, { max: number, windowMs: number }>
   const LIMITS = {
     'voice:reaction':               { max: 10, windowMs: 2_000 },
-    'voice:join_room':              { max: 5,  windowMs: 10_000 }, // P0-2: prevent reconnect-loop attacks
+    'voice:join_room':              { max: 15, windowMs: 10_000 }, // P0-2: prevent reconnect-loop attacks; 15 allows React StrictMode double-mount + reconnect + nav
     'liveclass:reaction':           { max: 10, windowMs: 2_000 },
     'voice:speaking':               { max: 30, windowMs: 5_000 },
     'liveclass:speaking':           { max: 30, windowMs: 5_000 },
@@ -305,7 +305,10 @@ io.on('connection', (socket) => {
   // Now requires an active VoiceParticipant record, matching the liveclass:join_room
   // pattern that was already fixed.
   socket.on('voice:join_room', async (roomId) => {
-    if (!socketAllow('voice:join_room')) return; // P0-2: rate limit reconnect loops
+    if (!socketAllow('voice:join_room')) {
+      logger.warn('[socket] voice:join_room rate-limited', { userId, roomId: typeof roomId === 'object' ? roomId?.roomId : roomId });
+      return; // P0-2: rate limit reconnect loops
+    }
     const id = typeof roomId === 'object' ? roomId?.roomId : roomId;
     if (!id || !userId) return;
     try {
@@ -313,7 +316,10 @@ io.on('connection', (socket) => {
         where: { roomId_userId: { roomId: id, userId } },
         select: { isActive: true },
       });
-      if (!participant?.isActive) return; // not an active participant — silently refuse
+      if (!participant?.isActive) {
+        logger.warn('[socket] voice:join_room rejected: participant not active or not found', { userId, roomId: id });
+        return; // not an active participant — silently refuse
+      }
       socket.join(`voice:${id}`);
       logger.info(`User ${userId} joined voice room voice:${id}`);
     } catch (err) {
