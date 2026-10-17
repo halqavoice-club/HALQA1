@@ -901,7 +901,22 @@ export function useVoiceRoom(roomId: string | null) {
     }
     socket.emit('voice:join_room', roomId)
 
+    // ── Polling fallback ──────────────────────────────────────────────────
+    // Pull a full authoritative participant snapshot every 8 seconds.
+    // This guarantees the UI stays in sync even if a socket event was
+    // missed (rate-limit drop, reconnect race, StrictMode double-mount, etc.).
+    // onStageState is idempotent: it upserts new participants and clears
+    // stale seats, so repeated calls are safe and cheap.
+    const pollInterval = setInterval(() => {
+      api.get(`/voice/${roomId}/stage-state`)
+        .then((r: { data: { data: Parameters<typeof onStageState>[0] } }) => {
+          if (r.data?.data) onStageState(r.data.data)
+        })
+        .catch(() => { /* non-fatal */ })
+    }, 8_000)
+
     return () => {
+      clearInterval(pollInterval)
       socket.off('connect', onReconnect)
       socket.off('voice:user_joined',        onUserJoined)
       socket.off('voice:user_left',          onUserLeft)
