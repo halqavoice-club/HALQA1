@@ -147,7 +147,17 @@ async function removeModerator(req, res, next) {
     });
     // RT-FIX-10: Clear seatNumber when moderator is demoted to audience.
     // A moderator on stage occupies a seat — demotion must free that seat.
-    await prisma.$executeRaw`UPDATE voice_participants SET seatNumber = NULL WHERE id = ${target.id}`.catch(() => {});
+    // FIX: was previously fire-and-forget (.catch(() => {})) — errors were
+    // silently swallowed, leaving seatNumber non-null in DB while role=AUDIENCE.
+    // Now awaited so failures surface. The ORM update above and this raw SQL
+    // are sequential (not transactional) but the unique-constraint on
+    // (roomId, seatNumber) means a seat collision would be caught on any
+    // subsequent promotion attempt.
+    try {
+      await prisma.$executeRaw`UPDATE voice_participants SET seatNumber = NULL WHERE id = ${target.id}`;
+    } catch (seatErr) {
+      logger.warn(`[voice:remove-mod] seatNumber clear failed for participant ${target.id}: ${seatErr.message}`);
+    }
 
     await safeDeleteCache(roomCacheKey(roomId));
 

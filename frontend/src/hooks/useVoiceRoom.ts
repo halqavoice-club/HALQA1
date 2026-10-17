@@ -428,7 +428,9 @@ export function useVoiceRoom(roomId: string | null) {
       if (data.roomId !== roomId) return
       // Update roles in store
       if (data.passerRole !== VOICE_ROLES.HOST) {
-        updateParticipant(data.passerId, { role: VOICE_ROLES.AUDIENCE, isMuted: true })
+        // SEAT FIX: also clear seatNumber for the passer so their seat slot
+        // empties immediately without waiting for voice:role_changed to arrive.
+        updateParticipant(data.passerId, { role: VOICE_ROLES.AUDIENCE, isMuted: true, seatNumber: null })
       }
       updateParticipant(data.targetId, {
         role: VOICE_ROLES.SPEAKER, isMuted: false,
@@ -901,22 +903,7 @@ export function useVoiceRoom(roomId: string | null) {
     }
     socket.emit('voice:join_room', roomId)
 
-    // ── Polling fallback ──────────────────────────────────────────────────
-    // Pull a full authoritative participant snapshot every 8 seconds.
-    // This guarantees the UI stays in sync even if a socket event was
-    // missed (rate-limit drop, reconnect race, StrictMode double-mount, etc.).
-    // onStageState is idempotent: it upserts new participants and clears
-    // stale seats, so repeated calls are safe and cheap.
-    const pollInterval = setInterval(() => {
-      api.get(`/voice/${roomId}/stage-state`)
-        .then((r: { data: { data: Parameters<typeof onStageState>[0] } }) => {
-          if (r.data?.data) onStageState(r.data.data)
-        })
-        .catch(() => { /* non-fatal */ })
-    }, 8_000)
-
     return () => {
-      clearInterval(pollInterval)
       socket.off('connect', onReconnect)
       socket.off('voice:user_joined',        onUserJoined)
       socket.off('voice:user_left',          onUserLeft)
@@ -1050,9 +1037,37 @@ export function useVoiceRoom(roomId: string | null) {
 
   const promoteUser = useCallback(async (targetUserId: string, role: 'SPEAKER' | 'AUDIENCE') => {
     if (!roomId) return
+    // Snapshot previous state for rollback on error
+    const prevState = useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === targetUserId)
+    // OPTIMISTIC UPDATE: apply the role change immediately so the actor's stage
+    // grid clears the seat without waiting for the socket round-trip.
+    // Mirrors the BUG-011 FIX already applied to dropMic(). Without this, the
+    // actor (host/mod) sees the user occupying the seat for 60–500ms after the
+    // action — the "ghost seat" bug.
+    if (role === 'AUDIENCE' && prevState) {
+      useVoiceStore.getState().updateParticipant(targetUserId, {
+        role: 'AUDIENCE',
+        isMuted: true,
+        seatNumber: null,
+        handRaised: false,
+        handRaisedAt: null,
+        mutedByModerator: false,
+      })
+    }
     try {
       await api.patch(`/voice/${roomId}/promote`, { targetUserId, role })
     } catch (e: any) {
+      // Rollback the optimistic update on failure
+      if (prevState) {
+        useVoiceStore.getState().updateParticipant(targetUserId, {
+          role: prevState.role,
+          isMuted: prevState.isMuted,
+          seatNumber: prevState.seatNumber,
+          handRaised: prevState.handRaised,
+          handRaisedAt: prevState.handRaisedAt,
+          mutedByModerator: prevState.mutedByModerator,
+        })
+      }
       toast({ title: e?.response?.data?.message || 'Failed to update role', variant: 'destructive' })
     }
   }, [roomId]) // eslint-disable-line
@@ -1079,6 +1094,12 @@ export function useVoiceRoom(roomId: string | null) {
 
   const kickUser = useCallback(async (targetUserId: string) => {
     if (!roomId) return
+    // OPTIMISTIC UPDATE: remove the participant immediately so the actor's grid
+    // clears without waiting for the socket round-trip.
+    // The subsequent voice:user_left event will call removeParticipant again
+    // (idempotent — filter on non-matching userId is a no-op).
+    // On error the participant is re-added via the next voice:stage_state snapshot.
+    useVoiceStore.getState().removeParticipant(targetUserId)
     try {
       await api.delete(`/voice/${roomId}/kick/${targetUserId}`)
     } catch {
@@ -1163,9 +1184,29 @@ export function useVoiceRoom(roomId: string | null) {
 
   const removeModerator = useCallback(async (targetUserId: string) => {
     if (!roomId) return
+    // Snapshot previous state for rollback on error
+    const prevState = useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === targetUserId)
+    // OPTIMISTIC UPDATE: clear the moderator's seat immediately so the actor's
+    // stage grid reflects the demotion without waiting for the socket round-trip.
+    // Mirrors the BUG-011 FIX applied to dropMic() and the new fix for promoteUser().
+    if (prevState) {
+      useVoiceStore.getState().updateParticipant(targetUserId, {
+        role: 'AUDIENCE' as const,
+        isMuted: true,
+        seatNumber: null,
+      })
+    }
     try {
       await api.delete(`/voice/${roomId}/moderator/${targetUserId}`)
     } catch (e: any) {
+      // Rollback on error
+      if (prevState) {
+        useVoiceStore.getState().updateParticipant(targetUserId, {
+          role: prevState.role,
+          isMuted: prevState.isMuted,
+          seatNumber: prevState.seatNumber,
+        })
+      }
       toast({ title: e?.response?.data?.message || 'Failed to remove moderator', variant: 'destructive' })
     }
   }, [roomId]) // eslint-disable-line

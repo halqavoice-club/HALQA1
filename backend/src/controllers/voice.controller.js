@@ -2630,7 +2630,7 @@ async function getStageState(req, res, next) {
         userId:           r.userId,
         role:             r.role,
         isMuted:          Boolean(r.isMuted),
-        seatNumber:       Number(r.seatNumber),
+        seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
         isPinned:         Boolean(r.isPinned),
         handRaised:       Boolean(r.handRaised),
         mutedByModerator: Boolean(r.mutedByModerator),
