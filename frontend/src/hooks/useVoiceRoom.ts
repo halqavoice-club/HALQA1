@@ -124,16 +124,26 @@ export function useVoiceRoom(roomId: string | null) {
       roomId: string; userId: string
       firstName: string; lastName: string
       avatarUrl: string | null; role: string
+      handRaised?: boolean
+      handRaisedAt?: string
+      isMuted?: boolean
+      mutedByModerator?: boolean
+      isPinned?: boolean
+      seatNumber?: number | null
+      joinedAt?: string
     }) => {
       if (data.roomId !== roomId) return
       addParticipant({
         id: data.userId, userId: data.userId,
-        role: asRole(data.role), isMuted: true,
-        mutedByModerator: false,
-        handRaised: false, handRaisedAt: null,
-        joinedAt: new Date().toISOString(), isActive: true,
-        isPinned: false,
-        seatNumber: null,
+        role: asRole(data.role),
+        isMuted: data.isMuted ?? true,
+        mutedByModerator: data.mutedByModerator ?? false,
+        handRaised: data.handRaised ?? false,
+        handRaisedAt: data.handRaisedAt ?? (data.handRaised ? new Date().toISOString() : null),
+        joinedAt: data.joinedAt ?? new Date().toISOString(),
+        isActive: true,
+        isPinned: data.isPinned ?? false,
+        seatNumber: data.seatNumber ?? null,
         user: { id: data.userId, firstName: data.firstName, lastName: data.lastName, avatarUrl: data.avatarUrl }
       })
     }
@@ -539,6 +549,12 @@ export function useVoiceRoom(roomId: string | null) {
       stageCount: number
     }) => {
       if (data.roomId !== roomId) return
+      // P1 FIX (ordering): Capture store state BEFORE the updateParticipant loop so the
+      // upsert-pass below uses the original participant list, not the post-mutation version.
+      // updateParticipant only maps over existing entries — if a userId is absent from the
+      // store it silently no-ops. Reading currentParticipants before the loop ensures the
+      // upsert-pass correctly identifies which participants are genuinely new.
+      const currentParticipants = useVoiceStore.getState().activeRoom?.participants ?? []
       // Apply authoritative seat state for every stage participant
       data.stageParticipants.forEach(sp => {
         updateParticipant(sp.userId, {
@@ -550,10 +566,9 @@ export function useVoiceRoom(roomId: string | null) {
           seatNumber: sp.seatNumber,
         })
       })
-      // P1 FIX: Upsert pass — add any stage participant whose userId is not
+      // Upsert pass — add any stage participant whose userId is not
       // already in the store. This covers participants missed due to the initial
       // join race (voice:user_joined arrived before listener was registered).
-      const currentParticipants = useVoiceStore.getState().activeRoom?.participants ?? []
       data.stageParticipants.forEach(sp => {
         const alreadyInStore = currentParticipants.some(p => p.userId === sp.userId)
         if (!alreadyInStore) {

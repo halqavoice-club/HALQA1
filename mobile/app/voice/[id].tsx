@@ -1365,8 +1365,35 @@ export default function VoiceRoomScreen() {
     };
 
     // Hand raised/lowered
-    const onHandRaised = (d: { userId: string; raised: boolean }) => {
-      setParticipants(prev => prev.map(p => p.id === d.userId ? { ...p, handRaised: d.raised } : p));
+    // P2 FIX: Use profile data from payload to upsert a minimal AUDIENCE entry if
+    // the participant is not already in the local list. This covers the case where
+    // voice:user_joined was missed — without this the host's queue UI shows no avatar.
+    const onHandRaised = (d: { userId: string; raised: boolean; firstName?: string; lastName?: string; avatarUrl?: string | null }) => {
+      setParticipants(prev => {
+        const exists = prev.find(p => p.id === d.userId);
+        if (exists) {
+          return prev.map(p => p.id === d.userId ? { ...p, handRaised: d.raised } : p);
+        }
+        // Participant not in local state — upsert as AUDIENCE with handRaised
+        // (profile data is included in voice:hand_raised payload from raiseHand controller)
+        if (d.raised && d.firstName) {
+          return [...prev, {
+            id:               d.userId,
+            name:             `${d.firstName} ${d.lastName ?? ''}`.trim(),
+            avatar:           d.avatarUrl ?? undefined,
+            role:             'AUDIENCE' as const,
+            isMuted:          true,
+            isSpeaking:       false,
+            handRaised:       true,
+            mutedByModerator: false,
+            isActive:         true,
+            seatNumber:       null,
+            isPinned:         false,
+            _joinedAt:        new Date().toISOString(),
+          }];
+        }
+        return prev;
+      });
     };
 
     // BUG-002 FIX: Consolidated voice:moderator_removed handler.
@@ -1632,7 +1659,21 @@ export default function VoiceRoomScreen() {
     socket.on('voice:queue_position',    (d: any) => { if (d.roomId !== id) return; setQueuePosition(d.position ?? 0); });
     // Queue resolved (promoted or rejected) — clear position
     socket.on('voice:queue_rejected',    (d: any) => { if (d.roomId !== id) return; clearQueuePosition(); showMessage({ message: d.message ?? 'Your request was declined', type: 'warning' }); });
-    socket.on('voice:promoted_to_speaker', (d: any) => { if (d.roomId !== id) return; clearQueuePosition(); showMessage({ message: '🎙️ You\'re on stage!', type: 'success' }); });
+    socket.on('voice:promoted_to_speaker', (d: any) => {
+      if (d.roomId !== id) return;
+      clearQueuePosition();
+      showMessage({ message: '🎙️ You\'re on stage!', type: 'success' });
+      // Update local participants so the promoted user sees their own seat immediately
+      // without waiting for voice:role_changed (which fires first in the server sequence
+      // but may arrive slightly after on mobile due to connection ordering).
+      if (d.seatNumber != null) {
+        setParticipants(prev => prev.map(p =>
+          p.id === user?.id
+            ? { ...p, role: 'SPEAKER' as const, isMuted: false, seatNumber: Number(d.seatNumber), handRaised: false }
+            : p
+        ));
+      }
+    });
     socket.on('voice:member_joined',       onMemberJoined);
     socket.on('voice:member_left',         onMemberLeft);
     socket.on('voice:room_level_upgraded', onRoomLevelUpgraded);

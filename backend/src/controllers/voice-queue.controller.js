@@ -48,11 +48,15 @@ async function safeDeleteCache(key) {
 async function broadcastQueue(roomId) {
   const io = getIo();
   if (!io) return;
+  // Always call queue.getQueue() — it handles Redis-unavailable internally
+  // by falling back to DB (getQueueFromDB). The previous isRedisReady() guard
+  // caused broadcastQueue to emit queue:[] when Redis was down, wiping the
+  // host's waiting list on every queue mutation (P0 bug).
   let q = [];
-  if (isRedisReady()) {
-    try { q = await queue.getQueue(roomId); } catch (err) {
-      logger.warn(`[voice-queue] broadcastQueue Redis error: ${err.message}`);
-    }
+  try {
+    q = await queue.getQueue(roomId);
+  } catch (err) {
+    logger.warn(`[voice-queue] broadcastQueue getQueue error: ${err.message}`);
   }
   io.to(`voice:${roomId}`).emit('voice:queue_updated', {
     roomId,
