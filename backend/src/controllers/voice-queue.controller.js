@@ -12,7 +12,8 @@
  * Socket events emitted:
  *   voice:queue_updated   → { roomId, queue: [...], queueLength }
  *   voice:queue_position  → { roomId, position }          (to the user only)
- *   voice:role_changed    → { roomId, userId, role }       (on approve)
+ *   voice:role_changed    → { roomId, userId, role, seatNumber }       (on AUDIENCE approve)
+ *   voice:mute_changed    → { roomId, userId, isMuted, seatNumber }    (on MODERATOR approve)
  *   voice:queue_rejected  → { roomId }                     (to rejected user)
  * ─────────────────────────────────────────────────────────────────────────────
  */
@@ -524,6 +525,7 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       return successResponse(res, {
         userId,
         role: 'SPEAKER',
+        seatNumber: null,
         firstName: userMeta.firstName,
         lastName: userMeta.lastName,
         alreadyOnStage: true,
@@ -591,7 +593,9 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
         })),
         stageCount: stageRows.length,
       });
-    } catch { /* non-fatal */ }
+    } catch (stageErr) {
+      logger.warn(`[_promoteUser] voice:stage_state broadcast failed: ${stageErr.message}`);
+    }
   }
 
   await broadcastQueue(roomId);
@@ -606,9 +610,10 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
 
   return successResponse(res, {
     userId,
-    role: 'SPEAKER',
-    firstName: userMeta.firstName,
-    lastName:  userMeta.lastName
+    role:       isMod ? VOICE_ROLES.MODERATOR : 'SPEAKER',
+    seatNumber: assignedSeat,
+    firstName:  userMeta.firstName,
+    lastName:   userMeta.lastName,
   }, `${userMeta.firstName} promoted to speaker`);
 }
 

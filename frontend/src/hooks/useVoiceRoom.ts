@@ -164,6 +164,30 @@ export function useVoiceRoom(roomId: string | null) {
       // isMuted=true + seatNumber=null = dropped to audience
       if (data.isMuted && data.seatNumber === null) update.seatNumber = null
       updateParticipant(data.userId, update)
+      // FIX: MODERATOR queue approval emits voice:mute_changed (not voice:role_changed).
+      // If the moderator being promoted is not yet in the store, updateParticipant is a
+      // no-op. Detect this case and upsert a minimal entry so their seat appears.
+      if (data.seatNumber != null && data.isMuted === false) {
+        const alreadyInStore = useVoiceStore.getState().activeRoom?.participants.some(
+          p => p.userId === data.userId
+        )
+        if (!alreadyInStore) {
+          addParticipant({
+            id:               data.userId,
+            userId:           data.userId,
+            role:             VOICE_ROLES.MODERATOR,
+            isMuted:          false,
+            mutedByModerator: false,
+            handRaised:       false,
+            handRaisedAt:     null,
+            joinedAt:         new Date().toISOString(),
+            isActive:         true,
+            isPinned:         false,
+            seatNumber:       data.seatNumber,
+            user: { id: data.userId, firstName: '', lastName: '', avatarUrl: null },
+          })
+        }
+      }
     }
 
     const onHandRaised = (data: {
@@ -1078,15 +1102,70 @@ export function useVoiceRoom(roomId: string | null) {
   const approveQueueUser = useCallback(async (targetUserId: string) => {
     if (!roomId) return
     try {
-      await api.post(`/voice/${roomId}/queue/approve/${targetUserId}`)
-      // Optimistic update: clear the hand-raised state immediately so the host's
-      // UI shows the approval without waiting for the socket round-trip.
-      // The subsequent voice:role_changed / voice:stage_state events will set the
-      // correct seat and role; this just clears the ✋ badge immediately.
-      useVoiceStore.getState().updateParticipant(targetUserId, {
-        handRaised: false,
-        handRaisedAt: null,
-      })
+      const res = await api.post(`/voice/${roomId}/queue/approve/${targetUserId}`)
+      const approved = res.data?.data ?? {}
+      const assignedSeat: number | null = approved.seatNumber != null ? Number(approved.seatNumber) : null
+      const assignedRole = (approved.role ?? 'SPEAKER') as VoiceParticipant['role']
+
+      const store = useVoiceStore.getState()
+      const inStore = store.activeRoom?.participants.some(p => p.userId === targetUserId)
+
+      if (assignedSeat != null && !inStore) {
+        // The approved user is not yet in the approver's store (they may have joined
+        // after the approver, or their voice:user_joined was buffered/dropped).
+        // Add them now using the HTTP response data so their seat renders immediately
+        // without waiting for the socket round-trip.
+        store.addParticipant({
+          id:               targetUserId,
+          userId:           targetUserId,
+          role:             assignedRole,
+          isMuted:          false,
+          mutedByModerator: false,
+          handRaised:       false,
+          handRaisedAt:     null,
+          joinedAt:         new Date().toISOString(),
+          isActive:         true,
+          isPinned:         false,
+          seatNumber:       assignedSeat,
+          user: {
+            id:        targetUserId,
+            firstName: approved.firstName ?? '',
+            lastName:  approved.lastName  ?? '',
+            avatarUrl: null, // filled in by subsequent voice:stage_state snapshot
+          },
+        })
+      } else if (assignedSeat != null) {
+        // User is already in the store — update their seat and role directly.
+        store.updateParticipant(targetUserId, {
+          role:         assignedRole,
+          isMuted:      false,
+          seatNumber:   assignedSeat,
+          handRaised:   false,
+          handRaisedAt: null,
+        })
+      } else {
+        // No seatNumber in response (e.g. ALREADY_ON_STAGE path) — just clear hand badge.
+        // Trigger a stage-state re-fetch as fallback so the grid reconciles.
+        store.updateParticipant(targetUserId, { handRaised: false, handRaisedAt: null })
+        api.get(`/voice/${roomId}/stage-state`)
+          .then((r: any) => {
+            const data = r.data?.data
+            if (!data) return
+            // Apply the snapshot directly to the store
+            const storeSnapshot = useVoiceStore.getState()
+            data.stageParticipants?.forEach((sp: any) => {
+              storeSnapshot.updateParticipant(sp.userId, {
+                role:             sp.role,
+                isMuted:          Boolean(sp.isMuted),
+                seatNumber:       sp.seatNumber != null ? Number(sp.seatNumber) : null,
+                handRaised:       Boolean(sp.handRaised),
+                isPinned:         Boolean(sp.isPinned),
+                mutedByModerator: Boolean(sp.mutedByModerator),
+              })
+            })
+          })
+          .catch(() => {})
+      }
     } catch (e: any) {
       toast({ title: e?.response?.data?.message || 'Failed to approve speaker', variant: 'destructive' })
     }
