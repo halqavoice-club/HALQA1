@@ -95,6 +95,16 @@ export function useVoiceRoom(roomId: string | null) {
           if (r.data?.data) onStageState(r.data.data)
         })
         .catch(() => { /* non-fatal — socket events will catch up */ })
+      // FIX: also re-fetch the speaker queue so speakerQueue store is current
+      // after reconnect. stage-state re-hydrates handRaised flags (fixes handQueue)
+      // but speakerQueue is only updated by voice:queue_updated socket events,
+      // which are missed during disconnect.
+      api.get(`/voice/${roomId}/queue`)
+        .then((r: { data: { data: { queue: typeof setSpeakerQueue extends (q: infer Q) => void ? Q : never } } }) => {
+          const q = r.data?.data?.queue
+          if (Array.isArray(q)) setSpeakerQueue(q)
+        })
+        .catch(() => { /* non-fatal */ })
     }
     socket.on('connect', onReconnect)
 
@@ -193,11 +203,19 @@ export function useVoiceRoom(roomId: string | null) {
     const onHandRaised = (data: {
       roomId: string; userId: string; raised: boolean
       firstName: string; lastName: string; avatarUrl?: string | null
+      handRaisedAt?: string | null  // FIX: server timestamp for correct FIFO sort order
     }) => {
       if (data.roomId !== roomId) return
       if (process.env.NODE_ENV === 'development') {
         console.log('[voice-debug] voice:hand_raised received', { userId: data.userId, raised: data.raised })
       }
+
+      // FIX (GAP-003): use server-provided handRaisedAt so the host's Hands panel
+      // sorts queue entries in true FIFO order regardless of client clock skew or
+      // event delivery delay. Fall back to local clock only when server doesn't send it.
+      const handRaisedAt = data.raised
+        ? (data.handRaisedAt ?? new Date().toISOString())
+        : null
 
       // Check if this participant is already in the store.
       // updateParticipant silently no-ops for unknown userIds — if this user
@@ -212,7 +230,7 @@ export function useVoiceRoom(roomId: string | null) {
       if (existing) {
         updateParticipant(data.userId, {
           handRaised: data.raised,
-          handRaisedAt: data.raised ? new Date().toISOString() : null
+          handRaisedAt,
         })
       } else if (data.raised) {
         // Participant not yet in the store — add them so the host's Hands panel shows them.
@@ -224,7 +242,7 @@ export function useVoiceRoom(roomId: string | null) {
           isMuted:          true,
           mutedByModerator: false,
           handRaised:       true,
-          handRaisedAt:     new Date().toISOString(),
+          handRaisedAt,
           joinedAt:         new Date().toISOString(),
           isActive:         true,
           isPinned:         false,
@@ -694,7 +712,29 @@ export function useVoiceRoom(roomId: string | null) {
       if (process.env.NODE_ENV === 'development') {
         console.log('[voice-debug] voice:queue_updated received', { queueLength: data.queue.length })
       }
+      // FIX (GAP-004): guard against an empty-array snapshot overwriting a
+      // non-empty queue. This can happen when broadcastQueue fires during a
+      // transient Redis re-hydration window where getQueue() returns [] before
+      // the ZSET is repopulated from DB. If queueLength says there ARE entries
+      // but the array is empty, skip — the next broadcast will have real data.
+      if (data.queue.length === 0 && data.queueLength > 0) return
       setSpeakerQueue(data.queue)
+      // FIX (GAP-007): cross-validate handRaised flags from the authoritative
+      // queue snapshot. If voice:hand_raised was dropped during a network blip
+      // but voice:queue_updated arrived, ensure those participants are marked
+      // handRaised=true in the store so the host's Hands panel shows them.
+      if (data.queue.length > 0) {
+        const queueUserIds = new Set(data.queue.map(u => u.userId))
+        const storeParticipants = useVoiceStore.getState().activeRoom?.participants ?? []
+        storeParticipants.forEach(p => {
+          if (queueUserIds.has(p.userId) && !p.handRaised) {
+            updateParticipant(p.userId, {
+              handRaised: true,
+              handRaisedAt: data.queue.find(u => u.userId === p.userId)?.raisedAt ?? new Date().toISOString(),
+            })
+          }
+        })
+      }
     }
 
     const onQueueRejected = (data: { roomId: string; message: string }) => {

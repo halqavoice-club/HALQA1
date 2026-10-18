@@ -306,6 +306,16 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     giftLeaderboard: [],
     // NOTE: wallet is intentionally NOT reset here — coins persist across room changes
     // and are refreshed by useVoiceRoom on mount
+    // FIX (GAP-005): re-arm the early buffer when clearing the active room so
+    // that re-joining (e.g. after kick/ban/room-end without navigating away)
+    // correctly buffers voice:user_joined and voice:queue_updated events that
+    // arrive during the race window before useVoiceRoom mounts its listeners.
+    ...(room === null && {
+      earlyBufferActive: true,
+      pendingSyncEvents: [],
+      pendingUserJoinedEvents: [],
+      pendingQueueUpdatedEvents: [],
+    }),
   }),
 
   updateRoom: (updates) => {

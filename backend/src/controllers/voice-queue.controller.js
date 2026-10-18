@@ -179,7 +179,8 @@ async function raiseHand(req, res, next) {
         lastName:  req.user.lastName,
         avatarUrl: req.user.avatarUrl,
         raised:    true,
-        position
+        position,
+        handRaisedAt: new Date().toISOString(), // FIX: include server timestamp so clients sort FIFO correctly
       });
     }
 
@@ -701,9 +702,12 @@ async function getQueueHandler(req, res, next) {
 
     if (isHost) {
       // Full queue for host/moderator
+      // FIX: was wrapped in isRedisReady() guard — returned [] when Redis was down,
+      // causing navigate-back to silently show an empty queue. Now always calls
+      // queue.getQueue() which handles Redis-unavailable via DB fallback internally.
       let q = [];
-      if (isRedisReady()) {
-        try { q = await queue.getQueue(roomId); } catch (err) { /* Redis unavailable */ }
+      try { q = await queue.getQueue(roomId); } catch (err) {
+        logger.warn(`[voice-queue:getQueueHandler] getQueue failed: ${err.message}`);
       }
       return successResponse(res, { queue: q, queueLength: q.length });
     } else {
