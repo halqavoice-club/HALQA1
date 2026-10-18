@@ -126,7 +126,25 @@ export default function VoiceRoomPage() {
       const existing = room.participants?.find(p => p.userId === user.id && p.isActive)
       if (existing) {
         autoJoinedRef.current = true
-        handleJoin()
+        // STAGE-PRESERVE FIX: If the returning user is demonstrably on stage
+        // (role is HOST/MODERATOR/SPEAKER AND seatNumber is assigned), bypass
+        // POST /join entirely and hydrate the store directly from the room
+        // snapshot we already have. POST /join is still needed for cold joins
+        // and audience reconnects, but calling it for on-stage users is fragile —
+        // it depends on the backend reconnect fix to preserve the seat. Skipping
+        // the round-trip eliminates that dependency for the most common case.
+        const isOnStage = (
+          (existing.role === 'HOST' || existing.role === 'MODERATOR' || existing.role === 'SPEAKER') &&
+          (existing as any).seatNumber != null
+        )
+        if (isOnStage) {
+          // Use the room snapshot from GET /voice/:id — DB state is preserved,
+          // no backend write needed. Socket reconnect and stage-state re-fetch
+          // in useVoiceRoom will reconcile any drift.
+          setActiveRoom(room as any)
+        } else {
+          handleJoin()
+        }
       }
     }
   }, [room, user]) // eslint-disable-line

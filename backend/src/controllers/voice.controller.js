@@ -1037,7 +1037,11 @@ async function endRoom(req, res, next) {
     // Mark all participants inactive
     await prisma.voiceParticipant.updateMany({
       where: { roomId, isActive: true },
-      data: { isActive: false, leftAt: endedAt }
+      // FIX: seatNumber must be cleared with isActive=false. The @@unique([roomId, seatNumber])
+      // constraint applies to all rows including inactive ones. Without clearing seatNumber here,
+      // participants archived by endRoom retain their seatNumber, which could block seat
+      // reuse if the room is ever re-activated (permanent room design).
+      data: { isActive: false, leftAt: endedAt, seatNumber: null }
     });
 
     await prisma.voiceRoom.update({
