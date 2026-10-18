@@ -620,14 +620,38 @@ async function joinRoom(req, res, next) {
               err.statusCode = 403;
               throw err;
             }
-            // Reconnect path — restore to active audience state
+            // Reconnect path — restore participant to active state.
+            // CRITICAL FIX: preserve seatNumber and isMuted for on-stage roles.
+            // The previous code unconditionally set isMuted=true and cleared
+            // seatNumber=NULL, which dropped every returning SPEAKER/HOST/MOD
+            // from the stage into the audience on navigate-back.
+            // Now: on-stage participants (role != AUDIENCE AND seatNumber != null)
+            // keep their seat and mute state. Audience participants get the
+            // standard reset (muted, no seat).
+            const wasOnStage = (
+              existing.role === 'HOST' ||
+              existing.role === 'MODERATOR' ||
+              existing.role === 'SPEAKER'
+            );
+
+            // Read existing seatNumber (raw SQL, Prisma client may not have column)
+            const [existingSeatRow] = await tx.$queryRaw`
+              SELECT seatNumber FROM voice_participants
+              WHERE roomId = ${roomId} AND userId = ${userId} LIMIT 1
+            `;
+            const hadSeat = existingSeatRow?.seatNumber != null;
+            const isOnStage = wasOnStage && hadSeat;
+
             participant = await tx.voiceParticipant.update({
               where: { roomId_userId: { roomId, userId } },
               data: {
                 isActive:     true,
-                joinedAt:     new Date(),
+                // Preserve joinedAt for stage reconnects so sort order is stable
+                ...(isOnStage ? {} : { joinedAt: new Date() }),
                 leftAt:       null,
-                isMuted:      true,
+                // Preserve isMuted for on-stage participants — their mute state
+                // was set deliberately. Audience reconnects are always muted.
+                isMuted:      isOnStage ? existing.isMuted : true,
                 handRaised:   false,
                 handRaisedAt: null,
               },
@@ -635,11 +659,15 @@ async function joinRoom(req, res, next) {
                 user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } }
               }
             });
-            // Clear seatNumber on re-join — they are in audience until they grab a seat
-            await tx.$executeRaw`
-              UPDATE voice_participants SET seatNumber = NULL
-              WHERE roomId = ${roomId} AND userId = ${userId}
-            `;
+
+            // Only clear seatNumber for AUDIENCE reconnects.
+            // On-stage participants keep their seat — it is still reserved in DB.
+            if (!isOnStage) {
+              await tx.$executeRaw`
+                UPDATE voice_participants SET seatNumber = NULL
+                WHERE roomId = ${roomId} AND userId = ${userId}
+              `;
+            }
           } else {
             // New join — create participant
             const role = room.hostId === userId ? VOICE_ROLES.HOST : VOICE_ROLES.AUDIENCE;
