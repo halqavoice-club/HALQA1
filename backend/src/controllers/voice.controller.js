@@ -2354,11 +2354,9 @@ async function dropMic(req, res, next) {
     // during the non-atomic window of a concurrent removeModerator call) while
     // the participant still holds a seat. Anyone with a seat is "on stage" and
     // must be able to voluntarily release it.
-    const [seatRow] = await prisma.$queryRaw`
-      SELECT seatNumber FROM voice_participants
-      WHERE roomId = ${roomId} AND userId = ${userId} LIMIT 1
-    `;
-    const hasSeat = seatRow?.seatNumber != null;
+    // participant.seatNumber is already available from the findUnique above —
+    // no second DB round-trip needed.
+    const hasSeat = participant.seatNumber != null;
 
     if (!isPrivileged && !isSpeaker && !hasSeat) {
       return errorResponse(res, 'You are not currently on stage', 400);

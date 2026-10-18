@@ -1565,11 +1565,14 @@ export function useVoiceRoom(roomId: string | null) {
       await api.post(`/voice/${roomId}/drop-mic`)
       toast({ title: '⬇️ Mic ended', description: 'You are now in the audience.' })
     } catch (e: any) {
-      // Rollback optimistic update on error
+      // Rollback optimistic update on error — restore role, isMuted, AND seatNumber.
+      // Without seatNumber the user appears stranded in the audience section on their
+      // own screen while the DB still has their seat (ghost-audience on error path).
       if (myParticipant) {
         useVoiceStore.getState().updateParticipant(myParticipant.userId, {
-          role: myParticipant.role,
-          isMuted: myParticipant.isMuted,
+          role:       myParticipant.role,
+          isMuted:    myParticipant.isMuted,
+          seatNumber: myParticipant.seatNumber,
         })
       }
       toast({ title: e?.response?.data?.message || 'Failed to end mic', variant: 'destructive' })
