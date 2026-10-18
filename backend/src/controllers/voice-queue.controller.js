@@ -741,6 +741,7 @@ async function getQueueHandler(req, res, next) {
 }
 
 module.exports = {
+  broadcastQueue,  // FIX: was missing — voice.controller.js requires this for grabMic queuing paths
   raiseHand,
   cancelHand,
   approveNext,
