@@ -978,6 +978,24 @@ export function useVoiceRoom(roomId: string | null) {
     }
     socket.emit('voice:join_room', roomId)
 
+    // P0-1 FIX: Re-hydrate stage state and queue on every mount.
+    // Covers navigate-back where the socket stays connected and the
+    // 'connect' event (used by onReconnect) never fires again.
+    // The emit above re-subscribes the socket to voice:{roomId}.
+    // These two fetches ensure the Zustand store reflects server truth
+    // for participants and the FIFO queue after returning from another page.
+    api.get(`/voice/${roomId}/stage-state`)
+      .then((r: { data: { data: Parameters<typeof onStageState>[0] } }) => {
+        if (r.data?.data) onStageState(r.data.data)
+      })
+      .catch(() => { /* non-fatal — socket events will catch up */ })
+    api.get(`/voice/${roomId}/queue`)
+      .then((r: { data: { data: { queue: Parameters<typeof setSpeakerQueue>[0] } } }) => {
+        const q = r.data?.data?.queue
+        if (Array.isArray(q)) setSpeakerQueue(q)
+      })
+      .catch(() => { /* non-fatal */ })
+
     return () => {
       socket.off('connect', onReconnect)
       socket.off('voice:user_joined',        onUserJoined)

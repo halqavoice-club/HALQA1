@@ -8,8 +8,9 @@ import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
   ActivityIndicator, Alert, Image, Modal, ScrollView,
   Animated, Dimensions, TextInput, Platform,
-  BackHandler} from 'react-native';
+  BackHandler, AppState, AppStateStatus} from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { showMessage } from 'react-native-flash-message';
@@ -1055,7 +1056,7 @@ export default function VoiceRoomScreen() {
   const queryClient = useQueryClient();
 
   // ── Voice store — shared with tab bar for active-room badge ──────────────
-  const { setActiveRoom, updateActiveRoom, clearActiveRoom, setQueuePosition, clearQueuePosition, setSpeaking } = useVoiceStore();
+  const { setActiveRoom, updateActiveRoom, clearActiveRoom, setQueuePosition, clearQueuePosition, setSpeaking, activeRoom: storeActiveRoom } = useVoiceStore();
 
   const [isJoined,       setIsJoined]       = useState(false);
   const [showHostControls, setShowHostControls] = useState(false);
@@ -2027,6 +2028,55 @@ export default function VoiceRoomScreen() {
       }},
     ]);
   }, [id, router, clearActiveRoom, clearQueuePosition]);
+
+  // P0-3 FIX: Auto-rejoin on screen focus when returning from a tab switch.
+  // On tab switch, expo-router unmounts this screen. On return, isJoined resets
+  // to false (useState initial value). We detect the "was in room" state via the
+  // Zustand activeRoom store — if storeActiveRoom.id === id, the user was previously
+  // joined and never explicitly left (handleLeave was not called, which calls clearActiveRoom).
+  // useFocusEffect fires on every focus event, including tab-switch return.
+  // useCallback(fn, []) is the required pattern from @react-navigation/native docs.
+  useFocusEffect(
+    useCallback(() => {
+      // Only auto-rejoin if:
+      // 1. Not already joined (remounted after tab switch)
+      // 2. Was previously in this room (store still has activeRoom for this id)
+      // 3. Not currently connecting (prevent double-fire)
+      if (!isJoined && storeActiveRoom?.id === id && !isConnecting) {
+        // Silent auto-rejoin — user just switched tabs, no confirmation needed
+        handleJoin();
+      }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id, isJoined, isConnecting])
+  );
+
+  // P0-4 FIX: Re-emit voice:join_room + re-hydrate stage state on app foreground.
+  // useLiveKitAudio reconnects LiveKit on foreground but does NOT re-subscribe
+  // the socket to voice:{id}. This effect fills that gap.
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      const prev = appStateRef.current;
+      appStateRef.current = nextState;
+      if (
+        (prev === 'background' || prev === 'inactive') &&
+        nextState === 'active' &&
+        hasJoinedRef.current
+      ) {
+        // Re-join the socket room after foregrounding.
+        // Socket may have reconnected transparently — re-subscribing is idempotent.
+        const socket = getSocket();
+        if (socket) {
+          socket.emit('voice:join_room', id);
+        }
+        // Re-hydrate stage state — participant list may be stale after background.
+        api.get(`/voice/${id}/stage-state`)
+          .then((r: any) => { if (r.data?.data) applyStageSnapshot(r.data.data); })
+          .catch(() => { /* non-fatal */ });
+      }
+    });
+    return () => sub.remove();
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // MOB-004: Android hardware back button — intercept when inside a live room.
   // Without this, pressing the Android back button navigates away silently,

@@ -545,6 +545,39 @@ export function VoiceRoomView({ onLeave }: Props) {
     return () => disconnect()
   }, [roomId]) // eslint-disable-line
 
+  // P0-2 FIX: Re-call POST /join on every mount when already an active participant.
+  // On navigate-back, VoiceRoomView mounts with activeRoom already set in the store.
+  // Without this, the backend reconnect path (which re-broadcasts voice:user_joined
+  // with seatNumber) never runs, so other clients don't see us re-appear on stage.
+  // Safety: only fires when myParticipant.isActive is true (i.e. user is already in
+  // the room). Does not fire on first join (myParticipant is null until POST /join
+  // returns and the store is populated).
+  // hasRejoined ref prevents double-fire in React StrictMode double-invoke.
+  const hasRejoinedRef = useRef(false)
+  useEffect(() => {
+    if (!roomId) return
+    if (hasRejoinedRef.current) return
+    // Only rejoin if we already have an active participant record in this room.
+    // myParticipant is derived from activeRoom.participants — populated on first join.
+    if (!myParticipant || !myParticipant.isActive) return
+    hasRejoinedRef.current = true
+    api.post(`/voice/${roomId}/join`)
+      .then((r: { data: { data: any } }) => {
+        const updated = r.data?.data
+        if (updated) {
+          // Update the store participant with fresh data from the server
+          // (seatNumber, role, isMuted may have changed since last visit)
+          useVoiceStore.getState().updateParticipant(updated.userId ?? updated.id, {
+            role:       updated.role,
+            isMuted:    updated.isMuted,
+            seatNumber: updated.seatNumber ?? null,
+            isActive:   true,
+          })
+        }
+      })
+      .catch(() => { /* non-fatal — participant already active; socket events sync state */ })
+  }, [roomId]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Fetch initial FIFO queue state when entering room
   useEffect(() => {
     if (!roomId) return
