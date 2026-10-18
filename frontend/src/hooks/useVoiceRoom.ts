@@ -207,7 +207,12 @@ export function useVoiceRoom(roomId: string | null) {
     }) => {
       if (data.roomId !== roomId) return
       if (process.env.NODE_ENV === 'development') {
-        console.log('[voice-debug] voice:hand_raised received', { userId: data.userId, raised: data.raised })
+        const storeCount = useVoiceStore.getState().activeRoom?.participants.length ?? 0
+        const foundInStore = !!useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === data.userId)
+        console.log('[voice-debug] voice:hand_raised received', {
+          userId: data.userId, raised: data.raised,
+          foundInStore, storeParticipantCount: storeCount,
+        })
       }
 
       // FIX (GAP-003): use server-provided handRaisedAt so the host's Hands panel

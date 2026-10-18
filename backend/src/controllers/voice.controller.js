@@ -2083,9 +2083,15 @@ async function grabMic(req, res, next) {
           lastName:  req.user.lastName,
           avatarUrl: req.user.avatarUrl,
           position,
+          handRaisedAt: new Date().toISOString(), // FIX: server timestamp for FIFO order
         });
         io0.to(`user:${userId}`).emit('voice:queue_position', { roomId, position });
       }
+      // FIX: broadcastQueue was missing from grabMic's open-mic-OFF path.
+      // Without it, voice:queue_updated is never emitted when users join the
+      // queue via grabMic, so speakerQueue store is never updated.
+      const { broadcastQueue: bq } = require('../controllers/voice-queue.controller');
+      await bq(roomId).catch(err => logger.warn(`[grabMic] broadcastQueue failed: ${err.message}`));
       return successResponse(res, { queued: true, role: 'AUDIENCE', position }, `You are #${position} in the queue`);
     }
 
@@ -2192,8 +2198,18 @@ async function grabMic(req, res, next) {
         if (io) {
           io.to(`voice:${roomId}`).emit('voice:hand_raised', {
             roomId, userId, raised: true,
-            firstName: req.user.firstName, lastName: req.user.lastName, avatarUrl: req.user.avatarUrl
+            firstName: req.user.firstName, lastName: req.user.lastName, avatarUrl: req.user.avatarUrl,
+            handRaisedAt: new Date().toISOString(), // FIX: server timestamp for FIFO order
           });
+        }
+        // FIX: broadcastQueue was missing from grabMic's stage-full path.
+        // Without it, voice:queue_updated is never emitted when users are queued
+        // because the stage is full, so speakerQueue store is never updated.
+        try {
+          const { broadcastQueue: bq2 } = require('../controllers/voice-queue.controller');
+          await bq2(roomId);
+        } catch (bqErr) {
+          logger.warn(`[grabMic:stage-full] broadcastQueue failed: ${bqErr.message}`);
         }
         return successResponse(res, { queued: true, role: participant.role }, 'Stage is full — you have been added to the queue');
       }
