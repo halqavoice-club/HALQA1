@@ -1535,7 +1535,16 @@ export function useVoiceRoom(roomId: string | null) {
 
   // Drop mic — HOST/MOD go to audience (keep role, just muted); SPEAKER → AUDIENCE
   const dropMic = useCallback(async () => {
-    if (!roomId || !myParticipant) return
+    if (!roomId || !user?.id) return
+    // Pre-flight: read live store state (avoid stale closure on myParticipant)
+    const liveParticipant = useVoiceStore.getState().activeRoom?.participants
+      .find(p => p.userId === user.id)
+    const isOnStage = liveParticipant?.seatNumber != null ||
+      liveParticipant?.role === VOICE_ROLES.HOST ||
+      liveParticipant?.role === VOICE_ROLES.MODERATOR ||
+      liveParticipant?.role === VOICE_ROLES.SPEAKER
+    if (!isOnStage) return  // already audience — no-op, don't call API
+    if (!myParticipant) return
     try {
       // Optimistic update — immediately reflect the change in the UI
       // HOST/MOD: set isMuted=true (they stay HOST/MOD but move to audience section)

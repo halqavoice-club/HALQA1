@@ -2349,8 +2349,19 @@ async function dropMic(req, res, next) {
     const isPrivileged = MODERATOR_ROLES.includes(participant.role);
     const isSpeaker = participant.role === VOICE_ROLES.SPEAKER;
 
-    if (!isPrivileged && !isSpeaker) {
-      return errorResponse(res, 'Only speakers, hosts, and moderators can drop the mic', 400);
+    // SEAT-BASED GUARD FIX: also allow drop-mic when seatNumber IS NOT NULL.
+    // The role-only check fails if role was transiently set to AUDIENCE (e.g.
+    // during the non-atomic window of a concurrent removeModerator call) while
+    // the participant still holds a seat. Anyone with a seat is "on stage" and
+    // must be able to voluntarily release it.
+    const [seatRow] = await prisma.$queryRaw`
+      SELECT seatNumber FROM voice_participants
+      WHERE roomId = ${roomId} AND userId = ${userId} LIMIT 1
+    `;
+    const hasSeat = seatRow?.seatNumber != null;
+
+    if (!isPrivileged && !isSpeaker && !hasSeat) {
+      return errorResponse(res, 'You are not currently on stage', 400);
     }
 
     if (isPrivileged) {

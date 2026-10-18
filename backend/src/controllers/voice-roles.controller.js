@@ -137,27 +137,15 @@ async function removeModerator(req, res, next) {
       return errorResponse(res, 'User is not a moderator', 400);
     }
 
-    await prisma.voiceParticipant.update({
-      where: { id: target.id },
-      data: {
-        role:    'AUDIENCE',
-        isMuted: true,
-        updatedAt: new Date()
-      }
-    });
-    // RT-FIX-10: Clear seatNumber when moderator is demoted to audience.
-    // A moderator on stage occupies a seat — demotion must free that seat.
-    // FIX: was previously fire-and-forget (.catch(() => {})) — errors were
-    // silently swallowed, leaving seatNumber non-null in DB while role=AUDIENCE.
-    // Now awaited so failures surface. The ORM update above and this raw SQL
-    // are sequential (not transactional) but the unique-constraint on
-    // (roomId, seatNumber) means a seat collision would be caught on any
-    // subsequent promotion attempt.
-    try {
-      await prisma.$executeRaw`UPDATE voice_participants SET seatNumber = NULL WHERE id = ${target.id}`;
-    } catch (seatErr) {
-      logger.warn(`[voice:remove-mod] seatNumber clear failed for participant ${target.id}: ${seatErr.message}`);
-    }
+    // ATOMIC FIX: collapse role=AUDIENCE + seatNumber=NULL into one raw SQL statement.
+    // The previous two-step approach (ORM update then separate raw SQL) created a
+    // race window where role=AUDIENCE but seatNumber was still set. A concurrent
+    // drop-mic call during that window would see role=AUDIENCE and be rejected.
+    await prisma.$executeRaw`
+      UPDATE voice_participants
+      SET role = 'AUDIENCE', isMuted = 1, seatNumber = NULL, updatedAt = NOW()
+      WHERE id = ${target.id}
+    `;
 
     await safeDeleteCache(roomCacheKey(roomId));
 

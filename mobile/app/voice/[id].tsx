@@ -2956,6 +2956,35 @@ export default function VoiceRoomScreen() {
                     </Text>
                   </TouchableOpacity>
                 )
+              ) : myParticipant?.role === 'SPEAKER' && amOnStage ? (
+                /* SPEAKER on stage — "End Mic" / leave stage button.
+                   SPEAKERs are not HOST/MOD so amHostOrMod is false, but they
+                   hold a seat and must be able to voluntarily return to audience. */
+                <TouchableOpacity
+                  style={[mobStyles.ctrlBtn, { backgroundColor: '#fffbeb', borderWidth: 1.5, borderColor: '#fde68a' }]}
+                  onPress={async () => {
+                    const prevSeatNumber = myParticipant?.seatNumber;
+                    // Optimistic update — move SPEAKER to audience immediately
+                    setParticipants(prev => prev.map(p =>
+                      p.id === user?.id ? { ...p, isMuted: true, seatNumber: null, role: 'AUDIENCE' } : p
+                    ));
+                    if (lk.connected) await lk.disableMic();
+                    try {
+                      await api.post(`/voice/${id}/drop-mic`);
+                      showMessage({ message: '⬇ Left the stage', type: 'info' });
+                    } catch (e: any) {
+                      // Rollback optimistic update on error
+                      setParticipants(prev => prev.map(p =>
+                        p.id === user?.id ? { ...p, isMuted: false, seatNumber: prevSeatNumber, role: 'SPEAKER' } : p
+                      ));
+                      if (lk.connected) await lk.enableMic();
+                      showMessage({ message: e?.response?.data?.message ?? 'Failed to leave stage', type: 'danger' });
+                    }
+                  }}
+                >
+                  <Text style={{ fontSize: 20 }}>🎤</Text>
+                  <Text style={[mobStyles.ctrlLabel, { color: '#d97706' }]}>End Mic</Text>
+                </TouchableOpacity>
               ) : (
                 /* Normal user — context-aware:
                    Free Stage ON + seat available → grab mic instantly (no approval)
