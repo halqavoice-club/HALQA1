@@ -556,6 +556,64 @@ export function VoiceRoomView({ onLeave }: Props) {
       .catch(() => {})
   }, [roomId]) // eslint-disable-line
 
+  // ── Periodic stage-state refresh — safety net for missed socket events ────
+  // Navigate-back works because onReconnect calls GET /stage-state, which
+  // re-hydrates ALL participant data (handRaised, role, presence) from DB.
+  // Staying on screen relies on socket events — a dropped voice:user_joined
+  // or voice:hand_raised permanently hides that person until reconnect.
+  // This 30-second interval closes the gap: missed events self-heal within 30s.
+  useEffect(() => {
+    if (!roomId) return
+    const interval = setInterval(() => {
+      api.get(`/voice/${roomId}/stage-state`)
+        .then((r: any) => {
+          const data = r.data?.data
+          if (!data?.stageParticipants?.length) return
+          const store = useVoiceStore.getState()
+          const currentIds = new Set(
+            (store.activeRoom?.participants ?? []).map((p: any) => p.userId)
+          )
+          // Update existing participants' state (handRaised, seatNumber, role)
+          data.stageParticipants.forEach((sp: any) => {
+            store.updateParticipant(sp.userId, {
+              role:             sp.role,
+              isMuted:          Boolean(sp.isMuted),
+              seatNumber:       sp.seatNumber != null ? Number(sp.seatNumber) : null,
+              handRaised:       Boolean(sp.handRaised),
+              isPinned:         Boolean(sp.isPinned),
+              mutedByModerator: Boolean(sp.mutedByModerator),
+            })
+          })
+          // Add any participant the host missed due to a dropped voice:user_joined
+          data.stageParticipants.forEach((sp: any) => {
+            if (!currentIds.has(sp.userId)) {
+              store.addParticipant({
+                id:               sp.userId,
+                userId:           sp.userId,
+                role:             sp.role,
+                isMuted:          Boolean(sp.isMuted),
+                mutedByModerator: Boolean(sp.mutedByModerator),
+                handRaised:       Boolean(sp.handRaised),
+                handRaisedAt:     null,
+                joinedAt:         sp.joinedAt ?? new Date().toISOString(),
+                isActive:         true,
+                isPinned:         Boolean(sp.isPinned),
+                seatNumber:       sp.seatNumber != null ? Number(sp.seatNumber) : null,
+                user: {
+                  id:        sp.userId,
+                  firstName: sp.firstName ?? '',
+                  lastName:  sp.lastName  ?? '',
+                  avatarUrl: sp.avatarUrl ?? null,
+                },
+              })
+            }
+          })
+        })
+        .catch(() => {}) // non-fatal — socket events are primary
+    }, 30_000) // every 30 seconds
+    return () => clearInterval(interval)
+  }, [roomId]) // eslint-disable-line
+
   // ── Live member count socket updates ──────────────────────────────────────
   useEffect(() => {
     if (!roomId) return

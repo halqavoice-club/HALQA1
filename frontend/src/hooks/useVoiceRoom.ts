@@ -144,7 +144,13 @@ export function useVoiceRoom(roomId: string | null) {
     }) => {
       if (data.roomId !== roomId) return
       if (process.env.NODE_ENV === 'development') {
-        console.log('[voice-debug] voice:user_joined received', { userId: data.userId, firstName: data.firstName })
+        console.log('[voice-debug] voice:user_joined received', {
+          userId: data.userId,
+          firstName: data.firstName,
+          storeCount: useVoiceStore.getState().activeRoom?.participants.length ?? 0,
+          activeRoomId: useVoiceStore.getState().activeRoom?.id,
+          roomIdMatch: data.roomId === roomId,
+        })
       }
       addParticipant({
         id: data.userId, userId: data.userId,
