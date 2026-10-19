@@ -833,6 +833,9 @@ async function joinRoom(req, res, next) {
         isPinned:         participant.isPinned ?? false,
         seatNumber:       joinSeatNumber,
         joinedAt:         participant.joinedAt?.toISOString?.() ?? new Date().toISOString(),
+        // PHASE 6 / DEF-001: include room-wide mute policy so joining clients
+        // know immediately whether allMuted is active without a separate fetch.
+        allMuted:         Boolean(updatedRoom?.allMuted ?? false),
       });
 
       // FIX-JOIN-STAGE: Send the current authoritative room snapshot directly to
@@ -1291,7 +1294,7 @@ async function promoteParticipant(req, res, next) {
     if (role === VOICE_ROLES.SPEAKER) {
       const room = await prisma.voiceRoom.findUnique({
         where: { id: roomId },
-        select: { micLocked: true, maxSpeakers: true }
+        select: { micLocked: true, maxSpeakers: true, allMuted: true }  // DEF-002: include allMuted
       });
       if (room?.micLocked) {
         return errorResponse(res, 'The mic is locked — unlock to promote speakers', 403);
@@ -1342,7 +1345,10 @@ async function promoteParticipant(req, res, next) {
             SELECT COUNT(*) as cnt FROM voice_participants
             WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
           `.then(rows => Number(rows[0]?.cnt ?? 0));
-          const maxSpk = (await tx.voiceRoom.findUnique({ where: { id: roomId }, select: { maxSpeakers: true } }))?.maxSpeakers || 12;
+          // DEF-002: read allMuted inside transaction so the check is atomic with the write.
+          const txRoom = (await tx.voiceRoom.findUnique({ where: { id: roomId }, select: { maxSpeakers: true, allMuted: true } }));
+          const maxSpk = txRoom?.maxSpeakers || 12;
+          const roomAllMuted = Boolean(txRoom?.allMuted);
           if (stageCnt >= maxSpk) {
             const err = new Error('All seats are full');
             err.statusCode = 400; throw err;
@@ -1362,9 +1368,12 @@ async function promoteParticipant(req, res, next) {
           }
           // Capture the assigned seat INSIDE the transaction so the broadcast always has it
           assignedSeatNumber = seat;
+          // DEF-002: SPEAKER promotion respects room-wide mute policy.
+          // HOST and MODERATOR are exempt (isMuted stays 0), but this path only
+          // ever promotes to SPEAKER so allMuted always applies here.
           await tx.$executeRaw`
             UPDATE voice_participants
-            SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = 0,
+            SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = ${roomAllMuted ? 1 : 0},
                 handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
             WHERE roomId = ${roomId} AND userId = ${targetUserId}
           `;
@@ -2044,7 +2053,7 @@ async function grabMic(req, res, next) {
     // ── 1. Validate room ──────────────────────────────────────────────────
     const room = await prisma.voiceRoom.findUnique({
       where: { id: roomId },
-      select: { status: true, deletedAt: true, isOpenMic: true, micLocked: true, maxSpeakers: true, hostId: true }
+      select: { status: true, deletedAt: true, isOpenMic: true, micLocked: true, maxSpeakers: true, hostId: true, allMuted: true }  // DEF-002: include allMuted
     });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
     if (room.status === 'ENDED') return errorResponse(res, 'This room has been archived', 400);
@@ -2177,9 +2186,9 @@ async function grabMic(req, res, next) {
           return;
         }
 
-        // Re-check micLocked inside tx
+        // Re-check micLocked and allMuted inside tx (DEF-002: atomic with write)
         const [rm] = await tx.$queryRaw`
-          SELECT micLocked, maxSpeakers FROM voice_rooms WHERE id = ${roomId} LIMIT 1
+          SELECT micLocked, maxSpeakers, allMuted FROM voice_rooms WHERE id = ${roomId} LIMIT 1
         `;
         if (rm?.micLocked && !isPrivileged) {
           const e = new Error('The mic is locked'); e.statusCode = 403; throw e;
@@ -2212,9 +2221,13 @@ async function grabMic(req, res, next) {
         updatedRole = newRole;
         assignedSeat = seat;
 
+        // DEF-002: HOST/MOD are exempt from allMuted (isPrivileged=true means isMuted stays 0).
+        // AUDIENCE→SPEAKER promotion respects the room-wide mute policy.
+        const grabAllMuted = Boolean(rm?.allMuted);
+
         // Assign seat atomically
         if (MODERATOR_ROLES.includes(curr.role)) {
-          // HOST/MOD: stay same role, go on stage (unmuted)
+          // HOST/MOD: stay same role, go on stage (unmuted — exempt from allMuted)
           await tx.$executeRaw`
             UPDATE voice_participants
             SET seatNumber = ${seat}, isMuted = 0, mutedByModerator = 0,
@@ -2222,10 +2235,10 @@ async function grabMic(req, res, next) {
             WHERE roomId = ${roomId} AND userId = ${userId}
           `;
         } else {
-          // AUDIENCE → SPEAKER
+          // AUDIENCE → SPEAKER: respect allMuted policy
           await tx.$executeRaw`
             UPDATE voice_participants
-            SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = 0, mutedByModerator = 0,
+            SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = ${grabAllMuted ? 1 : 0}, mutedByModerator = 0,
                 handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
             WHERE roomId = ${roomId} AND userId = ${userId}
           `;

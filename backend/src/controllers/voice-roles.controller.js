@@ -81,7 +81,12 @@ async function assignModerator(req, res, next) {
       where: { roomId_userId: { roomId, userId: targetUserId } },
       data: {
         role:    'MODERATOR',
-        isMuted: false,   // moderators can speak
+        // MODERATOR EXEMPTION (DEF-002): Moderators are always unmuted on assignment.
+        // allMuted (room-wide mute policy) does NOT apply to MODERATOR or HOST roles.
+        // A newly assigned moderator must be able to speak immediately to fulfil their
+        // moderation duties. This is intentional and correct — do NOT add an allMuted
+        // check here. Individual mute via toggleMute() remains available if needed.
+        isMuted: false,
         updatedAt: new Date()
       }
     });
@@ -302,6 +307,10 @@ async function transferAdmin(req, res, next) {
 /**
  * PATCH /voice/:id/mute-all
  * HOST or MODERATOR mutes all speakers (except themselves).
+ *
+ * DEF-001 FIX: Persist room-wide mute policy (VoiceRoom.allMuted=true) inside
+ * the same transaction as the per-participant writes so the policy survives
+ * restarts, reconnects, and token re-issuance.
  */
 async function muteAll(req, res, next) {
   try {
@@ -320,13 +329,21 @@ async function muteAll(req, res, next) {
       select: { id: true, userId: true }
     });
 
-    if (targets.length === 0) {
-      return successResponse(res, { mutedCount: 0 }, 'No active speakers to mute');
-    }
-
-    await prisma.voiceParticipant.updateMany({
-      where: { id: { in: targets.map(t => t.id) } },
-      data: { isMuted: true, mutedByModerator: true, updatedAt: new Date() }
+    // DEF-001: Persist room-wide policy AND participant rows in one transaction.
+    // Even when no participants are currently unmuted, we must still set allMuted=true
+    // so that future promotions and token issuances respect the policy.
+    await prisma.$transaction(async (tx) => {
+      if (targets.length > 0) {
+        await tx.voiceParticipant.updateMany({
+          where: { id: { in: targets.map(t => t.id) } },
+          data: { isMuted: true, mutedByModerator: true, updatedAt: new Date() }
+        });
+      }
+      // Persist the room-wide mute policy — this is the core DEF-001 fix.
+      await tx.voiceRoom.update({
+        where: { id: roomId },
+        data: { allMuted: true, updatedAt: new Date() }
+      });
     });
 
     await safeDeleteCache(roomCacheKey(roomId));
@@ -337,6 +354,11 @@ async function muteAll(req, res, next) {
         io.to(`voice:${roomId}`).emit('voice:mute_changed', {
           roomId, userId: t.userId, isMuted: true, mutedByModerator: true
         });
+      });
+      // DEF-001: Emit room policy event so all clients know allMuted=true.
+      // Emitted after per-participant events so clients apply participant state first.
+      io.to(`voice:${roomId}`).emit('voice:room_policy_changed', {
+        roomId, allMuted: true
       });
     }
 
@@ -350,7 +372,7 @@ async function muteAll(req, res, next) {
       sfuRevokePublish(roomId, t.userId, false, '[voice:mute-all]').catch(() => {});
     });
 
-    return successResponse(res, { mutedCount: targets.length },
+    return successResponse(res, { mutedCount: targets.length, allMuted: true },
       `Muted ${targets.length} speaker${targets.length > 1 ? 's' : ''}`);
   } catch (error) { next(error); }
 }
@@ -363,31 +385,48 @@ async function muteAll(req, res, next) {
  * The calling user (HOST/MOD) is excluded from the update — they control their
  * own mic independently. AUDIENCE participants are left alone (they are always
  * muted and are not stage speakers).
+ *
+ * DEF-001 FIX: Clear the room-wide mute policy (VoiceRoom.allMuted=false) in
+ * the same transaction as the per-participant writes.
+ *
+ * DEF-003/V4 FIX: Only unmute participants whose isMuted=true AND
+ * mutedByModerator=false. Participants individually muted by a moderator
+ * (mutedByModerator=true) are NOT cleared — their individual mute survives
+ * the room-wide unmute operation.
  */
 async function unmuteAll(req, res, next) {
   try {
     const { id: roomId } = req.params;
     const callerId = req.user.id;
 
-    // Find all currently muted SPEAKER and MODERATOR (not self, not HOST who controls own mic)
+    // DEF-003 FIX: Filter on mutedByModerator=false so individually muted
+    // participants are excluded from the room-wide unmute.
     const targets = await prisma.voiceParticipant.findMany({
       where: {
         roomId,
-        isActive: true,
-        isMuted:  true,
-        userId:   { not: callerId },
-        role:     { in: [VOICE_ROLES.SPEAKER, VOICE_ROLES.MODERATOR] }
+        isActive:         true,
+        isMuted:          true,
+        mutedByModerator: false,   // DEF-003: skip individually mod-muted participants
+        userId:           { not: callerId },
+        role:             { in: [VOICE_ROLES.SPEAKER, VOICE_ROLES.MODERATOR] }
       },
       select: { id: true, userId: true }
     });
 
-    if (targets.length === 0) {
-      return successResponse(res, { unmutedCount: 0 }, 'No muted speakers to unmute');
-    }
-
-    await prisma.voiceParticipant.updateMany({
-      where: { id: { in: targets.map(t => t.id) } },
-      data: { isMuted: false, mutedByModerator: false, updatedAt: new Date() }
+    // DEF-001: Persist room-wide policy clear AND participant rows in one transaction.
+    // allMuted is always cleared regardless of how many participants were unmuted.
+    await prisma.$transaction(async (tx) => {
+      if (targets.length > 0) {
+        await tx.voiceParticipant.updateMany({
+          where: { id: { in: targets.map(t => t.id) } },
+          data: { isMuted: false, mutedByModerator: false, updatedAt: new Date() }
+        });
+      }
+      // DEF-001: Clear the room-wide mute policy.
+      await tx.voiceRoom.update({
+        where: { id: roomId },
+        data: { allMuted: false, updatedAt: new Date() }
+      });
     });
 
     await safeDeleteCache(roomCacheKey(roomId));
@@ -399,10 +438,14 @@ async function unmuteAll(req, res, next) {
           roomId, userId: t.userId, isMuted: false, mutedByModerator: false
         });
       });
+      // DEF-001: Emit room policy event so all clients know allMuted=false.
+      io.to(`voice:${roomId}`).emit('voice:room_policy_changed', {
+        roomId, allMuted: false
+      });
     }
 
     _rolesAudit(callerId, 'UNMUTE_ALL', roomId, { unmutedCount: targets.length });
-    return successResponse(res, { unmutedCount: targets.length },
+    return successResponse(res, { unmutedCount: targets.length, allMuted: false },
       `Unmuted ${targets.length} speaker${targets.length > 1 ? 's' : ''}`);
   } catch (error) { next(error); }
 }

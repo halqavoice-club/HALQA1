@@ -25,7 +25,7 @@ async function autoPromoteNext(roomId, io) {
   // Check if there's room for another speaker
   const room = await prisma.voiceRoom.findUnique({
     where: { id: roomId },
-    select: { maxSpeakers: true, status: true, micLocked: true }
+    select: { maxSpeakers: true, status: true, micLocked: true, allMuted: true }  // DEF-002: include allMuted
   });
   if (!room || room.status === 'ENDED') return null;
 
@@ -158,6 +158,7 @@ async function autoPromoteNext(roomId, io) {
   // and recurse to try the next eligible user — matching the existing grabMic pattern.
   try {
     if (isMod) {
+      // MODERATOR is exempt from allMuted — isMuted stays 0
       await prisma.$executeRaw`
         UPDATE voice_participants
         SET seatNumber = ${promotedSeat}, isMuted = 0,
@@ -165,9 +166,11 @@ async function autoPromoteNext(roomId, io) {
         WHERE roomId = ${roomId} AND userId = ${userId}
       `;
     } else {
+      // DEF-002: auto-promoted SPEAKERs respect the room-wide mute policy
+      const autoAllMuted = Boolean(room.allMuted);
       await prisma.$executeRaw`
         UPDATE voice_participants
-        SET seatNumber = ${promotedSeat}, role = 'SPEAKER', isMuted = 0,
+        SET seatNumber = ${promotedSeat}, role = 'SPEAKER', isMuted = ${autoAllMuted ? 1 : 0},
             handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
         WHERE roomId = ${roomId} AND userId = ${userId}
       `;

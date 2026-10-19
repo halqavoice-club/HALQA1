@@ -539,6 +539,12 @@ export function useVoiceRoom(roomId: string | null) {
       }
     }
 
+    // DEF-001: room-wide mute policy changed — persist in store so all UI reflects it
+    const onRoomPolicyChanged = (data: { roomId: string; allMuted: boolean }) => {
+      if (data.roomId !== roomId) return
+      updateRoom({ allMuted: data.allMuted })
+    }
+
     const onSeatLockChanged = (data: { roomId: string; seatIndex: number; locked: boolean; lockedSeats: number[]; changedBy: string }) => {
       if (data.roomId !== roomId) return
       updateRoom({ lockedSeats: data.lockedSeats })
@@ -890,6 +896,7 @@ export function useVoiceRoom(roomId: string | null) {
     socket.on('voice:mic_offer_cancelled',onMicOfferCancelled)
     socket.on('voice:open_mic_changed',   onOpenMicChanged)
     socket.on('voice:mic_lock_changed',   onMicLockChanged)
+    socket.on('voice:room_policy_changed',onRoomPolicyChanged)  // DEF-001
     socket.on('voice:seat_lock_changed',  onSeatLockChanged)
     socket.on('voice:join_request',       onJoinRequest)
     socket.on('voice:join_approved',      onJoinApproved)
@@ -1026,6 +1033,7 @@ export function useVoiceRoom(roomId: string | null) {
       socket.off('voice:mic_offer_cancelled',onMicOfferCancelled)
       socket.off('voice:open_mic_changed',   onOpenMicChanged)
       socket.off('voice:mic_lock_changed',   onMicLockChanged)
+      socket.off('voice:room_policy_changed',onRoomPolicyChanged)  // DEF-001
       socket.off('voice:seat_lock_changed',  onSeatLockChanged)
     // (membership cleanup)
       socket.off('voice:join_request',       onJoinRequest)

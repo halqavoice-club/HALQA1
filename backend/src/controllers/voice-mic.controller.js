@@ -235,9 +235,10 @@ async function acceptMicOffer(req, res, next) {
     // Use raw SQL for seatNumber operations (Prisma client not regenerated yet).
 
     const roomInfo = await prisma.voiceRoom.findUnique({
-      where: { id: roomId }, select: { maxSpeakers: true }
+      where: { id: roomId }, select: { maxSpeakers: true, allMuted: true }  // DEF-002: include allMuted
     });
     const maxSp = roomInfo?.maxSpeakers || 12;
+    const micPassAllMuted = Boolean(roomInfo?.allMuted);
 
     // Get passer's current seatNumber so we can assign it to target (seat swap)
     const [passerRow] = await prisma.$queryRaw`
@@ -276,10 +277,10 @@ async function acceptMicOffer(req, res, next) {
           `
         : prisma.$executeRaw`SELECT 1`, // no-op for HOST
 
-      // Target: assign seat → SPEAKER
+      // Target: assign seat → SPEAKER (DEF-002: respect allMuted policy)
       prisma.$executeRaw`
         UPDATE voice_participants
-        SET seatNumber = ${targetSeat}, role = 'SPEAKER', isMuted = 0,
+        SET seatNumber = ${targetSeat}, role = 'SPEAKER', isMuted = ${micPassAllMuted ? 1 : 0},
             handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
         WHERE roomId = ${roomId} AND userId = ${acceptorId}
       `,

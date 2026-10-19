@@ -47,6 +47,8 @@ export interface VoiceRoom {
   endedAt: string | null
   scheduledAt: string | null
   createdAt: string
+  // Room-wide mute policy (DEF-001)
+  allMuted: boolean
   // Comment settings
   commentsEnabled: boolean
   slowMode: boolean

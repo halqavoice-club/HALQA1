@@ -1449,6 +1449,15 @@ export default function VoiceRoomScreen() {
       showMessage({ message: d.micLocked ? '🔒 Mic locked by host' : '🔓 Mic unlocked', type: 'info' });
     };
 
+    // DEF-001: room-wide mute policy changed — persist in store and query cache
+    const onRoomPolicyChanged = (d: { roomId: string; allMuted: boolean }) => {
+      if (d.roomId !== id) return;
+      updateActiveRoom({ allMuted: d.allMuted });
+      queryClient.setQueryData<any>(['voice-room', id], (old: any) =>
+        old ? { ...old, allMuted: d.allMuted } : old
+      );
+    };
+
     // Seat lock changed (individual seat)
     const onSeatLockChanged = (d: { roomId: string; seatIndex: number; locked: boolean; lockedSeats: number[] }) => {
       if (d.roomId !== id) return;
@@ -1592,6 +1601,7 @@ export default function VoiceRoomScreen() {
     socket.on('voice:room_ended',     onRoomEnded);
     socket.on('voice:open_mic_changed', onOpenMicChanged);
     socket.on('voice:mic_lock_changed', onMicLockChanged);
+    socket.on('voice:room_policy_changed', onRoomPolicyChanged);  // DEF-001
     socket.on('voice:seat_lock_changed', onSeatLockChanged);
     socket.on('voice:room_updated',      onRoomUpdated);
     socket.on('voice:join_request',      (d: any) => { if (d.roomId !== id) return; showMessage({ message: `✋ ${d.firstName ?? ''} ${d.lastName ?? ''} wants to join the room`, type: 'info' }); });
@@ -1809,6 +1819,7 @@ export default function VoiceRoomScreen() {
       socket.off('voice:room_ended',       onRoomEnded);
       socket.off('voice:open_mic_changed', onOpenMicChanged);
       socket.off('voice:mic_lock_changed', onMicLockChanged);
+      socket.off('voice:room_policy_changed', onRoomPolicyChanged);  // DEF-001
       socket.off('voice:seat_lock_changed', onSeatLockChanged);
       socket.off('voice:room_updated',      onRoomUpdated);
       socket.off('voice:join_request');
@@ -1894,6 +1905,7 @@ export default function VoiceRoomScreen() {
           hostId:          roomData?.hostId ?? room.host?.id ?? '',
           isOpenMic:       roomData?.isOpenMic ?? false,
           micLocked:       roomData?.micLocked ?? false,
+          allMuted:        roomData?.allMuted ?? false,   // DEF-001
           lockedSeats:     Array.isArray(roomData?.lockedSeats) ? roomData.lockedSeats : [],
           commentsEnabled: roomData?.commentsEnabled ?? true,
           slowMode:        roomData?.slowMode ?? false,

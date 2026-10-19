@@ -21,7 +21,7 @@ async function getLiveKitToken(req, res, next) {
     // ── Validate room ──────────────────────────────────────────────────────
     const room = await prisma.voiceRoom.findUnique({
       where: { id: roomId },
-      select: { status: true, deletedAt: true, micLocked: true }
+      select: { status: true, deletedAt: true, micLocked: true, allMuted: true }  // DEF-001/V3: include allMuted
     });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
     // PERMANENT ROOMS: Only archived rooms (ENDED) cannot issue tokens.
@@ -30,7 +30,8 @@ async function getLiveKitToken(req, res, next) {
 
     // ── Validate participant ───────────────────────────────────────────────
     const participant = await prisma.voiceParticipant.findUnique({
-      where: { roomId_userId: { roomId, userId } }
+      where: { roomId_userId: { roomId, userId } },
+      select: { role: true, isActive: true, isMuted: true }  // V3: include isMuted for canPublish logic
     });
     if (!participant || !participant.isActive) {
       return errorResponse(res, 'You are not an active participant in this room', 403);
@@ -68,22 +69,37 @@ async function getLiveKitToken(req, res, next) {
       ttl: '1h'
     });
 
-    // PH17-001 / mic-lock token gate:
+    // PH17-001 / mic-lock token gate + DEF-001/V3 allMuted + individual isMuted:
     //
-    // When the room is NOT mic-locked:
-    //   All roles get canPublish:true (original contract preserved).
-    //   SFU enforcement relies on role changes + sfuRevokePublish() at runtime.
+    // Policy hierarchy (highest priority first):
+    //   1. micLocked  → only HOST/MOD can publish (stage hardware lock)
+    //   2. allMuted   → only HOST/MOD can publish (room-wide mute policy, DEF-001)
+    //   3. isMuted    → SPEAKER individually muted cannot publish (V3 fix)
+    //   4. default    → canPublish:true
     //
-    // When the room IS mic-locked:
-    //   Only HOST and MODERATOR get canPublish:true.
-    //   SPEAKER and AUDIENCE get canPublish:false — the token gate prevents
-    //   a reconnecting SPEAKER from bypassing the mic-lock at the SFU level.
-    //   This closes the "reconnect gap" where a SPEAKER whose token was
-    //   issued before the lock could still publish after reconnecting.
+    // HOST and MODERATOR are EXEMPT from allMuted and individual isMuted checks.
+    // They retain full publish capability unless micLocked (which also applies to them — 
+    // actually micLocked only restricts non-privileged: see original logic below).
+    //
+    // Original micLocked contract preserved: when locked, only HOST/MOD can publish.
+    const isPrivileged = role === 'HOST' || role === 'MODERATOR';
     const micLocked = Boolean(room.micLocked);
-    const canPublishAudio = micLocked
-      ? (role === 'HOST' || role === 'MODERATOR')          // locked: privileged only
-      : true;                                               // unlocked: all can publish
+    const allMuted  = Boolean(room.allMuted);
+
+    let canPublishAudio;
+    if (micLocked) {
+      // Mic lock: only HOST/MOD can publish (original PH17-001 behaviour preserved)
+      canPublishAudio = isPrivileged;
+    } else if (allMuted) {
+      // Room-wide mute (DEF-001): only HOST/MOD can publish
+      canPublishAudio = isPrivileged;
+    } else if (participant.isMuted && !isPrivileged) {
+      // Individual mute (V3): muted SPEAKER cannot publish via token
+      // HOST/MOD control their own isMuted independently — they stay publishable
+      canPublishAudio = false;
+    } else {
+      canPublishAudio = true;
+    }
 
     at.addGrant({
       roomJoin:             true,

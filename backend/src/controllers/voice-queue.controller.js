@@ -311,8 +311,6 @@ async function approveNext(req, res, next) {
     return _promoteUser(req, res, nextUser, roomId, room);
   } catch (error) { next(error); }
 }
-
-// ─── APPROVE SPECIFIC USER ────────────────────────────────────────────────────
 /**
  * POST /voice/:id/queue/approve/:userId
  *
@@ -490,6 +488,7 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       assignedSeat = seat;
 
       // Assign seat using raw SQL (Prisma client not regenerated with seatNumber yet)
+      // DEF-002: MODERATOR is exempt from allMuted; AUDIENCE→SPEAKER respects it.
       if (txIsMod) {
         await tx.$executeRaw`
           UPDATE voice_participants
@@ -498,9 +497,11 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
           WHERE roomId = ${roomId} AND userId = ${userId}
         `;
       } else {
+        // DEF-002: queue promotions are always AUDIENCE→SPEAKER; respect allMuted.
+        const promoteAllMuted = Boolean(room.allMuted);
         await tx.$executeRaw`
           UPDATE voice_participants
-          SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = 0,
+          SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = ${promoteAllMuted ? 1 : 0},
               handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
           WHERE roomId = ${roomId} AND userId = ${userId}
         `;

@@ -1236,6 +1236,7 @@ model VoiceRoom {
   maxSpeakers     Int               @default(12)
   isOpenMic       Boolean           @default(false)  // when true, audience can grab mic directly
   micLocked       Boolean           @default(false)  // when true, nobody can grab or use mic
+  allMuted        Boolean           @default(false)  // when true, all speakers are room-wide muted
   roomLevel       Int               @default(1)      // 1-10: controls max permanent members
   coverEmoji      String?           @default("🎙️")
   coverImageUrl   String?           // uploaded room avatar/banner image

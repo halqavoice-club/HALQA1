@@ -56,6 +56,8 @@ export interface ActiveVoiceRoom {
   hostId: string;
   isOpenMic: boolean;
   micLocked: boolean;
+  // Room-wide mute policy (DEF-001)
+  allMuted: boolean;
   lockedSeats: number[];   // individual seat indices locked by host
   commentsEnabled: boolean;
   slowMode: boolean;
