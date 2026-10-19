@@ -1316,8 +1316,10 @@ export default function VoiceRoomScreen() {
       }));
       if (d.userId === user?.id) {
         if (lk.connected) {
+          // DEF-004: only honour server-enforced MUTE (isMuted === true).
+          // Do NOT auto-enable the mic when the server sends isMuted === false —
+          // the user must tap the mic button explicitly to speak.
           if (d.isMuted) lk.disableMic().catch(() => {});
-          else lk.enableMic().catch(() => {});
         }
       }
     };
@@ -2105,12 +2107,7 @@ export default function VoiceRoomScreen() {
   }, [isJoined, handleLeave]);
 
   const toggleMic = useCallback(async () => {
-    // LOCAL-ONLY mic toggle for HOST/MOD on stage.
-    // Does NOT call backend and does NOT update participants.isMuted.
-    // This keeps HOST/MOD visible on stage (amOnStage depends on !isMuted in participants).
-    // "End Mic" button is the only action that sets isMuted=true in DB → moves to audience.
-    // For SPEAKERs, this also only toggles LiveKit (they stay SPEAKER until demoted).
-    // GUARD: if the participant was muted by a moderator, they cannot self-unmute locally.
+    // GUARD: if the participant was muted by a moderator, they cannot self-unmute.
     const me = participants.find(p => p.id === user?.id);
     if (me?.mutedByModerator && me?.isMuted) {
       showMessage({ message: '🔒 You were muted by a moderator', type: 'warning' });
@@ -2118,10 +2115,19 @@ export default function VoiceRoomScreen() {
     }
     if (lk.connected) {
       const currentMuted = me?.isMuted ?? true;
+      const newMuted = !currentMuted;
       if (currentMuted) await lk.enableMic();
       else await lk.disableMic();
+      // DEF-006: sync mute state to backend so participants list and server state
+      // stay consistent. Best-effort — LiveKit track toggle is NOT rolled back on failure.
+      try {
+        await api.patch(`/voice/${id}/mute`, { isMuted: newMuted });
+      } catch {
+        // Non-fatal: local LiveKit toggle already applied; server will reconcile
+        // on the next voice:mute_changed socket event or stage-state pull.
+      }
     }
-  }, [participants, user?.id]);
+  }, [participants, user?.id, id]);
 
   const toggleHand = useCallback(async () => {
     if (room?.micLocked) { showMessage({ message: '🔒 Mic is locked by the host', type: 'warning' }); return; }
