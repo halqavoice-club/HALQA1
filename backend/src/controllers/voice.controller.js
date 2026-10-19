@@ -1197,6 +1197,27 @@ async function toggleMute(req, res, next) {
       });
     }
 
+    // DEF-005 FIX: Enforce SFU publish permission for moderator individual mute/unmute.
+    // Self-mute does not need SFU enforcement (participant controls their own mic client-side).
+    // Moderator action: revoke (muting) or restore (unmuting) canPublish on the SFU.
+    // DB update and socket event have already fired above regardless of SFU outcome.
+    if (subjectId !== callerId) {
+      // canPublish=false when muting, canPublish=true when unmuting
+      const canPublish = !newMuted;
+      const sfuTag = newMuted ? '[voice:mod-mute]' : '[voice:mod-unmute]';
+      let sfuEnforced = false;
+      try {
+        // sfuRevokePublish internally swallows errors after logging — we wrap it
+        // in try/catch at this level to detect whether the API call succeeded.
+        await sfuRevokePublish(roomId, subjectId, canPublish, sfuTag);
+        sfuEnforced = true;
+      } catch (sfuErr) {
+        // sfuRevokePublish already logs internally; this catch only fires if the
+        // helper itself throws unexpectedly (e.g. before the internal try/catch).
+        logger.warn(`${sfuTag} SFU enforcement failed for ${subjectId} in ${roomId}: ${sfuErr.message}`);
+      }
+      return successResponse(res, { isMuted: newMuted, sfuEnforced });
+    }
     return successResponse(res, { isMuted: newMuted });
   } catch (error) { next(error); }
 }
