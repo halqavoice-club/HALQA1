@@ -336,12 +336,13 @@ async function muteAll(req, res, next) {
     // F-01 FIX: Set mutedByModerator=false (not true) for room-wide mute targets.
     // Semantic distinction:
     //   mutedByModerator=true  → individual disciplinary mute via toggleMute(); persists
-    //                            through unmuteAll() because unmuteAll() filters
-    //                            mutedByModerator=false targets only.
+    //                            through the room-wide unmute operation because that
+    //                            operation filters mutedByModerator=false targets only.
     //   mutedByModerator=false → room-wide policy mute via muteAll(); eligible for
-    //                            batch release by unmuteAll().
-    // Using mutedByModerator=true here (original bug) caused unmuteAll() to be unable
-    // to find and release any participant muted by muteAll(), making the pair non-inverse.
+    //                            batch release by the unmute operation.
+    // Using mutedByModerator=true here (original bug) caused the unmute operation
+    // to be unable to find and release any participant muted by muteAll(), making
+    // the pair non-inverse.
     await prisma.$transaction(async (tx) => {
       if (targets.length > 0) {
         await tx.voiceParticipant.updateMany({
