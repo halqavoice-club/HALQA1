@@ -188,13 +188,15 @@ describe('DEF-001 + DEF-002 — Room-Wide Mute Policy (REAL DB)', () => {
     expect(room.allMuted).toBe(true);
 
     // SPEAKER and MOD must be muted in DB
+    // F-01 FIX: muteAll() now sets mutedByModerator=false (not true).
+    // mutedByModerator=true is reserved for INDIVIDUAL moderator mutes only.
     const spk = await freshParticipant(SPEAKER_ID);
     expect(spk.isMuted).toBe(true);
-    expect(spk.mutedByModerator).toBe(true);
+    expect(spk.mutedByModerator).toBe(false);  // F-01: room-wide mute does NOT set individual flag
 
     const mod = await freshParticipant(MOD_ID);
     expect(mod.isMuted).toBe(true);
-    expect(mod.mutedByModerator).toBe(true);
+    expect(mod.mutedByModerator).toBe(false);  // F-01: same for moderators
   });
 
   // ── R2: promoteParticipant() when allMuted=true → new SPEAKER isMuted=true ─
