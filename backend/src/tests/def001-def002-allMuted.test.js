@@ -1118,3 +1118,301 @@ describe('F-01 Regression — muteAll/unmuteAll symmetry [MOCKED]', () => {
   );
 
 });
+
+// ─── F-04 Regression: findMany inside $transaction ─────────────────────────────
+//
+// F-04 FIX: findMany was previously called OUTSIDE the $transaction, leaving a
+// race window where a concurrent promotion could commit a new SPEAKER between
+// the findMany and the transaction start. The fix moves findMany inside the
+// transaction so target selection sees the latest committed state under READ
+// COMMITTED isolation.
+//
+// These tests verify the structural change: findMany is now called during the
+// $transaction callback execution, not before it. They are MOCKED — they do not
+// prove real database isolation behavior.
+
+describe('F-04 Regression — findMany inside $transaction [MOCKED]', () => {
+
+  const prisma               = require('../utils/prisma');
+  const { sfuRevokePublish } = require('../utils/livekitService');
+  const { getIo }            = require('../sockets');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    const emitFn = jest.fn();
+    const toFn   = jest.fn().mockReturnValue({ emit: emitFn });
+    getIo.mockReturnValue({ to: toFn, emit: emitFn });
+    sfuRevokePublish.mockResolvedValue(undefined);
+    prisma.voiceParticipant.update.mockResolvedValue({});
+    prisma.voiceParticipant.updateMany.mockResolvedValue({ count: 1 });
+  });
+
+  // ── F-04-T1: muteAll() findMany runs inside $transaction ─────────────────
+  test('F-04-T1 — muteAll() calls findMany during $transaction execution (not before)', async () => {
+    let findManyCallOrder = -1;
+    let transactionCallOrder = -1;
+    let callCounter = 0;
+
+    // Track the order: $transaction is called first, then findMany inside it
+    prisma.$transaction.mockImplementation(async (fn) => {
+      transactionCallOrder = callCounter++;
+      await fn(prisma); // findMany is called here, inside the callback
+    });
+
+    const origFindMany = prisma.voiceParticipant.findMany;
+    prisma.voiceParticipant.findMany = jest.fn(async (...args) => {
+      findManyCallOrder = callCounter++;
+      return [{ id: 'p1', userId: 'u1' }];
+    });
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.muteAll(req, res, next);
+
+    // $transaction must be called BEFORE findMany (findMany is inside the callback)
+    expect(transactionCallOrder).toBeGreaterThanOrEqual(0);
+    expect(findManyCallOrder).toBeGreaterThan(transactionCallOrder);
+
+    // Restore original mock
+    prisma.voiceParticipant.findMany = origFindMany;
+  });
+
+  // ── F-04-T2: unmuteAll() findMany runs inside $transaction ────────────────
+  test('F-04-T2 — unmuteAll() calls findMany during $transaction execution (not before)', async () => {
+    let findManyCallOrder = -1;
+    let transactionCallOrder = -1;
+    let callCounter = 0;
+
+    prisma.$transaction.mockImplementation(async (fn) => {
+      transactionCallOrder = callCounter++;
+      await fn(prisma);
+    });
+
+    const origFindMany = prisma.voiceParticipant.findMany;
+    prisma.voiceParticipant.findMany = jest.fn(async (...args) => {
+      findManyCallOrder = callCounter++;
+      return [{ id: 'p1', userId: 'u1' }];
+    });
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    // $transaction must be called BEFORE findMany (findMany is inside the callback)
+    expect(transactionCallOrder).toBeGreaterThanOrEqual(0);
+    expect(findManyCallOrder).toBeGreaterThan(transactionCallOrder);
+
+    // Restore original mock
+    prisma.voiceParticipant.findMany = origFindMany;
+  });
+
+  // ── F-04-T3: muteAll() still mutes correct participants with new structure ──
+  test('F-04-T3 — muteAll() with new transaction structure still mutes targets correctly', async () => {
+    prisma.$transaction.mockImplementation(async (fn) => fn(prisma));
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([
+      { id: 'p1', userId: 'u1' },
+      { id: 'p2', userId: 'u2' },
+    ]);
+    // Risk C: updateMany.count is the ACTUAL updated rows, not targets.length
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 2 });
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.muteAll(req, res, next);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.mutedCount).toBe(2);
+    expect(res.body.data.allMuted).toBe(true);
+    // updateMany must use the IDs from the findMany inside the transaction
+    expect(prisma.voiceParticipant.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: { in: ['p1', 'p2'] } }),
+        data:  expect.objectContaining({ isMuted: true, mutedByModerator: false }),
+      })
+    );
+  });
+
+  // ── F-04-T4: unmuteAll() still preserves individual mutes with new structure ──
+  test('F-04-T4 — unmuteAll() with new transaction structure still preserves individual mutes', async () => {
+    prisma.$transaction.mockImplementation(async (fn) => fn(prisma));
+    // findMany returns only mutedByModerator=false participants (individually muted excluded)
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([
+      { id: 'p1', userId: 'u1' }, // policy-muted, eligible for unmute
+      // Note: individually-muted participant (mutedByModerator=true) is NOT returned
+    ]);
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.unmutedCount).toBe(1);
+    expect(res.body.data.allMuted).toBe(false);
+    // Only the policy-muted participant is unmuted
+    expect(prisma.voiceParticipant.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: { in: ['p1'] } }),
+        data:  expect.objectContaining({ isMuted: false }),
+      })
+    );
+  });
+
+  // ── F-04-T5: Empty room still persists policy with new structure ──────────
+  test('F-04-T5 — muteAll() empty room with new transaction structure still persists allMuted=true', async () => {
+    prisma.$transaction.mockImplementation(async (fn) => fn(prisma));
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([]);
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.muteAll(req, res, next);
+
+    expect(res.body.data.mutedCount).toBe(0);
+    expect(res.body.data.allMuted).toBe(true);
+    expect(prisma.voiceRoom.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ allMuted: true }) })
+    );
+    // updateMany NOT called (no targets)
+    expect(prisma.voiceParticipant.updateMany).not.toHaveBeenCalled();
+  });
+
+});
+
+// ─── F-04 Race B: Conditional WHERE clause in updateMany ──────────────────────
+//
+// Race B: a concurrent toggleMute() sets mutedByModerator=true on a participant
+// between unmuteAll()'s findMany and updateMany. Without a conditional WHERE
+// clause, updateMany would overwrite the individual mute.
+//
+// Fix: add mutedByModerator: false to the updateMany WHERE clause so the write
+// only affects rows where mutedByModerator is STILL false at write time.
+//
+// These are MOCKED tests — they verify the WHERE clause includes the condition.
+// Real MySQL isolation behavior is NOT VERIFIED here.
+
+describe('F-04 Race B — Conditional WHERE in updateMany [MOCKED]', () => {
+
+  const prisma               = require('../utils/prisma');
+  const { sfuRevokePublish } = require('../utils/livekitService');
+  const { getIo }            = require('../sockets');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    const emitFn = jest.fn();
+    const toFn   = jest.fn().mockReturnValue({ emit: emitFn });
+    getIo.mockReturnValue({ to: toFn, emit: emitFn });
+    sfuRevokePublish.mockResolvedValue(undefined);
+    prisma.voiceParticipant.update.mockResolvedValue({});
+    prisma.voiceParticipant.updateMany.mockResolvedValue({ count: 1 });
+    prisma.$transaction.mockImplementation(async (fn) => fn(prisma));
+  });
+
+  // ── C1: unmuteAll updateMany WHERE includes mutedByModerator: false ───────
+  test('C1 — unmuteAll() updateMany WHERE includes mutedByModerator: false (Race B fix)', async () => {
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([
+      { id: 'p1', userId: 'u1' },
+    ]);
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    // The updateMany WHERE clause MUST include mutedByModerator: false
+    // so a concurrent toggleMute that sets mutedByModerator=true between
+    // findMany and updateMany is NOT overwritten.
+    expect(prisma.voiceParticipant.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: { in: ['p1'] },
+          mutedByModerator: false,
+        }),
+      })
+    );
+  });
+
+  // ── C2: Normal room-wide unmute still works with conditional WHERE ────────
+  test('C2 — unmuteAll() with eligible participant (mutedByModerator=false) still unmutes correctly', async () => {
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([
+      { id: 'p1', userId: 'u1' },
+    ]);
+    prisma.voiceParticipant.updateMany.mockResolvedValue({ count: 1 });
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.unmutedCount).toBe(1);
+    expect(res.body.data.allMuted).toBe(false);
+    // Socket event emitted for the unmuted participant
+    const io = getIo();
+    const emitCalls = io.to.mock.results.flatMap(r => r.value.emit.mock?.calls ?? []);
+    const muteChanged = emitCalls.filter(([event]) => event === 'voice:mute_changed');
+    expect(muteChanged.length).toBeGreaterThanOrEqual(1);
+    expect(muteChanged[0][1]).toMatchObject({ userId: 'u1', isMuted: false, mutedByModerator: false });
+  });
+
+  // ── C3: Empty target set still clears allMuted ────────────────────────────
+  test('C3 — unmuteAll() with no eligible targets still clears allMuted=false', async () => {
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([]);
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.unmutedCount).toBe(0);
+    expect(res.body.data.allMuted).toBe(false);
+    expect(prisma.voiceParticipant.updateMany).not.toHaveBeenCalled();
+    expect(prisma.voiceRoom.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ allMuted: false }) })
+    );
+  });
+
+  // ── C4: muteAll updateMany WHERE includes isMuted: false (defense-in-depth) ─
+  test('C4 — muteAll() updateMany WHERE includes isMuted: false (defense-in-depth)', async () => {
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([
+      { id: 'p1', userId: 'u1' },
+    ]);
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.muteAll(req, res, next);
+
+    // The updateMany WHERE clause MUST include isMuted: false
+    // so a concurrent unmute between findMany and updateMany is not overwritten.
+    expect(prisma.voiceParticipant.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: { in: ['p1'] },
+          isMuted: false,
+        }),
+      })
+    );
+  });
+
+  // ── C5: Simulated race — toggleMute sets mutedByModerator=true after findMany ─
+  // This test simulates the race by having updateMany return count: 0, which
+  // is what would happen in real MySQL if the WHERE clause didn't match because
+  // mutedByModerator was changed to true by a concurrent toggleMute.
+  test('C5 — simulated race: updateMany returns count=0 when concurrent toggleMute changes mutedByModerator [MOCKED]', async () => {
+    // findMany returns participant with mutedByModerator=false (eligible for unmute)
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([
+      { id: 'p1', userId: 'u1' },
+    ]);
+    // Simulate: concurrent toggleMute sets mutedByModerator=true BEFORE updateMany
+    // In real MySQL, the conditional WHERE (mutedByModerator: false) would NOT match
+    // because the row now has mutedByModerator=true. The updateMany returns count: 0.
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    // The response should still succeed (allMuted is cleared on the room)
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.allMuted).toBe(false);
+    // Risk C fix: unmutedCount reflects actual updated rows (0), not targets.length (1)
+    expect(res.body.data.unmutedCount).toBe(0);
+  });
+
+});
