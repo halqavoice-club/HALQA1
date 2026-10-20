@@ -2116,8 +2116,10 @@ async function grabMic(req, res, next) {
       }, 'Already on stage');
     }
 
-    // ── 5. Open-mic OFF path (non-HOST participants must queue) ────────────
-    if (!isHost && !room.isOpenMic) {
+    // ── 5. Open-mic OFF path (non-HOST/MOD participants must queue) ──────────
+    // FIX-002: MODERATOR is privileged — they bypass the open-mic gate like HOST.
+    // A MOD should be able to take a seat regardless of isOpenMic state.
+    if (!isPrivileged && !room.isOpenMic) {
       if (participant.handRaised) {
         return successResponse(res, { queued: true, role: participant.role }, 'Already in the queue');
       }
@@ -2171,6 +2173,7 @@ async function grabMic(req, res, next) {
     const cap = room.maxSpeakers || 12;
 
     let assignedSeat = null;
+    let grabAllMuted = false; // GAP-E2 FIX: declared in outer scope so it's accessible after the transaction
     let updatedRole = participant.role;
 
     try {
@@ -2235,8 +2238,7 @@ async function grabMic(req, res, next) {
 
         // DEF-002: HOST/MOD are exempt from allMuted (isPrivileged=true means isMuted stays 0).
         // AUDIENCE→SPEAKER promotion respects the room-wide mute policy.
-        const grabAllMuted = Boolean(rm?.allMuted);
-
+        grabAllMuted = Boolean(rm?.allMuted); // GAP-E2: assign to outer-scope var (accessible after tx)
         // Assign seat atomically
         if (MODERATOR_ROLES.includes(curr.role)) {
           // HOST/MOD: stay same role, go on stage (unmuted — exempt from allMuted)
@@ -2335,7 +2337,9 @@ async function grabMic(req, res, next) {
         roomId, userId, role: updatedRole, seatNumber: assignedSeat
       });
       io.to(`voice:${roomId}`).emit('voice:mute_changed', {
-        roomId, userId, isMuted: false
+        // GAP-E2 FIX: emit actual isMuted value — when allMuted=true, new SPEAKER is muted.
+        // grabAllMuted is set inside the transaction; the ternary safely defaults to false.
+        roomId, userId, isMuted: Boolean(grabAllMuted) && !isPrivileged
       });
 
       // Authoritative stage state broadcast — clients reconcile from this

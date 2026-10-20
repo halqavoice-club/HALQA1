@@ -474,15 +474,14 @@ describe('MODERATOR approval: Free Stage OFF requires queue + approveUser endpoi
     path.join(__dirname, '../controllers/voice.controller.js'), 'utf8'
   );
 
-  test('grabMic queues MODERATOR when isOpenMic=false (non-HOST must queue)', () => {
+  test('grabMic queues MODERATOR when isOpenMic=false — FIX-002: now uses !isPrivileged so MOD bypasses queue', () => {
     const fnStart = voiceSrc.indexOf('async function grabMic');
     const fnEnd   = voiceSrc.indexOf('async function dropMic', fnStart);
     const fn = voiceSrc.slice(fnStart, fnEnd);
-    // Step 5: open-mic OFF path — condition must use !isHost (not !isPrivileged)
-    // so MODERATOR is queued when isOpenMic=false
-    expect(fn).toMatch(/!isHost.*isOpenMic|isOpenMic.*!isHost/);
-    // Must NOT use !isPrivileged which would bypass for MODERATOR
-    expect(fn).not.toMatch(/!isPrivileged.*!isOpenMic/);
+    // FIX-002: open-mic OFF path now uses !isPrivileged (HOST and MOD bypass the queue)
+    expect(fn).toMatch(/!isPrivileged.*!room\.isOpenMic|!room\.isOpenMic.*!isPrivileged/);
+    // Must NOT use !isHost-only check (that was the pre-FIX-002 behavior)
+    expect(fn).not.toMatch(/!isHost\s*&&\s*!room\.isOpenMic/);
   });
 
   test('approveUser endpoint handles MODERATOR via _promoteUser', () => {

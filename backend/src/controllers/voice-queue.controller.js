@@ -572,6 +572,15 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       message: `You've been approved as a speaker at Seat ${assignedSeat}!`
     });
 
+    // GAP-D1 FIX: Restore SFU canPublish for the newly promoted speaker.
+    // Without this, a participant whose canPublish was previously revoked (e.g. by micLocked
+    // or a prior mute) cannot publish audio until they request a new token (up to 1h gap).
+    // Best-effort — matches the pattern used in unmuteAll() P3a fix.
+    try {
+      const { sfuRevokePublish } = require('../utils/livekitService');
+      sfuRevokePublish(roomId, userId, true, '[voice:promote]').catch(() => {});
+    } catch {}
+
     // BUG-004 FIX: Add LEFT JOIN users so profile fields are included in the snapshot.
     // Audience was already included (no seatNumber filter) from a previous partial fix.
     // Previously firstName/lastName/avatarUrl were absent, causing blank names in upsert paths.
