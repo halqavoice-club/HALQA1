@@ -1,6 +1,6 @@
 
 const prisma = require('../utils/prisma');
-const XLSX = require('xlsx');
+const { buildMultiSheetWorkbook } = require('../utils/excel');
 const PDFDocument = require('pdfkit');
 const { successResponse, errorResponse } = require('../utils/response');
 
@@ -387,8 +387,6 @@ async function exportExcel(req, res, next) {
     const { student, records } = result;
     const name = `${student.user.firstName} ${student.user.lastName}`;
 
-    const wb = XLSX.utils.book_new();
-
     // ── Sheet 1: Attendance Records ──
     const attendanceData = records.map(r => ({
       'Date': formatDate(r.date),
@@ -401,23 +399,6 @@ async function exportExcel(req, res, next) {
       'Notes': r.notes || ''
     }));
 
-    const ws1 = XLSX.utils.json_to_sheet(attendanceData);
-
-    // Style header row
-    ws1['!cols'] = [
-      { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 10 },
-      { wch: 10 }, { wch: 20 }, { wch: 10 }, { wch: 30 }
-    ];
-
-    // Add title rows above data
-    XLSX.utils.sheet_add_aoa(ws1, [
-      [`Student Attendance Report — ${name}`],
-      [`Student ID: ${student.studentId}  |  School: ${student.school?.name || ''}  |  Generated: ${new Date().toLocaleDateString()}`],
-      ['']
-    ], { origin: 'A1' });
-
-    XLSX.utils.book_append_sheet(wb, ws1, 'Attendance Records');
-
     // ── Sheet 2: Summary ──
     const counts = { PRESENT: 0, ABSENT: 0, LATE: 0, EXCUSED: 0, LEFT_EARLY: 0 };
     records.forEach(r => { if (counts[r.status] !== undefined) counts[r.status]++; });
@@ -425,28 +406,45 @@ async function exportExcel(req, res, next) {
     const pct = total > 0 ? Math.round(((counts.PRESENT + counts.LATE * 0.5) / total) * 100) : 0;
 
     const summaryData = [
-      { 'Metric': 'Student Name', 'Value': name },
-      { 'Metric': 'Student ID', 'Value': student.studentId },
-      { 'Metric': 'School', 'Value': student.school?.name || '' },
-      { 'Metric': 'Classes', 'Value': student.enrollments.map(e => e.class.name).join(', ') },
-      { 'Metric': '', 'Value': '' },
-      { 'Metric': 'Total Days Recorded', 'Value': total },
-      { 'Metric': 'Present', 'Value': counts.PRESENT },
-      { 'Metric': 'Absent', 'Value': counts.ABSENT },
-      { 'Metric': 'Late', 'Value': counts.LATE },
-      { 'Metric': 'Excused', 'Value': counts.EXCUSED },
-      { 'Metric': 'Left Early', 'Value': counts.LEFT_EARLY },
-      { 'Metric': '', 'Value': '' },
-      { 'Metric': 'Attendance Rate', 'Value': `${pct}%` },
-      { 'Metric': 'Letter Grade', 'Value': getLetterGrade(pct) },
-      { 'Metric': 'Status', 'Value': pct >= 90 ? 'Excellent' : pct >= 75 ? 'Good' : pct >= 60 ? 'Warning' : 'Critical' }
+      { 'Metric': 'Student Name',         'Value': name },
+      { 'Metric': 'Student ID',           'Value': student.studentId },
+      { 'Metric': 'School',               'Value': student.school?.name || '' },
+      { 'Metric': 'Classes',              'Value': student.enrollments.map(e => e.class.name).join(', ') },
+      { 'Metric': '',                     'Value': '' },
+      { 'Metric': 'Total Days Recorded',  'Value': total },
+      { 'Metric': 'Present',              'Value': counts.PRESENT },
+      { 'Metric': 'Absent',               'Value': counts.ABSENT },
+      { 'Metric': 'Late',                 'Value': counts.LATE },
+      { 'Metric': 'Excused',              'Value': counts.EXCUSED },
+      { 'Metric': 'Left Early',           'Value': counts.LEFT_EARLY },
+      { 'Metric': '',                     'Value': '' },
+      { 'Metric': 'Attendance Rate',      'Value': `${pct}%` },
+      { 'Metric': 'Letter Grade',         'Value': getLetterGrade(pct) },
+      { 'Metric': 'Status',               'Value': pct >= 90 ? 'Excellent' : pct >= 75 ? 'Good' : pct >= 60 ? 'Warning' : 'Critical' }
     ];
 
-    const ws2 = XLSX.utils.json_to_sheet(summaryData);
-    ws2['!cols'] = [{ wch: 25 }, { wch: 30 }];
-    XLSX.utils.book_append_sheet(wb, ws2, 'Summary');
+    const buffer = await buildMultiSheetWorkbook([
+      {
+        name: 'Attendance Records',
+        data: attendanceData,
+        // Title rows prepended above the data header
+        titleRows: [
+          [`Student Attendance Report — ${name}`],
+          [`Student ID: ${student.studentId}  |  School: ${student.school?.name || ''}  |  Generated: ${new Date().toLocaleDateString()}`],
+          ['']
+        ],
+        colWidths: [
+          { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 10 },
+          { wch: 10 }, { wch: 20 }, { wch: 10 }, { wch: 30 }
+        ]
+      },
+      {
+        name: 'Summary',
+        data: summaryData,
+        colWidths: [{ wch: 25 }, { wch: 30 }]
+      }
+    ]);
 
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
     const filename = `attendance-${student.studentId}-${Date.now()}.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

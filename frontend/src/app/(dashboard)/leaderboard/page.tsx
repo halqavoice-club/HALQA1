@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { useToast } from '@/components/ui/use-toast'
 import { getAvatarUrl } from '@/lib/avatar'
 import api from '@/lib/api'
@@ -130,13 +131,13 @@ function Podium({ entries }: { entries: LeaderEntry[] }) {
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function LeaderboardPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const qc = useQueryClient()
   const [tab, setTab]     = useState<'global' | 'school'>('global')
   const [period, setPeriod] = useState<PeriodType>('ALL_TIME')
 
   const schoolId = user?.schoolId ?? ''
-  const isAdmin  = user?.role === 'SUPER_ADMIN' || user?.role === 'SCHOOL_ADMIN'
 
   const { data: globalData, isLoading: globalLoading } = useQuery<LeaderEntry[]>({
     queryKey: ['leaderboard-global', period],

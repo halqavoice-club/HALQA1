@@ -18,6 +18,7 @@ const { v4: uuidv4 } = require('uuid');
 const prisma = require('../utils/prisma');
 const { successResponse, errorResponse } = require('../utils/response');
 const { getIo } = require('../sockets');
+const logger = require('../utils/logger');
 
 const USER_SELECT = {
   id: true, firstName: true, lastName: true, avatarUrl: true, role: true
@@ -55,10 +56,21 @@ async function reportUser(req, res, next) {
     });
     if (!reported) return errorResponse(res, 'User not found', 404);
 
-    // Upsert — reporter can change their reason
-    const report = await prisma.userReport.upsert({
-      where: { reporterId_reportedId: { reporterId, reportedId } },
-      create: {
+    // Block duplicate PENDING reports — one active report per user pair at a time.
+    // Note: the DB unique constraint was relaxed (migration 20260821_fix_user_report_constraint)
+    // to allow re-reporting after a prior report was dismissed/resolved.
+    // This guard prevents spamming with multiple simultaneous PENDING reports.
+    const pendingReport = await prisma.userReport.findFirst({
+      where: { reporterId, reportedId, status: 'PENDING' },
+      select: { id: true }
+    });
+    if (pendingReport) {
+      return errorResponse(res, 'You already have a pending report against this user. Wait for it to be reviewed.', 409);
+    }
+
+    // Create a new report record (allows multiple reports over time, one PENDING at a time)
+    const report = await prisma.userReport.create({
+      data: {
         id: uuidv4(),
         reporterId,
         reportedId,
@@ -67,19 +79,17 @@ async function reportUser(req, res, next) {
         description: description?.trim() || null,
         status: 'PENDING',
       },
-      update: {
-        reason,
-        description: description?.trim() || null,
-        roomId:      roomId || null,
-        status:      'PENDING',
-        updatedAt:   new Date(),
-      },
     });
 
-    // Notify admins via socket (they can monitor from a dashboard)
+    // Notify platform admins via socket (they can monitor from a dashboard)
+    // SOC-P0-03 FIX: Emit to role:SUPER_ADMIN only.
+    // Previously emitted to both role:SUPER_ADMIN and role:SCHOOL_ADMIN, which
+    // leaked platform-wide report metadata (reporter ID, reported user ID, reason)
+    // to school-scoped administrators who have no jurisdiction over social platform
+    // reports. Social moderation is SUPER_ADMIN (HALQA platform) only.
     const io = getIo();
     if (io) {
-      io.to('role:SUPER_ADMIN').to('role:SCHOOL_ADMIN').emit('admin:user_reported', {
+      io.to('role:SUPER_ADMIN').emit('admin:user_reported', {
         reportId:   report.id,
         reporter:   { id: reporterId, firstName: req.user.firstName, lastName: req.user.lastName },
         reportedId,
@@ -123,7 +133,7 @@ async function listReports(req, res, next) {
 async function reviewReport(req, res, next) {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, action } = req.body;  // action: 'WARN' | 'SUSPEND' | 'BAN' — only with ACTION_TAKEN
     const validStatuses = ['REVIEWED', 'DISMISSED', 'ACTION_TAKEN'];
 
     if (!validStatuses.includes(status)) {
@@ -143,11 +153,84 @@ async function reviewReport(req, res, next) {
       },
     });
 
+    // ARCHITECTURE FIX (HALQA-ARCH-05):
+    // ACTION_TAKEN now has downstream enforcement.
+    // When action is specified, apply the actual moderation action to the reported user.
+    // All moderation actions are server-side and create an audit log.
+    if (status === 'ACTION_TAKEN' && action && report.reportedId) {
+      const validActions = ['WARN', 'SUSPEND', 'BAN'];
+      if (validActions.includes(action)) {
+        const { v4: uuidv4 } = require('uuid');
+
+        // Determine new user status
+        const newUserStatus = action === 'BAN' ? 'BANNED' : action === 'SUSPEND' ? 'SUSPENDED' : null;
+
+        if (newUserStatus) {
+          const target = await prisma.user.findUnique({
+            where: { id: report.reportedId },
+            select: { role: true, status: true }
+          });
+
+          // Never suspend/ban another SUPER_ADMIN via the report queue
+          if (target && target.role !== 'SUPER_ADMIN') {
+            await prisma.$transaction([
+              prisma.user.update({
+                where: { id: report.reportedId },
+                data:  { status: newUserStatus }
+              }),
+              prisma.auditLog.create({
+                data: {
+                  id:        uuidv4(),
+                  userId:    req.user.id,
+                  schoolId:  null,
+                  action:    'UPDATE',
+                  entity:    'user_moderation',
+                  entityId:  report.reportedId,
+                  oldValues: { status: target.status },
+                  newValues: {
+                    status:   newUserStatus,
+                    reason:   `Report ${id} reviewed — action: ${action}`,
+                    reportId: id,
+                  },
+                  ipAddress: req.ip || null,
+                  userAgent: req.headers['user-agent'] || null,
+                }
+              })
+            ]);
+
+            // Immediately invalidate auth cache so status propagates within 30s
+            const { invalidateUserCache } = require('../middleware/auth.middleware');
+            await invalidateUserCache(report.reportedId);
+          }
+        }
+      }
+    }
+
+    // FS-GAP-003 FIX: Audit log every report review action (UIGAP-013).
+    // Previously report reviews had no audit trail. Now every decision is recorded.
+    const { v4: uuidv4Audit } = require('uuid');
+    prisma.auditLog.create({
+      data: {
+        id:        uuidv4Audit(),
+        userId:    req.user.id,
+        action:    'UPDATE',
+        entity:    'report_review',
+        entityId:  id,
+        newValues: {
+          reviewDecision:   status,
+          moderationAction: (status === 'ACTION_TAKEN' && action) ? action : null,
+          reporterId:       report.reporterId,
+          reportedId:       report.reportedId,
+          reason:           report.reason,
+        },
+        ipAddress: req.ip || null,
+        userAgent: req.headers['user-agent'] || null,
+      }
+    }).catch(err => logger.warn(`[report] Review audit log failed: ${err.message}`));
+
     return successResponse(res, updated, 'Report updated');
   } catch (error) { next(error); }
 }
-
-// ─── BLOCK USER ───────────────────────────────────────────────────────────────
 
 async function blockUser(req, res, next) {
   try {

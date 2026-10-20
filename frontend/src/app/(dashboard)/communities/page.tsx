@@ -143,7 +143,11 @@ export default function CommunitiesPage() {
 
   const { data: myCommunities = [], isLoading: loadingMine } = useQuery<Community[]>({
     queryKey: ['my-communities'],
-    queryFn:  () => communitiesApi.mine().then(r => r.data.data),
+    queryFn:  () => communitiesApi.mine().then(r => {
+      // Handle both legacy flat array and new cursor-paginated { items, nextCursor, hasMore }
+      const data = r.data.data
+      return Array.isArray(data) ? data : (data?.items ?? [])
+    }),
     enabled:  tab === 'mine',
   })
 

@@ -1,15 +1,16 @@
-/**
+﻿/**
  * HALQA Mobile — Voice Room Screen
  * Live audio room: participants, mic, hand raise, gifts, leaderboard, leave
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
   ActivityIndicator, Alert, Image, Modal, ScrollView,
-  Animated, Dimensions, TextInput, KeyboardAvoidingView, Platform,
-  BackHandler,
-} from 'react-native';
+  Animated, Dimensions, TextInput, Platform,
+  BackHandler, AppState, AppStateStatus} from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { showMessage } from 'react-native-flash-message';
@@ -23,7 +24,12 @@ import { initSocket, getSocket } from '@/lib/socket';
 import { useLiveKitAudio } from '@/hooks/useLiveKitAudio';
 import { useNetworkQuality, qualityToPollInterval } from '@/hooks/useNetworkQuality';
 import MicPassModal, { type MicPassUser } from '@/components/voice/MicPassModal';
+import { MemberManagementPanel } from '@/components/voice/MemberManagementPanel';
 import { useVoiceStore } from '@/store/voice.store';
+import { GiftLeaderboard, type LeaderEntry } from '@/components/voice/GiftLeaderboard';
+import { RoomSettingsSheet } from '@/components/voice/RoomSettingsSheet';
+import { LiveVideoGrid, type VideoSpeaker } from '@/components/live-class/LiveVideoGrid';
+import { MobilePKPanel, MobilePKBanner } from '@/components/voice/PKComponents';
 
 // ─── Background Music Panel ───────────────────────────────────────────────────
 function BgMusicPanel({ visible, roomId, onClose, onNowPlayingChange }: {
@@ -419,6 +425,8 @@ function BgMusicPanel({ visible, roomId, onClose, onNowPlayingChange }: {
   );
 }
 
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+
 const bm = StyleSheet.create({
   backdrop:           { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)' },
   sheet:              { backgroundColor: '#1a1a2e', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 16, maxHeight: SCREEN_H * 0.85 },
@@ -467,19 +475,23 @@ const bm = StyleSheet.create({
   deviceTip:          { color: '#6b7280', fontSize: 11, lineHeight: 17 },
 });
 
-const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface VoiceRoom {
-  id: string; name: string; description?: string; hostId: string;
+  id: string; name: string; title?: string; description?: string; hostId: string;
   host: { id: string; name: string; avatar?: string };
-  participantsCount: number; topic?: string; isLive: boolean;
-  isOpenMic: boolean; micLocked: boolean; reactionsEnabled: boolean; roomLevel: number; commentsEnabled: boolean; slowMode: boolean;
+  participantsCount: number; topic?: string; isLive: boolean; privacy?: string;
+  isOpenMic: boolean; micLocked: boolean; reactionsEnabled: boolean; roomLevel: number;
+  commentsEnabled: boolean; slowMode: boolean; messageType?: string;
 }
 interface Participant {
   id: string; name: string; avatar?: string;
   role: 'HOST' | 'MODERATOR' | 'SPEAKER' | 'AUDIENCE';
   isMuted: boolean; isSpeaking: boolean; handRaised: boolean;
+  mutedByModerator: boolean;  // true = muted by HOST/MOD; self-unmute is blocked
+  isActive: boolean;          // true for all active participants in the room
+  seatNumber: number | null;  // 1–12 when on stage; null when in audience (authoritative)
+  isPinned: boolean;          // pinned to top of stage grid by host/mod
+  _joinedAt?: string;         // for deterministic sort (not required but helps)
 }
 interface Gift {
   id: string; name: string; emoji: string; priceCoins: number;
@@ -495,35 +507,140 @@ interface ChatMsg {
   createdAt: string;
 }
 
-// ─── Gift Animation Overlay ───────────────────────────────────────────────────
+// ─── Gift Animation Overlay — rarity & animationType aware (MOB-5 fix) ──────
+// Each rarity tier has distinct visual treatment:
+//   common/standard  — simple scale + fade (original behaviour)
+//   rare             — blue glow + bounce
+//   epic             — purple glow + bigger scale + particle burst label
+//   legendary        — gold glow + full-screen tint + shake + longer hold
+//   ultimate         — red glow + full-screen overlay + rotation + max hold
+// animationType is also respected for UI hints (rocket, cinematic, etc.)
 function GiftAnimOverlay({ gift, senderName, onDone }: {
   gift: Gift; senderName: string; onDone: () => void;
 }) {
-  const scaleAnim  = useRef(new Animated.Value(0)).current;
+  const scaleAnim   = useRef(new Animated.Value(0)).current;
   const opacityAnim = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    Animated.sequence([
-      Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, tension: 60, friction: 6 }),
-      Animated.delay(1800),
-      Animated.timing(opacityAnim, { toValue: 0, duration: 400, useNativeDriver: true }),
-    ]).start(() => onDone());
-  }, []);
+  const shakeAnim   = useRef(new Animated.Value(0)).current;
+  const rotateAnim  = useRef(new Animated.Value(0)).current;
 
   const rarityColors: Record<string, string> = {
-    common: '#94a3b8', rare: '#6366f1', epic: '#8b5cf6',
-    legendary: '#f59e0b', ultimate: '#ef4444',
+    common:    '#94a3b8',
+    standard:  '#60a5fa',
+    rare:      '#6366f1',
+    epic:      '#8b5cf6',
+    legendary: '#f59e0b',
+    ultimate:  '#ef4444',
   };
-  const glow = rarityColors[gift.rarity] || '#94a3b8';
+  const glow = rarityColors[gift.rarity] ?? '#94a3b8';
+
+  // Hold duration by rarity — longer for rarer gifts
+  const holdMs = gift.rarity === 'ultimate'  ? 3500
+               : gift.rarity === 'legendary' ? 2800
+               : gift.rarity === 'epic'      ? 2200
+               : gift.rarity === 'rare'      ? 1800
+               :                               1400;
+
+  // Spring tension by rarity — more dramatic for higher tiers
+  const tension = gift.rarity === 'ultimate'  ? 120
+                : gift.rarity === 'legendary' ? 100
+                : gift.rarity === 'epic'      ? 80
+                :                               60;
+
+  useEffect(() => {
+    // Build animation sequence based on rarity
+    const enterAnim = gift.rarity === 'ultimate' || gift.rarity === 'legendary'
+      ? Animated.parallel([
+          Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, tension, friction: 5 }),
+          // Shake for legendary/ultimate
+          Animated.sequence([
+            Animated.timing(shakeAnim, { toValue: 8,  duration: 60, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: -8, duration: 60, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: 6,  duration: 50, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: -6, duration: 50, useNativeDriver: true }),
+            Animated.timing(shakeAnim, { toValue: 0,  duration: 40, useNativeDriver: true }),
+          ]),
+        ])
+      : gift.rarity === 'epic'
+      ? Animated.parallel([
+          Animated.spring(scaleAnim, { toValue: 1.1, useNativeDriver: true, tension, friction: 5 }),
+          Animated.spring(rotateAnim, { toValue: 1, useNativeDriver: true, tension: 40, friction: 8 }),
+        ])
+      : Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, tension, friction: 6 });
+
+    Animated.sequence([
+      enterAnim,
+      Animated.delay(holdMs),
+      Animated.timing(opacityAnim, { toValue: 0, duration: 500, useNativeDriver: true }),
+    ]).start(() => onDone());
+  }, []); // eslint-disable-line
+
+  const rotateDeg = rotateAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '5deg'],
+  });
+
+  // Full-screen background tint for legendary/ultimate
+  const isFullscreen = gift.rarity === 'ultimate' || gift.rarity === 'legendary';
+  // Emoji scale boost for higher rarities
+  const emojiSize = gift.rarity === 'ultimate' ? 80
+                  : gift.rarity === 'legendary' ? 72
+                  : gift.rarity === 'epic'      ? 64
+                  : 56;
+
+  // Rarity label decorators
+  const rarityDecorator = gift.rarity === 'ultimate'  ? '✨ ULTIMATE ✨'
+                        : gift.rarity === 'legendary' ? '🌟 LEGENDARY'
+                        : gift.rarity === 'epic'      ? '💫 EPIC'
+                        : gift.rarity === 'rare'      ? '💠 RARE'
+                        : gift.rarity.toUpperCase();
+
+  // animationType hint (shown as subtitle for rocket/cinematic/etc.)
+  const animHint = gift.animationType === 'rocket_launch'    ? '🚀 Launching!'
+                 : gift.animationType === 'rocket_cinematic' ? '🚀 Cinematic!'
+                 : gift.animationType === 'racing'           ? '🏎️ Racing!'
+                 : gift.animationType === 'spotlight'        ? '🔦 Spotlight!'
+                 : gift.animationType === 'cinematic'        ? '🎬 Cinematic!'
+                 : gift.animationType === 'fullscreen'       ? '🌟 Fullscreen!'
+                 : null;
 
   return (
-    <Animated.View style={[styles.giftOverlay, { opacity: opacityAnim }]}>
-      <Animated.View style={[styles.giftAnimCard, { transform: [{ scale: scaleAnim }], borderColor: glow, shadowColor: glow }]}>
-        <Text style={styles.giftAnimEmoji}>{gift.emoji}</Text>
-        <Text style={styles.giftAnimName}>{gift.name}</Text>
+    <Animated.View style={[
+      styles.giftOverlay,
+      { opacity: opacityAnim },
+      // Full-screen tint overlay for legendary/ultimate
+      isFullscreen && { backgroundColor: glow + '18' },
+    ]}>
+      <Animated.View style={[
+        styles.giftAnimCard,
+        {
+          transform: [
+            { scale: scaleAnim },
+            { translateX: shakeAnim },
+            { rotate: rotateDeg },
+          ],
+          borderColor: glow,
+          shadowColor: glow,
+          // Bigger card for higher rarity
+          ...(gift.rarity === 'ultimate'  && { minWidth: 220, padding: 32, borderWidth: 3 }),
+          ...(gift.rarity === 'legendary' && { minWidth: 200, padding: 28, borderWidth: 2.5 }),
+          ...(gift.rarity === 'epic'      && { minWidth: 190, padding: 24 }),
+        },
+      ]}>
+        <Text style={[styles.giftAnimEmoji, { fontSize: emojiSize }]}>{gift.emoji}</Text>
+        <Text style={[styles.giftAnimName, gift.rarity === 'ultimate' && { fontSize: 22, color: glow }]}>
+          {gift.name}
+        </Text>
         <Text style={styles.giftAnimSender}>from {senderName}</Text>
-        <View style={[styles.giftRarityBadge, { backgroundColor: glow + '33', borderColor: glow }]}>
-          <Text style={[styles.giftRarityText, { color: glow }]}>{gift.rarity.toUpperCase()}</Text>
+        {animHint && (
+          <Text style={{ color: glow, fontSize: 12, fontWeight: '700', marginTop: 4 }}>{animHint}</Text>
+        )}
+        <View style={[styles.giftRarityBadge, {
+          backgroundColor: glow + '33',
+          borderColor: glow,
+          marginTop: gift.rarity === 'ultimate' ? 16 : 12,
+          paddingHorizontal: gift.rarity === 'ultimate' ? 18 : 14,
+        }]}>
+          <Text style={[styles.giftRarityText, { color: glow }]}>{rarityDecorator}</Text>
         </View>
       </Animated.View>
     </Animated.View>
@@ -822,6 +939,114 @@ function ParticipantTile({ participant, queuePosition }: { participant: Particip
   );
 }
 
+// ─── Speaking Ring — animated pulsing green ring (mirrors web .vc-speaking-ring) ──
+function SpeakingRing({ size }: { size: number }) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const opacity = useRef(new Animated.Value(0.6)).current;
+
+  useEffect(() => {
+    Animated.loop(
+      Animated.parallel([
+        Animated.sequence([
+          Animated.timing(scale,   { toValue: 1.18, duration: 500, useNativeDriver: true }),
+          Animated.timing(scale,   { toValue: 1,    duration: 500, useNativeDriver: true }),
+        ]),
+        Animated.sequence([
+          Animated.timing(opacity, { toValue: 0, duration: 500, useNativeDriver: true }),
+          Animated.timing(opacity, { toValue: 0.6, duration: 500, useNativeDriver: true }),
+        ]),
+      ])
+    ).start();
+    return () => { scale.stopAnimation(); opacity.stopAnimation(); };
+  }, []);
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        top:    -(size * 0.07),
+        left:   -(size * 0.07),
+        width:  size * 1.14,
+        height: size * 1.14,
+        borderRadius: size * 0.57,
+        borderWidth: 3,
+        borderColor: '#22c55e',
+        opacity,
+        transform: [{ scale }],
+        zIndex: 0,
+      }}
+    />
+  );
+}
+
+// ─── FloatingEmojiItem — animated emoji that pops, floats up, drifts, and fades ──
+// Phase 8: replaces the static Animated.Text used in Phase 7.
+// Uses RN Animated.Value for native-driver-compatible transform + opacity animation.
+// Duration: 2.5s total — pop (0.12s) + float (2.38s).
+// Pop: scale 0.6 → 1.1 → 1.0 (overshoot-settle feel).
+// Float: translateY 0 → -160, with slight x-drift.
+// Fade: opacity 1 → 1 → 0 (holds visible, then fades near end).
+function FloatingEmojiItem({ emoji, x }: { emoji: string; x: number }) {
+  const translateY = useRef(new Animated.Value(0)).current;
+  const translateX = useRef(new Animated.Value(0)).current;
+  const scale      = useRef(new Animated.Value(0.6)).current;
+  const opacity    = useRef(new Animated.Value(0)).current;
+  const rotate     = useRef(new Animated.Value(0)).current;
+
+  // Controlled randomization within safe bounds
+  const driftX  = (x - 40) * 0.6;  // x is 10–80, so drift is -18 to +24px
+  const rot     = (Math.random() * 14 - 7);  // ±7°
+  const dur     = 2400 + Math.random() * 400; // 2.4–2.8s total
+
+  useEffect(() => {
+    // Pop phase: quick scale 0.6 → 1.1 → 1.0
+    const popIn = Animated.sequence([
+      Animated.timing(scale, { toValue: 1.1, duration: dur * 0.10, easing: (t) => t, useNativeDriver: true }),
+      Animated.timing(scale, { toValue: 1.0, duration: dur * 0.06, easing: (t) => t, useNativeDriver: true }),
+    ]);
+    // Float up + drift + rotate — runs in parallel with pop then continues
+    const floatUp  = Animated.timing(translateY, { toValue: -160, duration: dur, easing: (t) => t, useNativeDriver: true });
+    const drift    = Animated.timing(translateX, { toValue: driftX, duration: dur * 0.7, easing: (t) => t * t, useNativeDriver: true });
+    const tilt     = Animated.timing(rotate, { toValue: rot, duration: dur * 0.4, easing: (t) => t, useNativeDriver: true });
+    // Fade: appear, hold, fade out (last 40%)
+    const fadeIn   = Animated.timing(opacity, { toValue: 1, duration: dur * 0.08, useNativeDriver: true });
+    const hold     = Animated.delay(dur * 0.52);
+    const fadeOut  = Animated.timing(opacity, { toValue: 0, duration: dur * 0.40, useNativeDriver: true });
+
+    Animated.parallel([
+      Animated.sequence([popIn]),
+      floatUp,
+      drift,
+      tilt,
+      Animated.sequence([fadeIn, hold, fadeOut]),
+    ]).start();
+  }, []); // eslint-disable-line
+
+  const rotateDeg = rotate.interpolate({ inputRange: [-15, 15], outputRange: ['-15deg', '15deg'] });
+
+  return (
+    <Animated.Text
+      style={{
+        position: 'absolute',
+        bottom: 0,
+        right: 0,
+        fontSize: 30,
+        opacity,
+        transform: [
+          { translateY },
+          { translateX },
+          { scale },
+          { rotate: rotateDeg },
+        ],
+        pointerEvents: 'none',
+      } as any}
+    >
+      {emoji}
+    </Animated.Text>
+  );
+}
+
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 export default function VoiceRoomScreen() {
   const { id }   = useLocalSearchParams<{ id: string }>();
@@ -831,7 +1056,7 @@ export default function VoiceRoomScreen() {
   const queryClient = useQueryClient();
 
   // ── Voice store — shared with tab bar for active-room badge ──────────────
-  const { setActiveRoom, updateActiveRoom, clearActiveRoom, setQueuePosition, clearQueuePosition, setSpeaking } = useVoiceStore();
+  const { setActiveRoom, updateActiveRoom, clearActiveRoom, setQueuePosition, clearQueuePosition, setSpeaking, activeRoom: storeActiveRoom } = useVoiceStore();
 
   const [isJoined,       setIsJoined]       = useState(false);
   const [showHostControls, setShowHostControls] = useState(false);
@@ -840,9 +1065,10 @@ export default function VoiceRoomScreen() {
   // LiveKit real audio (native builds only — degrades gracefully in Expo Go)
   const lk = useLiveKitAudio();
   const [isConnecting,   setIsConnecting]   = useState(false);
-  const [isMuted,        setIsMuted]        = useState(true);
+  // isMuted is derived from participants (single source of truth) — no separate useState
   const [handRaised,     setHandRaised]     = useState(false);
   const [participants,   setParticipants]   = useState<Participant[]>([]);
+  const [lockedSeats,    setLockedSeats]    = useState<number[]>([]);  // individual seat indices locked by host
   const [showGiftPanel,  setShowGiftPanel]  = useState(false);
   const [showLeaderboard,setShowLeaderboard]= useState(false);
   const [showChat,       setShowChat]       = useState(false);
@@ -850,6 +1076,10 @@ export default function VoiceRoomScreen() {
   const [chatMessages,   setChatMessages]   = useState<ChatMsg[]>([]);
   const [animGift,       setAnimGift]       = useState<{ gift: Gift; senderName: string } | null>(null);
   const chatListRef = useRef<FlatList>(null);
+  // FEAT-002: tracks whether the HTTP join has completed successfully.
+  // Used to guard socket.emit('voice:join_room') and onReconnect so neither
+  // fires before the user has actually joined via the API.
+  const hasJoinedRef = useRef(false);
 
   // ── Mic pass state ──────────────────────────────────────────────────────────
   const [showMicPassOffer,    setShowMicPassOffer]    = useState(false);
@@ -858,18 +1088,34 @@ export default function VoiceRoomScreen() {
   const [micPassOfferedBy,    setMicPassOfferedBy]    = useState<MicPassUser | null>(null);
   const [micPassOfferId,      setMicPassOfferId]      = useState<string | null>(null);
 
+  // ── Emoji reaction state ─────────────────────────────────────────────────────
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [floatingEmojis, setFloatingEmojis] = useState<{ id: string; emoji: string; x: number }[]>([]);
+
   // ── Background music state ───────────────────────────────────────────────────
   const [showBgMusic,   setShowBgMusic]   = useState(false);
   const [showDotMenu,   setShowDotMenu]   = useState(false);
+  const [showMembersPanel, setShowMembersPanel] = useState(false); // FIX-L12a: member management
+  const [showShare,     setShowShare]     = useState(false);    // Share room sheet
   // Room settings (host only)
   const [showRoomSettings, setShowRoomSettings] = useState(false);
   const [settingsTitle,    setSettingsTitle]    = useState('');
+  const [settingsDescription, setSettingsDescription] = useState('');
   const [settingsTopic,    setSettingsTopic]    = useState('');
   const [settingsPrivacy,  setSettingsPrivacy]  = useState<'PUBLIC'|'PRIVATE'|'INVITE_ONLY'>('PUBLIC');
   const [settingsSaving,   setSettingsSaving]   = useState(false);
   // Mini indicator — reflects BgMusicPanel's internal state via callback
   const [bgMusicTrack,  setBgMusicTrack]  = useState<{ title: string; isDeviceFile: boolean } | null>(null);
   const [bgMusicPlaying, setBgMusicPlaying] = useState(false);
+
+  // ── PK Battle state ──────────────────────────────────────────────────────────
+  const [showPKPanel,          setShowPKPanel]          = useState(false);
+  const [activePKMatchId,      setActivePKMatchId]      = useState<string | null>(null);
+  const [activePKParticipants, setActivePKParticipants] = useState<Array<{
+    userId: string; side: 'A' | 'B';
+    user: { firstName: string; lastName: string; avatarUrl: string | null }
+  }>>([]);
+  const [activePKDuration, setActivePKDuration] = useState(300);
 
   // Fetch room
   const { data: room, isLoading } = useQuery<VoiceRoom>({
@@ -906,6 +1152,15 @@ export default function VoiceRoomScreen() {
     staleTime: 5 * 60_000,
   });
 
+  // Fetch gift leaderboard — used in the header widget + LeaderboardPanel
+  const { data: leaders = [] } = useQuery<GiftLeaderItem[]>({
+    queryKey: ['gift-leaderboard', id],
+    queryFn:  () => api.get(`/voice/${id}/gifts/leaderboard`, { params: { limit: 10 } }).then(r => r.data.data ?? []),
+    enabled:  isJoined && !!id,
+    staleTime: 15_000,
+    refetchInterval: isJoined ? 30_000 : false,
+  });
+
   // Fetch wallet
   const { data: wallet } = useQuery({
     queryKey: ['wallet-me'],
@@ -921,13 +1176,103 @@ export default function VoiceRoomScreen() {
     } catch {}
   }, [id]);
 
+  // FEAT-002: authoritative stage snapshot reconciliation.
+  // Called both from the socket voice:stage_state handler and from handleJoin's
+  // GET /voice/:id/stage-state pull-fetch. Performs: clear stale seats, update
+  // existing participants, and upsert any participants absent from local state.
+  const applyStageSnapshot = useCallback((d: {
+    roomId: string;
+    stageParticipants: Array<{
+      userId: string; role: string; isMuted: boolean; seatNumber: number | null;
+      isPinned: boolean; handRaised: boolean; mutedByModerator: boolean;
+      joinedAt?: string;
+      firstName?: string; lastName?: string; avatarUrl?: string | null;
+    }>;
+    stageCount: number;
+  }) => {
+    if (d.roomId !== id) return;
+    setParticipants(prev => {
+      const updated = [...prev];
+      // Clear seatNumbers for participants not in stage (stage_state is authoritative)
+      const inStageIds = new Set(d.stageParticipants.map(sp => sp.userId));
+      for (let i = 0; i < updated.length; i++) {
+        if (!inStageIds.has(updated[i].id)) {
+          updated[i] = { ...updated[i], seatNumber: null };
+        }
+      }
+      // Update matching participants
+      const matchedIds = new Set<string>();
+      d.stageParticipants.forEach(sp => {
+        const idx = updated.findIndex(p => p.id === sp.userId);
+        if (idx >= 0) {
+          updated[idx] = {
+            ...updated[idx],
+            role: sp.role as Participant['role'],
+            isMuted: sp.isMuted,
+            mutedByModerator: sp.mutedByModerator,
+            handRaised: sp.handRaised,
+            seatNumber: sp.seatNumber,
+          };
+          matchedIds.add(sp.userId);
+        }
+      });
+      // FEAT-002 upsert: push participants not yet in local state
+      d.stageParticipants.forEach(sp => {
+        if (!matchedIds.has(sp.userId)) {
+          const name = `${sp.firstName ?? ''} ${sp.lastName ?? ''}`.trim() || 'User';
+          updated.push({
+            id:               sp.userId,
+            name,
+            avatar:           sp.avatarUrl ?? undefined,
+            role:             sp.role as Participant['role'],
+            isMuted:          sp.isMuted,
+            isSpeaking:       false,
+            handRaised:       sp.handRaised,
+            mutedByModerator: sp.mutedByModerator,
+            isActive:         true,
+            seatNumber:       sp.seatNumber,
+            isPinned:         (sp as any).isPinned ?? false,
+            _joinedAt:        typeof sp.joinedAt === 'string' ? sp.joinedAt : '',
+          });
+        }
+      });
+      return updated;
+    });
+  }, [id]);
+
   // Socket: real-time events
+  // FEAT-002: effect now runs on mount with [id, user] deps — before the user
+  // taps Join. The isJoined guard is replaced by hasJoinedRef so listeners are
+  // registered early while the guarded emit/reconnect still require a completed join.
   useEffect(() => {
-    if (!isJoined || !user) return;
+    if (!user) return;
     const socket = getSocket();
     if (!socket) return;
 
-    socket.emit('voice:join_room', id);
+    // FEAT-002: only emit voice:join_room after HTTP join has completed
+    if (hasJoinedRef.current) socket.emit('voice:join_room', id);
+
+    // PH24C-005 FIX: Re-join the socket room after a reconnect.
+    // When the socket disconnects and reconnects (network blip, token refresh,
+    // app foreground), the socket no longer belongs to voice:${id}.
+    // Without this handler, Phase 24B guards (socket.rooms.has(...)) silently
+    // drop all voice events (reactions, speaking, role changes) after reconnect.
+    // Matches web useVoiceRoom.ts: socket.on('connect', onReconnect).
+    const onReconnect = () => {
+      // FEAT-002: do not re-join socket room before HTTP join completes
+      if (!hasJoinedRef.current) return;
+      socket.emit('voice:join_room', id);
+      // Re-fetch room state so participant list and roles reflect server truth
+      // after a disconnect (stale data risk while socket was down).
+      queryClient.invalidateQueries({ queryKey: ['voice-room', id] });
+      // STEP-4 FIX: Re-hydrate full participant list (audience + stage) after
+      // reconnect. getStageState now returns ALL active participants so anyone
+      // who joined or left while the socket was down appears immediately.
+      api.get(`/voice/${id}/stage-state`)
+        .then((r: any) => { if (r.data?.data) applyStageSnapshot(r.data.data); })
+        .catch(() => { /* non-fatal — socket events will catch up */ });
+    };
+    socket.on('connect', onReconnect);
 
     // Real-time gift animation
     const onGift = (payload: any) => {
@@ -953,52 +1298,141 @@ export default function VoiceRoomScreen() {
     socket.on('voice:gift_sent',     onGift);
     socket.on('voice:premium_gift',  onGift);
     socket.on('voice:message',       onMsg);
-    socket.on('voice:user_joined',   () => queryClient.invalidateQueries({ queryKey: ['voice-room', id] }));
-    socket.on('voice:user_left',     () => queryClient.invalidateQueries({ queryKey: ['voice-room', id] }));
+    // FIX: removed duplicate unguarded voice:user_joined / voice:user_left handlers here.
+    // The real handlers (onUserJoined / onUserLeft) registered below include roomId guards
+    // and proper participant state updates. The duplicates below only invalidated queries
+    // without checking roomId, causing cross-room query noise.
 
-    // ── Missing real-time events (now wired) ─────────────────────────────────
+    // ── Real-time events ─────────────────────────────────────────────────────
 
-    // Mute state changed for a participant
-    const onMuteChanged = (d: { userId: string; isMuted: boolean }) => {
-      setParticipants(prev => prev.map(p => p.id === d.userId ? { ...p, isMuted: d.isMuted } : p));
-    };
-
-    // Role changed (promote/demote, moderator assign, etc.)
-    const onRoleChanged = (d: { userId: string; role: string }) => {
-      setParticipants(prev => prev.map(p =>
-        p.id === d.userId ? { ...p, role: d.role as Participant['role'], isMuted: d.role === 'AUDIENCE' } : p
-      ));
-      // Invalidate full room for accurate state
-      queryClient.invalidateQueries({ queryKey: ['voice-room', id] });
-    };
-
-    // Kicked — if it's me, leave immediately
-    const onKicked = (d: { userId: string }) => {
+    // Mute state changed for a participant (also carries seatNumber when dropping mic)
+    const onMuteChanged = (d: { userId: string; isMuted: boolean; mutedByModerator?: boolean; seatNumber?: number | null }) => {
+      setParticipants(prev => prev.map(p => {
+        if (p.id !== d.userId) return p;
+        const u: Participant = { ...p, isMuted: d.isMuted };
+        if (d.mutedByModerator !== undefined) u.mutedByModerator = d.mutedByModerator;
+        if (d.seatNumber !== undefined) u.seatNumber = d.seatNumber ?? null;
+        return u;
+      }));
       if (d.userId === user?.id) {
-        showMessage({ message: '🚫 You were removed from this room', type: 'danger' });
-        lk.disconnect();
-        api.post(`/voice/${id}/leave`).catch(() => {});
-        clearActiveRoom();
-        clearQueuePosition();
-        setIsJoined(false);
-        router.back();
-      } else {
-        setParticipants(prev => prev.filter(p => p.id !== d.userId));
+        if (lk.connected) {
+          // DEF-004: only honour server-enforced MUTE (isMuted === true).
+          // Do NOT auto-enable the mic when the server sends isMuted === false —
+          // the user must tap the mic button explicitly to speak.
+          if (d.isMuted) lk.disableMic().catch(() => {});
+        }
       }
     };
 
-    // Hand raised/lowered
-    const onHandRaised = (d: { userId: string; raised: boolean }) => {
-      setParticipants(prev => prev.map(p => p.id === d.userId ? { ...p, handRaised: d.raised } : p));
+    // Role changed — carries seatNumber for seat assignment.
+    // Used for both voice:role_changed (room-wide) and voice:your_role_changed (personal).
+    // voice:your_role_changed may not include userId in older server versions;
+    // fall back to user?.id so the promoted user's own seat always appears.
+    const onRoleChanged = (d: { userId?: string; role: string; seatNumber?: number | null }) => {
+      const targetId = d.userId ?? user?.id;
+      if (!targetId) return;
+      setParticipants(prev => {
+        const updated = prev.map(p => {
+          if (p.id !== targetId) return p;
+          const u: Participant = { ...p, role: d.role as Participant['role'] };
+          if (d.seatNumber !== undefined) u.seatNumber = d.seatNumber ?? null;
+          if (d.role === 'AUDIENCE') { u.isMuted = true; u.seatNumber = null; }
+          else if (d.role === 'SPEAKER' && d.seatNumber != null) u.isMuted = false;
+          return u;
+        });
+        return updated;
+      });
+      queryClient.invalidateQueries({ queryKey: ['voice-room', id] });
+      if (targetId === user?.id && lk.connected) {
+        if (d.role === 'AUDIENCE') lk.disableMic().catch(() => {});
+        else if (d.role === 'SPEAKER') lk.enableMic().catch(() => {});
+      }
     };
 
-    // Room ended — leave automatically
-    const onRoomEnded = () => {
-      showMessage({ message: '🏁 This room has ended', type: 'info' });
+    // Kicked — if it's me, leave immediately
+    // BUG-001 FIX: Backend emits voice:kicked on the personal user:{id} channel
+    // with payload { roomId } only — there is no userId field in the payload.
+    // The personal channel guarantees this event is only received by the kicked
+    // user, so we self-evict whenever roomId matches without checking d.userId.
+    // Web useVoiceRoom.ts uses the same roomId-only pattern (no userId check).
+    const onKicked = (d: { roomId: string; userId?: string }) => {
+      if (d.roomId !== id) return;
+      // Always self-evict — this channel is user-specific
+      showMessage({ message: '🚫 You were removed from this room', type: 'danger' });
       lk.disconnect();
+      api.post(`/voice/${id}/leave`).catch(() => {});
       clearActiveRoom();
       clearQueuePosition();
       setIsJoined(false);
+      router.back();
+    };
+
+    // Hand raised/lowered
+    // P2 FIX: Use profile data from payload to upsert a minimal AUDIENCE entry if
+    // the participant is not already in the local list. This covers the case where
+    // voice:user_joined was missed — without this the host's queue UI shows no avatar.
+    const onHandRaised = (d: { userId: string; raised: boolean; firstName?: string; lastName?: string; avatarUrl?: string | null }) => {
+      setParticipants(prev => {
+        const exists = prev.find(p => p.id === d.userId);
+        if (exists) {
+          return prev.map(p => p.id === d.userId ? { ...p, handRaised: d.raised } : p);
+        }
+        // Participant not in local state — upsert as AUDIENCE with handRaised
+        // (profile data is included in voice:hand_raised payload from raiseHand controller)
+        if (d.raised && d.firstName) {
+          return [...prev, {
+            id:               d.userId,
+            name:             `${d.firstName} ${d.lastName ?? ''}`.trim(),
+            avatar:           d.avatarUrl ?? undefined,
+            role:             'AUDIENCE' as const,
+            isMuted:          true,
+            isSpeaking:       false,
+            handRaised:       true,
+            mutedByModerator: false,
+            isActive:         true,
+            seatNumber:       null,
+            isPinned:         false,
+            _joinedAt:        new Date().toISOString(),
+          }];
+        }
+        return prev;
+      });
+    };
+
+    // BUG-002 FIX: Consolidated voice:moderator_removed handler.
+    // Previously two socket.on() registrations fired on the same event:
+    //   Handler 1 (onModeratorRemoved): correctly cleared seatNumber, isMuted, role
+    //   Handler 2 (inline): only updated role, overwriting Handler 1's seatNumber clear
+    // Net result: demoted moderator kept their stage seat on all mobile clients.
+    // Fix: remove Handler 2; move its personal notification into onModeratorRemoved.
+    const onModeratorRemoved = (d: { roomId: string; userId: string; message?: string }) => {
+      if (d.roomId !== id) return;
+      // Clear seat, mute, role, and handRaised — all authoritative from backend
+      setParticipants(prev => prev.map(p =>
+        p.id === d.userId
+          ? { ...p, role: 'AUDIENCE' as const, isMuted: true, seatNumber: null, handRaised: false }
+          : p
+      ));
+      // Personal notification — only show to the affected user
+      if (d.userId === user?.id) {
+        showMessage({ message: d.message ?? 'Your moderator role has been removed.', type: 'info' });
+      }
+    };
+
+    // Room went IDLE (all left) or was explicitly terminated by host/admin
+    // PERMANENT ROOMS: voice:room_ended fires when host calls endRoom() (ENDED terminal state)
+    // OR when the room transitions LIVE → IDLE after 5-min grace (empty room sleep).
+    // We do NOT force the user out — they can stay and wait for others to rejoin.
+    // Only clear the UI if the room is truly ENDED (terminal — host archived it).
+    const onRoomEnded = () => {
+      showMessage({ message: '🔔 Room is now offline — it will be back when the host returns', type: 'info', duration: 3000 });
+      // Do NOT call router.back() — the room is permanent and can be rejoined.
+      // The participant list will empty itself naturally via voice:user_left events.
+      // The room header will reflect IDLE status once the user polls or reconnects.
+      setIsJoined(false);
+      lk.disconnect();
+      clearQueuePosition();
+      // Leave the screen so they go back to the lobby (room stays in DB as IDLE)
       router.back();
     };
 
@@ -1015,6 +1449,21 @@ export default function VoiceRoomScreen() {
         old ? { ...old, micLocked: d.micLocked } : old
       );
       showMessage({ message: d.micLocked ? '🔒 Mic locked by host' : '🔓 Mic unlocked', type: 'info' });
+    };
+
+    // DEF-001: room-wide mute policy changed — persist in store and query cache
+    const onRoomPolicyChanged = (d: { roomId: string; allMuted: boolean }) => {
+      if (d.roomId !== id) return;
+      updateActiveRoom({ allMuted: d.allMuted });
+      queryClient.setQueryData<any>(['voice-room', id], (old: any) =>
+        old ? { ...old, allMuted: d.allMuted } : old
+      );
+    };
+
+    // Seat lock changed (individual seat)
+    const onSeatLockChanged = (d: { roomId: string; seatIndex: number; locked: boolean; lockedSeats: number[] }) => {
+      if (d.roomId !== id) return;
+      setLockedSeats(d.lockedSeats ?? []);
     };
 
     // Room settings updated (commentsEnabled, reactionsEnabled, etc.)
@@ -1035,18 +1484,31 @@ export default function VoiceRoomScreen() {
 
     // New participant joined — add to list
     const onUserJoined = (d: any) => {
-      const newP: Participant = {
-        id:         d.userId,
-        name:       `${d.firstName ?? ''} ${d.lastName ?? ''}`.trim() || 'User',
-        avatar:     d.avatarUrl ?? null,
-        role:       (d.role ?? 'AUDIENCE') as Participant['role'],
-        isMuted:    d.isMuted ?? true,
-        isSpeaking: false,
-        handRaised: false,
+      // SEAT SYNC FIX: Deterministic sort key — role asc then joinedAt asc
+      const PARTICIPANT_ROLE_ORDER: Record<string, number> = { HOST: 0, MODERATOR: 1, SPEAKER: 2, AUDIENCE: 3 };
+      const newP = {
+        id:               d.userId,
+        name:             `${d.firstName ?? ''} ${d.lastName ?? ''}`.trim() || 'User',
+        avatar:           d.avatarUrl ?? null,
+        role:             (d.role ?? 'AUDIENCE') as Participant['role'],
+        isMuted:          d.isMuted ?? true,
+        isSpeaking:       false,
+        handRaised:       false,
+        mutedByModerator: d.mutedByModerator ?? false,
+        isActive:         true,
+        seatNumber:       d.seatNumber != null ? Number(d.seatNumber) : null,
+        _joinedAt:        d.joinedAt ?? new Date().toISOString(),
       };
       setParticipants(prev => {
         if (prev.find(p => p.id === d.userId)) return prev;
-        return [...prev, newP];
+        // Insert in deterministic sorted position so all clients see identical seat layout
+        const updated = [...prev, newP as any];
+        return updated.sort((a: any, b: any) => {
+          const ra = PARTICIPANT_ROLE_ORDER[a.role] ?? 9;
+          const rb = PARTICIPANT_ROLE_ORDER[b.role] ?? 9;
+          if (ra !== rb) return ra - rb;
+          return (a._joinedAt ?? '').localeCompare(b._joinedAt ?? '');
+        });
       });
     };
 
@@ -1056,8 +1518,7 @@ export default function VoiceRoomScreen() {
     };
 
     // Mic pass offer received (incoming)
-    const onMicPassOffer = (d: { offerId?: string; offeredBy?: { id: string; firstName: string; lastName: string; avatarUrl?: string | null }; passerId?: string; passerName?: string; passerAvatar?: string | null }) => {
-      // Backend sends { offerId, roomId, passerName, passerAvatar } — normalise both formats
+    const onMicPassOffer = (d: { offerId?: string; offeredBy?: { id: string; firstName: string; lastName: string; avatarUrl?: string | null }; passerId?: string; passerName?: string; passerAvatar?: string | null }) => {      // Backend sends { offerId, roomId, passerName, passerAvatar } — normalise both formats
       const offererId = d.offeredBy?.id ?? d.passerId ?? '';
       const offererName = d.offeredBy
         ? `${d.offeredBy.firstName} ${d.offeredBy.lastName}`.trim()
@@ -1069,21 +1530,24 @@ export default function VoiceRoomScreen() {
     };
 
     // Mic pass accepted — someone accepted the mic offer we (sender) sent.
-    // Backend event: voice:mic_passed { roomId, passerId, passerName, targetId, targetName, passerRole }
-    const onMicPassResult = (d: { passerId?: string; targetId?: string; targetName?: string; passerRole?: string }) => {
+    // Backend event: voice:mic_passed { roomId, passerId, passerName, targetId, targetName, passerRole, seatNumber }
+    const onMicPassResult = (d: { passerId?: string; targetId?: string; targetName?: string; passerRole?: string; seatNumber?: number | null }) => {
       // If we are the passer, show confirmation
       if (d.passerId === user?.id) {
         showMessage({ message: `🎤 ${d.targetName ?? 'User'} accepted the mic!`, type: 'success' });
       }
-      // Update roles in participant list
+      // Update roles in participant list — passer releases seat, target takes it
       if (d.passerRole && d.passerRole !== 'HOST' && d.passerId) {
         setParticipants(prev => prev.map(p =>
-          p.id === d.passerId ? { ...p, role: 'AUDIENCE', isMuted: true } : p
+          p.id === d.passerId ? { ...p, role: 'AUDIENCE' as const, isMuted: true, seatNumber: null } : p
         ));
       }
       if (d.targetId) {
         setParticipants(prev => prev.map(p =>
-          p.id === d.targetId ? { ...p, role: 'SPEAKER', isMuted: false, handRaised: false } : p
+          p.id === d.targetId ? {
+            ...p, role: 'SPEAKER' as const, isMuted: false, handRaised: false,
+            seatNumber: d.seatNumber != null ? Number(d.seatNumber) : p.seatNumber,
+          } : p
         ));
       }
       setShowMicPassOffer(false);
@@ -1134,10 +1598,13 @@ export default function VoiceRoomScreen() {
     socket.on('voice:role_changed',   onRoleChanged);
     socket.on('voice:your_role_changed', onRoleChanged);
     socket.on('voice:kicked',         onKicked);
+    socket.on('voice:moderator_removed', onModeratorRemoved);  // RT-FIX-6
     socket.on('voice:hand_raised',    onHandRaised);
     socket.on('voice:room_ended',     onRoomEnded);
     socket.on('voice:open_mic_changed', onOpenMicChanged);
     socket.on('voice:mic_lock_changed', onMicLockChanged);
+    socket.on('voice:room_policy_changed', onRoomPolicyChanged);  // DEF-001
+    socket.on('voice:seat_lock_changed', onSeatLockChanged);
     socket.on('voice:room_updated',      onRoomUpdated);
     socket.on('voice:join_request',      (d: any) => { if (d.roomId !== id) return; showMessage({ message: `✋ ${d.firstName ?? ''} ${d.lastName ?? ''} wants to join the room`, type: 'info' }); });
     socket.on('voice:join_approved',     (d: any) => { if (d.roomId !== id) return; showMessage({ message: '✅ Your join request was approved!', type: 'success' }); setIsMember(true); setMemberLevel(1); });
@@ -1147,26 +1614,202 @@ export default function VoiceRoomScreen() {
       clearActiveRoom(); clearQueuePosition();
       router.back();
     });
+    // voice:blocked_from_room — emitted by room-member.controller.js blockMember()
     socket.on('voice:blocked_from_room', (d: any) => {
       if (d.roomId !== id) return;
       showMessage({ message: '⛔ You were blocked from this room', type: 'danger' });
       clearActiveRoom(); clearQueuePosition();
       router.back();
     });
-    socket.on('voice:speaker_pinned',    (d: any) => { if (d.roomId !== id) return; setParticipants(prev => prev.map(p => ({ ...p, handRaised: p.id === d.userId ? false : p.handRaised }))); });
+
+    // ROOM DELETED — host permanently deleted the room (soft-delete).
+    // Distinct from voice:room_ended (room went IDLE/archived). After deletion
+    // the room cannot be rejoined — evict the local user immediately.
+    socket.on('voice:room_deleted', (d: { roomId: string }) => {
+      if (d.roomId !== id) return;
+      lk.disconnect();
+      clearActiveRoom();
+      clearQueuePosition();
+      showMessage({ message: '🗑️ This room has been deleted by the host', type: 'warning', duration: 4000 });
+      router.back();
+    });
+
+    // MESSAGE DELETED — host/mod/author removed a chat message
+    socket.on('voice:message_deleted', (d: { roomId: string; msgId: string }) => {
+      if (d.roomId !== id) return;
+      setChatMessages(prev => prev.filter(m => m.id !== d.msgId));
+    });
+
+    socket.on('voice:speaker_pinned',    (d: any) => {
+      if (d.roomId !== id) return;
+      setParticipants(prev => prev.map(p => {
+        if (p.id === d.userId) {
+          // Pin the target participant and clear any stale handRaised
+          return { ...p, isPinned: Boolean(d.isPinned), handRaised: false };
+        }
+        // If pinning someone new, unpin all others (only one can be pinned at a time)
+        if (d.isPinned) return { ...p, isPinned: false };
+        return p;
+      }));
+    });
+
+    // ── Emoji reactions (broadcast from other participants) ───────────────────
+    // Parity with web: voice:reaction { userId, emoji } is broadcast by the backend
+    // to all room members when any participant sends a reaction.
+    // Rate-limited on backend: 10 per 2s. reactionsEnabled is checked on backend.
+    const onReaction = (d: { userId: string; emoji: string }) => {
+      // Don't show own reactions from other sockets (already shown locally)
+      if (d.userId === user?.id) return;
+      const reactionId = `${Date.now()}-${Math.random()}`;
+      const x = 10 + Math.random() * 70; // random horizontal position 10–80%
+      setFloatingEmojis(prev => [...prev.slice(-9), { id: reactionId, emoji: d.emoji, x }]);
+      setTimeout(() => {
+        setFloatingEmojis(prev => prev.filter(e => e.id !== reactionId));
+      }, 2500);
+    };
+    socket.on('voice:reaction', onReaction);
     // Queue position — update shared store so the tab bar can show it
     socket.on('voice:queue_position',    (d: any) => { if (d.roomId !== id) return; setQueuePosition(d.position ?? 0); });
     // Queue resolved (promoted or rejected) — clear position
     socket.on('voice:queue_rejected',    (d: any) => { if (d.roomId !== id) return; clearQueuePosition(); showMessage({ message: d.message ?? 'Your request was declined', type: 'warning' }); });
-    socket.on('voice:promoted_to_speaker', (d: any) => { if (d.roomId !== id) return; clearQueuePosition(); showMessage({ message: '🎙️ You\'re on stage!', type: 'success' }); });
+    socket.on('voice:promoted_to_speaker', (d: any) => {
+      if (d.roomId !== id) return;
+      clearQueuePosition();
+      showMessage({ message: '🎙️ You\'re on stage!', type: 'success' });
+      // Update local participants so the promoted user sees their own seat immediately
+      // without waiting for voice:role_changed (which fires first in the server sequence
+      // but may arrive slightly after on mobile due to connection ordering).
+      if (d.seatNumber != null) {
+        setParticipants(prev => prev.map(p =>
+          p.id === user?.id
+            ? { ...p, role: 'SPEAKER' as const, isMuted: false, seatNumber: Number(d.seatNumber), handRaised: false }
+            : p
+        ));
+      }
+    });
     socket.on('voice:member_joined',       onMemberJoined);
     socket.on('voice:member_left',         onMemberLeft);
     socket.on('voice:room_level_upgraded', onRoomLevelUpgraded);
     socket.on('voice:user_joined',    onUserJoined);
     socket.on('voice:user_left',      onUserLeft);
 
+    // FIX-MOB-1: voice:banned — emitted by banParticipant() on two channels:
+    //   1. Room-wide: voice:{roomId} → { roomId, userId } — remove participant for others
+    //   2. Personal:  user:{banned}  → { roomId, reason } — evict the banned user
+    // Previously missing: banned user's mobile UI was never evicted.
+    socket.on('voice:banned', (d: { roomId: string; userId?: string; reason?: string }) => {
+      if (d.roomId !== id) return;
+      if (d.userId && d.userId !== user?.id) {
+        // Another participant was banned — remove them from the list
+        setParticipants(prev => prev.filter(p => p.id !== d.userId));
+      } else {
+        // I was banned — evict me
+        showMessage({ message: `⛔ You were banned from this room${d.reason ? ': ' + d.reason : ''}`, type: 'danger', duration: 4000 });
+        lk.disconnect();
+        api.post(`/voice/${id}/leave`).catch(() => {});
+        clearActiveRoom();
+        clearQueuePosition();
+        setIsJoined(false);
+        router.back();
+      }
+    });
+
+    // FIX-MOB-2: voice:status_changed — room transitions (LIVE↔IDLE).
+    // Previously missing: mobile never reflected room status changes.
+    socket.on('voice:status_changed', (d: { roomId: string; status: string }) => {
+      if (d.roomId !== id) return;
+      queryClient.setQueryData<any>(['voice-room', id], (old: any) =>
+        old ? { ...old, isLive: d.status === 'LIVE', status: d.status } : old
+      );
+    });
+
+    // FIX-MOB-3: voice:queue_updated — FIFO speaker queue state.
+    // Previously missing: mobile speakerQueue in useVoiceStore was always stale.
+    socket.on('voice:queue_updated', (d: { roomId: string; queue: any[]; queueLength: number }) => {
+      if (d.roomId !== id) return;
+      useVoiceStore.getState().setSpeakerQueue(d.queue ?? []);
+    });
+
+    // MODERATOR ASSIGNMENT — realtime update for all participants
+    // voice:moderator_assigned: HOST assigned someone as MODERATOR
+    socket.on('voice:moderator_assigned', (d: { roomId: string; userId: string; firstName?: string; lastName?: string }) => {
+      if (d.roomId !== id) return;
+      // BUG-008 FIX: Set isMuted:false — backend sets isMuted=false when assigning
+      // moderator (voice-roles.controller.js assignModerator). Web onModeratorAssigned
+      // already sets isMuted:false; mobile must do the same so newly assigned moderators
+      // do not show as muted on other clients until the next stage_state snapshot.
+      // seatNumber is intentionally not changed — the new moderator retains their seat.
+      setParticipants(prev => prev.map(p =>
+        p.id === d.userId ? { ...p, role: 'MODERATOR' as const, isMuted: false } : p
+      ));
+      if (d.userId === user?.id) {
+        showMessage({ message: '🛡️ You are now a moderator!', type: 'success' });
+      }
+    });
+
+    // YOU ARE MODERATOR — personal notification when the local user is made mod
+    socket.on('voice:you_are_moderator', (d: { roomId: string; message?: string }) => {
+      if (d.roomId !== id) return;
+      showMessage({ message: d.message ?? '🛡️ You are now a moderator!', type: 'success' });
+    });
+
+    // YOU ARE HOST — personal notification when the local user becomes host
+    socket.on('voice:you_are_host', (d: { roomId: string; message?: string }) => {
+      if (d.roomId !== id) return;
+      showMessage({ message: d.message ?? '👑 You are now the host!', type: 'success' });
+    });
+
+    // HOST TRANSFER — ownership changes in realtime (parity with web)
+    // voice:admin_transferred is emitted by transferAdmin() to the whole room.
+    // Without this handler, the old HOST retains HOST controls and the new HOST
+    // appears as their old role until a screen refresh.
+    socket.on('voice:admin_transferred', (d: {
+      roomId: string;
+      newHostId: string;
+      prevHostId: string;
+      newHostName: string;
+    }) => {
+      if (d.roomId !== id) return;
+      // Update both participants' roles in local state
+      setParticipants(prev => prev.map(p => {
+        if (p.id === d.newHostId) return { ...p, role: 'HOST' as const };
+        if (p.id === d.prevHostId) return { ...p, role: 'MODERATOR' as const };
+        return p;
+      }));
+      // Notify the new host
+      if (d.newHostId === user?.id) {
+        showMessage({ message: '👑 You are now the host of this room!', type: 'success' });
+      }
+      // Notify the previous host
+      if (d.prevHostId === user?.id) {
+        showMessage({ message: `👑 ${d.newHostName} is now the host`, type: 'info' });
+      }
+    });
+
+    // ── PK room events ────────────────────────────────────────────────────────
+    socket.on('pk:room:started', (d: {
+      pkMatchId: string; durationSeconds: number;
+      participants: Array<{ userId: string; side: 'A' | 'B'; user: { firstName: string; lastName: string; avatarUrl: string | null } }>
+    }) => {
+      setActivePKMatchId(d.pkMatchId);
+      setActivePKDuration(d.durationSeconds);
+      setActivePKParticipants(d.participants);
+    });
+
+    socket.on('pk:room:ended', (d: { pkMatchId: string }) => {
+      setTimeout(() => {
+        setActivePKMatchId(prev => prev === d.pkMatchId ? null : prev);
+      }, 6500);
+    });
+
+    // ATOMIC STAGE STATE: authoritative snapshot after seat changes — reconcile any stale state.
+    // FEAT-002: delegate to applyStageSnapshot which also upserts absent participants.
+    socket.on('voice:stage_state', applyStageSnapshot);
+
     return () => {
       socket.emit('voice:leave_room', id);
+      // PH24C-005: remove the reconnect handler so it doesn't fire after unmount
+      socket.off('connect', onReconnect);
       socket.off('voice:gift_sent',    onGift);
       socket.off('voice:premium_gift', onGift);
       socket.off('voice:message',      onMsg);
@@ -1178,6 +1821,8 @@ export default function VoiceRoomScreen() {
       socket.off('voice:room_ended',       onRoomEnded);
       socket.off('voice:open_mic_changed', onOpenMicChanged);
       socket.off('voice:mic_lock_changed', onMicLockChanged);
+      socket.off('voice:room_policy_changed', onRoomPolicyChanged);  // DEF-001
+      socket.off('voice:seat_lock_changed', onSeatLockChanged);
       socket.off('voice:room_updated',      onRoomUpdated);
       socket.off('voice:join_request');
       socket.off('voice:join_approved');
@@ -1194,13 +1839,45 @@ export default function VoiceRoomScreen() {
       socket.off('voice:user_left',        onUserLeft);
       socket.off('voice:mic_offer',           onMicPassOffer);
       socket.off('voice:mic_passed',          onMicPassResult);
+      socket.off('pk:room:started');
+      socket.off('pk:room:ended');
       socket.off('voice:mic_declined');
       socket.off('voice:mic_offer_cancelled');
       socket.off('voice:mic_received');
+      // FIX-MOB-1/2/3: cleanup for the three newly-added handlers
+      socket.off('voice:banned');
+      socket.off('voice:status_changed');
+      socket.off('voice:moved_to_audience');
+      socket.off('voice:stage_state');
+      socket.off('voice:queue_updated');
+      // MODERATOR realtime events
+      socket.off('voice:moderator_assigned');
+      socket.off('voice:moderator_removed');
+      socket.off('voice:you_are_moderator');
+      socket.off('voice:you_are_host');
+      // Host transfer + room/message deletion (parity with web)
+      socket.off('voice:admin_transferred');
+      socket.off('voice:room_deleted');
+      socket.off('voice:message_deleted');
+      // Emoji reactions
+      socket.off('voice:reaction', onReaction);
     };
-  }, [isJoined, id, user, gifts, queryClient]);
+  // FEAT-002: removed isJoined, gifts, queryClient from deps — listeners
+  // register on mount; hasJoinedRef guards the join_room emit instead.
+  // Dep array is [id] only (matching web useVoiceRoom pattern) to prevent
+  // double-listener registration when the `user` object reference changes
+  // (e.g. token refresh). user.id is stable during a session, so closures
+  // capturing the first non-null user remain correct for all role checks.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
   const handleJoin = useCallback(async () => {
+    // SA-VOICE-MOBILE-01: SUPER_ADMIN = Platform Administration ONLY.
+    // Platform admins cannot join voice rooms as participants.
+    if (user?.role === 'SUPER_ADMIN') {
+      showMessage({ message: 'Platform admins cannot join voice rooms. Use the admin panel.', type: 'warning' });
+      return;
+    }
     if (!room) return;
     setIsConnecting(true);
     try {
@@ -1210,8 +1887,14 @@ export default function VoiceRoomScreen() {
       if (token && !getSocket()?.connected) initSocket(token);
 
       setIsJoined(true);
+      // FEAT-002: mark join as complete so the listener effect's guarded emit fires
+      hasJoinedRef.current = true;
+      // FEAT-002: register socket room now that HTTP join succeeded
+      const sockNow = getSocket();
+      if (sockNow?.connected) sockNow.emit('voice:join_room', id);
 
       // Store in shared voice store so the tab bar shows the "IN ROOM" badge
+      const roomData = res.data.data;
       if (room && id) {
         setActiveRoom({
           id:              id,
@@ -1224,6 +1907,8 @@ export default function VoiceRoomScreen() {
           hostId:          roomData?.hostId ?? room.host?.id ?? '',
           isOpenMic:       roomData?.isOpenMic ?? false,
           micLocked:       roomData?.micLocked ?? false,
+          allMuted:        roomData?.allMuted ?? false,   // DEF-001
+          lockedSeats:     Array.isArray(roomData?.lockedSeats) ? roomData.lockedSeats : [],
           commentsEnabled: roomData?.commentsEnabled ?? true,
           slowMode:        roomData?.slowMode ?? false,
           messageType:     (roomData?.messageType ?? 'all') as 'all' | 'followers' | 'none',
@@ -1233,35 +1918,114 @@ export default function VoiceRoomScreen() {
         });
       }
 
-      // Populate participants from response
-      const roomData = res.data.data;
-      const parts: Participant[] = (roomData?.participants || []).map((p: any) => ({
-        id:         p.userId ?? p.id,
-        name:       p.user ? `${p.user.firstName} ${p.user.lastName}`.trim() : 'User',
-        avatar:     p.user?.avatarUrl ?? null,
-        role:       p.role,
-        isMuted:    p.isMuted ?? true,
-        isSpeaking: false,
-        handRaised: p.handRaised ?? false,
+      const parts = (roomData?.participants || []).map((p: any) => ({
+        id:               p.userId ?? p.id,
+        name:             p.user ? `${p.user.firstName} ${p.user.lastName}`.trim() : 'User',
+        avatar:           p.user?.avatarUrl ?? null,
+        role:             p.role,
+        isMuted:          p.isMuted ?? true,
+        isSpeaking:       false,
+        handRaised:       p.handRaised ?? false,
+        mutedByModerator: p.mutedByModerator ?? false,
+        isActive:         p.isActive !== false,
+        seatNumber:       p.seatNumber != null ? Number(p.seatNumber) : null,
+        _joinedAt:        p.joinedAt ?? '',
       }));
       setParticipants(parts.length > 0 ? parts : [{
         id: room.host.id, name: room.host.name, avatar: room.host.avatar ?? undefined,
         role: 'HOST', isMuted: false, isSpeaking: false, handRaised: false,
+        mutedByModerator: false,
+        isActive: true, seatNumber: null,
+        _joinedAt: '',
       }]);
+      if (Array.isArray(roomData?.lockedSeats)) {
+        setLockedSeats(roomData.lockedSeats);
+      }
+      // FEAT-002: pull authoritative stage snapshot after HTTP join succeeds.
+      // This reconciles any stage changes that occurred between the HTTP join
+      // response and socket room subscription — the primary P0-B race window.
+      api.get(`/voice/${id}/stage-state`)
+        .then((r: any) => { if (r.data?.data) applyStageSnapshot(r.data.data); })
+        .catch(() => {});
       await loadChat();
       // Connect LiveKit for real audio (native builds only)
       try {
         const tokenRes = await api.post(`/voice/${id}/livekit-token`);
         const { token: lkToken, livekitUrl } = tokenRes.data.data;
         if (lkToken && livekitUrl) {
-          await lk.connect(livekitUrl, lkToken, true /* start muted */);
+          // PH19-002 FIX: pass tokenFetcher so every reconnect path obtains
+          // a fresh token from the authoritative backend endpoint rather than
+          // reusing the stale cached token.
+          //
+          // tokenFetcher calls POST /voice/:id/livekit-token — the same endpoint
+          // that issued the initial token. The backend verifies:
+          //   1. Room exists and is not ENDED
+          //   2. Caller has an active VoiceParticipant record (isActive:true)
+          //
+          // A kicked/banned user will have isActive:false in the DB by the time
+          // their Disconnected event fires and reconnect is attempted. The backend
+          // returns 403, which causes tokenFetcher to throw, which halts retries.
+          const tokenFetcher = async (): Promise<string> => {
+            const res = await api.post(`/voice/${id}/livekit-token`);
+            const token = res.data?.data?.token;
+            if (!token) throw new Error('No token in response');
+            return token;
+          };
+          await lk.connect(livekitUrl, lkToken, true /* start muted */, id, tokenFetcher);
         }
       } catch { /* non-fatal — audio not available in Expo Go */ }
-      showMessage({ message: `Joined ${room.name}`, type: 'success' });
+      showMessage({ message: `Joined ${room.name ?? room.title}`, type: 'success' });
     } catch (err: any) {
-      showMessage({ message: err?.response?.data?.message ?? 'Failed to join room', type: 'danger' });
+      const code = err?.response?.data?.errors?.code;
+      if (code === 'VOICE_ROOM_ALREADY_ACTIVE') {
+        // Show native conflict dialog — names room B (the active one) clearly.
+        // The conflict data lives under response.data.errors (not response.data directly).
+        const activeRoomEmoji = err?.response?.data?.errors?.activeRoomEmoji ?? '🎙️';
+        const activeRoomTitle = err?.response?.data?.errors?.activeRoomTitle ?? 'another room';
+        const activeRoomId    = err?.response?.data?.errors?.activeRoomId    ?? '';
+        const activeRoomTopic = err?.response?.data?.errors?.activeRoomTopic ?? null;
+        const subtitle = activeRoomTopic
+          ? `"${activeRoomTitle}" · ${activeRoomTopic}`
+          : `"${activeRoomTitle}"`;
+
+        Alert.alert(
+          `${activeRoomEmoji} You're already in a room`,
+          `You are currently in ${subtitle}.\n\nLeave that Voice Club to join this one?`,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Leave & Join',
+              style: 'destructive',
+              onPress: async () => {
+                setIsConnecting(true);
+                try {
+                  // 1. Disconnect LiveKit from room B
+                  lk.disconnect();
+                  // 2. Leave room B on server
+                  try { await api.post(`/voice/${activeRoomId}/leave`); } catch {}
+                  // 3. Leave Socket.IO room B
+                  const socket = getSocket();
+                  if (socket) socket.emit('voice:leave_room', activeRoomId);
+                  // 4. Clear store
+                  clearActiveRoom();
+                  // 5. Join room A (this room)
+                  await handleJoin();
+                } finally {
+                  setIsConnecting(false);
+                }
+              },
+            },
+          ],
+          { cancelable: true }
+        );
+        return;
+      }
+      showMessage({
+        message: err?.response?.data?.message ?? 'Failed to join room',
+        type: 'danger',
+      });
     } finally { setIsConnecting(false); }
-  }, [id, room, loadChat]);
+  }, [id, room, loadChat, lk, clearActiveRoom]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleLeave = useCallback(() => {
     Alert.alert('Leave Room', 'Are you sure you want to leave?', [
@@ -1271,11 +2035,62 @@ export default function VoiceRoomScreen() {
         lk.disconnect();
         clearActiveRoom();
         clearQueuePosition();
+        // FEAT-002: reset join ref so onReconnect won't re-register after leave
+        hasJoinedRef.current = false;
         setIsJoined(false);
         router.back();
       }},
     ]);
   }, [id, router, clearActiveRoom, clearQueuePosition]);
+
+  // P0-3 FIX: Auto-rejoin on screen focus when returning from a tab switch.
+  // On tab switch, expo-router unmounts this screen. On return, isJoined resets
+  // to false (useState initial value). We detect the "was in room" state via the
+  // Zustand activeRoom store — if storeActiveRoom.id === id, the user was previously
+  // joined and never explicitly left (handleLeave was not called, which calls clearActiveRoom).
+  // useFocusEffect fires on every focus event, including tab-switch return.
+  // useCallback(fn, []) is the required pattern from @react-navigation/native docs.
+  useFocusEffect(
+    useCallback(() => {
+      // Only auto-rejoin if:
+      // 1. Not already joined (remounted after tab switch)
+      // 2. Was previously in this room (store still has activeRoom for this id)
+      // 3. Not currently connecting (prevent double-fire)
+      if (!isJoined && storeActiveRoom?.id === id && !isConnecting) {
+        // Silent auto-rejoin — user just switched tabs, no confirmation needed
+        handleJoin();
+      }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id, isJoined, isConnecting])
+  );
+
+  // P0-4 FIX: Re-emit voice:join_room + re-hydrate stage state on app foreground.
+  // useLiveKitAudio reconnects LiveKit on foreground but does NOT re-subscribe
+  // the socket to voice:{id}. This effect fills that gap.
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      const prev = appStateRef.current;
+      appStateRef.current = nextState;
+      if (
+        (prev === 'background' || prev === 'inactive') &&
+        nextState === 'active' &&
+        hasJoinedRef.current
+      ) {
+        // Re-join the socket room after foregrounding.
+        // Socket may have reconnected transparently — re-subscribing is idempotent.
+        const socket = getSocket();
+        if (socket) {
+          socket.emit('voice:join_room', id);
+        }
+        // Re-hydrate stage state — participant list may be stale after background.
+        api.get(`/voice/${id}/stage-state`)
+          .then((r: any) => { if (r.data?.data) applyStageSnapshot(r.data.data); })
+          .catch(() => { /* non-fatal */ });
+      }
+    });
+    return () => sub.remove();
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // MOB-004: Android hardware back button — intercept when inside a live room.
   // Without this, pressing the Android back button navigates away silently,
@@ -1292,24 +2107,62 @@ export default function VoiceRoomScreen() {
   }, [isJoined, handleLeave]);
 
   const toggleMic = useCallback(async () => {
-    const newMuted = !isMuted;
-    setIsMuted(newMuted);
-    // Toggle real LiveKit audio track if connected in native build
-    if (lk.connected) {
-      if (newMuted) await lk.disableMic();
-      else await lk.enableMic();
+    // GUARD: if the participant was muted by a moderator, they cannot self-unmute.
+    const me = participants.find(p => p.id === user?.id);
+    if (me?.mutedByModerator && me?.isMuted) {
+      showMessage({ message: '🔒 You were muted by a moderator', type: 'warning' });
+      return;
     }
-    try { await api.patch(`/voice/${id}/mute`, { isMuted: newMuted }); } catch {}
-  }, [id, isMuted]);
+    if (lk.connected) {
+      const currentMuted = me?.isMuted ?? true;
+      const newMuted = !currentMuted;
+      if (currentMuted) await lk.enableMic();
+      else await lk.disableMic();
+      // DEF-006: sync mute state to backend so participants list and server state
+      // stay consistent. Best-effort — LiveKit track toggle is NOT rolled back on failure.
+      try {
+        await api.patch(`/voice/${id}/mute`, { isMuted: newMuted });
+      } catch {
+        // Non-fatal: local LiveKit toggle already applied; server will reconcile
+        // on the next voice:mute_changed socket event or stage-state pull.
+      }
+    }
+  }, [participants, user?.id, id]);
 
   const toggleHand = useCallback(async () => {
     if (room?.micLocked) { showMessage({ message: '🔒 Mic is locked by the host', type: 'warning' }); return; }
     const newRaised = !handRaised;
+    setHandRaised(newRaised);
     try { await api.patch(`/voice/${id}/raise-hand`, { raised: newRaised }); } catch {}
     setParticipants(prev => prev.map(p =>
       p.id === user?.id ? { ...p, handRaised: newRaised } : p
     ));
   }, [id, handRaised, user]);
+
+  // handleGrabMic — for normal AUDIENCE users when Free Stage (isOpenMic) is ON.
+  // Calls POST /grab-mic directly. Backend either seats them instantly (free seat)
+  // or enqueues them (stage full). Queue result is reflected via voice:hand_raised socket.
+  const handleGrabMic = useCallback(async () => {
+    if (room?.micLocked) { showMessage({ message: '🔒 Mic is locked by the host', type: 'warning' }); return; }
+    try {
+      const res = await api.post(`/voice/${id}/grab-mic`);
+      const { queued, position } = res.data.data ?? {};
+      if (queued) {
+        setHandRaised(true);
+        setParticipants(prev => prev.map(p =>
+          p.id === user?.id ? { ...p, handRaised: true } : p
+        ));
+        showMessage({
+          message: `✋ You're #${position ?? '?'} in the queue — waiting for a seat`,
+          type: 'info',
+        });
+      } else {
+        showMessage({ message: '🎤 You are on stage!', type: 'success' });
+      }
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed to take mic', type: 'danger' });
+    }
+  }, [id, room?.micLocked, user?.id]);
 
   // ── Host/Moderator controls ───────────────────────────────────────────────
   const myRole = participants.find(p => p.id === user?.id)?.role ?? (room?.hostId === user?.id ? 'HOST' : 'AUDIENCE');
@@ -1321,8 +2174,13 @@ export default function VoiceRoomScreen() {
 
   const handleMuteUser = useCallback(async (targetId: string, currentlyMuted: boolean) => {
     try {
-      await api.patch(/voice//mute, { targetUserId: targetId, isMuted: !currentlyMuted });
-      setParticipants(prev => prev.map(p => p.id === targetId ? { ...p, isMuted: !currentlyMuted } : p));
+      await api.patch(`/voice/${id}/mute`, { targetUserId: targetId, isMuted: !currentlyMuted });
+      // Optimistic update: also set mutedByModerator so the target's mic button locks correctly
+      setParticipants(prev => prev.map(p =>
+        p.id === targetId
+          ? { ...p, isMuted: !currentlyMuted, mutedByModerator: !currentlyMuted }
+          : p
+      ));
       showMessage({ message: !currentlyMuted ? '🔇 Speaker muted' : '🎙️ Speaker unmuted', type: 'info' });
     } catch {}
   }, [id]);
@@ -1330,7 +2188,21 @@ export default function VoiceRoomScreen() {
   const handlePromote = useCallback(async (targetId: string, role: 'SPEAKER' | 'AUDIENCE') => {
     try {
       await api.patch(`/voice/${id}/promote`, { targetUserId: targetId, role });
-      setParticipants(prev => prev.map(p => p.id === targetId ? { ...p, role, isMuted: role === 'AUDIENCE' } : p));
+      setParticipants(prev => prev.map(p =>
+        p.id === targetId
+          ? {
+              ...p,
+              role,
+              isMuted: role === 'AUDIENCE',
+              mutedByModerator: false,   // clear flag on any role change
+              // For SPEAKER promotion: do NOT set seatNumber optimistically — it's null in the
+              // audience and the backend assigns the real seat. The voice:role_changed socket
+              // event (or voice:stage_state) will provide the authoritative seatNumber.
+              // For AUDIENCE demotion: always clear seatNumber immediately.
+              seatNumber: role === 'AUDIENCE' ? null : p.seatNumber,
+            }
+          : p
+      ));
       showMessage({ message: role === 'SPEAKER' ? '🎙️ Promoted to speaker' : 'Moved to audience', type: 'success' });
     } catch (e: any) { showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' }); }
   }, [id]);
@@ -1342,6 +2214,41 @@ export default function VoiceRoomScreen() {
         try { await api.delete(`/voice/${id}/kick/${targetId}`); setParticipants(prev => prev.filter(p => p.id !== targetId)); } catch {}
       }},
     ]);
+  }, [id]);
+
+  const handleBan = useCallback((targetId: string, name: string) => {
+    Alert.alert(
+      'Ban from Room',
+      `Ban ${name}? They will be removed and cannot rejoin this room.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Ban', style: 'destructive', onPress: async () => {
+          try {
+            await api.post(`/voice/${id}/ban/${targetId}`, { reason: '' });
+            setParticipants(prev => prev.filter(p => p.id !== targetId));
+            showMessage({ message: `⛔ ${name} banned from room`, type: 'success' });
+          } catch (e: any) {
+            showMessage({ message: e?.response?.data?.message ?? 'Failed to ban', type: 'danger' });
+          }
+        }},
+      ]
+    );
+  }, [id]);
+
+  const handleUnban = useCallback(async (targetId: string, name: string) => {
+    try {
+      await api.delete(`/voice/${id}/ban/${targetId}`);
+      showMessage({ message: `✅ ${name} unbanned`, type: 'success' });
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed to unban', type: 'danger' });
+    }
+  }, [id]);
+
+  const handleUnmuteAll = useCallback(async () => {
+    try {
+      await api.patch(`/voice/${id}/unmute-all`);
+      showMessage({ message: '🎙️ All speakers unmuted', type: 'info' });
+    } catch {}
   }, [id]);
 
   const handleEndRoom = useCallback(async () => {
@@ -1360,6 +2267,17 @@ export default function VoiceRoomScreen() {
 
   const handleApproveQueue = useCallback(async () => {
     try { await api.post(`/voice/${id}/queue/approve`); showMessage({ message: '✅ Next speaker approved', type: 'success' }); } catch {}
+  }, [id]);
+
+  // Approve a SPECIFIC queued user — handles both AUDIENCE→SPEAKER and
+  // MODERATOR→unmuted-on-stage. The generic PATCH /promote rejects MODERATOR targets.
+  const handleApproveQueueUser = useCallback(async (targetId: string) => {
+    try {
+      await api.post(`/voice/${id}/queue/approve/${targetId}`);
+      showMessage({ message: '🎙️ Approved to stage', type: 'success' });
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed to approve', type: 'danger' });
+    }
   }, [id]);
 
   const handleAssignMod = useCallback(async (targetId: string, name: string) => {
@@ -1414,12 +2332,13 @@ export default function VoiceRoomScreen() {
     setSettingsSaving(true);
     try {
       await api.patch(`/voice/${id}`, {
-        title:   settingsTitle.trim(),
-        topic:   settingsTopic.trim() || null,
-        privacy: settingsPrivacy,
+        title:       settingsTitle.trim(),
+        description: settingsDescription.trim() || null,
+        topic:       settingsTopic.trim() || null,
+        privacy:     settingsPrivacy,
       });
       queryClient.setQueryData<any>(['voice-room', id], (old: any) =>
-        old ? { ...old, name: settingsTitle.trim(), title: settingsTitle.trim(), topic: settingsTopic.trim() || null, privacy: settingsPrivacy } : old
+        old ? { ...old, name: settingsTitle.trim(), title: settingsTitle.trim(), description: settingsDescription.trim() || null, topic: settingsTopic.trim() || null, privacy: settingsPrivacy } : old
       );
       showMessage({ message: '✅ Room settings saved', type: 'success' });
       setShowRoomSettings(false);
@@ -1428,20 +2347,53 @@ export default function VoiceRoomScreen() {
     } finally {
       setSettingsSaving(false);
     }
-  }, [id, settingsTitle, settingsTopic, settingsPrivacy, queryClient]);
+  }, [id, settingsTitle, settingsDescription, settingsTopic, settingsPrivacy, queryClient]);
 
   const handleToggleMicLock = useCallback(async () => {
     const currentLocked = room?.micLocked ?? false;
     try {
-      await api.patch(
-`/voice/${id}/mic-lock`
-, { locked: !currentLocked });
+      await api.patch(`/voice/${id}/mic-lock`, { locked: !currentLocked });
       showMessage({ message: !currentLocked ? '🔒 Mic Locked' : '🔓 Mic Unlocked', type: 'info' });
     } catch (e: any) { showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' }); }
   }, [id, room?.micLocked]);
 
+  // Toggle individual seat lock (HOST or MODERATOR only)
+  const handleToggleSeatLock = useCallback((seatIndex: number) => {
+    if (!(myRole === 'HOST' || myRole === 'MODERATOR')) return;
+    if (room?.micLocked) {
+      // micLocked already covers all seats — per-seat toggle not meaningful
+      showMessage({ message: '🔒 Mic is globally locked — unlock mic first', type: 'info' });
+      return;
+    }
+    const isLocked = lockedSeats.includes(seatIndex);
+    Alert.alert(
+      isLocked ? `🔓 Unlock Seat ${seatIndex + 1}` : `🔒 Lock Seat ${seatIndex + 1}`,
+      isLocked
+        ? `Allow speakers to occupy seat ${seatIndex + 1}?`
+        : `Prevent anyone from taking seat ${seatIndex + 1}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: isLocked ? 'Unlock' : 'Lock',
+          style: isLocked ? 'default' : 'destructive',
+          onPress: async () => {
+            try {
+              await api.patch(`/voice/${id}/seat-lock`, { seatIndex });
+              // Optimistic update — server will confirm via socket
+              setLockedSeats(prev =>
+                isLocked ? prev.filter(s => s !== seatIndex) : [...prev, seatIndex]
+              );
+              showMessage({ message: isLocked ? `🔓 Seat ${seatIndex + 1} unlocked` : `🔒 Seat ${seatIndex + 1} locked`, type: 'info' });
+            } catch (e: any) {
+              showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+            }
+          },
+        },
+      ]
+    );
+  }, [id, lockedSeats, room?.micLocked, myRole]);
 
-  // ── Room membership constants ─────────────────────────────────────────────
+
   const ROOM_LEVEL_CAPACITY: Record<number, number> = { 1:500,2:1000,3:2000,4:3500,5:5000,6:8000,7:12000,8:18000,9:25000,10:50000 };
   const MEMBER_LEVEL_META: Record<number, { label: string; emoji: string; color: string }> = {
     1:{label:'Fan',emoji:'⭐',color:'#9ca3af'},2:{label:'Regular',emoji:'🌟',color:'#6366f1'},
@@ -1458,7 +2410,6 @@ export default function VoiceRoomScreen() {
   // Fetch membership status on join
   useEffect(() => {
     api.get(`/voice/${id}/members/status`).then(r => {
-    api.get(/voice//members/status).then(r => {
       const d = r.data.data;
       setIsMember(d?.isMember ?? false);
       setMemberLevel(d?.member?.memberLevel ?? 0);
@@ -1470,7 +2421,7 @@ export default function VoiceRoomScreen() {
     if (joiningMember || !id) return;
     setJoiningMember(true);
     try {
-      await api.post(/voice//members/join);
+      await api.post(`/voice/${id}/members/join`);
       setIsMember(true); setMemberLevel(1); setMemberCount(c => c + 1);
       showMessage({ message: '⭐ You joined as a permanent member!', type: 'success' });
     } catch (e: any) {
@@ -1482,7 +2433,7 @@ export default function VoiceRoomScreen() {
     if (leavingMember || !id) return;
     setLeavingMember(true);
     try {
-      await api.delete(/voice//members/leave);
+      await api.delete(`/voice/${id}/members/leave`);
       setIsMember(false); setMemberLevel(0); setMemberCount(c => Math.max(0, c - 1));
       showMessage({ message: 'Left room membership', type: 'info' });
     } catch {} finally { setLeavingMember(false); }
@@ -1490,9 +2441,9 @@ export default function VoiceRoomScreen() {
 
   const handleUpgradeMemberLevel = useCallback(async (targetUserId: string, level: number) => {
     try {
-      await api.patch(/voice//members//upgrade, { memberLevel: level });
+      await api.patch(`/voice/${id}/members/${targetUserId}/upgrade`, { memberLevel: level });
       const meta = MEMBER_LEVEL_META[level];
-      showMessage({ message: ${meta?.emoji} Member upgraded to , type: 'success' });
+      showMessage({ message: `${meta?.emoji} Member upgraded to ${meta?.label ?? level}`, type: 'success' });
     } catch (e: any) {
       showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
     }
@@ -1500,11 +2451,11 @@ export default function VoiceRoomScreen() {
 
   const handleUpgradeRoomLevel = useCallback(async (level: number) => {
     try {
-      await api.patch(/voice//members/room-level, { level });
+      await api.patch(`/voice/${id}/members/room-level`, { level });
       queryClient.setQueryData<any>(['voice-room', id], (old: any) =>
         old ? { ...old, roomLevel: level } : old
       );
-      showMessage({ message: 🎉 Room upgraded to Level ! Max  members, type: 'success' });
+      showMessage({ message: `🎉 Room upgraded to Level ${level}! Max ${ROOM_LEVEL_CAPACITY[level] ?? '?'} members`, type: 'success' });
     } catch (e: any) {
       showMessage({ message: e?.response?.data?.message ?? 'Upgrade failed', type: 'danger' });
     }
@@ -1522,12 +2473,32 @@ export default function VoiceRoomScreen() {
   const handleToggleReactions = useCallback(async () => {
     if (!room) return;
     const newVal = !(room.reactionsEnabled ?? true);
+    try {
       await api.patch(`/voice/${id}`, { reactionsEnabled: newVal });
-      await api.patch(/voice/, { reactionsEnabled: newVal });
       queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, reactionsEnabled: newVal } : old);
       showMessage({ message: newVal ? '🌹 Reactions enabled' : '🚫 Reactions disabled', type: 'info' });
     } catch {}
   }, [id, room, queryClient]);
+
+  // ── Emoji reaction sender ────────────────────────────────────────────────────
+  // Same REACTIONS list as web VoiceRoomView for full parity.
+  const VOICE_REACTIONS = ['❤️', '😂', '😮', '👏', '🔥', '🌹', '✅', '🎉'] as const;
+
+  const sendReaction = useCallback((emoji: string) => {
+    setShowEmojiPicker(false);
+    // Show locally immediately (don't wait for server echo)
+    const reactionId = `local-${Date.now()}-${Math.random()}`;
+    const x = 10 + Math.random() * 70;
+    setFloatingEmojis(prev => [...prev.slice(-9), { id: reactionId, emoji, x }]);
+    setTimeout(() => {
+      setFloatingEmojis(prev => prev.filter(e => e.id !== reactionId));
+    }, 2500);
+    // Broadcast to room via socket — backend validates reactionsEnabled + room membership
+    const socket = getSocket();
+    if (socket && id) {
+      socket.emit('voice:reaction', { roomId: id, emoji });
+    }
+  }, [id]);
 
   const handleGiftAllStage = useCallback(async (giftId: string, count: number) => {
     try {
@@ -1563,13 +2534,44 @@ export default function VoiceRoomScreen() {
   if (!room)     return <View style={styles.centered}><Text style={styles.errorText}>Room not found</Text></View>;
 
   const myParticipant = participants.find(p => p.id === user?.id);
-  const canSendGifts  = isJoined && participants.some(p => ['HOST','MODERATOR','SPEAKER'].includes(p.role));
-  const speakers      = participants.filter(p => ['HOST','MODERATOR','SPEAKER'].includes(p.role));
-  const audience      = participants.filter(p => p.role === 'AUDIENCE');
+  const amHostOrMod   = myParticipant?.role === 'HOST' || myParticipant?.role === 'MODERATOR';
+  // On stage = has a seatNumber (authoritative from backend).
+  const amOnStage     = myParticipant?.seatNumber != null;
+  // Single source of truth for mute state — derived from participants, never separate state
+  const isMuted       = myParticipant?.isMuted ?? true;
+
+  // ── AUTHORITATIVE SEAT LAYOUT ────────────────────────────────────────────
+  // Seats are rendered directly from participant.seatNumber (1–12).
+  // No client-side ordering — the backend is the single source of truth.
+  const maxSpeakerSlots = (room as any)?.maxSpeakers ?? 12;
+
+  const speakerSlotArray: Array<Participant | null> = Array.from(
+    { length: maxSpeakerSlots },
+    (_, i) => {
+      const seatNum = i + 1; // index 0 = Seat 1
+      return participants.find(p => p.isActive && Number(p.seatNumber) === seatNum) ?? null;
+    }
+  );
+
+  // On stage = has a seatNumber; Audience = seatNumber is null
+  const speakers = participants.filter(p => p.isActive && p.seatNumber != null);
+  const audience = participants.filter(p => p.isActive && p.seatNumber == null);
+  const canSendGifts = isJoined && speakers.length > 0;
 
   return (
     <>
-      <Stack.Screen options={{ headerShown: true, title: room.name, headerTintColor: '#4f46e5', headerStyle: { backgroundColor: '#0f0f23' }, headerTitleStyle: { color: '#fff' } }} />
+      <Stack.Screen options={{ headerShown: false }} />
+
+      {/* ── Floating emoji reactions overlay (pointer-events: none) ─────────────
+          Phase 8: Each emoji animates with pop-spawn, float upward, side drift,
+          rotation, and fade-out — matching the web VoiceRoomView experience.  */}
+      {floatingEmojis.length > 0 && (
+        <View pointerEvents="none" style={{ position: 'absolute', bottom: 120, right: 12, zIndex: 50, width: 80 }}>
+          {floatingEmojis.map(fe => (
+            <FloatingEmojiItem key={fe.id} emoji={fe.emoji} x={fe.x} />
+          ))}
+        </View>
+      )}
 
       {/* Gift fly-in animation */}
       {animGift && (
@@ -1580,39 +2582,41 @@ export default function VoiceRoomScreen() {
         />
       )}
 
-      <View style={[styles.container, { paddingBottom: insets.bottom }]}>
-        {/* Room header */}
-        <View style={styles.roomHeader}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.roomName} numberOfLines={1}>{room.name}</Text>
-            {room.topic ? <Text style={styles.roomTopic} numberOfLines={1}>{room.topic}</Text> : null}
-          </View>
-          <View style={styles.roomHeaderRight}>
-            {room.isLive && <View style={styles.liveBadge}><View style={styles.liveDot} /><Text style={styles.liveText}>LIVE</Text></View>}
-            <TouchableOpacity style={styles.leaderBtn} onPress={() => setShowLeaderboard(true)}>
-              <Text style={{ fontSize: 16 }}>🏆</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.leaderBtn} onPress={() => router.push('/voice/stats' as any)}>
-              <Ionicons name="bar-chart-outline" size={16} color="#a5b4fc" />
-            </TouchableOpacity>
-            {/* Room Level badge */}
-            <View style={{ paddingHorizontal: 7, paddingVertical: 3, borderRadius: 10, backgroundColor: '#7c3aed22', borderWidth: 1, borderColor: '#7c3aed44', marginRight: 4 }}>
-              <Text style={{ fontSize: 9, fontWeight: '800', color: '#a5b4fc' }}>Lv{room.roomLevel ?? 1}</Text>
+      <View style={[mobStyles.container, { paddingBottom: insets.bottom }]}>
+        {/* Room header — white card matching target design */}
+        <View style={mobStyles.header}>
+          <View style={mobStyles.headerLeft}>
+            {/* Cover emoji / image */}
+            <View style={mobStyles.headerEmoji}>
+              <Text style={{ fontSize: 26 }}>{(room as any).coverEmoji ?? '🎙️'}</Text>
             </View>
-            {/* Auto-member badge — no join button needed, membership is automatic */}
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={mobStyles.headerTitle} numberOfLines={1}>{room.name}</Text>
+              {/* "● Live Room" subtitle */}
+              <View style={mobStyles.liveSubtitle}>
+                <View style={mobStyles.liveSubtitleDot} />
+                <Text style={mobStyles.liveSubtitleText}>
+                  {room.isLive ? 'Live Room' : 'Idle'}
+                </Text>
+              </View>
+            </View>
+          </View>
+          <View style={mobStyles.headerRight}>
+            {/* Member badge (e.g. "⭐ Mentor") */}
             {isJoined && isMember && (
-              <View style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12, backgroundColor: '#22c55e22', borderWidth: 1, borderColor: '#22c55e44', marginRight: 4 }}>
-                <Text style={{ fontSize: 9, fontWeight: '700', color: '#22c55e' }}>
-                  {MEMBER_LEVEL_META[memberLevel]?.emoji ?? '⭐'} Member
+              <View style={mobStyles.memberBadge}>
+                <Text style={mobStyles.memberBadgeText}>
+                  {MEMBER_LEVEL_META[memberLevel]?.emoji ?? '⭐'} {MEMBER_LEVEL_META[memberLevel]?.label ?? 'Member'}
                 </Text>
               </View>
             )}
-            {isJoined && !isMember && memberCount >= (ROOM_LEVEL_CAPACITY[room?.roomLevel ?? 1] ?? 500) && (
-              <View style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12, backgroundColor: '#37415122', borderWidth: 1, borderColor: '#37415144', marginRight: 4 }}>
-                <Text style={{ fontSize: 9, fontWeight: '700', color: '#9ca3af' }}>🔒 Full</Text>
-              </View>
-            )}
-              <Ionicons name="ellipsis-vertical" size={18} color="#a5b4fc" />
+            {/* Lv1 pill */}
+            <View style={mobStyles.levelBadge}>
+              <Text style={mobStyles.levelBadgeText}>Lv{room.roomLevel ?? 1}</Text>
+            </View>
+            {/* Three-dot menu */}
+            <TouchableOpacity style={mobStyles.dotMenuBtn} onPress={() => setShowRoomSettings(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Ionicons name="ellipsis-vertical" size={18} color="#374151" />
             </TouchableOpacity>
           </View>
         </View>
@@ -1620,58 +2624,234 @@ export default function VoiceRoomScreen() {
         {/* Persistent music indicator — shown when BgMusicPanel is playing */}
         {bgMusicTrack && (
           <TouchableOpacity
-            style={styles.musicBar}
+            style={mobStyles.musicBar}
             onPress={() => setShowBgMusic(true)}
             activeOpacity={0.85}
           >
-            <View style={styles.musicBarLeft}>
+            <View style={mobStyles.musicBarLeft}>
               <Text style={{ fontSize: 14 }}>{bgMusicTrack.isDeviceFile ? '📱' : '🎵'}</Text>
-              <Text style={styles.musicBarTitle} numberOfLines={1}>{bgMusicTrack.title}</Text>
+              <Text style={mobStyles.musicBarTitle} numberOfLines={1}>{bgMusicTrack.title}</Text>
             </View>
-            <View style={styles.musicBarRight}>
+            <View style={mobStyles.musicBarRight}>
               {bgMusicPlaying
-                ? <><View style={styles.musicBarDot} /><Text style={styles.musicBarStatus}>Playing</Text></>
-                : <Text style={styles.musicBarStatus}>Paused</Text>
+                ? <><View style={mobStyles.musicBarDot} /><Text style={mobStyles.musicBarStatus}>Playing</Text></>
+                : <Text style={mobStyles.musicBarStatus}>Paused</Text>
               }
-              <Ionicons name="chevron-forward" size={12} color="#4ade80" />
+              <Ionicons name="chevron-forward" size={12} color="#22c55e" />
             </View>
           </TouchableOpacity>
         )}
 
-        {/* Tabs: Speakers / Chat */}
-        <View style={styles.tabs}>
-          <TouchableOpacity style={[styles.tab, !showChat && styles.tabActive]} onPress={() => setShowChat(false)}>
-            <Ionicons name="people-outline" size={14} color={!showChat ? '#a5b4fc' : '#6b7280'} />
-            <Text style={[styles.tabText, !showChat && styles.tabTextActive]}>Room ({participants.length})</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.tab, showChat && styles.tabActive]} onPress={() => setShowChat(true)}>
-            <Ionicons name="chatbubbles-outline" size={14} color={showChat ? '#a5b4fc' : '#6b7280'} />
-            <Text style={[styles.tabText, showChat && styles.tabTextActive]}>Chat</Text>
-            {chatMessages.length > 0 && <View style={styles.chatBadge}><Text style={styles.chatBadgeText}>{chatMessages.length > 99 ? '99+' : chatMessages.length}</Text></View>}
-          </TouchableOpacity>
-        </View>
+        {/* Chat tab toggle — shown only when inside room */}
+        {isJoined && (
+          <View style={mobStyles.tabs}>
+            <TouchableOpacity style={[mobStyles.tab, !showChat && mobStyles.tabActive]} onPress={() => setShowChat(false)}>
+              <Ionicons name="people-outline" size={14} color={!showChat ? '#6366f1' : '#9ca3af'} />
+              <Text style={[mobStyles.tabText, !showChat && mobStyles.tabTextActive]}>Room</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[mobStyles.tab, showChat && mobStyles.tabActive]} onPress={() => setShowChat(true)}>
+              <Ionicons name="chatbubbles-outline" size={14} color={showChat ? '#6366f1' : '#9ca3af'} />
+              <Text style={[mobStyles.tabText, showChat && mobStyles.tabTextActive]}>Chat</Text>
+              {chatMessages.length > 0 && (
+                <View style={mobStyles.chatBadge}>
+                  <Text style={mobStyles.chatBadgeText}>{chatMessages.length > 99 ? '99+' : chatMessages.length}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          </View>
+        )}
 
         {!showChat ? (
-          /* Participants view */
-          <FlatList
-            data={[...speakers, ...audience]}
-            numColumns={3}
-            keyExtractor={p => p.id}
-            renderItem={({ item }) => {
-              // Calculate queue position for raised-hand audience members
-              const raisedAudience = audience.filter(p => p.handRaised);
-              const queuePos = item.role === 'AUDIENCE' && item.handRaised
-                ? raisedAudience.findIndex(p => p.id === item.id) + 1
-                : undefined;
-              return <ParticipantTile participant={item} queuePosition={queuePos} />;
-            }}
-            contentContainerStyle={styles.grid}
-            style={{ flex: 1 }}
-            ListEmptyComponent={<Text style={styles.emptyText}>{isJoined ? 'Waiting for participants…' : 'Join to see participants'}</Text>}
-            ListHeaderComponent={speakers.length > 0 && audience.length > 0 ? (
-              <Text style={styles.gridSectionLabel}>🎙 On Stage ({speakers.length})</Text>
-            ) : null}
-          />
+          /* ── Participants / Stage view ── */
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 12 }} showsVerticalScrollIndicator={false}>
+
+            {/* ── Stage header bar ── */}
+            <View style={mobStyles.stageBar}>
+              <View style={mobStyles.stageBarLeft}>
+                {/* Microphone icon */}
+                <View style={mobStyles.stageMicIcon}>
+                  <Ionicons name="mic" size={13} color="#6366f1" />
+                </View>
+                <Text style={mobStyles.stageBarLabel}>ON STAGE</Text>
+                <View style={mobStyles.stageCountBadge}>
+                  <Text style={mobStyles.stageCountText}>{speakers.length}</Text>
+                </View>
+              </View>
+              <View style={mobStyles.stageBarRight}>
+                {/* 👑 Lv1 · 500 members */}
+                <View style={mobStyles.levelMembersPill}>
+                  <Text style={mobStyles.levelMembersText}>
+                    👑 Lv{room.roomLevel ?? 1} · {(ROOM_LEVEL_CAPACITY[room.roomLevel ?? 1] ?? 500).toLocaleString()} members
+                  </Text>
+                </View>
+                {/* 👥 1 / 12 — stage full when all maxSpeakers seats are taken */}
+                <View style={[mobStyles.participantsPill, speakers.length >= ((room as any)?.maxSpeakers ?? 12) && mobStyles.participantsPillFull]}>
+                  <Text style={[mobStyles.participantsPillText, speakers.length >= ((room as any)?.maxSpeakers ?? 12) && { color: '#dc2626' }]}>
+                    👥 {speakers.length} / {(room as any)?.maxSpeakers ?? 12}
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            {/* ── Speakers grid card — white, rounded bottom, 4 columns ── */}
+            <View style={mobStyles.speakersCard}>
+              <View style={mobStyles.speakersGrid}>
+                {speakerSlotArray.map((speaker, i) => {
+                  const isMe = speaker?.id === user?.id;
+                  const seatLocked = lockedSeats.includes(i);
+                  const isLocked   = (room.micLocked ?? false) || seatLocked;
+
+                  if (speaker) {
+                    /* ── Filled seat ── */
+                    return (
+                      <TouchableOpacity
+                        key={speaker.id}
+                        style={mobStyles.speakerSlot}
+                        activeOpacity={0.8}
+                        onLongPress={() => {
+                          if (!canModerate || isMe) return;
+                          Alert.alert(speaker.name, 'Actions', [
+                            { text: 'Cancel', style: 'cancel' },
+                            { text: speaker.isMuted ? '🎙️ Unmute' : '🔇 Mute', onPress: () => handleMuteUser(speaker.id, speaker.isMuted) },
+                            { text: '⬇️ Move to audience', onPress: () => handlePromote(speaker.id, 'AUDIENCE') },
+                            ...(myRole === 'HOST' && speaker.role !== 'MODERATOR' ? [{ text: '🛡️ Make Mod', onPress: () => handleAssignMod(speaker.id, speaker.name) }] : []),
+                            ...(myRole === 'HOST' && speaker.role === 'MODERATOR' ? [{ text: '🛡️ Remove Mod', onPress: () => handleRemoveMod(speaker.id, speaker.name) }] : []),
+                            ...(myRole === 'HOST' ? [{ text: '🎙️ Pass Mic', onPress: () => handlePassMic(speaker) }] : []),
+                            { text: '🚫 Remove', style: 'destructive' as const, onPress: () => handleKick(speaker.id, speaker.name) },
+                          ]);
+                        }}
+                      >
+                        <View style={[mobStyles.avatarWrap, speaker.isSpeaking && mobStyles.avatarSpeaking]}>
+                          {/* Gap 2 fix: pulsing speaking ring — mirrors web's .vc-speaking-ring */}
+                          {speaker.isSpeaking && !speaker.isMuted && (
+                            <SpeakingRing size={SLOT_SIZE} />
+                          )}
+                          <Image
+                            source={{ uri: avatarUrl(speaker.avatar, speaker.name) }}
+                            style={[
+                              mobStyles.avatarImg,
+                              // Gap 2 fix: green border when speaking (mirrors web's .vc-speaking-ring)
+                              speaker.isSpeaking && !speaker.isMuted && {
+                                borderColor: '#22c55e',
+                                borderWidth: 3,
+                              },
+                            ]}
+                          />
+                          {/* Crown for host */}
+                          {speaker.role === 'HOST' && (
+                            <Text style={mobStyles.crownBadge}>👑</Text>
+                          )}
+                          {/* Shield for mod */}
+                          {speaker.role === 'MODERATOR' && (
+                            <Text style={[mobStyles.crownBadge, { fontSize: 11 }]}>🛡️</Text>
+                          )}
+                          {/* Gap 3 fix: hand raised indicator on stage slots */}
+                          {speaker.handRaised && (
+                            <Text style={mobStyles.handRaisedBadge}>✋</Text>
+                          )}
+                          {/* Mute indicator */}
+                          <View style={[mobStyles.muteBadge, speaker.isMuted ? mobStyles.muteBadgeMuted : mobStyles.muteBadgeLive]}>
+                            <Ionicons
+                              name={speaker.isMuted ? 'mic-off' : 'mic'}
+                              size={9}
+                              color={speaker.isMuted ? '#6b7280' : '#16a34a'}
+                            />
+                          </View>
+                          {/* "You" indicator */}
+                          {isMe && (
+                            <View style={mobStyles.meBadge}>
+                              <Text style={mobStyles.meBadgeText}>You</Text>
+                            </View>
+                          )}
+                        </View>
+                        <Text style={mobStyles.slotName} numberOfLines={1}>
+                          {isMe ? 'You' : speaker.name.split(' ')[0]}
+                        </Text>
+                        {/* Role label below name — matches web's vc-role-label */}
+                        {!isMe && (
+                          <Text style={[
+                            mobStyles.roleLabel,
+                            speaker.role === 'HOST'      && mobStyles.roleLabelHost,
+                            speaker.role === 'MODERATOR' && mobStyles.roleLabelMod,
+                            speaker.role === 'SPEAKER'   && mobStyles.roleLabelSpeaker,
+                          ]} numberOfLines={1}>
+                            {speaker.role === 'HOST'      ? '👑 Host'
+                             : speaker.role === 'MODERATOR' ? '🛡️ Mod'
+                             : '🎙️ Speaker'}
+                          </Text>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  }
+
+                  /* ── Empty seat ── */
+                  return (
+                    <TouchableOpacity
+                      key={`empty-${i}`}
+                      style={mobStyles.speakerSlot}
+                      activeOpacity={0.7}
+                      onPress={() => {
+                        if (canModerate && !(room.micLocked ?? false)) {
+                          handleToggleSeatLock(i);
+                        }
+                      }}
+                    >
+                      <View style={[
+                        mobStyles.emptySlot,
+                        isLocked && mobStyles.emptySlotLocked,
+                        // Gap 7 fix: yellow outline for individually locked seat (matches web)
+                        seatLocked && !(room.micLocked ?? false) && mobStyles.emptySlotSeatLocked,
+                      ]}>
+                        {isLocked ? (
+                          <Ionicons name="lock-closed" size={22} color="#9ca3af" />
+                        ) : (
+                          <Ionicons name="mic-outline" size={22} color="#94a3b8" />
+                        )}
+                        {/* "● Open" label */}
+                        {!isLocked && (
+                          <View style={mobStyles.openLabel}>
+                            <View style={mobStyles.openDot} />
+                            <Text style={mobStyles.openLabelText}>Open</Text>
+                          </View>
+                        )}
+                      </View>
+                      <Text style={mobStyles.slotNum}>{i + 1}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+
+            {/* ── Audience section ── */}
+            <View style={mobStyles.audienceSection}>
+              <View style={mobStyles.audienceHeader}>
+                <Ionicons name="people-outline" size={14} color="#374151" />
+                <Text style={mobStyles.audienceLabel}>AUDIENCE · {audience.length}</Text>
+              </View>
+              {audience.length === 0 ? (
+                <Text style={mobStyles.audienceEmpty}>No listeners yet</Text>
+              ) : (
+                <View style={mobStyles.audienceGrid}>
+                  {audience.map(p => (
+                    <View key={p.id} style={mobStyles.audienceItem}>
+                      <Image
+                        source={{ uri: avatarUrl(p.avatar, p.name) }}
+                        style={[mobStyles.audienceAvatar, p.handRaised && mobStyles.audienceAvatarHand]}
+                      />
+                      {p.handRaised && (
+                        <View style={mobStyles.handBadgeAud}>
+                          <Text style={{ fontSize: 10 }}>✋</Text>
+                        </View>
+                      )}
+                      <Text style={mobStyles.audienceName} numberOfLines={1}>
+                        {p.id === user?.id ? 'You' : p.name.split(' ')[0]}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+          </ScrollView>
         ) : (
           /* Chat view */
           <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -1711,59 +2891,253 @@ export default function VoiceRoomScreen() {
           </KeyboardAvoidingView>
         )}
 
-        {/* Controls bar */}
-        <View style={styles.controls}>
+        {/* Controls bar — light theme */}
+        <View style={mobStyles.controls}>
           {!isJoined ? (
-            <TouchableOpacity style={styles.joinBtn} onPress={handleJoin} disabled={isConnecting}>
-              {isConnecting ? <ActivityIndicator color="#fff" /> : <><Ionicons name="headset" size={20} color="#fff" /><Text style={styles.joinBtnText}>Join Room</Text></>}
-            </TouchableOpacity>
+            user?.role === 'SUPER_ADMIN' ? (
+              <View style={[mobStyles.joinBtn, { backgroundColor: '#92400e', flexDirection: 'column', gap: 2, paddingVertical: 10 }]}>
+                <Text style={[mobStyles.joinBtnText, { fontSize: 12 }]}>Platform admins cannot join voice rooms</Text>
+                <Text style={{ color: '#fde68a', fontSize: 10 }}>Use admin panel to manage rooms</Text>
+              </View>
+            ) : (
+              <TouchableOpacity style={mobStyles.joinBtn} onPress={handleJoin} disabled={isConnecting}>
+                {isConnecting ? <ActivityIndicator color="#fff" /> : <><Ionicons name="headset" size={20} color="#fff" /><Text style={mobStyles.joinBtnText}>Join Room</Text></>}
+              </TouchableOpacity>
+            )
           ) : (
             <>
-              {/* Hand raise */}
-              {/* Hand raise — disabled when mic is locked */}
-              <TouchableOpacity
-                style={[styles.ctrlBtn, handRaised && styles.ctrlBtnActive, room?.micLocked ? { opacity: 0.4 } : {}]}
-                onPress={toggleHand}
-                disabled={room?.micLocked ?? false}
-                accessibilityLabel={room?.micLocked ? 'Mic locked by host' : handRaised ? 'Lower hand' : 'Raise hand'}
-                accessibilityRole="button"
-              >
-                <Text style={{ fontSize: 20 }}>{room?.micLocked ? '🔒' : '✋'}</Text>
-                <Text style={styles.ctrlLabel}>{room?.micLocked ? 'Locked' : handRaised ? 'Lower' : 'Raise'}</Text>
-              </TouchableOpacity>
+              {/* Stage control — behaviour depends on role */}
+              {amHostOrMod ? (
+                amOnStage ? (
+                  /* HOST/MOD on stage — "End Mic" button */
+                  <TouchableOpacity
+                    style={[mobStyles.ctrlBtn, { backgroundColor: '#fef3c7', borderWidth: 1.5, borderColor: '#fde68a' }]}
+                    onPress={async () => {
+                      // Optimistic update — move HOST/MOD to audience immediately
+                      // amOnStage = amHostOrMod && !myParticipant.isMuted
+                      // We must update both local isMuted state AND participants array
+                      // [removed redundant setIsMuted]  //setIsMuted(true);
+                      setParticipants(prev => prev.map(p =>
+                        p.id === user?.id ? { ...p, isMuted: true } : p
+                      ));
+                      if (lk.connected) await lk.disableMic();
+                      try {
+                        await api.post(`/voice/${id}/drop-mic`);
+                        showMessage({ message: '⬇️ Left the stage', type: 'info' });
+                      } catch (e: any) {
+                        // Rollback on API error
+                        // [removed redundant setIsMuted]  //setIsMuted(false);
+                        setParticipants(prev => prev.map(p =>
+                          p.id === user?.id ? { ...p, isMuted: false } : p
+                        ));
+                        if (lk.connected) await lk.enableMic();
+                        showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+                      }
+                    }}
+                  >
+                    <Text style={{ fontSize: 20 }}>🎤</Text>
+                    <Text style={[mobStyles.ctrlLabel, { color: '#d97706' }]}>End Mic</Text>
+                  </TouchableOpacity>
+                ) : (
+                  /* HOST/MOD in audience — "Take Stage" button */
+                  <TouchableOpacity
+                    style={[mobStyles.ctrlBtn, mobStyles.ctrlBtnActive, room?.micLocked ? { opacity: 0.4 } : {}]}
+                    onPress={async () => {
+                      if (room?.micLocked) {
+                        showMessage({ message: '🔒 Mic is locked', type: 'warning' });
+                        return;
+                      }
+                      // Optimistic update — show HOST as on-stage immediately
+                      // [removed redundant setIsMuted]  //setIsMuted(false);
+                      setParticipants(prev => prev.map(p =>
+                        p.id === user?.id ? { ...p, isMuted: false } : p
+                      ));
+                      if (lk.connected) await lk.enableMic();
+                      try {
+                        await api.post(`/voice/${id}/grab-mic`);
+                        showMessage({ message: '🎤 You are on stage!', type: 'success' });
+                      } catch (e: any) {
+                        // Rollback on error
+                        // [removed redundant setIsMuted]  //setIsMuted(true);
+                        setParticipants(prev => prev.map(p =>
+                          p.id === user?.id ? { ...p, isMuted: true } : p
+                        ));
+                        if (lk.connected) await lk.disableMic();
+                        showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+                      }
+                    }}
+                    disabled={room?.micLocked ?? false}
+                  >
+                    <Text style={{ fontSize: 20 }}>{room?.micLocked ? '🔒' : '🎤'}</Text>
+                    <Text style={[mobStyles.ctrlLabel, { color: '#6366f1' }]}>
+                      {room?.micLocked ? 'Locked' : 'Go Live'}
+                    </Text>
+                  </TouchableOpacity>
+                )
+              ) : myParticipant?.role === 'SPEAKER' && amOnStage ? (
+                /* SPEAKER on stage — "End Mic" / leave stage button.
+                   SPEAKERs are not HOST/MOD so amHostOrMod is false, but they
+                   hold a seat and must be able to voluntarily return to audience. */
+                <TouchableOpacity
+                  style={[mobStyles.ctrlBtn, { backgroundColor: '#fffbeb', borderWidth: 1.5, borderColor: '#fde68a' }]}
+                  onPress={async () => {
+                    const prevSeatNumber = myParticipant?.seatNumber;
+                    // Optimistic update — move SPEAKER to audience immediately
+                    setParticipants(prev => prev.map(p =>
+                      p.id === user?.id ? { ...p, isMuted: true, seatNumber: null, role: 'AUDIENCE' } : p
+                    ));
+                    if (lk.connected) await lk.disableMic();
+                    try {
+                      await api.post(`/voice/${id}/drop-mic`);
+                      showMessage({ message: '⬇ Left the stage', type: 'info' });
+                    } catch (e: any) {
+                      // Rollback optimistic update on error
+                      setParticipants(prev => prev.map(p =>
+                        p.id === user?.id ? { ...p, isMuted: false, seatNumber: prevSeatNumber, role: 'SPEAKER' } : p
+                      ));
+                      if (lk.connected) await lk.enableMic();
+                      showMessage({ message: e?.response?.data?.message ?? 'Failed to leave stage', type: 'danger' });
+                    }
+                  }}
+                >
+                  <Text style={{ fontSize: 20 }}>🎤</Text>
+                  <Text style={[mobStyles.ctrlLabel, { color: '#d97706' }]}>End Mic</Text>
+                </TouchableOpacity>
+              ) : (
+                /* Normal user — context-aware:
+                   Free Stage ON + seat available → grab mic instantly (no approval)
+                   Free Stage ON + stage full     → queue (waiting for seat)
+                   Free Stage OFF                 → raise hand (waiting for HOST/MOD approval)
+                   Already in queue               → lower hand to cancel */
+                <TouchableOpacity
+                  style={[
+                    mobStyles.ctrlBtn,
+                    handRaised && mobStyles.ctrlBtnActive,
+                    room?.micLocked ? { opacity: 0.4 } : {},
+                    // Green tint when free stage and seat available
+                    (!handRaised && room?.isOpenMic && speakers.length < ((room as any)?.maxSpeakers ?? 12) && !(room?.micLocked))
+                      ? { backgroundColor: '#6366f122', borderColor: '#6366f155' }
+                      : {},
+                  ]}
+                  onPress={() => {
+                    if (room?.micLocked) { showMessage({ message: '🔒 Mic is locked by the host', type: 'warning' }); return; }
+                    if (handRaised) {
+                      // Lower hand — cancel queue
+                      toggleHand();
+                      return;
+                    }
+                    if (room?.isOpenMic) {
+                      // Free Stage ON: grab mic directly (backend handles queue if full)
+                      handleGrabMic();
+                    } else {
+                      // Free Stage OFF: raise hand for approval
+                      toggleHand();
+                    }
+                  }}
+                  disabled={room?.micLocked ?? false}
+                >
+                  <Text style={{ fontSize: 22 }}>
+                    {room?.micLocked ? '🔒'
+                     : handRaised ? '✋'
+                     : room?.isOpenMic && speakers.length < ((room as any)?.maxSpeakers ?? 12) ? '🎙️'
+                     : '✋'}
+                  </Text>
+                  <Text style={[
+                    mobStyles.ctrlLabel,
+                    !handRaised && room?.isOpenMic && speakers.length < ((room as any)?.maxSpeakers ?? 12) && !(room?.micLocked)
+                      ? { color: '#6366f1' }
+                      : {},
+                  ]}>
+                    {room?.micLocked
+                      ? 'Locked'
+                      : handRaised
+                        ? 'Waiting'
+                        : room?.isOpenMic && speakers.length < ((room as any)?.maxSpeakers ?? 12)
+                          ? 'Take Seat'
+                          : room?.isOpenMic
+                            ? 'Stage Full'
+                            : 'Raise Hand'}
+                  </Text>
+                </TouchableOpacity>
+              )}
 
-              {/* Mic */}
-              <TouchableOpacity
-                style={[styles.ctrlBtn, !isMuted && styles.ctrlBtnActive]}
-                onPress={toggleMic}
-                accessibilityLabel={isMuted ? 'Unmute microphone' : 'Mute microphone'}
-                accessibilityRole="button"
-              >
-                <Ionicons name={isMuted ? 'mic-off' : 'mic'} size={22} color={isMuted ? '#6b7280' : '#4f46e5'} />
-                <Text style={styles.ctrlLabel}>{isMuted ? 'Unmute' : 'Mute'}</Text>
-              </TouchableOpacity>
+              {/* Mic — only shown when on stage */}
+              {amOnStage && (
+                <TouchableOpacity
+                  style={[
+                    mobStyles.ctrlBtn,
+                    lk.micEnabled && mobStyles.ctrlBtnActive,
+                    (myParticipant?.mutedByModerator && myParticipant?.isMuted) && { opacity: 0.5 },
+                  ]}
+                  onPress={toggleMic}
+                  disabled={!!(myParticipant?.mutedByModerator && myParticipant?.isMuted)}
+                >
+                  <Ionicons
+                    name={myParticipant?.mutedByModerator && myParticipant?.isMuted ? 'lock-closed' : lk.micEnabled ? 'mic' : 'mic-off'}
+                    size={22}
+                    color={myParticipant?.mutedByModerator && myParticipant?.isMuted ? '#ef4444' : lk.micEnabled ? '#6366f1' : '#6b7280'}
+                  />
+                  <Text style={mobStyles.ctrlLabel}>
+                    {myParticipant?.mutedByModerator && myParticipant?.isMuted ? 'Mod Muted' : lk.micEnabled ? 'Mute' : 'Unmute'}
+                  </Text>
+                </TouchableOpacity>
+              )}
 
-              {/* 🎁 Gift button — only shown when speakers are on stage */}
+              {/* Gift button */}
               {canSendGifts && (
-                <TouchableOpacity style={[styles.ctrlBtn, styles.ctrlBtnGift]} onPress={() => setShowGiftPanel(true)}>
+                <TouchableOpacity style={[mobStyles.ctrlBtn, mobStyles.ctrlBtnGift]} onPress={() => setShowGiftPanel(true)}>
                   <Text style={{ fontSize: 22 }}>🎁</Text>
-                  <Text style={[styles.ctrlLabel, { color: '#f59e0b' }]}>Gift</Text>
+                  <Text style={[mobStyles.ctrlLabel, { color: '#d97706' }]}>Gift</Text>
                 </TouchableOpacity>
               )}
 
-              {/* Host controls button */}
-              {canModerate && (
-                <TouchableOpacity style={[styles.ctrlBtn, showHostControls && styles.ctrlBtnActive]}
-                  onPress={() => setShowHostControls(true)}>
-                  <Ionicons name="shield-outline" size={22} color={showHostControls ? '#4f46e5' : '#6b7280'} />
-                  <Text style={styles.ctrlLabel}>Host</Text>
+              {/* ⚔️ PK Battle button — host only */}
+              {myRole === 'HOST' && (
+                <TouchableOpacity
+                  style={[mobStyles.ctrlBtn, activePKMatchId ? { backgroundColor: '#ef444422', borderWidth: 1.5, borderColor: '#ef444466' } : {}]}
+                  onPress={() => setShowPKPanel(true)}
+                >
+                  <Text style={{ fontSize: 22 }}>⚔️</Text>
+                  <Text style={[mobStyles.ctrlLabel, activePKMatchId ? { color: '#ef4444' } : {}]}>
+                    {activePKMatchId ? 'PK LIVE' : 'PK'}
+                  </Text>
                 </TouchableOpacity>
               )}
+
+              {/* Host controls */}
+              {canModerate && (
+                <TouchableOpacity style={[mobStyles.ctrlBtn, showHostControls && mobStyles.ctrlBtnActive]}
+                  onPress={() => setShowHostControls(true)}>
+                  <Ionicons name="shield-outline" size={22} color={showHostControls ? '#6366f1' : '#6b7280'} />
+                  <Text style={mobStyles.ctrlLabel}>Host</Text>
+                </TouchableOpacity>
+              )}
+
+              {/* Emoji Reactions button — matches web VoiceRoomView reaction button.
+                  Disabled (opacity 0.4) when reactionsEnabled is false (same as web). */}
+              <TouchableOpacity
+                style={[mobStyles.ctrlBtn, showEmojiPicker && mobStyles.ctrlBtnActive]}
+                onPress={() => {
+                  if (room?.reactionsEnabled ?? true) {
+                    setShowEmojiPicker(v => !v);
+                  }
+                }}
+                disabled={!(room?.reactionsEnabled ?? true)}
+              >
+                <Text style={{ fontSize: 22, opacity: (room?.reactionsEnabled ?? true) ? 1 : 0.4 }}>🌹</Text>
+                <Text style={[mobStyles.ctrlLabel, { opacity: (room?.reactionsEnabled ?? true) ? 1 : 0.4 }]}>React</Text>
+              </TouchableOpacity>
+
+              {/* Share / Invite */}
+              <TouchableOpacity style={mobStyles.ctrlBtn} onPress={() => setShowShare(true)}>
+                <Text style={{ fontSize: 22 }}>📨</Text>
+                <Text style={mobStyles.ctrlLabel}>Invite</Text>
+              </TouchableOpacity>
 
               {/* Leave */}
-              <TouchableOpacity style={[styles.ctrlBtn, styles.ctrlBtnDanger]} onPress={handleLeave}>
+              <TouchableOpacity style={[mobStyles.ctrlBtn, mobStyles.ctrlBtnDanger]} onPress={handleLeave}>
                 <Ionicons name="exit-outline" size={22} color="#ef4444" />
-                <Text style={[styles.ctrlLabel, { color: '#ef4444' }]}>Leave</Text>
+                <Text style={[mobStyles.ctrlLabel, { color: '#ef4444' }]}>Leave</Text>
               </TouchableOpacity>
             </>
           )}
@@ -1791,6 +3165,48 @@ export default function VoiceRoomScreen() {
         roomId={id!}
         onClose={() => setShowLeaderboard(false)}
       />
+
+      {/* ── Emoji Reaction Picker Modal ───────────────────────────────────────────
+          Appears when user taps the React button in the bottom bar.
+          Same REACTIONS list as web for full parity.
+          Dismissed on tap-outside or after picking an emoji.               */}
+      <Modal
+        visible={showEmojiPicker}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowEmojiPicker(false)}
+      >
+        <TouchableOpacity
+          style={{ flex: 1, justifyContent: 'flex-end' }}
+          activeOpacity={1}
+          onPress={() => setShowEmojiPicker(false)}
+        >
+          <View style={{
+            backgroundColor: '#1a1a2e',
+            borderTopLeftRadius: 20,
+            borderTopRightRadius: 20,
+            padding: 20,
+            paddingBottom: insets.bottom + 20,
+          }}>
+            <View style={{ width: 40, height: 4, backgroundColor: '#374151', borderRadius: 2, alignSelf: 'center', marginBottom: 16 }} />
+            <Text style={{ color: '#e5e7eb', fontSize: 14, fontWeight: '700', marginBottom: 14, textAlign: 'center' }}>
+              React to the room
+            </Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-around', flexWrap: 'wrap', gap: 8 }}>
+              {VOICE_REACTIONS.map(emoji => (
+                <TouchableOpacity
+                  key={emoji}
+                  onPress={() => sendReaction(emoji)}
+                  style={{ padding: 10, borderRadius: 12, backgroundColor: '#111827', minWidth: 52, alignItems: 'center' }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={{ fontSize: 28 }}>{emoji}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {/* ── Mic Pass Modals ─────────────────────────────────────── */}
       {/* Host offering mic to a specific user */}
@@ -1836,7 +3252,8 @@ export default function VoiceRoomScreen() {
             { icon: '🏆', label: 'Leaderboard',       onPress: () => { setShowDotMenu(false); setShowLeaderboard(true); } },
             { icon: '📊', label: 'My Stats',           onPress: () => { setShowDotMenu(false); router.push('/voice/stats' as any); } },
             { icon: '🎵', label: 'Background Music',   onPress: () => { setShowDotMenu(false); setShowBgMusic(true); } },
-            ...(isHost ? [{ icon: '⚙️', label: 'Room Settings', onPress: () => { setShowDotMenu(false); setShowRoomSettings(true); } }] : []),
+            ...(canModerate ? [{ icon: '⭐', label: 'Members', onPress: () => { setShowDotMenu(false); setShowMembersPanel(true); } }] : []),
+            ...(myRole === 'HOST' ? [{ icon: '⚙️', label: 'Room Settings', onPress: () => { setShowDotMenu(false); setShowRoomSettings(true); } }] : []),
           ].map((item, i, arr) => (
             <TouchableOpacity
               key={i}
@@ -1859,6 +3276,16 @@ export default function VoiceRoomScreen() {
         onNowPlayingChange={(track, playing) => { setBgMusicTrack(track); setBgMusicPlaying(playing); }}
       />
 
+      {/* ── Member Management Panel (FIX-L12a) ──────────────────── */}
+      {isJoined && (
+        <MemberManagementPanel
+          visible={showMembersPanel}
+          roomId={id!}
+          myRole={myRole as 'HOST' | 'MODERATOR' | 'SPEAKER' | 'AUDIENCE'}
+          onClose={() => setShowMembersPanel(false)}
+        />
+      )}
+
       {/* ── Room Settings Modal (host only) ─────────────────────── */}
       <Modal
         visible={showRoomSettings}
@@ -1868,6 +3295,7 @@ export default function VoiceRoomScreen() {
         onShow={() => {
           // Seed form fields from current room data when modal opens
           setSettingsTitle(room?.name ?? room?.title ?? '');
+          setSettingsDescription(room?.description ?? '');
           setSettingsTopic(room?.topic ?? '');
           setSettingsPrivacy((room?.privacy ?? 'PUBLIC') as 'PUBLIC'|'PRIVATE'|'INVITE_ONLY');
         }}
@@ -1908,7 +3336,90 @@ export default function VoiceRoomScreen() {
               />
             </View>
 
-            {/* Privacy */}
+            {/* Description */}
+            <View>
+              <Text style={{ color: '#9ca3af', fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Description (optional)</Text>
+              <TextInput
+                style={{ backgroundColor: '#1e1e3a', color: '#e5e7eb', borderRadius: 12, padding: 12, fontSize: 14, borderWidth: 1, borderColor: '#374151', minHeight: 80, textAlignVertical: 'top' }}
+                value={settingsDescription}
+                onChangeText={setSettingsDescription}
+                placeholder="Tell people what your room is about…"
+                placeholderTextColor="#6b7280"
+                maxLength={500}
+                multiline
+                numberOfLines={3}
+              />
+              <Text style={{ color: '#6b7280', fontSize: 10, textAlign: 'right', marginTop: 3 }}>
+                {settingsDescription.length}/500
+              </Text>
+            </View>
+
+            {/* Cover Image */}
+            <View>
+              <Text style={{ color: '#9ca3af', fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Cover Image (optional)</Text>
+              {/* Current cover preview */}
+              {(room as any)?.coverImageUrl ? (
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+                  <Image
+                    source={{ uri: (room as any).coverImageUrl }}
+                    style={{ width: 64, height: 64, borderRadius: 12, backgroundColor: '#1e1e3a' }}
+                  />
+                  <Text style={{ color: '#6b7280', fontSize: 12, flex: 1 }}>Current cover image</Text>
+                  <TouchableOpacity
+                    style={{ backgroundColor: '#ef444422', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: '#ef444444' }}
+                    onPress={async () => {
+                      try {
+                        await api.patch(`/voice/${id}`, { coverImageUrl: null });
+                        queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, coverImageUrl: null } : old);
+                        showMessage({ message: '🗑️ Cover image removed', type: 'info' });
+                      } catch { showMessage({ message: 'Failed to remove cover', type: 'danger' }); }
+                    }}
+                  >
+                    <Ionicons name="trash-outline" size={14} color="#ef4444" />
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+              <TouchableOpacity
+                style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: '#1e1e3a', borderRadius: 12, padding: 14, borderWidth: 1.5, borderStyle: 'dashed', borderColor: '#374151' }}
+                onPress={async () => {
+                  try {
+                    const result = await DocumentPicker.getDocumentAsync({
+                      type: ['image/jpeg', 'image/png', 'image/webp'],
+                      copyToCacheDirectory: true,
+                    });
+                    if (result.canceled || !result.assets?.[0]) return;
+                    const asset = result.assets[0];
+                    if (asset.size && asset.size > 2 * 1024 * 1024) {
+                      showMessage({ message: 'Image must be under 2 MB', type: 'warning' }); return;
+                    }
+                    const formData = new FormData();
+                    // Determine content type — Expo DocumentPicker may return undefined/null on some Android devices
+                    const mimeType = (asset.mimeType && asset.mimeType !== 'undefined')
+                      ? asset.mimeType
+                      : asset.name?.endsWith('.png') ? 'image/png'
+                      : asset.name?.endsWith('.webp') ? 'image/webp'
+                      : 'image/jpeg';
+                    formData.append('cover', { uri: asset.uri, name: asset.name ?? 'cover.jpg', type: mimeType } as any);
+                    // No Content-Type header needed — React Native's FormData + axios
+                    // sets multipart/form-data with the correct boundary automatically
+                    const res = await api.post(`/voice/${id}/cover`, formData);
+                    const newUrl = res.data.data?.coverImageUrl;
+                    if (newUrl) {
+                      queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, coverImageUrl: newUrl } : old);
+                      showMessage({ message: '🖼️ Cover image updated!', type: 'success' });
+                    }
+                  } catch (e: any) {
+                    showMessage({ message: e?.response?.data?.message ?? 'Upload failed', type: 'danger' });
+                  }
+                }}
+              >
+                <Ionicons name="image-outline" size={20} color="#6b7280" />
+                <Text style={{ color: '#9ca3af', fontSize: 14, fontWeight: '600' }}>
+                  {(room as any)?.coverImageUrl ? 'Change Cover Image' : 'Upload Cover Image'}
+                </Text>
+              </TouchableOpacity>
+              <Text style={{ color: '#6b7280', fontSize: 10, marginTop: 4 }}>JPG, PNG, WebP · Max 2 MB</Text>
+            </View>
             <View>
               <Text style={{ color: '#9ca3af', fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Privacy</Text>
               {([
@@ -1973,24 +3484,103 @@ export default function VoiceRoomScreen() {
             </TouchableOpacity>
           </View>
 
+          {/* ── Raised Hands Queue ─────────────────────────────────────────────
+               Shows only participants who have raised their hand (in queue),
+               sorted by raise time (FIFO). Each row has per-user Approve + Reject.
+               Matches the web Hands drawer. Supports 100+ with max-height scroll. */}
+          {participants.filter(p => p.handRaised && p.seatNumber == null).length > 0 && (() => {
+            const raisedHand = participants
+              .filter(p => p.handRaised && p.seatNumber == null)
+              .sort((a, b) => (a._joinedAt ?? '').localeCompare(b._joinedAt ?? ''));
+            return (
+              <View style={{ borderBottomWidth: 1, borderBottomColor: '#1e1e3a' }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8 }}>
+                  <Text style={{ color: '#f59e0b', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    ✋ Raised Hands ({raisedHand.length})
+                  </Text>
+                  <TouchableOpacity
+                    style={{ backgroundColor: '#10b98122', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: '#10b98144' }}
+                    onPress={handleApproveQueue}
+                  >
+                    <Text style={{ color: '#10b981', fontSize: 11, fontWeight: '700' }}>Approve Next</Text>
+                  </TouchableOpacity>
+                </View>
+                {/* Max 280dp height — scrollable for 100+ entries */}
+                <FlatList
+                  data={raisedHand}
+                  keyExtractor={p => p.id + '_hand'}
+                  style={{ maxHeight: 280 }}
+                  contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8, gap: 4 }}
+                  renderItem={({ item: p, index }) => (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#1e1e3a', borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#f59e0b22' }}>
+                      {/* Position number */}
+                      <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: '#f59e0b22', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                        <Text style={{ color: '#f59e0b', fontSize: 11, fontWeight: '800' }}>{index + 1}</Text>
+                      </View>
+                      {/* Avatar */}
+                      <Image source={{ uri: avatarUrl(p.avatar, p.name) }} style={{ width: 32, height: 32, borderRadius: 16, flexShrink: 0 }} />
+                      {/* Name + role */}
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={{ color: '#e5e7eb', fontSize: 13, fontWeight: '600' }} numberOfLines={1}>{p.name}</Text>
+                        <Text style={{ color: p.role === 'MODERATOR' ? '#10b981' : '#9ca3af', fontSize: 10, fontWeight: '600' }}>{p.role}</Text>
+                      </View>
+                      {/* Approve button — always enabled; backend is authoritative for seat count */}
+                      <TouchableOpacity
+                        style={{ backgroundColor: '#10b98133', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: '#10b98166' }}
+                        onPress={() => handleApproveQueueUser(p.id)}
+                      >
+                        <Text style={{ color: '#10b981', fontSize: 11, fontWeight: '700' }}>
+                          ✅
+                        </Text>
+                      </TouchableOpacity>
+                      {/* Reject button */}
+                      <TouchableOpacity
+                        style={{ backgroundColor: '#ef444422', borderRadius: 8, padding: 6, borderWidth: 1, borderColor: '#ef444444' }}
+                        onPress={async () => {
+                          try {
+                            await api.delete(`/voice/${id}/queue/reject/${p.id}`);
+                          } catch { /* non-fatal */ }
+                        }}
+                      >
+                        <Ionicons name="close" size={14} color="#ef4444" />
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                />
+              </View>
+            );
+          })()}
+
           {/* Quick actions */}
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, padding: 16 }}>
-            <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#f59e0b22', borderWidth: 1, borderColor: '#f59e0b44', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
+            <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#f59e0b22', borderWidth: 1, borderColor: '#f59e0b44', borderRadius: 12, padding: 12, alignItems: 'center', gap: 4 }}
               onPress={() => handleMuteAll()}>
               <Ionicons name="mic-off" size={22} color="#f59e0b" />
               <Text style={{ color: '#f59e0b', fontSize: 12, fontWeight: '600' }}>Mute All</Text>
+              <Text style={{ color: '#6b7280', fontSize: 9 }}>Silence speakers on stage</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#10b98122', borderWidth: 1, borderColor: '#10b98144', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
+            {/* Unmute All */}
+            <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#22c55e22', borderWidth: 1, borderColor: '#22c55e44', borderRadius: 12, padding: 12, alignItems: 'center', gap: 4 }}
+              onPress={handleUnmuteAll}>
+              <Ionicons name="mic" size={22} color="#22c55e" />
+              <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '600' }}>Unmute All</Text>
+              <Text style={{ color: '#6b7280', fontSize: 9 }}>Unsilence speakers on stage</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#10b98122', borderWidth: 1, borderColor: '#10b98144', borderRadius: 12, padding: 12, alignItems: 'center', gap: 4 }}
               onPress={handleApproveQueue}>
               <Ionicons name="checkmark-circle" size={22} color="#10b981" />
               <Text style={{ color: '#10b981', fontSize: 12, fontWeight: '600' }}>Approve Hand</Text>
+              <Text style={{ color: '#6b7280', fontSize: 9 }}>Next in queue → stage</Text>
             </TouchableOpacity>
-            {/* Open Mic toggle */}
-            <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: room?.isOpenMic ? '#6366f122' : '#1e1e3a', borderWidth: 1, borderColor: room?.isOpenMic ? '#6366f155' : '#374151', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
+            {/* Free Stage (Open Mic) toggle */}
+            <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: room?.isOpenMic ? '#6366f122' : '#1e1e3a', borderWidth: 1, borderColor: room?.isOpenMic ? '#6366f155' : '#374151', borderRadius: 12, padding: 12, alignItems: 'center', gap: 4 }}
               onPress={handleToggleOpenMic}>
               <Ionicons name="mic" size={22} color={room?.isOpenMic ? '#6366f1' : '#6b7280'} />
               <Text style={{ color: room?.isOpenMic ? '#6366f1' : '#6b7280', fontSize: 12, fontWeight: '600' }}>
-                {room?.isOpenMic ? 'Open Mic ON' : 'Open Mic'}
+                {room?.isOpenMic ? 'Free Stage ON' : 'Free Stage OFF'}
+              </Text>
+              <Text style={{ color: '#6b7280', fontSize: 9, textAlign: 'center' }}>
+                {room?.isOpenMic ? 'Anyone can join freely' : 'Approval required'}
               </Text>
             </TouchableOpacity>
             {/* Lock Mic toggle */}
@@ -2011,7 +3601,7 @@ export default function VoiceRoomScreen() {
             </TouchableOpacity>
             {/* Slow Mode toggle */}
             <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: (room?.slowMode ?? false) ? '#ef444422' : '#1e1e3a', borderWidth: 1, borderColor: (room?.slowMode ?? false) ? '#ef444444' : '#374151', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
-              onPress={() => api.patch(/voice/, { slowMode: !(room?.slowMode ?? false) }).then(() => queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, slowMode: !(room?.slowMode ?? false) } : old)).catch(() => {})}>
+              onPress={() => api.patch(`/voice/${id}`, { slowMode: !(room?.slowMode ?? false) }).then(() => queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, slowMode: !(room?.slowMode ?? false) } : old)).catch(() => {})}>
               <Ionicons name='timer-outline' size={22} color={(room?.slowMode ?? false) ? '#ef4444' : '#6b7280'} />
               <Text style={{ color: (room?.slowMode ?? false) ? '#ef4444' : '#6b7280', fontSize: 12, fontWeight: '600' }}>
                 {(room?.slowMode ?? false) ? '⏱ Slow Mode ON' : '⏱ Slow Mode'}
@@ -2019,7 +3609,7 @@ export default function VoiceRoomScreen() {
             </TouchableOpacity>
             {/* Message type: all / followers / none */}
             <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#1e1e3a', borderWidth: 1, borderColor: '#374151', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
-              onPress={() => { const types = ['all','followers','none']; const next = types[(types.indexOf(room?.messageType ?? 'all') + 1) % 3]; api.patch(/voice/, { messageType: next }).then(() => queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, messageType: next } : old)).catch(() => {}); }}>
+              onPress={() => { const types = ['all','followers','none']; const next = types[(types.indexOf(room?.messageType ?? 'all') + 1) % 3]; api.patch(`/voice/${id}`, { messageType: next }).then(() => queryClient.setQueryData<any>(['voice-room', id], (old: any) => old ? { ...old, messageType: next } : old)).catch(() => {}); }}>
               <Ionicons name='people-outline' size={22} color='#6b7280' />
               <Text style={{ color: '#a5b4fc', fontSize: 12, fontWeight: '600' }}>
                 {room?.messageType === 'all' ? '🌍 All Chat' : room?.messageType === 'followers' ? '👥 Followers' : '🔇 No Chat'}
@@ -2040,8 +3630,8 @@ export default function VoiceRoomScreen() {
                 onPress={() => {
                   const nextLevel = (room?.roomLevel ?? 1) + 1;
                   Alert.alert(
-                    Upgrade to Level ?,
-                    Max members: ,
+                    `Upgrade to Level ${nextLevel}?`,
+                    `Max members: ${ROOM_LEVEL_CAPACITY[nextLevel] ?? '?'}`,
                     [
                       { text: 'Cancel', style: 'cancel' },
                       { text: 'Upgrade', onPress: () => handleUpgradeRoomLevel(nextLevel) }
@@ -2055,12 +3645,20 @@ export default function VoiceRoomScreen() {
               </TouchableOpacity>
             )}
             {myRole === 'HOST' && (
-              <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#ef444422', borderWidth: 1, borderColor: '#ef444444', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
-                onPress={() => { setShowHostControls(false); handleEndRoom(); }}>
-                <Ionicons name="stop-circle" size={22} color="#ef4444" />
-                <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: '600' }}>End Room</Text>
-              </TouchableOpacity>
+              // Rooms are PERMANENT — "End Room" terminates the room forever.
+              // Hosts should just "Leave" — the room stays as IDLE and can be rejoined.
+              // This button is intentionally hidden from the UI to prevent accidental termination.
+              // SUPER_ADMIN can terminate via the admin panel if needed.
+              null
             )}
+            {/* Members management — FIX-L12a */}
+            <TouchableOpacity
+              style={{ flex: 1, minWidth: '45%', backgroundColor: '#6366f122', borderWidth: 1, borderColor: '#6366f155', borderRadius: 12, padding: 12, alignItems: 'center', gap: 6 }}
+              onPress={() => { setShowHostControls(false); setShowMembersPanel(true); }}
+            >
+              <Ionicons name="people" size={22} color="#a5b4fc" />
+              <Text style={{ color: '#a5b4fc', fontSize: 12, fontWeight: '600' }}>Members</Text>
+            </TouchableOpacity>
           </View>
 
           {/* Participant list with actions */}
@@ -2135,9 +3733,19 @@ export default function VoiceRoomScreen() {
                       {myRole === 'HOST' && p.role === 'MODERATOR' && (
                         <TouchableOpacity style={{ padding: 7, backgroundColor: '#6b728022', borderRadius: 8 }}
                           onPress={() => handleRemoveMod(p.id, p.name)}>
-                          <Ionicons name="shield-outline" size={16} color="#6b7280" />
+                          <Ionicons name="shield-checkmark-outline" size={16} color="#9ca3af" />
                         </TouchableOpacity>
                       )}
+                      {/* Ban from room (HOST/MOD only) */}
+                      <TouchableOpacity style={{ padding: 7, backgroundColor: '#ef444422', borderRadius: 8 }}
+                        onPress={() => handleBan(p.id, p.name)}>
+                        <Ionicons name="ban-outline" size={16} color="#ef4444" />
+                      </TouchableOpacity>
+                      {/* Kick from room */}
+                      <TouchableOpacity style={{ padding: 7, backgroundColor: '#f97316' + '22', borderRadius: 8 }}
+                        onPress={() => handleKick(p.id, p.name)}>
+                        <Ionicons name="log-out-outline" size={16} color="#f97316" />
+                      </TouchableOpacity>
                       {/* Transfer Host (HOST only) */}
                       {myRole === 'HOST' && (
                         <TouchableOpacity style={{ padding: 7, backgroundColor: '#f59e0b22', borderRadius: 8 }}
@@ -2146,10 +3754,9 @@ export default function VoiceRoomScreen() {
                         </TouchableOpacity>
                       )}
                       {/* Pin Speaker — HOST and MOD can pin any speaker/mod */}
-                      {(p.role === 'SPEAKER' || p.role === 'MODERATOR' || p.role === 'HOST') && !isMe && (
+                      {p.role !== 'AUDIENCE' && !isMe && (
                         <TouchableOpacity style={{ padding: 7, backgroundColor: '#0ea5e922', borderRadius: 8 }}
-                          onPress={() => handlePinSpeaker(p.id)}
-                          title="Pin to stage">
+                          onPress={() => handlePinSpeaker(p.id)}>
                           <Ionicons name="pin" size={16} color="#0ea5e9" />
                         </TouchableOpacity>
                       )}
@@ -2168,9 +3775,486 @@ export default function VoiceRoomScreen() {
           />
         </View>
       </Modal>
+
+      {/* ── Share / Invite Room Sheet ─────────────────────────────────────── */}
+      <VoiceShareSheetMobile
+        visible={showShare}
+        roomId={id!}
+        roomTitle={room?.name ?? room?.title ?? ''}
+        onClose={() => setShowShare(false)}
+      />
+
+      {/* ── PK Battle Panel (host only) ──────────────────────────────────── */}
+      {myRole === 'HOST' && id && (
+        <MobilePKPanel
+          visible={showPKPanel}
+          onClose={() => setShowPKPanel(false)}
+          roomId={id}
+          speakers={speakers}
+          myUserId={user?.id ?? ''}
+          onPKStarted={(pkMatchId, participants, durationSeconds) => {
+            setActivePKMatchId(pkMatchId);
+            setActivePKParticipants(participants);
+            setActivePKDuration(durationSeconds);
+          }}
+        />
+      )}
+
+      {/* ── PK Live Score Banner ─────────────────────────────────────────── */}
+      {activePKMatchId && (
+        <MobilePKBanner
+          pkMatchId={activePKMatchId}
+          participants={activePKParticipants}
+          durationSeconds={activePKDuration}
+          onDismiss={() => setActivePKMatchId(null)}
+          onWatch={() => router.push(`/pk/${activePKMatchId}` as any)}
+        />
+      )}
     </>
   );
 }
+
+// ─── Voice Share Sheet (Mobile) ──────────────────────────────────────────────
+// Share a Voice Club room to DM, Group Chat, Feed, Community, or native Share.
+// Reuses existing backend endpoints — same contract as web VoiceShareSheet.
+//
+// BUG-003 FIX: roomUrl now uses EXPO_PUBLIC_WEB_URL (web app origin), not the API URL.
+// BUG-005 FIX: Feed/Community share uses LIVE_ROOM_SHARE type for rich LiveCard.
+// Community: new tab using GET /communities/mine + POST /posts { communityId }.
+type ShareTab = 'dm' | 'group' | 'feed' | 'community' | 'copy';
+
+function VoiceShareSheetMobile({ visible, roomId, roomTitle, onClose }: {
+  visible: boolean; roomId: string; roomTitle: string; onClose: () => void;
+}) {
+  const [tab, setTab]           = useState<ShareTab>('dm');
+  const [search, setSearch]     = useState('');
+  const [sending, setSending]   = useState<string | null>(null);
+  const [feedNote, setFeedNote] = useState('');
+
+  // BUG-003 FIX: Use the configured web app URL, NOT the API server URL.
+  // EXPO_PUBLIC_WEB_URL must be set in mobile/.env (e.g. http://localhost:3000 in dev,
+  // https://app.halqa.com in production).
+  const webBase = (process.env.EXPO_PUBLIC_WEB_URL ?? '').replace(/\/$/, '');
+  const roomUrl = `${webBase}/voice-club/${roomId}`;
+  // Plain-text link for DM/Group (text messages, not structured cards)
+  const shareBody = `🎙️ Join me in "${roomTitle}" on Halqa Voice Club!\n${roomUrl}`;
+
+  // ── Fetch DM conversations ─────────────────────────────────────────────────
+  // Use friends list so ALL friends appear, even if no conversation exists yet.
+  // GET /social/friends returns: [{ id, firstName, lastName, avatarUrl }]
+  const { data: dmConvs = [] } = useQuery<any[]>({
+    queryKey: ['dm-friends-share-mob'],
+    queryFn:  () => api.get('/social/friends?limit=100').then(r => {
+      const friends: any[] = r.data.data ?? []
+      return friends.map((f: any) => ({ id: f.id, otherUser: f }))
+    }),
+    enabled:  visible && tab === 'dm',
+    staleTime: 30_000,
+  });
+
+  // ── Fetch Group chats ──────────────────────────────────────────────────────
+  const { data: groupConvs = [] } = useQuery<any[]>({
+    queryKey: ['group-conversations-share-mob'],
+    queryFn:  () => api.get('/group-chat/conversations?limit=50').then(r => r.data.data ?? []),
+    enabled:  visible && tab === 'group',
+    staleTime: 30_000,
+  });
+
+  // ── Fetch user's communities ───────────────────────────────────────────────
+  const { data: myCommunities = [] } = useQuery<any[]>({
+    queryKey: ['my-communities-share-mob'],
+    queryFn:  () => api.get('/communities/mine').then(r => r.data.data?.items ?? r.data.data ?? []),
+    enabled:  visible && tab === 'community',
+    staleTime: 60_000,
+  });
+
+  const sendDM = async (conv: any) => {
+    const friendUserId = conv.id; // conv.id is the friend's userId (from friends list)
+    setSending(friendUserId);
+    try {
+      // Task 6: Get or create a DM conversation with this friend first.
+      // conv.id is the friend's userId, NOT a conversation id.
+      const convRes = await api.get(`/dm/conversations/${friendUserId}/with`);
+      const convId = convRes.data.data?.id;
+      if (!convId) throw new Error('Could not start conversation');
+      // Send structured VOICE_ROOM_SHARE — only roomId is authoritative
+      await api.post(`/dm/conversations/${convId}/messages`, {
+        msgType:       'VOICE_ROOM_SHARE',
+        refEntityType: 'VoiceRoom',
+        refEntityId:   roomId,
+        body:          feedNote.trim() || null,
+      });
+      showMessage({ message: `✅ Sent to ${conv.otherUser?.firstName ?? 'DM'}`, type: 'success' });
+      onClose();
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+    } finally { setSending(null); }
+  };
+
+  const sendGroup = async (conv: any) => {
+    setSending(conv.id);
+    try {
+      // Phase 6: send structured VOICE_ROOM_SHARE — only roomId is authoritative
+      await api.post(`/group-chat/conversations/${conv.id}/messages`, {
+        type:          'VOICE_ROOM_SHARE',
+        refEntityType: 'VoiceRoom',
+        refEntityId:   roomId,
+        body:          feedNote.trim() || null,
+      });
+      showMessage({ message: `✅ Sent to ${conv.name ?? 'Group'}`, type: 'success' });
+      onClose();
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+    } finally { setSending(null); }
+  };
+
+  // BUG-005 FIX: Feed share uses LIVE_ROOM_SHARE so LiveCard renders a rich room card.
+  const postFeed = async () => {
+    setSending('feed');
+    try {
+      await api.post('/posts', {
+        type:          'LIVE_ROOM_SHARE',
+        refEntityType: 'VoiceRoom',
+        refEntityId:   roomId,
+        body:          feedNote.trim() || null,
+        visibility:    'PUBLIC',
+      });
+      showMessage({ message: '✅ Posted to your feed', type: 'success' });
+      onClose();
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+    } finally { setSending(null); }
+  };
+
+  // Community share — same LIVE_ROOM_SHARE type with communityId
+  const postCommunity = async (community: any) => {
+    setSending(community.id);
+    try {
+      await api.post('/posts', {
+        type:          'LIVE_ROOM_SHARE',
+        refEntityType: 'VoiceRoom',
+        refEntityId:   roomId,
+        communityId:   community.id,
+        body:          feedNote.trim() || null,
+        visibility:    'PUBLIC',
+      });
+      showMessage({ message: `✅ Shared to ${community.name}`, type: 'success' });
+      onClose();
+    } catch (e: any) {
+      showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
+    } finally { setSending(null); }
+  };
+
+  // Native Share sheet — uses correct web URL
+  const nativeShare = async () => {
+    try {
+      const { Share } = require('react-native');
+      await Share.share({ message: shareBody, url: roomUrl });
+    } catch { /* user cancelled */ }
+  };
+
+  const filteredDM          = search ? dmConvs.filter((c: any)       => `${c.otherUser?.firstName} ${c.otherUser?.lastName}`.toLowerCase().includes(search.toLowerCase())) : dmConvs;
+  const filteredGroup       = search ? groupConvs.filter((c: any)    => (c.name ?? '').toLowerCase().includes(search.toLowerCase())) : groupConvs;
+  const filteredCommunities = search ? myCommunities.filter((c: any) => (c.name ?? '').toLowerCase().includes(search.toLowerCase())) : myCommunities;
+
+  const TABS: { id: ShareTab; label: string; emoji: string }[] = [
+    { id: 'dm',        label: 'Friend',    emoji: '👤' },
+    { id: 'group',     label: 'Group',     emoji: '👥' },
+    { id: 'feed',      label: 'Feed',      emoji: '📢' },
+    { id: 'community', label: 'Community', emoji: '🏘️' },
+    { id: 'copy',      label: 'Share',     emoji: '🔗' },
+  ];
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <TouchableOpacity style={vss.backdrop} activeOpacity={1} onPress={onClose} />
+      <KeyboardAvoidingView style={vss.sheet} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        {/* Handle */}
+        <View style={vss.handle} />
+
+        {/* Header */}
+        <View style={vss.header}>
+          <View style={{ flex: 1 }}>
+            <Text style={vss.title}>Share Room</Text>
+            <Text style={vss.subtitle} numberOfLines={1}>🎙️ {roomTitle}</Text>
+          </View>
+          <TouchableOpacity onPress={onClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="close" size={22} color="#94a3b8" />
+          </TouchableOpacity>
+        </View>
+
+        {/* Tab bar */}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={vss.tabsScroll} contentContainerStyle={vss.tabsContent}>
+          {TABS.map(t => (
+            <TouchableOpacity
+              key={t.id}
+              style={[vss.tabBtn, tab === t.id && vss.tabBtnActive]}
+              onPress={() => { setTab(t.id); setSearch(''); }}
+            >
+              <Text style={[vss.tabTxt, tab === t.id && vss.tabTxtActive]}>{t.emoji} {t.label}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+
+        {/* Search (DM / Group / Community) */}
+        {(tab === 'dm' || tab === 'group' || tab === 'community') && (
+          <View style={vss.searchRow}>
+            <Ionicons name="search-outline" size={14} color="#94a3b8" />
+            <TextInput
+              style={vss.searchInput}
+              value={search}
+              onChangeText={setSearch}
+              placeholder={tab === 'dm' ? 'Search friends…' : tab === 'group' ? 'Search groups…' : 'Search communities…'}
+              placeholderTextColor="#94a3b8"
+              allowFontScaling={false}
+            />
+          </View>
+        )}
+
+        {/* Content */}
+        <View style={{ flex: 1, minHeight: 0 }}>
+
+          {/* DM */}
+          {tab === 'dm' && (
+            <View style={{ flex: 1 }}>
+              {/* Optional note for the Voice Club share */}
+              <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4 }}>
+                <TextInput
+                  style={[vss.feedInput, { minHeight: 48, marginBottom: 0 }]}
+                  value={feedNote}
+                  onChangeText={setFeedNote}
+                  placeholder="Add a note (optional)…"
+                  placeholderTextColor="#94a3b8"
+                  multiline
+                  numberOfLines={2}
+                  maxLength={500}
+                />
+              </View>
+              {filteredDM.length === 0
+                ? <Text style={vss.empty}>No conversations found</Text>
+                : <FlatList
+                    data={filteredDM}
+                    keyExtractor={(c: any) => c.id}
+                    contentContainerStyle={{ paddingBottom: 20 }}
+                    renderItem={({ item: conv }: any) => (
+                      <View style={vss.row}>
+                        <Image
+                          source={{ uri: avatarUrl(conv.otherUser?.avatarUrl, `${conv.otherUser?.firstName ?? ''} ${conv.otherUser?.lastName ?? ''}`) }}
+                          style={vss.avatar}
+                        />
+                        <Text style={vss.name} numberOfLines={1}>{conv.otherUser?.firstName} {conv.otherUser?.lastName}</Text>
+                        <TouchableOpacity
+                          style={[vss.sendBtn, sending === conv.id && vss.sendBtnDisabled]}
+                          onPress={() => sendDM(conv)}
+                          disabled={!!sending}
+                        >
+                          {sending === conv.id
+                            ? <ActivityIndicator size="small" color="#fff" />
+                            : <Text style={vss.sendBtnTxt}>Send</Text>
+                          }
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                  />
+              }
+            </View>
+          )}
+
+          {/* Group */}
+          {tab === 'group' && (
+            <View style={{ flex: 1 }}>
+              {/* Optional note for the Voice Club share */}
+              <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4 }}>
+                <TextInput
+                  style={[vss.feedInput, { minHeight: 48, marginBottom: 0 }]}
+                  value={feedNote}
+                  onChangeText={setFeedNote}
+                  placeholder="Add a note (optional)…"
+                  placeholderTextColor="#94a3b8"
+                  multiline
+                  numberOfLines={2}
+                  maxLength={500}
+                />
+              </View>
+              {filteredGroup.length === 0
+                ? <Text style={vss.empty}>No groups found</Text>
+                : <FlatList
+                    data={filteredGroup}
+                    keyExtractor={(c: any) => c.id}
+                    contentContainerStyle={{ paddingBottom: 20 }}
+                    renderItem={({ item: conv }: any) => (
+                      <View style={vss.row}>
+                        <Image
+                          source={{ uri: avatarUrl(conv.avatarUrl, conv.name ?? 'G') }}
+                          style={vss.avatar}
+                        />
+                        <View style={{ flex: 1, minWidth: 0 }}>
+                          <Text style={vss.name} numberOfLines={1}>{conv.name}</Text>
+                          {conv.memberCount ? <Text style={vss.meta}>{conv.memberCount} members</Text> : null}
+                        </View>
+                        <TouchableOpacity
+                          style={[vss.sendBtn, sending === conv.id && vss.sendBtnDisabled]}
+                          onPress={() => sendGroup(conv)}
+                          disabled={!!sending}
+                        >
+                          {sending === conv.id
+                            ? <ActivityIndicator size="small" color="#fff" />
+                            : <Text style={vss.sendBtnTxt}>Send</Text>
+                          }
+                        </TouchableOpacity>
+                      </View>
+                    )}
+                  />
+              }
+            </View>
+          )}
+
+          {/* Feed */}
+          {tab === 'feed' && (
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16 }} keyboardShouldPersistTaps="handled">
+              <Text style={vss.feedLabel}>Add a note (optional)</Text>
+              <Text style={[vss.feedLabel, { color: '#94a3b8', fontSize: 11, marginBottom: 8 }]}>
+                A Voice Club card will appear in the feed — recipients can tap &quot;Join&quot; directly.
+              </Text>
+              <TextInput
+                style={vss.feedInput}
+                value={feedNote}
+                onChangeText={setFeedNote}
+                placeholder="Say something about the room…"
+                placeholderTextColor="#94a3b8"
+                multiline
+                numberOfLines={3}
+                maxLength={500}
+              />
+              <TouchableOpacity
+                style={[vss.postBtn, !!sending && vss.postBtnDisabled]}
+                onPress={postFeed}
+                disabled={!!sending}
+              >
+                {sending === 'feed'
+                  ? <ActivityIndicator color="#fff" />
+                  : <Text style={vss.postBtnTxt}>📢 Post to Feed</Text>
+                }
+              </TouchableOpacity>
+            </ScrollView>
+          )}
+
+          {/* Community */}
+          {tab === 'community' && (
+            filteredCommunities.length === 0 ? (
+              <Text style={vss.empty}>
+                {myCommunities.length === 0 ? 'You are not a member of any communities' : 'No communities found'}
+              </Text>
+            ) : (
+              <View style={{ flex: 1 }}>
+                {/* Optional note */}
+                <View style={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 4 }}>
+                  <TextInput
+                    style={[vss.feedInput, { minHeight: 52, marginBottom: 0 }]}
+                    value={feedNote}
+                    onChangeText={setFeedNote}
+                    placeholder="Add a note (optional)…"
+                    placeholderTextColor="#94a3b8"
+                    multiline
+                    numberOfLines={2}
+                    maxLength={500}
+                  />
+                </View>
+                <FlatList
+                  data={filteredCommunities}
+                  keyExtractor={(c: any) => c.id}
+                  contentContainerStyle={{ paddingBottom: 20 }}
+                  renderItem={({ item: community }: any) => (
+                    <View style={vss.row}>
+                      <Image
+                        source={{ uri: avatarUrl(community.avatarUrl, community.name ?? 'C') }}
+                        style={vss.avatar}
+                      />
+                      <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={vss.name} numberOfLines={1}>{community.name}</Text>
+                        <Text style={vss.meta}>{community.privacy}</Text>
+                      </View>
+                      <TouchableOpacity
+                        style={[vss.sendBtn, sending === community.id && vss.sendBtnDisabled]}
+                        onPress={() => postCommunity(community)}
+                        disabled={!!sending}
+                      >
+                        {sending === community.id
+                          ? <ActivityIndicator size="small" color="#fff" />
+                          : <Text style={vss.sendBtnTxt}>Share</Text>
+                        }
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                />
+              </View>
+            )
+          )}
+
+          {/* Copy / Share */}
+          {tab === 'copy' && (
+            <View style={{ padding: 16 }}>
+              <View style={vss.linkBox}>
+                <Text style={vss.linkTxt} numberOfLines={3}>{shareBody}</Text>
+              </View>
+              <TouchableOpacity style={vss.postBtn} onPress={nativeShare}>
+                <Text style={vss.postBtnTxt}>🔗 Share / Copy Link</Text>
+              </TouchableOpacity>
+              <Text style={vss.copyHint}>Uses your device&apos;s share sheet</Text>
+            </View>
+          )}
+
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+// ─── VoiceShareSheetMobile styles ────────────────────────────────────────────
+// Referenced as `vss.*` inside VoiceShareSheetMobile above.
+const vss = StyleSheet.create({
+  // Modal backdrop
+  backdrop:       { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.55)' },
+  // Bottom sheet container
+  sheet:          { backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: '72%' as any, flex: 0 },
+  // Drag handle
+  handle:         { width: 40, height: 4, backgroundColor: '#e2e8f0', borderRadius: 2, alignSelf: 'center', marginTop: 12, marginBottom: 0 },
+  // Header row
+  header:         { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 12, paddingBottom: 0 },
+  title:          { fontSize: 16, fontWeight: '700', color: '#1e293b' },
+  subtitle:       { fontSize: 12, color: '#94a3b8', marginTop: 2, flex: 1 },
+  // Tab bar
+  tabsScroll:     { flexGrow: 0 },
+  tabsContent:    { flexDirection: 'row', gap: 6, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 0 },
+  tabBtn:         { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: '#e5e7eb', backgroundColor: '#f9fafb' },
+  tabBtnActive:   { borderColor: '#7c3aed', backgroundColor: '#ede9fe' },
+  tabTxt:         { fontSize: 12, fontWeight: '600', color: '#64748b' },
+  tabTxtActive:   { color: '#7c3aed' },
+  // Search row
+  searchRow:      { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginTop: 10, backgroundColor: '#f9fafb', borderRadius: 10, borderWidth: 1, borderColor: '#e5e7eb', paddingHorizontal: 10, paddingVertical: 8 },
+  searchInput:    { flex: 1, fontSize: 13, color: '#1e293b', padding: 0 },
+  // Empty state
+  empty:          { textAlign: 'center', color: '#94a3b8', fontSize: 13, padding: 24 },
+  // Shared list row (DM / Group / Community)
+  row:            { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 16, paddingVertical: 10 },
+  avatar:         { width: 42, height: 42, borderRadius: 21, backgroundColor: '#e0e7ff' },
+  name:           { fontSize: 13, fontWeight: '600', color: '#1e293b' },
+  meta:           { fontSize: 11, color: '#94a3b8', marginTop: 1 },
+  sendBtn:        { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 10, backgroundColor: '#7c3aed' },
+  sendBtnDisabled:{ backgroundColor: '#f1f5f9' },
+  sendBtnTxt:     { fontSize: 12, fontWeight: '600', color: '#fff' },
+  // Feed / Community note input
+  feedLabel:      { fontSize: 12, color: '#64748b', marginBottom: 4 },
+  feedInput:      { width: '100%' as any, padding: 10, borderRadius: 10, borderWidth: 1, borderColor: '#e5e7eb', fontSize: 13, color: '#374151', backgroundColor: '#f9fafb', minHeight: 72, textAlignVertical: 'top' },
+  // Post button
+  postBtn:        { marginTop: 12, paddingVertical: 12, borderRadius: 12, backgroundColor: '#7c3aed', alignItems: 'center', justifyContent: 'center' },
+  postBtnDisabled:{ backgroundColor: '#f1f5f9' },
+  postBtnTxt:     { fontSize: 14, fontWeight: '700', color: '#fff' },
+  // Copy / Share tab
+  linkBox:        { backgroundColor: '#f8fafc', borderRadius: 10, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: '#e5e7eb' },
+  linkTxt:        { fontSize: 12, color: '#64748b' },
+  copyHint:       { textAlign: 'center', color: '#94a3b8', fontSize: 11, marginTop: 8 },
+});
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
@@ -2221,6 +4305,11 @@ const styles = StyleSheet.create({
   queueBadge:       { position: 'absolute', top: -4, left: -4, backgroundColor: '#4f46e5', borderRadius: 8, paddingHorizontal: 4, paddingVertical: 1, minWidth: 18, alignItems: 'center' },
   queueBadgeText:   { color: '#fff', fontSize: 9, fontWeight: '800' },
   queueLabel:       { color: '#6366f1', fontSize: 8, fontWeight: '700', marginTop: 2 },
+  // Empty speaker slot
+  emptySlot:        { width: 56, height: 56, borderRadius: 28, backgroundColor: '#111827', borderWidth: 1.5, borderStyle: 'dashed', borderColor: '#374151', alignItems: 'center', justifyContent: 'center' },
+  emptySlotLocked:  { backgroundColor: '#1a1020', borderColor: '#7c3aed', borderStyle: 'solid' },
+  emptySlotHint:    { fontSize: 7, color: '#6b7280', marginTop: 2, textAlign: 'center' },
+  emptySlotNum:     { fontSize: 9, color: '#6b7280', marginTop: 4, fontWeight: '600' },
 
   // Chat
   chatList:         { padding: 10, gap: 8 },
@@ -2301,3 +4390,580 @@ const styles = StyleSheet.create({
   leaderName:       { color: '#e5e7eb', fontSize: 14, fontWeight: '700' },
   leaderCoins:      { color: '#9ca3af', fontSize: 12, marginTop: 2 },
 });
+
+// ─── Mobile UI styles — light theme matching the target screenshot ────────────
+const SLOT_SIZE = Math.floor((SCREEN_W - 32 - 24) / 4); // 4 columns, 16px side padding, 8px gaps
+
+const mobStyles = StyleSheet.create({
+  // ── Root container ──────────────────────────────────────────────────────────
+  container: {
+    flex: 1,
+    backgroundColor: '#eef0f8', // light blue-grey matching target
+  },
+
+  // ── Header ──────────────────────────────────────────────────────────────────
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#fff',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e8eaf0',
+    gap: 8,
+  },
+  headerLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    minWidth: 0,
+  },
+  headerEmoji: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: '#f0f0ff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  headerTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#1a1a2e',
+    lineHeight: 20,
+  },
+  liveSubtitle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 1,
+  },
+  liveSubtitleDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    backgroundColor: '#22c55e',
+  },
+  liveSubtitleText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#22c55e',
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexShrink: 0,
+  },
+  memberBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: '#22c55e',
+    backgroundColor: '#f0fdf4',
+  },
+  memberBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#22c55e',
+  },
+  levelBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+    backgroundColor: '#f5f3ff',
+    borderWidth: 1,
+    borderColor: '#ddd6fe',
+  },
+  levelBadgeText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#5b21b6',
+  },
+  dotMenuBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#f3f4f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+
+  // ── Music bar ────────────────────────────────────────────────────────────────
+  musicBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#f0fdf4',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderBottomWidth: 1,
+    borderBottomColor: '#bbf7d0',
+  },
+  musicBarLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flex: 1,
+    minWidth: 0,
+  },
+  musicBarTitle: {
+    color: '#16a34a',
+    fontSize: 12,
+    fontWeight: '600',
+    flex: 1,
+  },
+  musicBarRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  musicBarDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#22c55e',
+  },
+  musicBarStatus: {
+    color: '#16a34a',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+
+  // ── Tabs (Room / Chat) ───────────────────────────────────────────────────────
+  tabs: {
+    flexDirection: 'row',
+    backgroundColor: '#fff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e5e7eb',
+  },
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    gap: 5,
+  },
+  tabActive: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#6366f1',
+  },
+  tabText: {
+    color: '#9ca3af',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  tabTextActive: {
+    color: '#6366f1',
+  },
+  chatBadge: {
+    backgroundColor: '#6366f1',
+    borderRadius: 8,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+  },
+  chatBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+
+  // ── Stage bar ────────────────────────────────────────────────────────────────
+  stageBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 8,
+    backgroundColor: '#eef0f8',
+  },
+  stageBarLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  stageMicIcon: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#ede9fe',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stageBarLabel: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#6366f1',
+    letterSpacing: 0.5,
+  },
+  stageCountBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 20,
+    backgroundColor: '#ede9fe',
+  },
+  stageCountText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#6366f1',
+  },
+  stageBarRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  levelMembersPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 20,
+    backgroundColor: '#f5f3ff',
+    borderWidth: 1,
+    borderColor: '#ddd6fe',
+  },
+  levelMembersText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#5b21b6',
+  },
+  participantsPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 20,
+    backgroundColor: '#f3f4f6',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  participantsPillFull: {
+    backgroundColor: '#fee2e2',
+    borderColor: '#fca5a5',
+  },
+  participantsPillText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#374151',
+  },
+
+  // ── Speakers grid card ───────────────────────────────────────────────────────
+  speakersCard: {
+    backgroundColor: '#fff',
+    borderBottomLeftRadius: 20,
+    borderBottomRightRadius: 20,
+    paddingHorizontal: 16,
+    paddingTop: 4,
+    paddingBottom: 16,
+    marginBottom: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  speakersGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+
+  // ── Individual speaker slot ──────────────────────────────────────────────────
+  speakerSlot: {
+    width: SLOT_SIZE,
+    alignItems: 'center',
+    gap: 4,
+  },
+  avatarWrap: {
+    position: 'relative',
+    width: SLOT_SIZE,
+    height: SLOT_SIZE,
+    borderRadius: SLOT_SIZE / 2,
+    overflow: 'visible',
+  },
+  avatarSpeaking: {
+    // Speaking ring handled via borderColor on avatarImg
+  },
+  avatarImg: {
+    width: SLOT_SIZE,
+    height: SLOT_SIZE,
+    borderRadius: SLOT_SIZE / 2,
+    backgroundColor: '#e0e7ff',
+    borderWidth: 2.5,
+    borderColor: '#e0e7ff',
+  },
+  crownBadge: {
+    position: 'absolute',
+    top: -8,
+    right: -4,
+    fontSize: 14,
+    zIndex: 3,
+  },
+  // Gap 3 fix: hand raised badge on stage slots (mirrors web ✋ top-left)
+  handRaisedBadge: {
+    position: 'absolute',
+    top: -6,
+    left: -4,
+    fontSize: 13,
+    zIndex: 3,
+  },
+  muteBadge: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 2,
+    borderWidth: 1.5,
+    borderColor: '#fff',
+  },
+  muteBadgeLive: {
+    backgroundColor: '#dcfce7',
+  },
+  muteBadgeMuted: {
+    backgroundColor: '#f3f4f6',
+  },
+  meBadge: {
+    position: 'absolute',
+    bottom: 2,
+    left: -2,
+    backgroundColor: '#6366f1',
+    borderRadius: 6,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+  },
+  meBadgeText: {
+    color: '#fff',
+    fontSize: 8,
+    fontWeight: '800',
+  },
+  slotName: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: '#374151',
+    textAlign: 'center',
+    maxWidth: SLOT_SIZE,
+  },
+
+  // ── Role label below name — matches web .vc-role-label ──────────────────────
+  roleLabel: {
+    fontSize: 9,
+    fontWeight: '700',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 6,
+    textAlign: 'center',
+    marginTop: 1,
+    overflow: 'hidden',
+  } as any,
+  roleLabelHost: {
+    backgroundColor: '#fef3c7',
+    color: '#92400e',
+  },
+  roleLabelMod: {
+    backgroundColor: '#ede9fe',
+    color: '#5b21b6',
+  },
+  roleLabelSpeaker: {
+    backgroundColor: '#dcfce7',
+    color: '#166534',
+  },
+
+  // ── Empty slot ───────────────────────────────────────────────────────────────
+  emptySlot: {
+    width: SLOT_SIZE,
+    height: SLOT_SIZE,
+    borderRadius: SLOT_SIZE / 2,
+    borderWidth: 2,
+    borderColor: '#22c55e',
+    borderStyle: 'dashed',
+    backgroundColor: '#f8faff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  emptySlotLocked: {
+    borderColor: '#d1d5db',
+    backgroundColor: '#f3f4f6',
+    borderStyle: 'solid',
+  },
+  // Gap 7 fix: individually seat-locked outline — matches web's yellow outline
+  emptySlotSeatLocked: {
+    borderColor: '#f59e0b',
+    borderWidth: 2.5,
+    borderStyle: 'solid',
+  },
+  openLabel: {
+    position: 'absolute',
+    bottom: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+  },
+  openDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: '#22c55e',
+  },
+  openLabelText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: '#22c55e',
+  },
+  slotNum: {
+    fontSize: 10,
+    color: '#9ca3af',
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+
+  // ── Audience section ─────────────────────────────────────────────────────────
+  audienceSection: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 8,
+  },
+  audienceHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 10,
+  },
+  audienceLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#374151',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  audienceEmpty: {
+    color: '#9ca3af',
+    fontSize: 13,
+    textAlign: 'center',
+    paddingVertical: 20,
+  },
+  audienceGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  audienceItem: {
+    alignItems: 'center',
+    gap: 3,
+    position: 'relative',
+    width: 52,
+  },
+  audienceAvatar: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#e0e7ff',
+    borderWidth: 2,
+    borderColor: '#e0e7ff',
+  },
+  audienceAvatarHand: {
+    borderColor: '#fde68a',
+  },
+  handBadgeAud: {
+    position: 'absolute',
+    top: -4,
+    left: -4,
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    padding: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.15,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  audienceName: {
+    fontSize: 10,
+    color: '#6b7280',
+    textAlign: 'center',
+    maxWidth: 52,
+  },
+
+  // ── Controls bar — light theme ───────────────────────────────────────────────
+  controls: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#fff',
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  joinBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    backgroundColor: '#6366f1',
+    paddingVertical: 14,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    shadowColor: '#6366f1',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  joinBtnText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  ctrlBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f3f4f6',
+    borderRadius: 14,
+    padding: 10,
+    minWidth: 60,
+    height: 60,
+  },
+  ctrlBtnActive: {
+    backgroundColor: '#ede9fe',
+    borderWidth: 1.5,
+    borderColor: '#6366f1',
+  },
+  ctrlBtnGift: {
+    backgroundColor: '#fffbeb',
+    borderWidth: 1.5,
+    borderColor: '#fde68a',
+  },
+  ctrlBtnDanger: {
+    backgroundColor: '#fef2f2',
+    borderWidth: 1.5,
+    borderColor: '#fecaca',
+  },
+  ctrlLabel: {
+    color: '#6b7280',
+    fontSize: 10,
+    marginTop: 3,
+    fontWeight: '600',
+  },
+});
+
+
+
+
+
+
+

@@ -1,8 +1,8 @@
 const bcrypt = require('bcryptjs');
 const prisma = require('../utils/prisma');
-const { generateAccessToken, generateRefreshToken, verifyRefreshToken } = require('../utils/jwt');
+const { generateAccessToken, generateRefreshToken, generate2FAChallengeToken, verifyRefreshToken } = require('../utils/jwt');
 const { generateOtp, getOtpExpiry } = require('../utils/otp');
-const { sendOtpEmail } = require('../utils/email');
+const { sendOtpEmail, isEmailConfigured } = require('../utils/email');
 const { successResponse, errorResponse } = require('../utils/response');
 const logger = require('../utils/logger');
 
@@ -117,21 +117,45 @@ async function register(req, res, next) {
     const passwordHash = await bcrypt.hash(password, 12);
 
     // Create user
-    const user = await prisma.user.create({
-      data: {
-        email,
-        passwordHash,
-        firstName,
-        lastName,
-        role: 'STUDENT',
-        schoolId: schoolId || null,
-        phone: phone || null,
-        status: 'PENDING'
-      },
-      select: {
-        id: true, email: true, firstName: true, lastName: true,
-        role: true, status: true, schoolId: true, createdAt: true
-      }
+    // F-06: Wallet is created atomically in the same transaction as the user
+    // so every registered user has a wallet row from the start. Previously the
+    // wallet was created lazily on first /wallet/me call, which meant a user
+    // who received diamonds via seed/admin paths and then tried to request a
+    // payout would hit WALLET_NOT_FOUND (404).
+    const user = await prisma.$transaction(async (tx) => {
+      const newUser = await tx.user.create({
+        data: {
+          email,
+          passwordHash,
+          firstName,
+          lastName,
+          role: 'MEMBER',
+          schoolId: schoolId || null,
+          phone: phone || null,
+          // In development: activate immediately so users can log in without email verification.
+          // In production: start as PENDING until email is verified via OTP.
+          status: process.env.NODE_ENV === 'development' ? 'ACTIVE' : 'PENDING',
+          emailVerified: process.env.NODE_ENV === 'development' ? true : false,
+        },
+        select: {
+          id: true, email: true, firstName: true, lastName: true,
+          role: true, status: true, schoolId: true, createdAt: true
+        }
+      });
+
+      // Create wallet atomically with the user — zero balances, no ledger entry
+      // (a brand-new wallet has no transaction history).
+      await tx.wallet.create({
+        data: {
+          userId:    newUser.id,
+          coins:      0,
+          diamonds:   0,
+          totalSpent: 0,
+          totalEarned: 0,
+        }
+      });
+
+      return newUser;
     });
 
     // Send verification OTP
@@ -147,7 +171,12 @@ async function register(req, res, next) {
 
     await sendOtpEmail(email, otp, 'email_verify');
 
-    return successResponse(res, { user }, 'Registration successful. Please verify your email.', 201);
+    const isDev = process.env.NODE_ENV === 'development';
+    const message = isDev
+      ? 'Registration successful! Email verification skipped in development. You can sign in now.'
+      : 'Registration successful. Please verify your email.';
+
+    return successResponse(res, { user }, message, 201);
   } catch (error) {
     next(error);
   }
@@ -176,15 +205,34 @@ async function login(req, res, next) {
     const user = await prisma.user.findUnique({
       where: { email },
       include: {
-        school: { select: { id: true, name: true, slug: true } }
+        school: { select: { id: true, name: true, slug: true } },
+        // Include school memberships in login response so the sidebar immediately
+        // shows the Education section after login without needing a separate
+        // GET /auth/me call. Without this, schoolMemberships is undefined in
+        // the auth store and the school doesn't appear until fetchMe() is called.
+        schoolMemberships: {
+          where: { status: 'ACTIVE', deletedAt: null },
+          include: {
+            school: {
+              select: { id: true, name: true, slug: true, logoUrl: true, type: true }
+            }
+          },
+          orderBy: { joinedAt: 'asc' }
+        }
       }
     });
-
     if (!user) {
       await recordFailedAttempt(email);
       return errorResponse(res, 'Invalid credentials', 401);
     }
     if (user.deletedAt) return errorResponse(res, 'Account not found', 401);
+
+    // Guard: user may have registered via Google (no password).
+    // They must use Google Sign-In — email/password login is not available.
+    if (!user.passwordHash) {
+      await recordFailedAttempt(email);
+      return errorResponse(res, 'This account was created with Google Sign-In. Please use "Continue with Google" to sign in.', 401);
+    }
 
     const isValid = await bcrypt.compare(password, user.passwordHash);
     if (!isValid) {
@@ -197,6 +245,23 @@ async function login(req, res, next) {
 
     // SEC-004: Successful login — clear the failure counter
     await clearFailedAttempts(email);
+
+    // ── 2FA gate (C-1 fix) ──────────────────────────────────────────────────
+    // If 2FA is enabled, issue a short-lived challenge token instead of full
+    // tokens. The client must complete POST /auth/2fa/authenticate with this
+    // challengeToken + their TOTP code to receive the full access/refresh tokens.
+    // The challengeToken is signed with JWT_SECRET, expires in 5 min, and is
+    // single-use (jti tracked in Redis by the authenticate2FA handler).
+    if (user.twoFactorEnabled) {
+      const challengeToken = generate2FAChallengeToken(user.id);
+      return successResponse(res, {
+        requiresTOTP: true,
+        challengeToken,           // client sends this back with the TOTP code
+        // NOTE: userId is intentionally NOT returned here (C-1 fix).
+        // The challengeToken encodes the userId server-side.
+        expiresIn: '5m'
+      }, 'TOTP verification required');
+    }
 
     // Generate tokens
     const tokenPayload = { userId: user.id, role: user.role, schoolId: user.schoolId };
@@ -234,7 +299,10 @@ async function login(req, res, next) {
       user: userWithoutPassword,
       accessToken,
       refreshToken, // included for mobile clients that can't use httpOnly cookies
-      expiresIn: process.env.JWT_EXPIRES_IN || '15m'
+      expiresIn: process.env.JWT_EXPIRES_IN || '15m',
+      // Step 8: signal to frontend to redirect to change-password screen
+      // before allowing any other navigation. Clear after successful change.
+      mustChangePassword: user.mustChangePassword || false,
     }, 'Login successful');
   } catch (error) {
     next(error);
@@ -457,7 +525,23 @@ async function getMe(req, res, next) {
         school: { select: { id: true, name: true, slug: true, logoUrl: true } },
         student: { select: { id: true, studentId: true, qrCode: true } },
         teacher: { select: { id: true, employeeId: true, department: true } },
-        guardian: { select: { id: true, relationship: true } }
+        guardian: { select: { id: true, relationship: true } },
+        // Education domain: school-scoped memberships
+        // This is the authoritative source for which schools the user belongs to
+        // and what role they have in each school.
+        // MOBILE NOTE: The mobile app should read schoolMemberships[] from this
+        // response to determine Education navigation, not user.role directly.
+        // user.role is kept for backward compatibility but schoolMemberships is
+        // the correct source for school-scoped authorization.
+        schoolMemberships: {
+          where: { status: 'ACTIVE', deletedAt: null },
+          include: {
+            school: {
+              select: { id: true, name: true, slug: true, logoUrl: true, type: true }
+            }
+          },
+          orderBy: { joinedAt: 'asc' }
+        }
       }
     });
 
@@ -487,7 +571,10 @@ async function changePassword(req, res, next) {
     await prisma.$transaction([
       prisma.user.update({
         where: { id: req.user.id },
-        data: { passwordHash }
+        data: {
+          passwordHash,
+          mustChangePassword: false  // Step 8: clear the force-reset flag on successful change
+        }
       }),
       prisma.refreshToken.updateMany({
         where: { userId: req.user.id },

@@ -1,9 +1,9 @@
-FROM node:20-alpine AS deps
+FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --only=production
 
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 
@@ -26,6 +26,9 @@ USER appuser
 
 EXPOSE 5000
 
-# Run migrations then start server
+# Run migrations then start server with 512MB heap
+# --max-old-space-size=512: prevents OOM crashes under normal production load
+#   (default ~93MB heap is too small for this app's module footprint)
+# --expose-gc: allows the GC nudge in app.js startup to reclaim post-boot memory
 # prisma migrate deploy is idempotent — safe to run on every restart
-CMD ["sh", "-c", "npx prisma migrate deploy && node src/app.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node --max-old-space-size=512 --expose-gc src/app.js"]

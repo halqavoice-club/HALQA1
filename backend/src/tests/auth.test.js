@@ -62,11 +62,19 @@ const VALID_USER = {
 // ─── REGISTER ─────────────────────────────────────────────────────────────────
 describe('POST /api/v1/auth/register', () => {
   let app;
+  let txUserCreate, txWalletCreate;
   beforeEach(() => {
     app = buildApp(); jest.clearAllMocks();
     prisma.user.findUnique.mockResolvedValue(null);
-    prisma.user.create.mockResolvedValue({ ...VALID_USER, status: 'PENDING' });
     prisma.otpCode.create.mockResolvedValue({ id: 'otp-1' });
+
+    // F-06: register now wraps user + wallet creation in $transaction
+    txUserCreate = jest.fn().mockResolvedValue({ ...VALID_USER, status: 'PENDING' });
+    txWalletCreate = jest.fn().mockResolvedValue({ id: 'w-1', userId: VALID_USER.id });
+    prisma.$transaction.mockImplementation(async (fn) => fn({
+      user:            { create: txUserCreate },
+      wallet:          { create: txWalletCreate },
+    }));
   });
 
   test('creates user with valid data', async () => {
@@ -76,10 +84,32 @@ describe('POST /api/v1/auth/register', () => {
     expect(res.body.success).toBe(true);
   });
 
-  test('SECURITY: role from body is always STUDENT', async () => {
+  test('SECURITY: role from body is always MEMBER (social-only, no privilege escalation)', async () => {
+    // Architecture change: new registrations default to MEMBER (Social-only).
+    // Education roles (TEACHER, STUDENT, etc.) are assigned via SchoolMembership
+    // when a user joins/creates a school — never at registration time.
+    // This prevents privilege escalation (self-registering as SUPER_ADMIN etc.)
     await request(app).post('/api/v1/auth/register')
       .send({ email: 'admin@halqa.app', password: 'Test1234', firstName: 'A', lastName: 'B', role: 'SUPER_ADMIN' });
-    expect(prisma.user.create.mock.calls[0][0].data.role).toBe('STUDENT');
+    expect(txUserCreate.mock.calls[0][0].data.role).toBe('MEMBER');
+  });
+
+  test('F-06: wallet created atomically with user at registration', async () => {
+    const res = await request(app).post('/api/v1/auth/register')
+      .send({ email: 'new@halqa.app', password: 'Test1234', firstName: 'New', lastName: 'User' });
+    expect(res.status).toBe(201);
+    // Wallet must be created inside the same transaction as the user
+    expect(txWalletCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          userId:    VALID_USER.id,
+          coins:     0,
+          diamonds:  0,
+          totalSpent: 0,
+          totalEarned: 0,
+        })
+      })
+    );
   });
 
   test('rejects duplicate email with 409', async () => {

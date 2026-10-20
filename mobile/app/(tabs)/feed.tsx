@@ -11,9 +11,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList, View, Text, StyleSheet, RefreshControl,
-  TouchableOpacity, ActivityIndicator,
+  TouchableOpacity, ActivityIndicator, ScrollView
 } from 'react-native';
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueryClient, useQuery } from '@tanstack/react-query';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -26,21 +26,64 @@ import { LiveSection } from '@/components/feed/LiveSection';
 
 interface FeedPage { items: Post[]; nextCursor: string | null; hasMore: boolean }
 
+type FeedTab = 'for-you' | 'following';
+
+// ─── Trending hashtags panel (MF-014) ─────────────────────────────────────────
+function TrendingPanel() {
+  const router = useRouter();
+  const { data: tags = [], isLoading } = useQuery<{ id: string; name: string; postCount: number }[]>({
+    queryKey: ['trending-hashtags'],
+    queryFn: () => api.get('/posts/trending').then(r => r.data.data ?? []),
+    staleTime: 5 * 60_000,
+  });
+
+  if (isLoading || tags.length === 0) return null;
+
+  return (
+    <View style={tp.container}>
+      <Text allowFontScaling={false} style={tp.label}>🔥 Trending</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={tp.scroll}>
+        {tags.slice(0, 10).map(tag => (
+          <TouchableOpacity
+            key={tag.id}
+            style={tp.pill}
+            onPress={() => router.push({ pathname: '/explore/hashtag/[tag]', params: { tag: tag.name } } as any)}
+          >
+            <Text allowFontScaling={false} style={tp.pillTxt}>#{tag.name}</Text>
+            <Text allowFontScaling={false} style={tp.pillCount}>{tag.postCount >= 1000 ? `${(tag.postCount / 1000).toFixed(1)}K` : tag.postCount}</Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+    </View>
+  );
+}
+
+const tp = StyleSheet.create({
+  container:  { backgroundColor: '#fff', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  label:      { fontSize: 11, fontWeight: '700', color: '#6b7280', paddingHorizontal: 16, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 },
+  scroll:     { paddingHorizontal: 12, gap: 8 },
+  pill:       { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#f3f4f6', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20 },
+  pillTxt:    { fontSize: 13, fontWeight: '600', color: '#4f46e5' },
+  pillCount:  { fontSize: 11, color: '#9ca3af' },
+});
+
 export default function FeedScreen() {
   const router      = useRouter();
   const { user }    = useAuthStore();
   const queryClient = useQueryClient();
   const insets      = useSafeAreaInsets();
 
+  const [activeTab,     setActiveTab]     = useState<FeedTab>('for-you');
   const [refreshing,    setRefreshing]    = useState(false);
   const [newPosts,      setNewPosts]      = useState<Post[]>([]);
   const [showNewBanner, setShowNewBanner] = useState(false);
   const flatListRef = useRef<FlatList>(null);
 
-  // ── Infinite feed query ────────────────────────────────────────────────────
+  // ── For You feed query ─────────────────────────────────────────────────────
   const {
-    data, fetchNextPage, hasNextPage, isFetchingNextPage,
-    isLoading, isError, refetch,
+    data: forYouData, fetchNextPage: fetchNextForYou, hasNextPage: hasNextForYou,
+    isFetchingNextPage: fetchingMoreForYou, isLoading: loadingForYou,
+    isError: errorForYou, refetch: refetchForYou,
   } = useInfiniteQuery({
     queryKey: ['feed'],
     queryFn: ({ pageParam }) =>
@@ -51,12 +94,38 @@ export default function FeedScreen() {
     staleTime: 60_000,
   });
 
-  const fetchedPosts = data?.pages.flatMap(p => p.items) ?? [];
+  // ── Following feed query ───────────────────────────────────────────────────
+  const {
+    data: followingData, fetchNextPage: fetchNextFollowing, hasNextPage: hasNextFollowing,
+    isFetchingNextPage: fetchingMoreFollowing, isLoading: loadingFollowing,
+    isError: errorFollowing, refetch: refetchFollowing,
+  } = useInfiniteQuery({
+    queryKey: ['feed-following'],
+    queryFn: ({ pageParam }) =>
+      api.get('/posts/feed', { params: { cursor: pageParam, limit: 20, filter: 'following' } })
+        .then(r => r.data.data as FeedPage),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: page => page.nextCursor ?? undefined,
+    staleTime: 60_000,
+    enabled: activeTab === 'following', // lazy load — only fetch when tab is visible
+  });
 
-  // Merge incoming real-time posts, deduplicating by id
-  const allPosts = [...newPosts, ...fetchedPosts].filter(
+  const forYouPosts    = forYouData?.pages.flatMap(p => p.items) ?? [];
+  const followingPosts = followingData?.pages.flatMap(p => p.items) ?? [];
+
+  // Active tab data helpers
+  const isLoading          = activeTab === 'for-you' ? loadingForYou    : loadingFollowing;
+  const isError            = activeTab === 'for-you' ? errorForYou      : errorFollowing;
+  const hasNextPage        = activeTab === 'for-you' ? hasNextForYou    : hasNextFollowing;
+  const isFetchingNextPage = activeTab === 'for-you' ? fetchingMoreForYou : fetchingMoreFollowing;
+  const fetchNextPage      = activeTab === 'for-you' ? fetchNextForYou  : fetchNextFollowing;
+  const refetch            = activeTab === 'for-you' ? refetchForYou    : refetchFollowing;
+
+  // Merge real-time new posts into the For You feed only
+  const allForYouPosts = [...newPosts, ...forYouPosts].filter(
     (p, i, self) => self.findIndex(x => x.id === p.id) === i
   );
+  const activePosts = activeTab === 'for-you' ? allForYouPosts : followingPosts;
 
   // ── Real-time socket ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -105,9 +174,56 @@ export default function FeedScreen() {
       setNewPosts(prev => prev.filter(p => p.id !== d.postId));
     };
 
+    // Increment comment count in feed cache when a new comment arrives
+    const onCommentNew = (d: { postId: string }) => {
+      queryClient.setQueryData<any>(['feed'], (old: any) => {
+        if (!old?.pages) return old;
+        return {
+          ...old,
+          pages: old.pages.map((page: any) => ({
+            ...page,
+            items: page.items.map((p: Post) =>
+              p.id === d.postId
+                ? { ...p, _count: { ...(p._count ?? {}), comments: ((p._count?.comments ?? 0) + 1) } }
+                : p
+            ),
+          })),
+        };
+      });
+      setNewPosts(prev => prev.map(p =>
+        p.id === d.postId
+          ? { ...p, _count: { ...(p._count ?? {}), comments: ((p._count?.comments ?? 0) + 1) } }
+          : p
+      ));
+    };
+
     socket.on('post:create', onPostCreate);
     socket.on('post:update', onPostUpdate);
     socket.on('post:delete', onPostDelete);
+    socket.on('comment:create', onCommentNew);
+
+    // Targeted reaction count patch — avoids full feed refetch on every like
+    const onPostLike = (d: { postId: string; userId: string; type: string; action: 'added' | 'updated' | 'removed' }) => {
+      const delta = d.action === 'added' ? 1 : d.action === 'removed' ? -1 : 0;
+      if (delta === 0) return; // 'update' (type change) doesn't change total count
+      const patch = (p: Post) =>
+        p.id === d.postId
+          ? { ...p, _count: { ...p._count, reactions: Math.max(0, (p._count?.reactions ?? 0) + delta) } }
+          : p;
+      queryClient.setQueryData<any>(['feed'], (old: any) => {
+        if (!old?.pages) return old;
+        return {
+          ...old,
+          pages: old.pages.map((page: any) => ({
+            ...page,
+            items: page.items.map(patch),
+          })),
+        };
+      });
+      setNewPosts(prev => prev.map(patch));
+    };
+
+    socket.on('post:like', onPostLike);
 
     return () => {
       socket.emit('feed:leave');
@@ -115,6 +231,8 @@ export default function FeedScreen() {
       socket.off('post:create', onPostCreate);
       socket.off('post:update', onPostUpdate);
       socket.off('post:delete', onPostDelete);
+      socket.off('comment:create', onCommentNew);
+      socket.off('post:like', onPostLike);
     };
   }, [user?.id, user?.schoolId, queryClient]);
 
@@ -147,19 +265,23 @@ export default function FeedScreen() {
       <StoriesBar />
       {/* Live sessions */}
       <LiveSection />
-      {/* Compose tap-target — navigates to dedicated create-post screen */}
-      <TouchableOpacity style={ss.compose} onPress={() => router.push('/create-post' as any)}>
-        <View style={ss.composeAvatar}>
-          <Text allowFontScaling={false} style={ss.composeInitials}>
-            {user?.firstName?.[0]}{user?.lastName?.[0]}
-          </Text>
-        </View>
-        <Text allowFontScaling={false} style={ss.composePlaceholder}>What's on your mind?</Text>
-        <Ionicons name="image-outline" size={20} color="#9ca3af" />
-      </TouchableOpacity>
+      {/* Trending hashtags — only on For You tab */}
+      {activeTab === 'for-you' && <TrendingPanel />}
+      {/* Compose tap-target — hidden for SUPER_ADMIN (platform admin cannot create posts) */}
+      {user?.role !== 'SUPER_ADMIN' && (
+        <TouchableOpacity style={ss.compose} onPress={() => router.push('/create-post' as any)}>
+          <View style={ss.composeAvatar}>
+            <Text allowFontScaling={false} style={ss.composeInitials}>
+              {user?.firstName?.[0]}{user?.lastName?.[0]}
+            </Text>
+          </View>
+          <Text allowFontScaling={false} style={ss.composePlaceholder}>What's on your mind?</Text>
+          <Ionicons name="image-outline" size={20} color="#9ca3af" />
+        </TouchableOpacity>
+      )}
 
-      {/* "New posts" banner */}
-      {showNewBanner && newPosts.length > 0 && (
+      {/* "New posts" banner — only on For You tab */}
+      {activeTab === 'for-you' && showNewBanner && newPosts.length > 0 && (
         <TouchableOpacity style={ss.newBanner} onPress={handleBannerTap} activeOpacity={0.85}>
           <Ionicons name="arrow-up" size={16} color="#fff" />
           <Text allowFontScaling={false} style={ss.newBannerTxt}>
@@ -168,37 +290,17 @@ export default function FeedScreen() {
         </TouchableOpacity>
       )}
     </View>
-  ), [user, router, showNewBanner, newPosts.length, handleBannerTap]);
+  ), [user, router, activeTab, showNewBanner, newPosts.length, handleBannerTap]);
 
   const ListFooter = useCallback(() => {
     if (isFetchingNextPage) {
       return <View style={ss.footer}><ActivityIndicator color="#4f46e5" /></View>;
     }
-    if (!hasNextPage && allPosts.length > 0) {
+    if (!hasNextPage && activePosts.length > 0) {
       return <Text allowFontScaling={false} style={ss.caughtUp}>You're all caught up ✓</Text>;
     }
     return null;
-  }, [isFetchingNextPage, hasNextPage, allPosts.length]);
-
-  // ── Error state ────────────────────────────────────────────────────────────
-  if (isError && !isLoading) {
-    return (
-      <SafeAreaView style={ss.container} edges={['top']}>
-        <View style={ss.header}>
-          <Text allowFontScaling={false} style={ss.headerTitle}>HALQA</Text>
-        </View>
-        <View style={ss.errorCenter}>
-          <Ionicons name="cloud-offline-outline" size={52} color="#d1d5db" />
-          <Text allowFontScaling={false} style={ss.errorTitle}>Failed to load feed</Text>
-          <Text allowFontScaling={false} style={ss.errorSub}>Check your connection and try again</Text>
-          <TouchableOpacity style={ss.retryBtn} onPress={() => refetch()}>
-            <Ionicons name="refresh" size={16} color="#fff" />
-            <Text allowFontScaling={false} style={ss.retryTxt}>Retry</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
-  }
+  }, [isFetchingNextPage, hasNextPage, activePosts.length]);
 
   return (
     <SafeAreaView style={ss.container} edges={['top']}>
@@ -206,6 +308,12 @@ export default function FeedScreen() {
       <View style={ss.header}>
         <Text allowFontScaling={false} style={ss.headerTitle}>HALQA</Text>
         <View style={ss.headerRight}>
+          <TouchableOpacity
+            onPress={() => router.push('/reels' as any)}
+            style={ss.iconBtn}
+          >
+            <Ionicons name="play-circle-outline" size={22} color="#374151" />
+          </TouchableOpacity>
           <TouchableOpacity
             onPress={() => router.push('/(tabs)/notifications' as any)}
             style={ss.iconBtn}
@@ -221,15 +329,46 @@ export default function FeedScreen() {
         </View>
       </View>
 
+      {/* ── For You / Following tab bar ─────────────────────────────────────── */}
+      <View style={ss.tabBar}>
+        <TouchableOpacity
+          style={[ss.tab, activeTab === 'for-you' && ss.tabActive]}
+          onPress={() => setActiveTab('for-you')}
+        >
+          <Text allowFontScaling={false} style={[ss.tabTxt, activeTab === 'for-you' && ss.tabTxtActive]}>
+            For You
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[ss.tab, activeTab === 'following' && ss.tabActive]}
+          onPress={() => setActiveTab('following')}
+        >
+          <Text allowFontScaling={false} style={[ss.tabTxt, activeTab === 'following' && ss.tabTxtActive]}>
+            Following
+          </Text>
+        </TouchableOpacity>
+      </View>
+
       {/* Loading skeleton */}
       {isLoading ? (
         <View style={ss.center}>
           <ActivityIndicator size="large" color="#4f46e5" />
         </View>
+      ) : isError ? (
+        <View style={ss.errorCenter}>
+          <Ionicons name="cloud-offline-outline" size={52} color="#d1d5db" />
+          <Text allowFontScaling={false} style={ss.errorTitle}>Failed to load feed</Text>
+          <Text allowFontScaling={false} style={ss.errorSub}>Check your connection and try again</Text>
+          <TouchableOpacity style={ss.retryBtn} onPress={() => refetch()}>
+            <Ionicons name="refresh" size={16} color="#fff" />
+            <Text allowFontScaling={false} style={ss.retryTxt}>Retry</Text>
+          </TouchableOpacity>
+        </View>
       ) : (
         <FlatList
           ref={flatListRef}
-          data={allPosts}
+          key={activeTab}
+          data={activePosts}
           keyExtractor={item => item.id}
           renderItem={renderPost}
           ListHeaderComponent={ListHeader}
@@ -251,9 +390,13 @@ export default function FeedScreen() {
           ListEmptyComponent={
             <View style={ss.empty}>
               <Ionicons name="newspaper-outline" size={48} color="#d1d5db" />
-              <Text allowFontScaling={false} style={ss.emptyTitle}>Your feed is empty</Text>
+              <Text allowFontScaling={false} style={ss.emptyTitle}>
+                {activeTab === 'following' ? 'Nothing from people you follow' : 'Your feed is empty'}
+              </Text>
               <Text allowFontScaling={false} style={ss.emptySub}>
-                Follow people to see their posts here
+                {activeTab === 'following'
+                  ? 'Follow people to see their posts here'
+                  : 'Follow people to see their posts here'}
               </Text>
               <TouchableOpacity
                 style={ss.emptyBtn}
@@ -294,4 +437,11 @@ const ss = StyleSheet.create({
   emptySub:        { color: '#9ca3af', textAlign: 'center', marginTop: 8, fontSize: 13 },
   emptyBtn:        { marginTop: 20, paddingHorizontal: 20, paddingVertical: 10, backgroundColor: '#4f46e5', borderRadius: 12 },
   emptyBtnTxt:     { color: '#fff', fontWeight: '700', fontSize: 14 },
+  // ── For You / Following tab bar ───────────────────────────────────────────
+  tabBar:          { flexDirection: 'row', backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#f3f4f6' },
+  tab:             { flex: 1, alignItems: 'center', paddingVertical: 11 },
+  tabActive:       { borderBottomWidth: 2, borderBottomColor: '#4f46e5' },
+  tabTxt:          { fontSize: 14, fontWeight: '600', color: '#9ca3af' },
+  tabTxtActive:    { color: '#4f46e5' },
 });
+

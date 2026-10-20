@@ -21,6 +21,7 @@ import {
   Shield, Star, Crown, Check, UserX, UserPlus, Ban,
 } from 'lucide-react'
 import Link from 'next/link'
+import { RoomSettingsSheet } from '@/components/voice/RoomSettingsSheet'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MEMBER_ROLES = ['OWNER','CO_OWNER','ADMIN','MODERATOR','VIP','OFFICIAL','MEMBER'] as const
@@ -387,7 +388,7 @@ function MembersTab({ roomId, myRole }: { roomId: string; myRole: string }) {
 }
 
 // ─── ROOM DETAILS TAB (BIGO-style) ─────────────────────────────────────────
-function DetailsTab({ room, roomId }: { room: any; roomId: string }) {
+function DetailsTab({ room, roomId, onOpenSettings }: { room: any; roomId: string; onOpenSettings: () => void }) {
   const { data: statsData } = useQuery({
     queryKey: ['room-level-stats', roomId],
     queryFn: () => api.get(`/voice/${roomId}/members/level-stats`).then(r => r.data.data),
@@ -435,8 +436,11 @@ function DetailsTab({ room, roomId }: { room: any; roomId: string }) {
 
       {/* Room Management Center */}
       <div style={{ background: '#fff', borderRadius: 14, padding: '16px 18px', marginBottom: 10, border: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
-        onClick={() => {}}>
-        <span style={{ fontSize: 15, fontWeight: 600, color: '#1e293b' }}>Room Management Center</span>
+        onClick={onOpenSettings}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 20 }}>⚙️</span>
+          <span style={{ fontSize: 15, fontWeight: 600, color: '#1e293b' }}>Room Management Center</span>
+        </div>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
       </div>
 
@@ -474,7 +478,9 @@ export default function RoomMembersPage() {
   const params = useParams<{ id: string }>()
   const router = useRouter()
   const { user } = useAuthStore()
+  const { toast } = useToast()
   const [tab, setTab] = useState<Tab>('members')
+  const [showSettings, setShowSettings] = useState(false)
 
   const roomId = params?.id ?? ''
 
@@ -485,7 +491,7 @@ export default function RoomMembersPage() {
     staleTime: 30_000,
   })
 
-  const { data: roomData } = useQuery({
+  const { data: roomData, refetch: refetchRoom } = useQuery({
     queryKey: ['voice-room-detail', roomId],
     queryFn: () => api.get(`/voice/${roomId}`).then(r => r.data.data),
     enabled: !!roomId,
@@ -494,6 +500,47 @@ export default function RoomMembersPage() {
 
   const myRole = statusData?.member?.role ?? (roomData?.hostId === user?.id ? 'OWNER' : 'MEMBER')
   const room = roomData
+
+  // Only HOST or CO_OWNER / ADMIN can use the Room Management Center controls
+  const isHost      = roomData?.hostId === user?.id
+  const amModerating = ['OWNER','CO_OWNER','ADMIN','MODERATOR'].includes(myRole) || isHost
+
+  // ── Room control handlers (call API directly from this standalone page) ─────
+  const handleMuteAll = useCallback(async () => {
+    try {
+      await api.patch(`/voice/${roomId}/mute-all`)
+      toast({ title: '🔇 All speakers muted' })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed', variant: 'destructive' })
+    }
+  }, [roomId, toast])
+
+  const handleUnmuteAll = useCallback(async () => {
+    try {
+      await api.patch(`/voice/${roomId}/unmute-all`)
+      toast({ title: '🎙️ All speakers unmuted' })
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed', variant: 'destructive' })
+    }
+  }, [roomId, toast])
+
+  const handleToggleOpenMic = useCallback(async () => {
+    try {
+      await api.patch(`/voice/${roomId}/open-mic`, { enabled: !(room?.isOpenMic ?? false) })
+      refetchRoom()
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed', variant: 'destructive' })
+    }
+  }, [roomId, room?.isOpenMic, refetchRoom, toast])
+
+  const handleToggleMicLock = useCallback(async () => {
+    try {
+      await api.patch(`/voice/${roomId}/mic-lock`, { locked: !(room?.micLocked ?? false) })
+      refetchRoom()
+    } catch (e: any) {
+      toast({ title: e?.response?.data?.message || 'Failed', variant: 'destructive' })
+    }
+  }, [roomId, room?.micLocked, refetchRoom, toast])
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', minHeight: '100vh', background: '#fff', display: 'flex', flexDirection: 'column' }}>
@@ -514,7 +561,12 @@ export default function RoomMembersPage() {
             <RoleBadge role={myRole} />
           </div>
         </div>
-        <button style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 4 }}>
+        {/* Gear icon — opens Room Management Center (settings sheet) */}
+        <button
+          onClick={() => setShowSettings(true)}
+          title="Room Management Center"
+          style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 4, fontSize: 20, lineHeight: 1 }}
+        >
           ⚙️
         </button>
       </div>
@@ -535,10 +587,24 @@ export default function RoomMembersPage() {
 
       {/* Tab content */}
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-        {tab === 'details' && <DetailsTab room={room} roomId={roomId} />}
+        {tab === 'details' && <DetailsTab room={room} roomId={roomId} onOpenSettings={() => setShowSettings(true)} />}
         {tab === 'events'  && <EventsTab roomId={roomId} />}
         {tab === 'members' && <MembersTab roomId={roomId} myRole={myRole} />}
       </div>
+
+      {/* Room Settings Sheet — same sheet used inside the live room */}
+      <RoomSettingsSheet
+        open={showSettings}
+        onClose={() => setShowSettings(false)}
+        isHost={isHost}
+        amModerating={amModerating}
+        onMuteAll={amModerating ? handleMuteAll : undefined}
+        onUnmuteAll={amModerating ? handleUnmuteAll : undefined}
+        onToggleOpenMic={amModerating ? handleToggleOpenMic : undefined}
+        onToggleMicLock={amModerating ? handleToggleMicLock : undefined}
+        isOpenMic={room?.isOpenMic ?? false}
+        micLocked={room?.micLocked ?? false}
+      />
     </div>
   )
 }

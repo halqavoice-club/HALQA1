@@ -115,14 +115,24 @@ async function sendMicOffer(req, res, next) {
     // HOST passing mic: they stay HOST, target becomes SPEAKER — no slot freed
     // SPEAKER passing mic: they become AUDIENCE, target becomes SPEAKER — net 0
     // MODERATOR passing mic: they become AUDIENCE, target becomes SPEAKER — net 0
-    // So limit is only an issue if passer is HOST (they keep their slot)
+    // So limit is only an issue if passer is HOST (they keep their slot, adding +1)
     if (passer.role === VOICE_ROLES.HOST) {
+      // PHASE 4 FIX: Count only participants actually on stage.
       const speakerCount = await prisma.voiceParticipant.count({
-        where: { roomId, isActive: true, role: { in: ['HOST', 'MODERATOR', 'SPEAKER'] } }
+        where: {
+          roomId, isActive: true,
+          OR: [
+            { role: 'SPEAKER' },
+            { role: 'HOST',      isMuted: false },
+            { role: 'MODERATOR', isMuted: false },
+          ]
+        }
       });
-      const limit = room.maxSpeakers || 10;
+      // PHASE 4 FIX: Use room.maxSpeakers directly as authoritative capacity.
+      // Seat 1 eligibility is enforced by the layout engine, not by reducing cap to 11.
+      const limit = room.maxSpeakers || 12;
       if (speakerCount >= limit) {
-        return errorResponse(res, `Speaker limit reached (max ${limit}). Cannot add another speaker.`, 400);
+        return errorResponse(res, `All ${limit} stage seats are occupied. Cannot add another speaker.`, 400);
       }
     }
 
@@ -184,6 +194,18 @@ async function acceptMicOffer(req, res, next) {
       return errorResponse(res, 'This offer was not sent to you', 403);
     }
 
+    // ── P2-1 FIX: Check micLocked before accepting — mic-pass creates a new speaker ──
+    const roomForLock = await prisma.voiceRoom.findUnique({
+      where: { id: roomId },
+      select: { micLocked: true, status: true }
+    });
+    if (!roomForLock || roomForLock.status !== 'LIVE') {
+      return errorResponse(res, 'Room is not live', 400);
+    }
+    if (roomForLock.micLocked) {
+      return errorResponse(res, 'The mic is locked — mic pass is not allowed while the stage is locked', 403);
+    }
+
     // ── Validate both participants still active ────────────────────────────
     const [passer, target] = await Promise.all([
       prisma.voiceParticipant.findUnique({
@@ -208,38 +230,62 @@ async function acceptMicOffer(req, res, next) {
     // ── Consume offer ──────────────────────────────────────────────────────
     await safeDeleteCache(offerKey(offerId));
 
-    // ── Atomic role swap ───────────────────────────────────────────────────
-    const updates = [];
+    // ── Find seat for target and perform atomic swap ───────────────────────
+    // The passer releases their seat (or HOST keeps their seat but grants a new slot to target).
+    // Use raw SQL for seatNumber operations (Prisma client not regenerated yet).
 
-    // HOST keeps their role — they're just giving a slot to someone
-    if (offer.passerRole !== VOICE_ROLES.HOST) {
-      updates.push(
-        prisma.voiceParticipant.update({
-          where: { roomId_userId: { roomId, userId: offer.passerId } },
-          data: {
-            role:    VOICE_ROLES.AUDIENCE,
-            isMuted: true,
-            updatedAt: new Date()
-          }
-        })
-      );
+    const roomInfo = await prisma.voiceRoom.findUnique({
+      where: { id: roomId }, select: { maxSpeakers: true, allMuted: true }  // DEF-002: include allMuted
+    });
+    const maxSp = roomInfo?.maxSpeakers || 12;
+    const micPassAllMuted = Boolean(roomInfo?.allMuted);
+
+    // Get passer's current seatNumber so we can assign it to target (seat swap)
+    const [passerRow] = await prisma.$queryRaw`
+      SELECT seatNumber FROM voice_participants
+      WHERE roomId = ${roomId} AND userId = ${offer.passerId} LIMIT 1
+    `;
+    const passerSeat = passerRow ? Number(passerRow.seatNumber) : null;
+
+    // Find target's seat: reuse passer's seat if HOST passes (HOST keeps their seat, target gets new one)
+    // or if passer releases seat, target gets passer's freed seat
+    let targetSeat = passerSeat; // default: target takes passer's old seat
+    if (offer.passerRole === VOICE_ROLES.HOST) {
+      // HOST keeps their seat — find lowest available for target
+      const occupied = await prisma.$queryRaw`
+        SELECT seatNumber FROM voice_participants
+        WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
+      `;
+      const occupiedSet = new Set(occupied.map(r => Number(r.seatNumber)));
+      targetSeat = null;
+      for (let s = 2; s <= maxSp; s++) { // SPEAKER starts from Seat 2
+        if (!occupiedSet.has(s)) { targetSeat = s; break; }
+      }
+      if (targetSeat === null) {
+        return errorResponse(res, 'No stage seats available for the mic pass', 400);
+      }
     }
 
-    // Target becomes SPEAKER
-    updates.push(
-      prisma.voiceParticipant.update({
-        where: { roomId_userId: { roomId, userId: acceptorId } },
-        data: {
-          role:        VOICE_ROLES.SPEAKER,
-          isMuted:     false,
-          handRaised:  false,
-          handRaisedAt: null,
-          updatedAt:   new Date()
-        }
-      })
-    );
+    // Perform the swap atomically
+    await prisma.$transaction([
+      // Passer: release seat → AUDIENCE (unless HOST who keeps seat)
+      offer.passerRole !== VOICE_ROLES.HOST
+        ? prisma.$executeRaw`
+            UPDATE voice_participants
+            SET seatNumber = NULL, role = 'AUDIENCE', isMuted = 1, updatedAt = NOW()
+            WHERE roomId = ${roomId} AND userId = ${offer.passerId}
+          `
+        : prisma.$executeRaw`SELECT 1`, // no-op for HOST
 
-    await prisma.$transaction(updates);
+      // Target: assign seat → SPEAKER (DEF-002: respect allMuted policy)
+      prisma.$executeRaw`
+        UPDATE voice_participants
+        SET seatNumber = ${targetSeat}, role = 'SPEAKER', isMuted = ${micPassAllMuted ? 1 : 0},
+            handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
+        WHERE roomId = ${roomId} AND userId = ${acceptorId}
+      `,
+    ]);
+
     await safeDeleteCache(roomCacheKey(roomId));
 
     // ── Broadcast ──────────────────────────────────────────────────────────
@@ -255,26 +301,31 @@ async function acceptMicOffer(req, res, next) {
         passerRole: offer.passerRole
       });
 
-      // Role change events so all clients update their UI
+      // Role change events with seatNumber so clients update their UI
       if (offer.passerRole !== VOICE_ROLES.HOST) {
         io.to(`voice:${roomId}`).emit('voice:role_changed', {
-          roomId, userId: offer.passerId, role: VOICE_ROLES.AUDIENCE
+          roomId, userId: offer.passerId, role: VOICE_ROLES.AUDIENCE, seatNumber: null
+        });
+        io.to(`voice:${roomId}`).emit('voice:mute_changed', {
+          roomId, userId: offer.passerId, isMuted: true, seatNumber: null
         });
       }
       io.to(`voice:${roomId}`).emit('voice:role_changed', {
-        roomId, userId: acceptorId, role: VOICE_ROLES.SPEAKER
+        roomId, userId: acceptorId, role: VOICE_ROLES.SPEAKER, seatNumber: targetSeat
       });
 
       // Tell the new speaker directly
       io.to(`user:${acceptorId}`).emit('voice:mic_received', {
         roomId,
-        message: `${passer.user.firstName} passed the mic to you! You're now a speaker.`
+        seatNumber: targetSeat,
+        message: `${passer.user.firstName} passed the mic to you! You're now a speaker at Seat ${targetSeat}.`
       });
     }
 
     return successResponse(res, {
       passerId:   offer.passerId,
       targetId:   acceptorId,
+      seatNumber: targetSeat,
       passerRole: offer.passerRole === VOICE_ROLES.HOST ? VOICE_ROLES.HOST : VOICE_ROLES.AUDIENCE,
       targetRole: VOICE_ROLES.SPEAKER
     }, 'Mic accepted — you are now a speaker!');

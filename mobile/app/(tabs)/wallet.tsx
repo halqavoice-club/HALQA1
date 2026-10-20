@@ -6,7 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, FlatList,
+  ActivityIndicator, FlatList
 } from 'react-native';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
@@ -47,24 +47,62 @@ function PackageCard({ pkg, onBuy, loading }: { pkg: any; onBuy: () => void; loa
   );
 }
 
-// ─── Tx Row ───────────────────────────────────────────────────────────────────
-function TxRow({ tx, isSent }: { tx: any; isSent: boolean }) {
-  const other = isSent ? tx.receiver : tx.sender;
-  const name = other ? `${other.firstName ?? ''} ${other.lastName ?? ''}`.trim() : '—';
+// ─── Tx Row — handles ALL WalletTransaction types ────────────────────────────
+const TX_META: Record<string, { icon: string; label: string; bg: string }> = {
+  STRIPE_PURCHASE:      { icon: '💳', label: 'Coin Purchase',       bg: '#eff6ff' },
+  GIFT_SEND:            { icon: '🎁', label: 'Gift Sent',           bg: '#fef2f2' },
+  GIFT_RECEIVE:         { icon: '🎁', label: 'Gift Received',       bg: '#f0fdf4' },
+  TIP_SEND:             { icon: '💸', label: 'Tip Sent',            bg: '#fef2f2' },
+  TIP_RECEIVE:          { icon: '💰', label: 'Tip Received',        bg: '#f0fdf4' },
+  SUBSCRIPTION:         { icon: '⭐', label: 'Subscription',        bg: '#faf5ff' },
+  SUBSCRIPTION_RECEIVE: { icon: '⭐', label: 'Subscription Income', bg: '#f0fdf4' },
+  ADMIN_GRANT:          { icon: '🛡️', label: 'Admin Grant',         bg: '#eef2ff' },
+  REFUND:               { icon: '↩️', label: 'Refund',              bg: '#fefce8' },
+  PAYOUT:               { icon: '💎', label: 'Payout Request',      bg: '#fff7ed' },
+  PAYOUT_REVERSAL:      { icon: '💎', label: 'Payout Reversed',     bg: '#f0fdf4' },
+  DISPUTED:             { icon: '⚠️', label: 'Disputed',            bg: '#fef2f2' },
+};
+
+function TxRow({ tx }: { tx: any }) {
+  const meta  = TX_META[tx.type] ?? { icon: '🪙', label: tx.type, bg: '#f9fafb' };
+
+  const displayEmoji = (tx.type === 'GIFT_SEND' || tx.type === 'GIFT_RECEIVE')
+    ? (tx.giftDetails?.gift?.emoji ?? meta.icon)
+    : meta.icon;
+
+  const displayLabel = tx.type === 'GIFT_SEND' && tx.giftDetails
+    ? `${tx.giftDetails.gift.name} → ${tx.giftDetails.receiver.firstName} ${tx.giftDetails.receiver.lastName}`
+    : (tx.description ?? meta.label);
+
+  const coinAmt    = Math.abs(tx.coins ?? 0);
+  const diamondAmt = Math.abs(tx.diamonds ?? 0);
+
   return (
     <View style={w.txRow}>
-      <View style={[w.txEmoji, { backgroundColor: isSent ? '#fef2f2' : '#f0fdf4' }]}>
-        <Text style={{ fontSize: 18 }}>{tx.gift?.emoji ?? '🎁'}</Text>
+      <View style={[w.txEmoji, { backgroundColor: meta.bg }]}>
+        <Text style={{ fontSize: 18 }}>{displayEmoji}</Text>
       </View>
       <View style={{ flex: 1, minWidth: 0 }}>
-        <Text style={w.txName} numberOfLines={1}>{isSent ? '→' : '←'} {name}</Text>
+        <Text style={w.txName} numberOfLines={1}>{meta.label}</Text>
         <Text style={w.txMeta} numberOfLines={1}>
-          {tx.gift?.name}{tx.room ? ` · ${tx.room.title}` : ''} · {timeAgo(tx.createdAt)}
+          {displayLabel} · {timeAgo(tx.createdAt)}
         </Text>
       </View>
-      <Text style={[w.txAmount, { color: isSent ? '#ef4444' : '#22c55e' }]}>
-        {isSent ? '-' : '+'}{fmt(tx.gift?.priceCoins ?? 0)} 🪙
-      </Text>
+      <View style={{ alignItems: 'flex-end' }}>
+        {coinAmt > 0 && (
+          <Text style={[w.txAmount, { color: tx.coins < 0 ? '#ef4444' : '#22c55e' }]}>
+            {tx.coins < 0 ? '-' : '+'}{fmt(coinAmt)} 🪙
+          </Text>
+        )}
+        {diamondAmt > 0 && (
+          <Text style={[w.txAmount, { color: tx.diamonds < 0 ? '#ef4444' : '#22c55e' }]}>
+            {tx.diamonds < 0 ? '-' : '+'}{fmt(diamondAmt)} 💎
+          </Text>
+        )}
+        {coinAmt === 0 && diamondAmt === 0 && (
+          <Text style={w.txMeta}>—</Text>
+        )}
+      </View>
     </View>
   );
 }
@@ -86,6 +124,8 @@ export default function WalletScreen() {
     const onCredited = (d: { coins: number }) => {
       showMessage({ message: `✅ ${fmt(d.coins)} coins added to your wallet!`, type: 'success' });
       queryClient.invalidateQueries({ queryKey: ['wallet-me'] });
+      // F-09: also invalidate history so the new transaction shows without a tab switch
+      queryClient.invalidateQueries({ queryKey: ['wallet-history'] });
     };
     socket.on('wallet:coins_credited', onCredited);
     return () => {
@@ -105,8 +145,10 @@ export default function WalletScreen() {
     staleTime: 5 * 60_000,
   });
 
-  const { data: history, isLoading: histLoading } = useQuery<{ sent: any[]; received: any[] }>({
+  const { data: history, isLoading: histLoading } = useQuery<{ data: any[]; pagination: any }>({
     queryKey: ['wallet-history'],
+    // Backend: GET /wallet/history → successResponse wraps in { success, message, data: { data: [...], pagination } }
+    // r.data.data = { data: WalletTx[], pagination: {...} }
     queryFn: () => api.get('/wallet/history').then(r => r.data.data),
     enabled: tab === 'history',
   });
@@ -129,7 +171,14 @@ export default function WalletScreen() {
       }
       // 503 = Stripe not configured — fall through to dev mode
     }
-    // Dev fallback
+    // Dev fallback — only works in development (blocked by backend in production)
+    // In production, the /stripe/checkout flow above handles coin purchases.
+    // If we reach this point in production, show an appropriate message.
+    if (process.env.EXPO_PUBLIC_ENV === 'production') {
+      showMessage({ message: 'Stripe checkout is required for purchases', type: 'danger' });
+      setBuyingId(null);
+      return;
+    }
     try {
       const res = await api.post('/wallet/purchase', { packageId: pkg.id });
       const total = res.data.data?.purchased?.total ?? 0;
@@ -230,33 +279,24 @@ export default function WalletScreen() {
           <View style={{ paddingHorizontal: 12 }}>
             {histLoading ? (
               <ActivityIndicator size="large" color="#4f46e5" style={{ margin: 32 }} />
-            ) : !history || (history.sent.length === 0 && history.received.length === 0) ? (
+            ) : !history || !history.data || history.data.length === 0 ? (
               <View style={w.empty}>
                 <Text style={{ fontSize: 36 }}>🎁</Text>
                 <Text style={w.emptyTxt}>No transactions yet</Text>
                 <Text style={w.emptySub}>Send a gift in a Voice Club room to get started</Text>
               </View>
             ) : (
-              <>
-                {history.sent.length > 0 && (
-                  <View style={w.txSection}>
-                    <View style={w.txSectionHeader}>
-                      <Ionicons name="arrow-up-outline" size={13} color="#ef4444" />
-                      <Text style={w.txSectionTitle}>Gifts Sent</Text>
-                    </View>
-                    {history.sent.map(tx => <TxRow key={tx.id} tx={tx} isSent />)}
-                  </View>
+              <View style={w.txSection}>
+                <View style={w.txSectionHeader}>
+                  <Text style={w.txSectionTitle}>All Transactions</Text>
+                </View>
+                {history.data.map((tx: any) => <TxRow key={tx.id} tx={tx} />)}
+                {history.pagination?.total > history.data.length && (
+                  <Text style={[w.txMeta, { textAlign: 'center', paddingVertical: 8 }]}>
+                    Showing {history.data.length} of {history.pagination.total}
+                  </Text>
                 )}
-                {history.received.length > 0 && (
-                  <View style={w.txSection}>
-                    <View style={w.txSectionHeader}>
-                      <Ionicons name="arrow-down-outline" size={13} color="#22c55e" />
-                      <Text style={w.txSectionTitle}>Gifts Received</Text>
-                    </View>
-                    {history.received.map(tx => <TxRow key={tx.id} tx={tx} isSent={false} />)}
-                  </View>
-                )}
-              </>
+              </View>
             )}
           </View>
         )}
@@ -317,3 +357,4 @@ const w = StyleSheet.create({
   emptyTxt:         { fontSize: 15, color: '#94a3b8', marginTop: 8 },
   emptySub:         { fontSize: 12, color: '#cbd5e1', textAlign: 'center' },
 });
+

@@ -188,13 +188,35 @@ export function useLiveKit(roomId: string | null): LiveKitState {
         activeSpeakersRef.current = new Set()
         detachAllAudio()
 
+        // Clear any pending token refresh timer
+        if ((roomRef.current as any)?._tokenRefreshTimer) {
+          clearTimeout((roomRef.current as any)._tokenRefreshTimer)
+        }
+
         const shouldReconnect = reason === undefined || !NO_RECONNECT_REASONS.has(reason)
         if (shouldReconnect && reconnectAttempts.current < MAX_RECONNECT_ATTEMPTS) {
           const delay = BASE_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttempts.current)
           reconnectAttempts.current += 1
+          // connect() always fetches a fresh token — handles 1h TTL expiry transparently
           reconnectTimer.current = setTimeout(() => { isConnecting.current = false; connect() }, delay)
         }
       })
+
+      // ── Token refresh: proactive reconnect 5 min before 1-hour token expires ──
+      // The LiveKit token TTL is 1h. At 55 min we gracefully reconnect so the
+      // user never sees a forced disconnection from token expiry.
+      const TOKEN_REFRESH_MS = 55 * 60 * 1000 // 55 minutes
+      const tokenRefreshTimer = setTimeout(() => {
+        if (isUnmounted.current) return
+        const r = roomRef.current
+        if (r && r.state === ConnectionState.Connected) {
+          // Reset reconnect counter so the next connect() is treated as fresh
+          reconnectAttempts.current = 0
+          isConnecting.current = false
+          r.disconnect() // triggers Disconnected → connect() with a new token
+        }
+      }, TOKEN_REFRESH_MS)
+      ;(room as any)._tokenRefreshTimer = tokenRefreshTimer
 
       room.on(RoomEvent.Reconnecting, () => {
         if (!isUnmounted.current) setConnectionState(ConnectionState.Reconnecting)
@@ -301,6 +323,10 @@ export function useLiveKit(roomId: string | null): LiveKitState {
     reconnectAttempts.current = 0
     isConnecting.current = false
     if (roomRef.current) {
+      // Clear token refresh timer before disconnecting
+      if ((roomRef.current as any)._tokenRefreshTimer) {
+        clearTimeout((roomRef.current as any)._tokenRefreshTimer)
+      }
       roomRef.current.removeAllListeners()
       roomRef.current.disconnect()
       roomRef.current = null
@@ -407,6 +433,10 @@ export function useLiveKit(roomId: string | null): LiveKitState {
       isUnmounted.current = true
       clearReconnectTimer()
       if (roomRef.current) {
+        // Clear the token refresh timer on unmount
+        if ((roomRef.current as any)._tokenRefreshTimer) {
+          clearTimeout((roomRef.current as any)._tokenRefreshTimer)
+        }
         roomRef.current.removeAllListeners()
         roomRef.current.disconnect()
         roomRef.current = null

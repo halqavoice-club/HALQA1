@@ -30,7 +30,7 @@ export function OfflineBanner() {
   if (isOnline && !showReconnected) return null
 
   return (
-    <div className={`fixed top-0 left-0 right-0 z-[100] flex items-center justify-center gap-2 py-2 text-sm font-medium transition-all ${
+    <div className={`fixed top-14 md:top-0 left-0 right-0 z-[90] flex items-center justify-center gap-2 py-2 text-sm font-medium transition-all ${
       isOnline
         ? 'bg-green-500 text-white'
         : 'bg-red-500 text-white'

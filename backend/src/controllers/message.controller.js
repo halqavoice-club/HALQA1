@@ -14,7 +14,7 @@ async function sendMessage(req, res, next) {
         attachments: attachments || [],
         classId,
         isAnnouncement: isAnnouncement || false,
-        schoolId: req.user.schoolId,
+        schoolId: (req.schoolId || req.user.schoolId),
         parentMessageId: parentMessageId || null,
         recipients: {
           create: recipientIds.map(id => ({ recipientId: id }))
@@ -48,7 +48,7 @@ async function sendMessage(req, res, next) {
     await prisma.notification.createMany({
       data: recipientIds.map(userId => ({
         userId,
-        schoolId: req.user.schoolId,
+        schoolId: (req.schoolId || req.user.schoolId),
         type: 'MESSAGE',
         title: `New message from ${req.user.firstName} ${req.user.lastName}`,
         body: subject || body.substring(0, 100),
@@ -163,6 +163,17 @@ async function getMessage(req, res, next) {
     });
 
     if (!message) return errorResponse(res, 'Message not found', 404);
+
+    // MSG-P2-001 FIX: Verify the requesting user is authorized to access this message.
+    // Only the sender and direct recipients may read a school message.
+    // Any other authenticated user who knows the message UUID is denied.
+    // Using 404 (not 403) to avoid confirming the existence of a message the caller
+    // is not party to — consistent with the existing "Message not found" response above.
+    const isSender    = message.senderId === req.user.id;
+    const isRecipient = message.recipients.some(r => r.recipientId === req.user.id);
+    if (!isSender && !isRecipient) {
+      return errorResponse(res, 'Message not found', 404);
+    }
 
     // Mark as read if recipient
     const recipientRecord = message.recipients.find(r => r.recipientId === req.user.id);

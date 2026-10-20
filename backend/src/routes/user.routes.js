@@ -57,9 +57,46 @@ router.post('/avatar', avatarUpload.single('avatar'), async (req, res, next) => 
 
 // ─── PUT /users/profile — update personal info ────────────────────────────────
 // Must come BEFORE /:id to avoid Express matching "profile" as an ID
+
+// P1-003 FIX (SEC-HIGH-003): Validate avatarUrl to prevent XSS and SSRF.
+// Allowed values:
+//   null / undefined / '' — clear the avatar (valid)
+//   /uploads/...          — local dev storage URL (relative path)
+//   https://...           — HTTPS CDN/R2 URL (production)
+// Rejected values:
+//   javascript:...        — stored XSS
+//   data:...              — stored XSS via data URI
+//   file:...              — local filesystem disclosure
+//   http://...            — plain HTTP (insecure, not used by storage layer)
+//   arbitrary strings     — not a URL
+function validateAvatarUrl(avatarUrl) {
+  if (avatarUrl === null || avatarUrl === undefined || avatarUrl === '') {
+    return true; // explicit clear is allowed
+  }
+  if (typeof avatarUrl !== 'string') return false;
+
+  // Relative local path from STORAGE_TYPE=local (e.g. /uploads/avatars/uuid.jpg)
+  if (avatarUrl.startsWith('/uploads/')) return true;
+
+  // Must be a valid HTTPS URL for production CDN/R2
+  try {
+    const parsed = new URL(avatarUrl);
+    if (parsed.protocol !== 'https:') return false; // only HTTPS
+    return true;
+  } catch {
+    return false; // not a URL at all
+  }
+}
+
 router.put('/profile', async (req, res, next) => {
   try {
     const { firstName, lastName, phone, dateOfBirth, gender, address, language, timezone, avatarUrl, bio } = req.body;
+
+    // Validate avatarUrl before any database operation
+    if (avatarUrl !== undefined && !validateAvatarUrl(avatarUrl)) {
+      return errorResponse(res, 'avatarUrl must be a valid HTTPS URL, a /uploads/ path, or null', 400);
+    }
+
     const user = await prisma.user.update({
       where: { id: req.user.id },
       data: {
@@ -67,7 +104,7 @@ router.put('/profile', async (req, res, next) => {
         dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : undefined,
         gender, address, language, timezone,
         ...(bio !== undefined && { bio: bio?.trim() || null }),
-        ...(avatarUrl !== undefined && { avatarUrl })
+        ...(avatarUrl !== undefined && { avatarUrl: avatarUrl || null })
       },
       select: { id: true, firstName: true, lastName: true, email: true, phone: true, avatarUrl: true, bio: true, username: true }
     });
@@ -118,25 +155,35 @@ router.put('/username', async (req, res, next) => {
   }
 });
 
-// ─── GET /users — list all users (admin only) ─────────────────────────────────
-router.get('/', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res, next) => {
+// ─── GET /users — list all users (admin only, school-scoped) ────────────────
+// Uses school membership context (req.schoolId) when available so that new
+// MEMBER users who are school admins can list their school's users.
+// Falls back to req.user.schoolId for legacy users.
+router.get('/',
+  require('../middleware/educationAuth').eduAdmin[0], // requireSchoolMember
+  require('../middleware/educationAuth').eduAdmin[1], // requireSchoolRole(SCHOOL_ADMIN, SUPER_ADMIN)
+  async (req, res, next) => {
   try {
     const { page = 1, limit = 20, role, search, status } = req.query;
     const { skip, ...pagination } = getPagination(page, limit);
-    const schoolId = req.user.schoolId;
+    // Use req.schoolId (set by requireSchoolMember) — school-scoped and validated
+    const schoolId = req.schoolId || req.user.schoolId;
+    const isGlobalSuperAdmin = req.schoolMembership?.role === 'SUPER_ADMIN' || req.user.role === 'SUPER_ADMIN';
 
     const where = {
       deletedAt: null,
-      ...(schoolId && req.user.role !== 'SUPER_ADMIN' && { schoolId })
+      // Scope to school unless this is a global super admin with no specific school
+      ...(schoolId && !isGlobalSuperAdmin && { schoolId }),
+      ...(schoolId &&  isGlobalSuperAdmin && req.schoolId && { schoolId })
     };
 
-    if (role) where.role = role;
+    if (role)   where.role   = role;
     if (status) where.status = status;
     if (search) {
       where.OR = [
         { firstName: { contains: search } },
-        { lastName: { contains: search } },
-        { email: { contains: search } }
+        { lastName:  { contains: search } },
+        { email:     { contains: search } }
       ];
     }
 
@@ -160,28 +207,144 @@ router.get('/', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), async (req, res, next)
 });
 
 // ─── GET /users/:id ───────────────────────────────────────────────────────────
+// SEC-CRIT-002 FIX: Restrict PII in cross-user profile lookups.
+//
+// BEFORE: Any authenticated user could fetch full PII of any other user,
+//         including email, phone, dateOfBirth, gender, address, emailVerified.
+//
+// AFTER:
+//   - Own profile request (id === req.user.id): returns full profile
+//   - SUPER_ADMIN or same-school SCHOOL_ADMIN: returns full profile
+//   - Any other authenticated user: returns public profile only
+//     (no email, phone, dateOfBirth, gender, address, emailVerified, lastLoginAt)
+//
+// Public profile = what any user should be able to see about another user
+// on their profile page: name, avatar, username, bio, role (for display), joinDate.
+const PUBLIC_PROFILE_SELECT = {
+  id: true, firstName: true, lastName: true,
+  avatarUrl: true, bio: true, username: true,
+  role: true, createdAt: true, schoolId: true
+};
+
+// Full profile — own profile or admin view
+const FULL_PROFILE_SELECT = {
+  id: true, email: true, firstName: true, lastName: true,
+  role: true, status: true, avatarUrl: true, phone: true,
+  bio: true, username: true, dateOfBirth: true, gender: true, address: true,
+  lastLoginAt: true, createdAt: true, schoolId: true, emailVerified: true
+};
+
 router.get('/:id', async (req, res, next) => {
   try {
+    const targetId = req.params.id;
+    const isOwnProfile = targetId === req.user.id;
+    const isSuperAdmin = req.user.role === 'SUPER_ADMIN';
+    // SCHOOL_ADMIN can see full profiles of users in their school.
+    // Check BOTH legacy User.role and new-arch SchoolMembership.role.
+    const isSchoolAdmin = req.user.role === 'SCHOOL_ADMIN' ||
+                          req.schoolMembership?.role === 'SCHOOL_ADMIN' ||
+                          req.schoolMembership?.role === 'SUPER_ADMIN';
+
+    // Choose select fields based on requester relationship to target
+    let selectFields;
+    if (isOwnProfile || isSuperAdmin) {
+      selectFields = FULL_PROFILE_SELECT;
+    } else if (isSchoolAdmin) {
+      // School admin sees full profile only if target is in same school
+      // We check schoolId after lookup — use full select, strip if needed
+      selectFields = FULL_PROFILE_SELECT;
+    } else {
+      selectFields = PUBLIC_PROFILE_SELECT;
+    }
+
     const user = await prisma.user.findUnique({
-      where: { id: req.params.id },
-      select: {
-        id: true, email: true, firstName: true, lastName: true,
-        role: true, status: true, avatarUrl: true, phone: true,
-        bio: true, username: true, dateOfBirth: true, gender: true, address: true,
-        lastLoginAt: true, createdAt: true, schoolId: true, emailVerified: true
-      }
+      where: { id: targetId },
+      select: selectFields
     });
     if (!user) return errorResponse(res, 'User not found', 404);
+
+    // For SCHOOL_ADMIN: only return full profile if target is in same school
+    if (isSchoolAdmin && !isOwnProfile && user.schoolId !== req.user.schoolId) {
+      // Different school — return public profile only (re-select public fields)
+      const publicUser = await prisma.user.findUnique({
+        where: { id: targetId },
+        select: PUBLIC_PROFILE_SELECT
+      });
+      return successResponse(res, publicUser);
+    }
+
+    // UIGAP-013 FIX: Audit log when SUPER_ADMIN reads full PII of another user.
+    // Own-profile reads are not logged (too noisy). Cross-user admin reads are.
+    if (isSuperAdmin && !isOwnProfile) {
+      try {
+        if (prisma.auditLog && typeof prisma.auditLog.create === 'function') {
+          prisma.auditLog.create({
+            data: {
+              id:        uuidv4(),
+              userId:    req.user.id,
+              action:    'VIEW',
+              entity:    'user_profile_access',
+              entityId:  targetId,
+              newValues: { targetEmail: user.email, requesterRole: 'SUPER_ADMIN' },
+              ipAddress: req.ip || null,
+              userAgent: req.headers['user-agent'] || null,
+            }
+          }).catch(err => require('../utils/logger').warn(`[user] PII audit log failed: ${err.message}`));
+        }
+      } catch (auditErr) {
+        require('../utils/logger').warn(`[user] PII audit log setup failed: ${auditErr.message}`);
+      }
+    }
+
     return successResponse(res, user);
   } catch (error) { next(error); }
 });
 
 // ─── PUT /users/:id/status ────────────────────────────────────────────────────
+// P1-001 FIX (SEC-HIGH-001): Validate status against the exact UserStatus enum.
+// Previously any string could be written to the status column.
+// Valid values mirror the Prisma UserStatus enum: ACTIVE | INACTIVE | SUSPENDED | PENDING | BANNED
+// PENDING is included because admins may need to reset a user to pending state.
+// Invalid values are rejected with HTTP 400 before any DB operation.
+const VALID_USER_STATUSES = ['ACTIVE', 'INACTIVE', 'SUSPENDED', 'PENDING', 'BANNED'];
+
 router.put('/:id/status',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  require('../middleware/educationAuth').eduAdmin[0],
+  require('../middleware/educationAuth').eduAdmin[1],
   async (req, res, next) => {
     try {
       const { status } = req.body;
+
+      // Validate status before touching the database
+      if (!status || !VALID_USER_STATUSES.includes(status)) {
+        return errorResponse(
+          res,
+          `Invalid status. Must be one of: ${VALID_USER_STATUSES.join(', ')}`,
+          400
+        );
+      }
+
+      // SOCIAL-STATUS-01: Verify the target user belongs to the admin's school.
+      // requireSchoolMember (eduAdmin[0]) sets req.schoolId from the membership context.
+      // But the handler itself must independently verify the target user is actually
+      // in that school — otherwise a school admin could change the status of any
+      // user on the platform by guessing their UUID.
+      const schoolId = req.schoolId || req.user.schoolId;
+      if (schoolId) {
+        const targetUser = await prisma.user.findUnique({
+          where:  { id: req.params.id },
+          select: { id: true, schoolId: true }
+        });
+        if (!targetUser) return errorResponse(res, 'User not found', 404);
+        if (targetUser.schoolId !== schoolId) {
+          return errorResponse(
+            res,
+            'You can only manage users in your own school.',
+            403
+          );
+        }
+      }
+
       const user = await prisma.user.update({
         where: { id: req.params.id },
         data:  { status },
@@ -264,11 +427,22 @@ router.delete('/me', async (req, res, next) => {
     if (!user) return errorResponse(res, 'User not found', 404);
 
     const bcrypt   = require('bcryptjs');
+
+    // SEC-MED-004 FIX: OAuth users have no passwordHash — bcrypt.compare(password, null)
+    // throws a TypeError that causes a 500 crash. Return a clear 400 instead.
+    if (!user.passwordHash) {
+      return errorResponse(res, 'This account uses Google Sign-In. To delete your account, please contact support.', 400);
+    }
+
     const isValid  = await bcrypt.compare(password, user.passwordHash);
     if (!isValid) return errorResponse(res, 'Incorrect password', 400);
 
     // 2. Prevent deletion of school admins with active schools (protect data integrity)
-    if (user.role === 'SCHOOL_ADMIN') {
+    // Check both legacy global role and new school membership role
+    const hasAdminMembership = await prisma.schoolMembership.findFirst({
+      where: { userId: user.id, role: { in: ['SUPER_ADMIN', 'SCHOOL_ADMIN'] }, status: 'ACTIVE' }
+    });
+    if (user.role === 'SCHOOL_ADMIN' || user.role === 'SUPER_ADMIN' || hasAdminMembership) {
       const school = await prisma.school.findFirst({
         where: { id: user.schoolId ?? '', isActive: true, deletedAt: null }
       });
@@ -278,6 +452,26 @@ router.delete('/me', async (req, res, next) => {
           400
         );
       }
+    }
+
+    // P4-001 FIX: Block deletion if the user has a non-zero wallet balance.
+    // Coins and diamonds represent real monetary value (coins are purchased via
+    // Stripe; diamonds are earned by receiving gifts). Silently discarding them
+    // on account deletion would be a financial loss for the user and a potential
+    // consumer-protection issue. We block deletion and direct the user to
+    // withdraw/spend their balance first.
+    const wallet = await prisma.wallet.findUnique({
+      where:  { userId: user.id },
+      select: { coins: true, diamonds: true },
+    });
+    if (wallet && (wallet.coins > 0 || wallet.diamonds > 0)) {
+      const parts = [];
+      if (wallet.coins    > 0) parts.push(`${wallet.coins} coin${wallet.coins    !== 1 ? 's' : ''}`);
+      if (wallet.diamonds > 0) parts.push(`${wallet.diamonds} diamond${wallet.diamonds !== 1 ? 's' : ''}`);
+      return errorResponse(res,
+        `Your wallet has a balance (${parts.join(' and ')}). Please spend or withdraw your balance before deleting your account.`,
+        400
+      );
     }
 
     const deletedAt      = new Date();

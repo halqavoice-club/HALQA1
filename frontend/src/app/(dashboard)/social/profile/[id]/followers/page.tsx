@@ -16,7 +16,7 @@ export default function FollowersPage() {
 
   const { data: followers = [], isLoading } = useQuery<SocialUser[]>({
     queryKey: ['followers-full', id],
-    queryFn: () => socialApi.followers(id, 100).then(r => r.data.data),
+    queryFn: () => socialApi.followers(id, 100).then(r => r.data.data?.items ?? r.data.data ?? []),
     enabled: !!id
   })
 

@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Separator } from '@/components/ui/separator'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { Settings, Bell, Shield, School, User, Save, Loader2, Globe, Sun, Moon, Monitor } from 'lucide-react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ErrorState } from '@/components/ui/error-state'
@@ -27,6 +28,7 @@ function getLangFlag(lang: Language): string {
 
 export default function SettingsPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
 
@@ -114,7 +116,6 @@ export default function SettingsPage() {
     onError: (err: any) => toast({ title: err.response?.data?.message || 'Failed', variant: 'destructive' })
   })
 
-  const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
   const { theme, language, setTheme, setLanguage } = useThemeStore()
   const { t } = useTranslation()
 

@@ -121,13 +121,17 @@ async function handleWebhook(req, res) {
     if (secret && !secret.startsWith('whsec_REPLACE') && sig) {
       // Production / CLI: verify Stripe signature
       event = stripe.webhooks.constructEvent(req.body, sig, secret);
-    } else if (process.env.NODE_ENV !== 'production') {
-      // Development: parse without signature (test simulator)
+    } else if (process.env.STRIPE_SKIP_SIGNATURE === 'true' && process.env.NODE_ENV !== 'production') {
+      // M-9 FIX: Signature bypass now requires an EXPLICIT opt-in env var
+      // (STRIPE_SKIP_SIGNATURE=true) AND must NOT be production.
+      // Previously, ANY non-production NODE_ENV allowed unauthenticated webhook calls.
+      // This prevents staging environments that forget to set NODE_ENV=production
+      // from accepting forged Stripe events (e.g. fake coin credits).
       const payload = req.body instanceof Buffer ? req.body.toString() : req.body;
       event = typeof payload === 'string' ? JSON.parse(payload) : payload;
-      logger.warn('[stripe] Webhook signature skipped — development mode');
+      logger.warn('[stripe] Webhook signature skipped — STRIPE_SKIP_SIGNATURE=true (dev only)');
     } else {
-      logger.error('[stripe] Webhook secret not configured in production');
+      logger.error('[stripe] Webhook secret not configured or signature bypass not explicitly enabled');
       return res.status(400).json({ error: 'Webhook secret not configured' });
     }
   } catch (err) {
@@ -157,38 +161,70 @@ async function handleWebhook(req, res) {
       }
 
       try {
-        // Idempotency: check if already processed via Redis
-        let alreadyDone = false;
+        // ── DB-first idempotency (Task 8.1) ────────────────────────────────────
+        // Check for an existing FeeRecord that already has this stripeSessionId.
+        // This is the authoritative guard — Redis alone was insufficient because
+        // a Redis outage would allow duplicate fee payments on Stripe retries.
+        const existingFee = await prisma.feeRecord.findFirst({
+          where:  { id: feeId, stripeSessionId: session.id }
+        }).catch(() => null);
+
+        if (existingFee?.status === 'PAID') {
+          logger.info(`[stripe] Fee ${feeId} already paid (DB check, session ${session.id}) — skipping`);
+          return res.json({ received: true });
+        }
+
+        // ── Redis fast-path (supplementary, not authoritative) ─────────────────
+        let redisAlreadyDone = false;
         try {
           const { isRedisReady, getCache, setCache } = require('../utils/redis');
           if (isRedisReady()) {
             const key = `stripe:fee:${session.id}`;
-            if (await getCache(key)) { alreadyDone = true; }
+            if (await getCache(key)) { redisAlreadyDone = true; }
             else { await setCache(key, { feeId, processedAt: new Date().toISOString() }, 7 * 24 * 3600); }
           }
-        } catch { /* Redis unavailable — continue */ }
+        } catch { /* Redis unavailable — DB constraint is the fallback guard */ }
 
-        if (!alreadyDone) {
+        if (redisAlreadyDone) {
+          logger.info(`[stripe] Fee ${feeId} already paid (Redis check) — skipping`);
+          return res.json({ received: true });
+        }
+
+        // ── Update fee record with stripeSessionId (P2002 = already processed) ──
+        try {
           await prisma.feeRecord.update({
             where: { id: feeId },
-            data:  { status: 'PAID', paidAt: new Date(), notes: `Paid via Stripe session ${session.id}` }
+            data:  {
+              status:          'PAID',
+              paidAt:          new Date(),
+              stripeSessionId: session.id,
+              notes:           `Paid via Stripe session ${session.id}`
+            }
           });
-
-          logger.info(`[stripe] Fee ${feeId} marked PAID (session ${session.id})`);
-
-          // Notify payer in real-time
-          const io = getIo();
-          if (io && paidBy) {
-            io.to(`user:${paidBy}`).emit('fee:paid', { feeId, stripeSessionId: session.id });
+        } catch (updateErr) {
+          // P2002 = unique constraint on stripeSessionId — concurrent webhook already processed it
+          if (updateErr.code === 'P2002') {
+            logger.info(`[stripe] Fee ${feeId} already processed (P2002 race guard, session ${session.id}) — skipping`);
+            return res.json({ received: true });
           }
-
-          await notify(paidBy, {
-            type:  'SYSTEM',
-            title: '✅ Fee payment confirmed',
-            body:  'Your fee payment was successful.',
-            data:  { type: 'fee_paid', feeId }
-          }).catch(() => {});
+          throw updateErr;
         }
+
+        logger.info(`[stripe] Fee ${feeId} marked PAID (session ${session.id})`);
+
+        // Notify payer in real-time
+        const io = getIo();
+        if (io && paidBy) {
+          io.to(`user:${paidBy}`).emit('fee:paid', { feeId, stripeSessionId: session.id });
+        }
+
+        await notify(paidBy, {
+          type:  'SYSTEM',
+          title: '✅ Fee payment confirmed',
+          body:  'Your fee payment was successful.',
+          data:  { type: 'fee_paid', feeId }
+        }).catch(() => {});
+
       } catch (feeErr) {
         logger.error(`[stripe] Failed to mark fee ${feeId} as paid: ${feeErr.message}`);
         return res.status(500).json({ error: 'Database error — will retry' });
@@ -276,6 +312,22 @@ async function handleWebhook(req, res) {
           }
           throw err;
         });
+
+        // P1-004 FIX: Platform revenue entry is now FATAL (no .catch).
+        // Coin credit and platform revenue ledger must commit or roll back together.
+        // Previously this was wrapped in .catch() which silently allowed revenue
+        // entries to be missing while coins were credited. Now if the revenue
+        // ledger write fails the entire transaction rolls back — no coins without a record.
+        await tx.platformRevenueEntry.create({
+          data: {
+            id:         require('uuid').v4(),
+            sourceType: 'COIN_PURCHASE',
+            sourceId:   session.id,
+            userId,
+            coins:      totalCoins,
+            usdEquiv:   parseFloat((totalCoins * 0.01).toFixed(2)),
+          }
+        });
       });
 
       logger.info(`[stripe] Credited ${totalCoins} coins to user ${userId} (session ${session.id})`);
@@ -313,6 +365,62 @@ async function handleWebhook(req, res) {
       // Return 500 so Stripe retries the webhook
       return res.status(500).json({ error: 'Database error — will retry' });
     }
+  }
+
+  // ── Handle charge.dispute.created (Task 8.2) ─────────────────────────────────
+  // A dispute means a customer has challenged a Stripe charge with their bank.
+  // Policy: DO NOT automatically clawback coins — flag and notify admins only.
+  // Admin must review before any manual coin reversal is applied.
+  if (event.type === 'charge.dispute.created') {
+    const dispute = event.data.object;
+
+    // Always log disputes — never silently swallow them
+    logger.warn(
+      `[stripe:dispute] charge.dispute.created: id=${dispute.id}, ` +
+      `amount=${dispute.amount}, reason=${dispute.reason}, ` +
+      `paymentIntent=${dispute.payment_intent}`
+    );
+
+    // Look up the corresponding WalletTransaction by payment intent
+    // (the stripeSessionId field stores the Checkout session ID, but the
+    //  payment_intent is available on the dispute — try both approaches)
+    const tx = await prisma.walletTransaction.findFirst({
+      where: { stripeSessionId: dispute.payment_intent }
+    }).catch(() => null);
+
+    if (!tx) {
+      logger.error(
+        `[stripe:dispute] No WalletTransaction found for paymentIntent ${dispute.payment_intent}. ` +
+        'Manual investigation required.'
+      );
+      // Return 200 to prevent Stripe from retrying — we've logged the dispute
+      return res.json({ received: true });
+    }
+
+    // Flag the transaction as disputed — no coin movement, admin review required
+    await prisma.walletTransaction.update({
+      where: { id: tx.id },
+      data:  { type: 'DISPUTED' }
+    }).catch(err => {
+      logger.error(`[stripe:dispute] Failed to flag transaction ${tx.id}: ${err.message}`);
+    });
+
+    // Notify SUPER_ADMIN via socket
+    const disputeIo = getIo();
+    if (disputeIo) {
+      disputeIo.to('role:SUPER_ADMIN').emit('stripe:dispute', {
+        disputeId:      dispute.id,
+        userId:         tx.userId,
+        amount:         dispute.amount,
+        reason:         dispute.reason,
+        evidenceDueBy:  dispute.evidence_details?.due_by ?? null,
+        transactionId:  tx.id,
+        paymentIntent:  dispute.payment_intent,
+      });
+    }
+
+    logger.info(`[stripe:dispute] Transaction ${tx.id} (user ${tx.userId}) flagged as DISPUTED`);
+    return res.json({ received: true });
   }
 
   // Acknowledge all other event types

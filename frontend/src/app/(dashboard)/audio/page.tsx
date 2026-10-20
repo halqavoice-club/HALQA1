@@ -14,6 +14,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import {
   Headphones, Plus, Upload, Play, Pause, SkipBack, SkipForward,
   Volume2, Trash2, Edit, BookOpen, Loader2, X, Music,
@@ -224,6 +225,7 @@ function LessonCard({ lesson, onPlay, isPlaying, canEdit, onDelete, onEdit }: {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function AudioPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -258,8 +260,7 @@ export default function AudioPage() {
   const [editForm, setEditForm] = useState({ title: '', description: '' })
   const [deleteLessonId, setDeleteLessonId] = useState<string | null>(null)
 
-  const canUpload = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
-  const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
+  const canUpload = isTeacher
 
   // ─── Queries ────────────────────────────────────────────────────────────────
   const { data: categoriesData } = useQuery({
@@ -344,7 +345,7 @@ export default function AudioPage() {
       fd.append('courseId', uploadForm.courseId)
       if (uploadForm.categoryId) fd.append('categoryId', uploadForm.categoryId)
 
-      await api.post('/audio/lessons', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+      await api.post('/audio/lessons', fd)
       toast({ title: 'Audio lesson uploaded successfully' })
       queryClient.invalidateQueries({ queryKey: ['audio-lessons'] })
       setUploadFile(null)

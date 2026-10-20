@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { DollarSign, Plus, CheckCircle, XCircle, Clock, Search, Download } from 'lucide-react'
 import { ErrorState } from '@/components/ui/error-state'
 import { format } from 'date-fns'
@@ -33,6 +34,7 @@ const STATUS_ICONS: Record<string, React.ElementType> = {
 
 export default function FeesPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
@@ -43,7 +45,6 @@ export default function FeesPage() {
     studentId: '', amount: '', description: '', dueDate: '', feeType: 'TUITION'
   })
 
-  const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
 
   const { data: feesData, isLoading, isError: feesError, refetch: refetchFees } = useQuery({
     queryKey: ['fees', search, statusFilter],

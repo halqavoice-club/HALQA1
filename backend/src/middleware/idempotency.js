@@ -1,18 +1,18 @@
 /**
  * Request Deduplication (Idempotency) Middleware
- * 
+ *
  * Prevents duplicate requests from being processed multiple times.
  * Useful for:
  * - Payment processing
  * - Resource creation
  * - State-changing operations
- * 
+ *
  * Uses idempotency keys to identify duplicate requests.
  * Stores request results in Redis with configurable TTL.
- * 
+ *
  * Usage:
  *   router.post('/api/v1/payments', idempotency({ ttl: 3600 }), paymentHandler);
- * 
+ *
  * Client must provide:
  *   - Idempotency-Key header (recommended)
  *   - or idempotencyKey in request body
@@ -24,36 +24,59 @@ const logger = require('../utils/logger');
 const { errorResponse } = require('../utils/response');
 const prom = require('../utils/prometheus');
 
-const DEFAULT_TTL = 3600; // 1 hour
+const DEFAULT_TTL = 3600;     // 1 hour
 const DEFAULT_KEY_TTL = 86400; // 24 hours for key tracking
 
 /**
- * Generate idempotency key from request
- * Falls back to hash of request body if no key provided
+ * Generate idempotency key from request.
+ *
+ * SECURITY: For auto-generated keys (no explicit header/body key), the cache key
+ * includes the authenticated user's identity (req.user?.id).  This prevents
+ * cross-user cache collisions where user A's cached 200 response could be
+ * returned to user B (e.g. a SUPER_ADMIN receiving a normal-user's cached 200
+ * for a route that should return 403 for the SA).
+ *
+ * Identity source: req.user?.id — populated server-side by authenticate()
+ * middleware from the verified JWT.  Never use client-supplied userId.
+ *
+ * NOTE: This function must only be called after authenticate() has run so that
+ * req.user is populated.  For the early-cache-read path (explicit keys only),
+ * the client-supplied key is used directly — the client owns uniqueness there.
+ * For auto-generated keys, key generation is deferred to response-intercept time
+ * (inside res.json) where req.user is guaranteed to be set.
  */
 function generateIdempotencyKey(req) {
-  // Check header first
+  // Check header first — client-supplied explicit key used as-is.
   const headerKey = req.headers['idempotency-key'];
-  if (headerKey) {
-    return headerKey;
-  }
+  if (headerKey) return headerKey;
 
   // Check body
   const bodyKey = req.body?.idempotencyKey;
-  if (bodyKey) {
-    return bodyKey;
-  }
+  if (bodyKey) return bodyKey;
 
-  // Generate from request signature
-  const signature = `${req.method}:${req.path}:${JSON.stringify(req.body)}`;
+  // Auto-generate from request signature scoped to the authenticated user.
+  // 'anon' for unauthenticated requests (separate namespace from any user).
+  const userId    = req.user?.id || 'anon';
+  const signature = `${userId}:${req.method}:${req.path}:${JSON.stringify(req.body)}`;
   return crypto.createHash('sha256').update(signature).digest('hex');
 }
 
 /**
  * Idempotency middleware
- * 
- * Checks if request has already been processed and returns cached result if so.
- * Stores result for future duplicate requests.
+ *
+ * Two-phase key strategy:
+ *
+ * 1. Explicit keys (Idempotency-Key header or body.idempotencyKey):
+ *    - Cache lookup happens immediately at middleware entry (fast-path replay).
+ *    - Cache write happens at response-intercept time.
+ *    - Used for payment retries, PK battles, etc. where the client manages keys.
+ *
+ * 2. Auto-generated keys (no explicit client key):
+ *    - Cache lookup is SKIPPED at middleware entry because req.user is not yet
+ *      set (authenticate() middleware runs later inside the route handlers).
+ *    - Cache write happens at response-intercept time, AFTER authenticate() has
+ *      run, so req.user.id is available and the key is user-scoped.
+ *    - This prevents cross-user cache collisions on authorization-sensitive routes.
  */
 function idempotencyMiddleware(options = {}) {
   const {
@@ -64,7 +87,7 @@ function idempotencyMiddleware(options = {}) {
   } = options;
 
   return async (req, res, next) => {
-    // Idempotency only applies to state-changing methods — skip GETs entirely
+    // Idempotency only applies to state-changing methods
     if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
       return next();
     }
@@ -75,84 +98,113 @@ function idempotencyMiddleware(options = {}) {
       return next();
     }
 
-    const idempotencyKey = generateIdempotencyKey(req);
-    const cacheKey = `idempotency:${idempotencyKey}`;
+    // ── Determine if client provided an explicit key ──────────────────────
+    const explicitKey = req.headers['idempotency-key'] || req.body?.idempotencyKey || null;
 
-    try {
-      // Check if request was already processed
-      const cached = await getCache(cacheKey);
+    if (explicitKey) {
+      // ── Explicit-key path: early cache lookup ─────────────────────────
+      const cacheKey = `idempotency:${explicitKey}`;
 
-      if (cached) {
-        logger.info(`[idempotency] Duplicate request detected: ${idempotencyKey}`);
+      try {
+        const cached = await getCache(cacheKey);
 
-        // Emit Prometheus metric
-        prom.idempotencyHitsTotal.inc({ endpoint: req.path });
+        if (cached) {
+          logger.info(`[idempotency] Duplicate request detected: ${explicitKey}`);
+          prom.idempotencyHitsTotal.inc({ endpoint: req.path });
 
-        // Return cached response
-        res.set('X-Idempotency-Key', idempotencyKey);
-        res.set('X-Idempotency-Replayed', 'true');
-        res.set('X-Cache-Age', Math.round((Date.now() - cached.timestamp) / 1000));
-
-        return res.status(cached.statusCode).json(cached.body);
+          res.set('X-Idempotency-Key', explicitKey);
+          res.set('X-Idempotency-Replayed', 'true');
+          res.set('X-Cache-Age', Math.round((Date.now() - cached.timestamp) / 1000));
+          return res.status(cached.statusCode).json(cached.body);
+        }
+      } catch (err) {
+        logger.error('[idempotency] Cache read error:', err);
+        // Fail-open: allow request to proceed
       }
 
-      // Store original res.json to intercept response
+      // Intercept response to cache under explicit key
       const originalJson = res.json.bind(res);
-      let responseCaptured = false;
+      let captured = false;
 
       res.json = function(body) {
-        if (!responseCaptured) {
-          responseCaptured = true;
-
-          // Determine if we should cache this response
+        if (!captured) {
+          captured = true;
           const statusCode = res.statusCode;
-          const shouldCache = 
-            (skipSuccessful && statusCode >= 200 && statusCode < 300) ||
-            (skipFailed && statusCode >= 400) ||
-            (!skipSuccessful && !skipFailed);
+          const isSuccess  = statusCode >= 200 && statusCode < 300;
+          const isFailed   = statusCode >= 400;
+          const shouldCache = !(skipSuccessful && isSuccess) && !(skipFailed && isFailed);
 
           if (shouldCache) {
-            // Cache the response
-            setCache(cacheKey, {
-              statusCode,
-              body,
-              timestamp: Date.now()
-            }, ttl).catch(err => {
-              logger.error('[idempotency] Failed to cache response:', err);
-            });
+            setCache(cacheKey, { statusCode, body, timestamp: Date.now() }, ttl)
+              .catch(err => logger.error('[idempotency] Failed to cache response:', err));
+            setCache(`idempotency:keys:${explicitKey}`, true, keyTtl).catch(() => {});
           }
-
-          res.set('X-Idempotency-Key', idempotencyKey);
+          res.set('X-Idempotency-Key', explicitKey);
         }
-
         return originalJson(body);
       };
 
-      // Track the key to prevent key reuse
-      const keyTrackingKey = `idempotency:keys:${idempotencyKey}`;
-      await setCache(keyTrackingKey, true, keyTtl);
-
-      // Emit Prometheus metric for cache miss (new request)
       prom.idempotencyMissesTotal.inc({ endpoint: req.path });
-
-      res.set('X-Idempotency-Key', idempotencyKey);
-      next();
-    } catch (error) {
-      logger.error('[idempotency] Error:', error);
-      // On error, allow request to proceed (fail-open)
-      next();
+      res.set('X-Idempotency-Key', explicitKey);
+      return next();
     }
+
+    // ── Auto-generated key path: deferred key generation ──────────────────
+    // req.user is NOT yet set here — authenticate() runs later inside the router.
+    // We skip the early cache-read to avoid cross-user collisions.
+    // The key is generated lazily inside res.json after auth has populated req.user.
+
+    const originalJson = res.json.bind(res);
+    let responseCaptured = false;
+
+    res.json = function(body) {
+      if (!responseCaptured) {
+        responseCaptured = true;
+
+        // At this point authenticate() has run — req.user is populated.
+        const idempotencyKey = generateIdempotencyKey(req); // now user-scoped
+        const cacheKey = `idempotency:${idempotencyKey}`;
+
+        const statusCode = res.statusCode;
+        const isSuccess  = statusCode >= 200 && statusCode < 300;
+        const isFailed   = statusCode >= 400;
+
+        const shouldCache =
+          !(skipSuccessful && isSuccess) &&
+          !(skipFailed    && isFailed);
+
+        if (shouldCache) {
+          setCache(cacheKey, {
+            statusCode,
+            body,
+            timestamp: Date.now()
+          }, ttl).catch(err => {
+            logger.error('[idempotency] Failed to cache response:', err);
+          });
+
+          const keyTrackingKey = `idempotency:keys:${idempotencyKey}`;
+          setCache(keyTrackingKey, true, keyTtl).catch(() => {});
+        }
+
+        res.set('X-Idempotency-Key', idempotencyKey);
+      }
+
+      return originalJson(body);
+    };
+
+    prom.idempotencyMissesTotal.inc({ endpoint: req.path });
+    next();
   };
 }
 
 /**
  * Idempotency key validation middleware
- * 
+ *
  * Ensures idempotency keys are not reused across different requests.
  * Prevents accidental key collisions.
  */
 function validateIdempotencyKey(options = {}) {
-  const { keyTtl = DEFAULT_KEY_TTL } = options;
+  const { keyTtl: _keyTtl = DEFAULT_KEY_TTL } = options; // eslint-disable-line no-unused-vars
 
   return async (req, res, next) => {
     if (!isRedisReady()) {
@@ -179,7 +231,7 @@ function validateIdempotencyKey(options = {}) {
 
 /**
  * Idempotency key generator helper
- * 
+ *
  * Generates a unique idempotency key for clients to use.
  */
 function generateKey() {
@@ -188,7 +240,7 @@ function generateKey() {
 
 /**
  * Clear idempotency cache for a specific key
- * 
+ *
  * Useful for testing or manual cache invalidation.
  */
 async function clearIdempotencyKey(idempotencyKey) {
@@ -216,8 +268,6 @@ async function getIdempotencyStats() {
   }
 
   try {
-    // This would require Redis SCAN command which is complex
-    // For now, return basic info
     return {
       status: 'available',
       defaultTtl: DEFAULT_TTL,

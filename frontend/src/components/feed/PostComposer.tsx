@@ -11,7 +11,7 @@
  *
  * Requirements: 4.1–4.12
  */
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { postsApi } from '@/lib/posts'
 import { useAuthStore } from '@/store/auth.store'
@@ -21,9 +21,10 @@ import { resolveMediaUrl } from '@/lib/media'
 import { filterMentionCandidates, type UserSummary } from '@/lib/mentionUtils'
 import { cn } from '@/lib/utils'
 import api from '@/lib/api'
+import Link from 'next/link'
 import {
   Image, Globe, Users, Lock, School, ChevronDown,
-  Loader2, X, Smile, MapPin,
+  Loader2, X, Smile, MapPin, Link2,
 } from 'lucide-react'
 
 // ─── Curated emoji palette ────────────────────────────────────────────────────
@@ -76,12 +77,44 @@ export function PostComposer({
   const [mentionCandidates, setMentionCandidates] = useState<UserSummary[]>([])
   const [mentionStart,      setMentionStart]      = useState(0) // caret position of @
 
+  // Link preview
+  const [linkPreview,      setLinkPreview]      = useState<{ url: string; title: string | null; description: string | null; image: string | null } | null>(null)
+  const [linkFetching,     setLinkFetching]     = useState(false)
+  const [linkDismissed,    setLinkDismissed]    = useState<string | null>(null)  // URL user has dismissed
+  const linkDebounceRef = useRef<ReturnType<typeof setTimeout>>()
+
+  // SA-COMPOSER-01: SUPER_ADMIN = Platform Administration ONLY.
+  // Platform admins must not create social content.
+  // Early return MUST come after ALL hooks to comply with React rules-of-hooks.
+  // (useCallback at ~line 95 and useMutation at ~line 208 must come before this)
+
+  // URL regex — matches http(s):// URLs in text
+  const URL_REGEX = /https?:\/\/[^\s<>"']+/gi
+
+  // Debounced URL detector — fires 800ms after user stops typing
+  const detectAndFetchLink = useCallback((text: string) => {
+    clearTimeout(linkDebounceRef.current)
+    linkDebounceRef.current = setTimeout(async () => {
+      const matches = text.match(URL_REGEX)
+      const firstUrl = matches?.[0]
+      if (!firstUrl || firstUrl === linkDismissed || linkPreview?.url === firstUrl) return
+      if (linkPreview) return // already have a preview
+      setLinkFetching(true)
+      try {
+        const res = await postsApi.getLinkPreview(firstUrl)
+        const data = res.data.data
+        if (data.title) setLinkPreview(data)
+      } catch { /* non-fatal */ }
+      finally { setLinkFetching(false) }
+    }, 800)
+  }, [linkPreview, linkDismissed]) // eslint-disable-line react-hooks/exhaustive-deps
   // ── Detect @mention trigger in textarea ──────────────────────────────────
   const handleBodyChange = async (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val   = e.target.value
     const caret = e.target.selectionStart ?? val.length
 
     setBody(val)
+    detectAndFetchLink(val)
 
     // Find @ before caret
     const beforeCaret = val.slice(0, caret)
@@ -111,7 +144,10 @@ export function PostComposer({
   const selectMention = (u: UserSummary) => {
     const before  = body.slice(0, mentionStart)
     const after   = body.slice(textareaRef.current?.selectionStart ?? body.length)
-    const insert  = `@${u.firstName}${u.lastName} `
+    // Always insert @username so backend mention resolver can match it.
+    // Fall back to @firstName if the user hasn't set a username yet.
+    const handle  = u.username ?? u.firstName
+    const insert  = `@${handle} `
     setBody(before + insert + after)
     setMentionQuery(null)
     setMentionCandidates([])
@@ -136,20 +172,32 @@ export function PostComposer({
       toast({ title: `Max ${MAX_MEDIA} media items per post`, variant: 'destructive' })
       return
     }
+
+    // Client-side size guard: 50 MB per file (matches backend multer limit)
+    const oversized = files.filter(f => f.size > 50 * 1024 * 1024)
+    if (oversized.length) {
+      toast({ title: `${oversized[0].name} is too large (max 50 MB)`, variant: 'destructive' })
+      if (fileRef.current) fileRef.current.value = ''
+      return
+    }
+
     setUploading(true)
     for (const f of files) {
       try {
         const form = new FormData()
         form.append('file', f)
-        const r = await api.post('/upload', form, { headers: { 'Content-Type': 'multipart/form-data' } })
+        const r = await api.post('/upload', form, {          // Track per-file upload progress (future enhancement hook)
+          timeout: 120_000, // 2 min for large videos
+        })
         const uploaded = r.data.data
         setMedia(prev => [...prev, {
           url: uploaded.url,
           type: f.type.startsWith('video') ? 'VIDEO' : 'IMAGE',
           mimeType: f.type,
         }])
-      } catch {
-        toast({ title: 'Upload failed', variant: 'destructive' })
+      } catch (err: any) {
+        const msg = err?.response?.data?.message || err?.message || 'Upload failed'
+        toast({ title: `Upload failed: ${msg}`, variant: 'destructive' })
       }
     }
     setUploading(false)
@@ -164,10 +212,17 @@ export function PostComposer({
       media,
       ...(location.trim() && { location: location.trim() }),
       ...(communityId && { communityId }),
+      ...(linkPreview && {
+        linkUrl:         linkPreview.url,
+        linkTitle:       linkPreview.title ?? undefined,
+        linkDescription: linkPreview.description ?? undefined,
+        linkImage:       linkPreview.image ?? undefined,
+      }),
     }),
     onSuccess: (response) => {
       const savedBody = body
       setBody(''); setMedia([]); setFocused(false); setLocation(''); setShowLocInput(false)
+      setLinkPreview(null); setLinkDismissed(null)
       toast({ title: '✅ Posted!' })
 
       // Optimistic prepend to feed cache
@@ -200,13 +255,17 @@ export function PostComposer({
   const avatarSrc = getAvatarUrl(user?.avatarUrl)
   const initials  = user ? `${user.firstName?.charAt(0) ?? ''}${user.lastName?.charAt(0) ?? ''}`.toUpperCase() || '?' : '?'
 
+  // SA-COMPOSER-01: SUPER_ADMIN cannot create social content — placed after all hooks
+  if (user?.role === 'SUPER_ADMIN') return null
+
   return (
     <div className={cn('bg-white rounded-2xl border border-gray-100 shadow-sm', compact ? 'p-3' : 'p-4')}>
       <div className="flex gap-3">
-        {/* Avatar */}
-        <div className="w-10 h-10 rounded-full overflow-hidden bg-indigo-100 flex-shrink-0 flex items-center justify-center text-sm font-bold text-indigo-600">
+        {/* Avatar — click to view your own profile */}
+        <Link href={`/social/profile/${user?.id}`} title="View my profile"
+          className="w-10 h-10 rounded-full overflow-hidden bg-indigo-100 flex-shrink-0 flex items-center justify-center text-sm font-bold text-indigo-600 hover:ring-2 hover:ring-indigo-400 hover:ring-offset-1 transition-all">
           {avatarSrc ? <img src={avatarSrc} alt="" className="w-full h-full object-cover" /> : initials}
-        </div>
+        </Link>
 
         <div className="flex-1 min-w-0">
           {/* Textarea */}
@@ -264,9 +323,42 @@ export function PostComposer({
             </div>
           )}
 
+          {/* Link preview card */}
+          {linkFetching && (
+            <div className="flex items-center gap-2 mt-2 text-xs text-gray-400">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Fetching link preview…
+            </div>
+          )}
+          {linkPreview && !linkFetching && (
+            <div className="mt-2 rounded-xl border border-gray-200 overflow-hidden bg-gray-50 relative">
+              <button
+                onClick={() => { setLinkDismissed(linkPreview.url); setLinkPreview(null) }}
+                className="absolute top-1.5 right-1.5 w-5 h-5 bg-white rounded-full shadow flex items-center justify-center hover:bg-gray-100 z-10"
+              >
+                <X className="w-3 h-3 text-gray-500" />
+              </button>
+              {linkPreview.image && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={linkPreview.image} alt="" className="w-full h-28 object-cover" />
+              )}
+              <div className="p-2.5">
+                <div className="flex items-center gap-1 mb-0.5">
+                  <Link2 className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                  <p className="text-[10px] text-gray-400 truncate">{new URL(linkPreview.url).hostname}</p>
+                </div>
+                {linkPreview.title && (
+                  <p className="text-xs font-semibold text-gray-800 line-clamp-1">{linkPreview.title}</p>
+                )}
+                {linkPreview.description && (
+                  <p className="text-[11px] text-gray-500 line-clamp-2 mt-0.5">{linkPreview.description}</p>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Media previews */}
-          {media.length > 0 && (
-            <div className="flex flex-wrap gap-2 mt-2">
+          {media.length > 0 && (            <div className="flex flex-wrap gap-2 mt-2">
               {media.map((m, i) => (
                 <div key={i} className="relative w-20 h-20 rounded-xl overflow-hidden bg-gray-100">
                   {m.type === 'IMAGE'

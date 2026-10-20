@@ -86,11 +86,31 @@ describe('POST /api/v1/wallet/purchase', () => {
 
   test('grants coins+bonus in test/dev mode', async () => {
     prisma.coinPackage.findUnique.mockResolvedValue(PACKAGE);
-    prisma.wallet.upsert.mockResolvedValue({ ...WALLET, coins: WALLET.coins + 550 });
+    // $transaction mock: interactive form receives a callback fn
+    prisma.$transaction.mockImplementation(async (fn) => fn({
+      wallet:            { upsert: jest.fn().mockResolvedValue({ ...WALLET, coins: WALLET.coins + 550 }) },
+      walletTransaction: { create: jest.fn().mockResolvedValue({ id: 'wt-dev-1' }) },
+    }));
     const res = await request(buildApp('test')).post('/api/v1/wallet/purchase')
       .send({ packageId: PACKAGE.id });
     expect(res.status).toBe(200);
     expect(res.body.data.purchased.total).toBe(550); // 500 + 50 bonus
+  });
+
+  test('F-01: walletTransaction.create called with STRIPE_PURCHASE type in dev mode', async () => {
+    prisma.coinPackage.findUnique.mockResolvedValue(PACKAGE);
+    const mockCreate = jest.fn().mockResolvedValue({ id: 'wt-dev-2' });
+    prisma.$transaction.mockImplementation(async (fn) => fn({
+      wallet:            { upsert: jest.fn().mockResolvedValue({ ...WALLET, coins: WALLET.coins + 550 }) },
+      walletTransaction: { create: mockCreate },
+    }));
+    await request(buildApp('test')).post('/api/v1/wallet/purchase')
+      .send({ packageId: PACKAGE.id });
+    expect(mockCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ type: 'STRIPE_PURCHASE', coins: 550 })
+      })
+    );
   });
 
   test('SECURITY: blocks /wallet/purchase in production', async () => {
@@ -116,47 +136,97 @@ describe('POST /api/v1/wallet/purchase', () => {
 });
 
 // ─── GET /wallet/history ─────────────────────────────────────────────────────
+// Task 9.1: history now returns WalletTransaction records (not GiftTransaction)
 describe('GET /api/v1/wallet/history', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  const sentTx     = { id: 'gt-1', coinsSpent: 20, createdAt: new Date().toISOString(),
-    gift: { name: 'Rose', emoji: '🌹', priceCoins: 20 },
-    receiver: { id: 'r-1', firstName: 'Sara', lastName: 'A', avatarUrl: null },
-    room: { id: 'room-1', title: 'Live' } };
-  const receivedTx = { id: 'gt-2', diamondsEarned: 10, createdAt: new Date().toISOString(),
-    gift: { name: 'Rose', emoji: '🌹', priceCoins: 20 },
-    sender: { id: 's-1', firstName: 'Ali', lastName: 'H', avatarUrl: null },
-    room: { id: 'room-1', title: 'Live' } };
+  // WalletTransaction fixtures
+  const stripeTx = {
+    id: 'wt-1', type: 'STRIPE_PURCHASE', coins: 1000, diamonds: 0,
+    description: 'Stripe purchase', packageId: 'pkg-1',
+    stripeSessionId: 'cs_abc', giftTxId: null, tipId: null, subscriptionId: null,
+    createdAt: new Date().toISOString(),
+  };
+  const giftTx = {
+    id: 'wt-2', type: 'GIFT_SEND', coins: -20, diamonds: 0,
+    description: 'Sent 1x Rose to room r1', giftTxId: 'gt-1', packageId: null,
+    stripeSessionId: null, tipId: null, subscriptionId: null,
+    createdAt: new Date().toISOString(),
+  };
+  const payoutTx = {
+    id: 'wt-3', type: 'PAYOUT', coins: 0, diamonds: -2000,
+    description: 'Payout request pr-1: 2000 diamonds reserved', giftTxId: null,
+    packageId: null, stripeSessionId: null, tipId: null, subscriptionId: null,
+    createdAt: new Date().toISOString(),
+  };
 
-  test('returns sent + received with total count', async () => {
-    prisma.giftTransaction.findMany
-      .mockResolvedValueOnce([sentTx])
-      .mockResolvedValueOnce([receivedTx]);
-    prisma.giftTransaction.count.mockResolvedValue(2);
+  test('returns WalletTransaction records with pagination', async () => {
+    if (!prisma.walletTransaction) prisma.walletTransaction = {};
+    prisma.walletTransaction.findMany = jest.fn().mockResolvedValue([stripeTx, giftTx]);
+    prisma.walletTransaction.count    = jest.fn().mockResolvedValue(2);
+    // No GIFT_SEND enrichment needed (giftTxId present but giftTransaction.findMany returns [])
+    prisma.giftTransaction.findMany.mockResolvedValue([]);
+
     const res = await request(buildApp()).get('/api/v1/wallet/history');
     expect(res.status).toBe(200);
-    expect(res.body.data.sent).toHaveLength(1);
-    expect(res.body.data.received).toHaveLength(1);
-    expect(res.body.data.total).toBe(2);
+    expect(res.body.data.data).toHaveLength(2);
+    expect(res.body.data.pagination.total).toBe(2);
   });
 
-  test('returns empty arrays when no transactions', async () => {
-    prisma.giftTransaction.findMany.mockResolvedValue([]);
-    prisma.giftTransaction.count.mockResolvedValue(0);
+  test('returns empty array when no transactions', async () => {
+    if (!prisma.walletTransaction) prisma.walletTransaction = {};
+    prisma.walletTransaction.findMany = jest.fn().mockResolvedValue([]);
+    prisma.walletTransaction.count    = jest.fn().mockResolvedValue(0);
+
     const res = await request(buildApp()).get('/api/v1/wallet/history');
     expect(res.status).toBe(200);
-    expect(res.body.data.total).toBe(0);
+    expect(res.body.data.pagination.total).toBe(0);
   });
 
-  test('applies page/limit pagination correctly', async () => {
-    prisma.giftTransaction.findMany.mockResolvedValue([]);
-    prisma.giftTransaction.count.mockResolvedValue(0);
+  test('applies page/limit pagination — skip and take passed to walletTransaction', async () => {
+    if (!prisma.walletTransaction) prisma.walletTransaction = {};
+    prisma.walletTransaction.findMany = jest.fn().mockResolvedValue([]);
+    prisma.walletTransaction.count    = jest.fn().mockResolvedValue(0);
+
     await request(buildApp()).get('/api/v1/wallet/history?page=2&limit=10');
-    // Both findMany calls (sent + received) should have been called with pagination
-    expect(prisma.giftTransaction.findMany).toHaveBeenCalled();
-    const firstCall = prisma.giftTransaction.findMany.mock.calls[0][0];
-    // page=2, limit=10 → skip = (2-1)*10 = 10
-    expect(firstCall.skip).toBe(10);
-    expect(firstCall.take).toBe(10);
+    expect(prisma.walletTransaction.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ skip: 10, take: 10 })
+    );
+  });
+
+  test('GIFT_SEND records enriched with gift details (batch lookup, no N+1)', async () => {
+    if (!prisma.walletTransaction) prisma.walletTransaction = {};
+    prisma.walletTransaction.findMany = jest.fn().mockResolvedValue([giftTx]);
+    prisma.walletTransaction.count    = jest.fn().mockResolvedValue(1);
+    // Batch giftTransaction lookup returns the matching record
+    prisma.giftTransaction.findMany.mockResolvedValue([{
+      id:       'gt-1',
+      gift:     { name: 'Rose', emoji: '🌹', priceCoins: 20 },
+      receiver: { id: 'r-1', firstName: 'Sara', lastName: 'A', avatarUrl: null },
+    }]);
+
+    const res = await request(buildApp()).get('/api/v1/wallet/history');
+    expect(res.status).toBe(200);
+    const record = res.body.data.data[0];
+    expect(record.type).toBe('GIFT_SEND');
+    expect(record.giftDetails.gift.name).toBe('Rose');
+    expect(record.giftDetails.receiver.firstName).toBe('Sara');
+    // Exactly 1 findMany call for enrichment (batch, not N+1)
+    expect(prisma.giftTransaction.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  test('PAYOUT records have no sensitive fields exposed', async () => {
+    if (!prisma.walletTransaction) prisma.walletTransaction = {};
+    prisma.walletTransaction.findMany = jest.fn().mockResolvedValue([payoutTx]);
+    prisma.walletTransaction.count    = jest.fn().mockResolvedValue(1);
+    prisma.giftTransaction.findMany.mockResolvedValue([]);
+
+    const res = await request(buildApp()).get('/api/v1/wallet/history');
+    expect(res.status).toBe(200);
+    const record = res.body.data.data[0];
+    expect(record.type).toBe('PAYOUT');
+    expect(record.diamonds).toBe(-2000);
+    // accountDetails should not be present (lives on PayoutRequest, not WalletTransaction)
+    expect(record.accountDetails).toBeUndefined();
   });
 });

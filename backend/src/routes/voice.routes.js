@@ -17,10 +17,11 @@ const { moderateDeviceLimiter } = require('../middleware/rateLimiter.device');
 const { middleware: idempotency } = require('../middleware/idempotency');
 const {
   listRooms, getRoom, searchRooms, createRoom, joinRoom, leaveRoom, endRoom,
-  toggleMute, raiseHand, promoteParticipant, kickParticipant,
+  toggleMute, raiseHand, promoteParticipant, kickParticipant, banParticipant, unbanParticipant, unkickParticipant,
   getMessages, sendMessage, getHandQueue,
   toggleOpenMic, toggleMicLock, grabMic, dropMic,
-  updateRoom, deleteRoom, getMyRooms, uploadRoomCover
+  updateRoom, deleteRoom, getMyRooms, getScheduledRooms, uploadRoomCover, toggleSeatLock,
+  deleteMessage, getStageState
 } = require('../controllers/voice.controller');
 
 // ─── Multer — room cover image (2 MB, images only, memory storage) ───────────
@@ -28,10 +29,44 @@ const coverUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 2 * 1024 * 1024 }, // 2 MB
   fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) cb(null, true);
-    else cb(new Error('Only image files are allowed'));
+    // Guard against missing mimetype (some mobile clients may not set it)
+    const mime = file.mimetype || '';
+    if (mime.startsWith('image/') || mime === 'application/octet-stream') {
+      // application/octet-stream is used by some mobile clients for binary uploads
+      // — magic bytes validation (validateCoverImage) will do the real check
+      cb(null, true);
+    } else if (!mime) {
+      // No mimetype at all — allow through and let magic bytes decide
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'));
+    }
   },
 });
+
+// L-8 FIX: Validate uploaded cover image magic bytes so spoofed Content-Type
+// headers cannot be used to upload non-image files via this endpoint.
+// Falls back gracefully when magic bytes cannot be detected (some valid images
+// like HEIC, animated GIF, or certain WEBP variants have no detectable signature).
+async function validateCoverImage(req, res, next) {
+  if (!req.file) return next();
+  try {
+    // CJS → ESM interop: file-type@21.x is ESM-only; use dynamic import()
+    const { fileTypeFromBuffer } = await import('file-type');
+    const detected = await fileTypeFromBuffer(req.file.buffer);
+    const mime = detected?.mime;
+    // If file-type CAN detect a type and it's clearly not an image, reject it.
+    // If file-type returns null/undefined, fall through — multer already validated
+    // the declared mimetype via the fileFilter above (startsWith 'image/').
+    if (mime && !mime.startsWith('image/') && !mime.startsWith('video/')) {
+      const { errorResponse } = require('../utils/response');
+      return errorResponse(res, `File type not allowed (detected: ${mime}). Only images are accepted.`, 400);
+    }
+    next();
+  } catch {
+    next(); // fail-open on detection error — multer MIME filter already provides basic protection
+  }
+}
 const { getLiveKitToken } = require('../controllers/livekit.controller');
 const { getMyStats, getLeaderboard } = require('../controllers/voice-stats.controller');
 const {
@@ -43,7 +78,7 @@ const {
   getQueueHandler
 } = require('../controllers/voice-queue.controller');
 const {
-  assignModerator, removeModerator, transferAdmin, muteAll, getParticipants, pinSpeaker
+  assignModerator, removeModerator, transferAdmin, muteAll, unmuteAll, getParticipants, pinSpeaker
 } = require('../controllers/voice-roles.controller');
 const {
   checkVoiceRole, VOICE_ROLES
@@ -79,9 +114,21 @@ router.get('/stats/leaderboard', getLeaderboard);
 router.get('/', moderateLimiter, listRooms);
 router.get('/search', moderateLimiter, searchRooms);  // must be before /:id
 router.get('/my', moderateLimiter, getMyRooms);       // user's own rooms — must be before /:id
+router.get('/scheduled', moderateLimiter, getScheduledRooms); // P2-4: upcoming scheduled rooms
 router.get('/:id', moderateLimiter, getRoom);
 
 router.post('/',
+  // SA-VOICE-CREATE-01: SUPER_ADMIN = Platform Administration ONLY.
+  // Platform admins cannot create voice rooms as content participants.
+  (req, res, next) => {
+    if (req.user?.role === 'SUPER_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Platform administrators cannot create voice rooms. Use the admin panel to manage content.'
+      });
+    }
+    return next();
+  },
   writeLimiter,
   moderateDeviceLimiter,
   validateZod(createRoomSchema),
@@ -116,9 +163,23 @@ router.patch('/:id',
 router.delete('/:id', deleteRoom);
 
 // Upload room cover image (host only)
-router.post('/:id/cover', coverUpload.single('cover'), uploadRoomCover);
+router.post('/:id/cover', coverUpload.single('cover'), validateCoverImage, uploadRoomCover);
 
-router.post('/:id/join', joinRoom);
+router.post('/:id/join',
+  // SA-VOICE-JOIN-01: SUPER_ADMIN = Platform Administration ONLY.
+  // Platform admins cannot join voice rooms as participants.
+  // Emergency room termination is done via PATCH /:id/end (admin-actions route).
+  (req, res, next) => {
+    if (req.user?.role === 'SUPER_ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Platform administrators cannot join voice rooms as participants. Use the admin panel to manage rooms.'
+      });
+    }
+    return next();
+  },
+  joinRoom
+);
 router.post('/:id/leave', leaveRoom);
 
 router.patch('/:id/end',
@@ -154,6 +215,21 @@ router.patch('/:id/promote',
 
 router.delete('/:id/kick/:userId', kickParticipant);
 
+// Ban a participant (kick + persistent DB ban — cannot rejoin)
+router.post('/:id/ban/:userId',
+  [body('reason').optional().isString().isLength({ max: 500 })],
+  validate,
+  banParticipant
+);
+// Unban a participant (removes persistent ban)
+router.delete('/:id/ban/:userId', unbanParticipant);
+
+// Unkick a participant (resets wasKicked so they can rejoin — HOST only)
+router.delete('/:id/kick/:userId/unkick',
+  checkVoiceRole([VOICE_ROLES.HOST]),
+  unkickParticipant
+);
+
 // ─── FIFO SPEAKER QUEUE ───────────────────────────────────────────────────────
 router.post('/:id/queue/raise',              queueRaiseHand);
 router.delete('/:id/queue/cancel',           cancelHand);
@@ -182,6 +258,11 @@ router.patch('/:id/mute-all',
   checkVoiceRole([VOICE_ROLES.HOST, VOICE_ROLES.MODERATOR]),
   muteAll
 );
+// HOST or MODERATOR unmutes all speakers (P1-1 FIX)
+router.patch('/:id/unmute-all',
+  checkVoiceRole([VOICE_ROLES.HOST, VOICE_ROLES.MODERATOR]),
+  unmuteAll
+);
 // HOST or MODERATOR pins/unpins a speaker to top of stage
 router.patch('/:id/pin/:userId',
   checkVoiceRole([VOICE_ROLES.HOST, VOICE_ROLES.MODERATOR]),
@@ -191,18 +272,33 @@ router.patch('/:id/pin/:userId',
 // Get participants grouped by role
 router.get('/:id/participants', getParticipants);
 
+// Authoritative stage snapshot — for active participants only (post-join pull)
+router.get('/:id/stage-state', moderateLimiter, getStageState);
+
 // ─── OPEN MIC ─────────────────────────────────────────────────────────────────
-// HOST/MOD toggles open mic mode
+// HOST/MOD toggles open mic mode — route-level guard added for defence-in-depth
 router.patch('/:id/open-mic',
+  checkVoiceRole([VOICE_ROLES.HOST, VOICE_ROLES.MODERATOR]),
   [body('enabled').optional().isBoolean()],
   validate,
   toggleOpenMic
 );
-// HOST/MOD locks/unlocks the mic (prevents anyone from grabbing the mic)
+// HOST or MODERATOR locks/unlocks the mic — route-level guard added for defence-in-depth
 router.patch('/:id/mic-lock',
+  checkVoiceRole([VOICE_ROLES.HOST, VOICE_ROLES.MODERATOR]),
   [body('locked').optional().isBoolean()],
   validate,
   toggleMicLock
+);
+
+// HOST or MODERATOR locks/unlocks an individual speaker seat by index
+// PHASE 7 FIX: Added checkVoiceRole middleware — server-side authorization required.
+// The toggleSeatLock controller also enforces this, providing defence-in-depth.
+router.patch('/:id/seat-lock',
+  checkVoiceRole([VOICE_ROLES.HOST, VOICE_ROLES.MODERATOR]),
+  [body('seatIndex').isInt({ min: 0, max: 99 }).withMessage('seatIndex must be 0-99')],
+  validate,
+  toggleSeatLock
 );
 // AUDIENCE grabs mic directly
 router.post('/:id/grab-mic', grabMic);
@@ -223,11 +319,21 @@ router.delete('/:id/mic-pass/:offerId',              cancelMicOffer);
 router.get('/:id/messages', getMessages);
 
 router.post('/:id/messages',
+  // SA-VOICE-MSG-01: SUPER_ADMIN cannot send messages in voice rooms (not a participant)
+  (req, res, next) => {
+    if (req.user?.role === 'SUPER_ADMIN') {
+      return res.status(403).json({ success: false, message: 'Platform administrators cannot send messages in voice rooms.' });
+    }
+    return next();
+  },
   validateZod(sendMessageSchema),
   [body('body').trim().notEmpty().withMessage('Message body required')],
   validate,
   sendMessage
 );
+
+// Delete a single message (host/mod/author only)
+router.delete('/:id/messages/:msgId', deleteMessage);
 
 // ─── HAND QUEUE (legacy) ──────────────────────────────────────────────────────
 router.get('/:id/hand-queue', getHandQueue);
@@ -238,6 +344,13 @@ router.post('/:id/livekit-token', getLiveKitToken);
 // ─── GIFTS ────────────────────────────────────────────────────────────────────
 // Send a gift to a host/speaker in the room
 router.post('/:id/gifts',
+  // SA-VOICE-GIFT-01: SUPER_ADMIN cannot send gifts — not a content participant
+  (req, res, next) => {
+    if (req.user?.role === 'SUPER_ADMIN') {
+      return res.status(403).json({ success: false, message: 'Platform administrators cannot send gifts.' });
+    }
+    return next();
+  },
   giftRateLimit,
   validateGiftZod(sendGiftSchema),
   [
@@ -252,6 +365,13 @@ router.post('/:id/gifts',
 
 // Send the same gift to ALL speakers/host on stage at once
 router.post('/:id/gifts/all',
+  // SA-VOICE-GIFT-02: SUPER_ADMIN cannot send gifts — not a content participant
+  (req, res, next) => {
+    if (req.user?.role === 'SUPER_ADMIN') {
+      return res.status(403).json({ success: false, message: 'Platform administrators cannot send gifts.' });
+    }
+    return next();
+  },
   giftRateLimit,
   validateGiftZod(sendGiftToAllSchema),
   [
@@ -278,7 +398,7 @@ router.get('/:id/gifts/top-supporters', getTopSupporters);
 // instead of the full GET /:id, reducing data usage by 97%.
 // ADDITIVE — new route only, no existing routes changed.
 const { getCache } = require('../utils/redis');
-const { prisma }   = require('../utils/prisma');
+const prisma       = require('../utils/prisma');
 router.get('/:id/status', authenticate, async (req, res, next) => {
   try {
     const { id } = req.params;

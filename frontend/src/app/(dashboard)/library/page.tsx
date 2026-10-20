@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { BookOpen, Plus, Search, User, Calendar, CheckCircle, XCircle, Clock, RotateCcw } from 'lucide-react'
 import { ErrorState } from '@/components/ui/error-state'
 import { format } from 'date-fns'
@@ -21,6 +22,7 @@ const CATEGORIES = ['Quran', 'Hadith', 'Fiqh', 'Seerah', 'Arabic', 'Tafsir', 'Is
 
 export default function LibraryPage() {
   const { user } = useAuthStore()
+  const { isTeacher, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
@@ -30,7 +32,8 @@ export default function LibraryPage() {
   const [bookForm, setBookForm] = useState({ title: '', author: '', isbn: '', category: 'Quran', totalCopies: '1', description: '' })
   const [issueForm, setIssueForm] = useState({ studentId: '', dueDate: '' })
 
-  const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  // isAdmin: teacher or above can manage books and issue/return
+  const isAdmin = isTeacher
 
   const { data: booksData, isLoading: loadingBooks, isError: booksError, refetch: refetchBooks } = useQuery({
     queryKey: ['library-books', search, categoryFilter],

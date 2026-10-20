@@ -23,13 +23,13 @@ const prom = require('./prometheus');
  */
 async function sendSlackAlert(options) {
   const { webhookUrl, message, channel, username, iconEmoji, attachments } = options;
+  // Use explicit webhookUrl if provided, otherwise fall back to env var
+  const url = webhookUrl || process.env.SLACK_WEBHOOK_URL;
 
-  if (!webhookUrl || !process.env.SLACK_WEBHOOK_URL) {
+  if (!url) {
     logger.warn('[alerting] Slack webhook URL not configured');
     return;
   }
-
-  const url = webhookUrl || process.env.SLACK_WEBHOOK_URL;
 
   try {
     const response = await fetch(url, {
@@ -364,5 +364,8 @@ module.exports = {
   alertCircuitBreaker,
   alertHealthCheck,
   alertRateLimitExceeded,
-  alertErrorSpike
+  alertErrorSpike,
+  // Exported for testing
+  getSeverityColor,
+  getDefaultChannels,
 };

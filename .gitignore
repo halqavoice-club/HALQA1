@@ -11,12 +11,15 @@ build/
 
 # Environment files — NEVER commit these
 .env
+.env.*
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
 .env.production
 .env.docker
+.env.docker.local
+.env.docker.*.local
 
 # Logs
 logs/
@@ -98,3 +101,111 @@ login_test.json
 __pycache__/
 *.pyc
 *.pyo
+
+# ─── BUILD ARTIFACTS ─────────────────────────────────────────────────────────
+
+# TypeScript incremental build cache — regenerated on every build
+frontend/tsconfig.tsbuildinfo
+
+# Lint output artifacts
+frontend/lint-output.txt
+
+# SSL certificates — should be provisioned by the server, not committed
+frontend/certificates/
+
+# Windows shortcuts
+*.lnk
+
+# Jest cache directories
+mobile/.jest/
+.jest/
+
+# Demo seed scripts — contain hardcoded credentials, never for production
+backend/prisma/seed-demo-accounts.js
+
+# Browser-downloaded duplicate service worker files
+frontend/public/sw\ (1).js
+frontend/public/sw\ (*).js
+
+# Temporary Google Drive upload cache
+.tmp.driveupload/
+.tmp.drivedownload/
+
+# Local dev artifacts — never commit
+frontend/.expo/
+mobile/mobile-tsc-output.txt
+mobile/_*.js
+backend/test-join.js
+
+# ─── V1-01 ADDITIONS ─────────────────────────────────────────────────────────
+
+# Patch files — working-tree diff exports are development artifacts, not source.
+# These may contain uncommitted code changes. Store them outside the repo or in
+# a secure artifact store. Never commit a patch file to source control.
+*.patch
+
+# CI diagnostic and troubleshooting scripts — not part of the shipped product
+ci-integration-logs.txt
+backend/integration-test-output.txt
+
+# Root-level audit scan scripts
+_audit_scan.js
+
+# ─── V1-03-C ADDITIONS ───────────────────────────────────────────────────────
+
+# Root-level AI/audit session reports (generated during development sessions,
+# not source code). Uses multi-word kebab/underscore patterns — safe, will NOT
+# match HALQA-MASTER.md or HALQA_FULL_AUDIT_REPORT.md (single-word suffixes).
+HALQA-*-*-*.md
+HALQA_*_*.md
+PK_COMMUNITY_*.md
+PUBLIC-LIVE-*.md
+PUBLIC_LIVE_*.md
+product-new.md
+product-old.md
+
+# docs/ audit session reports (enumerated explicitly — do NOT use docs/HALQA-*.md
+# glob as it would also match docs/HALQA-MASTER.md which is a tracked canonical doc)
+docs/HALQA-COMPLETION-MAP.md
+docs/HALQA-DEPLOYMENT-ORDER.md
+docs/HALQA-FIX-SPECIFICATIONS.md
+docs/HALQA-GAP-REGISTER.md
+docs/HALQA-PRODUCTION-SMOKE-TEST-PLAN.md
+docs/HALQA-PRODUCTION-READINESS-AUDIT-REPORT.md
+docs/HALQA-PRODUCTION-READINESS-MATRIX.md
+docs/HALQA-RELEASE-BLOCKERS.md
+docs/HALQA-TEST-COVERAGE-MASTER-AUDIT.md
+docs/HALQA-FINAL-DEPENDENCY-DECISION-AUDIT.md
+docs/audits/
+
+# Backend investigation/dev scripts (not Jest tests, not part of the product)
+backend/test-createroom-concurrency.js
+backend/test-livekit-factory-runtime.cjs
+backend/test-livekit-factory-runtime.mjs
+backend/test-livekit-verify.mjs
+backend/v102b-smoke-test.js
+
+# Duplicate test artifact — OS copy with space in filename
+backend/src/tests/voice-mic-lock-security (1).test.js
+
+# CI diagnostic PowerShell scripts — used during CI investigation, not shipped
+scripts/gh-*.ps1
+
+# Two-word-segment HALQA audit reports (e.g. HALQA-CONTRADICTION-REGISTER.md)
+# Covered by HALQA-*-*.md (no tracked file matches this pattern)
+HALQA-*-*.md
+
+# Playwright saved auth state
+frontend/e2e/.auth/
+
+# Agent audit reports and task artifacts (generated, not source code)
+.agents/tasks/
+
+# Worktrees directory (local git worktrees, never committed)
+.worktrees/
+
+# Kiro AI master prompts file (local tooling doc)
+KIRO-AI-MASTER-PROMPTS.md
+
+# Next.js fallback JS files (generated at build/runtime)
+frontend/public/fallback-*.js

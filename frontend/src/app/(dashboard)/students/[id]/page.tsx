@@ -13,6 +13,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Modal } from '@/components/ui/modal'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useSchoolAccess } from '@/hooks/useSchoolAccess'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { Breadcrumb } from '@/components/ui/breadcrumb'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
@@ -20,7 +21,7 @@ import {
   ArrowLeft, QrCode, Mail, Phone, Calendar, BookOpen,
   CheckCircle, XCircle, Clock, Star, BookMarked, Users,
   TrendingUp, Download, Edit, Trash2, MessageSquare,
-  Send, Loader2, Bell, UserCheck
+  Send, Loader2, Bell, UserCheck, ArrowRightLeft, X
 } from 'lucide-react'
 import Link from 'next/link'
 import { format } from 'date-fns'
@@ -50,10 +51,14 @@ export default function StudentDetailPage() {
   const { id } = useParams<{ id: string }>()
   const router = useRouter()
   const { user } = useAuthStore()
+  const { activeRole } = useSchoolAccess()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [showIdCard, setShowIdCard] = useState(false)
+
+  // ── Class reassignment state ──
+  const [showClassPanel, setShowClassPanel] = useState(false)
 
   // ── Communication state ──
   const [showMsgModal, setShowMsgModal] = useState(false)
@@ -93,8 +98,46 @@ export default function StudentDetailPage() {
     }
   })
 
+  // ── Class list for reassignment ──
+  const { data: classesData } = useQuery({
+    queryKey: ['classes-picker'],
+    queryFn: () => api.get('/classes', { params: { limit: 100 } }).then(r => r.data),
+    enabled: showClassPanel,
+    staleTime: 0,
+  })
+  const allClasses: any[] = classesData?.data || []
+
+  const enrollMutation = useMutation({
+    mutationFn: (classId: string) => api.post(`/students/${id}/enroll`, { classId }),
+    onSuccess: () => {
+      toast({ title: 'Student added to class' })
+      queryClient.invalidateQueries({ queryKey: ['student', id] })
+      queryClient.invalidateQueries({ queryKey: ['classes-picker'] })
+    },
+    onError: (err: any) =>
+      toast({ title: err.response?.data?.message || 'Failed to enroll', variant: 'destructive' }),
+  })
+
+  const unenrollMutation = useMutation({
+    mutationFn: (classId: string) => api.delete(`/students/${id}/enroll/${classId}`),
+    onSuccess: () => {
+      toast({ title: 'Student removed from class' })
+      queryClient.invalidateQueries({ queryKey: ['student', id] })
+      queryClient.invalidateQueries({ queryKey: ['classes-picker'] })
+    },
+    onError: (err: any) =>
+      toast({ title: err.response?.data?.message || 'Failed to remove from class', variant: 'destructive' }),
+  })
+
   // ── Send message to student / guardians ──
   const handleSendMessage = async () => {
+    // Single student → use DM (WhatsApp-style), not email
+    if (msgTarget === 'student' && student?.user?.id) {
+      setShowMsgModal(false)
+      router.push(`/dm?userId=${student.user.id}`)
+      return
+    }
+
     if (!msgBody.trim()) {
       toast({ title: 'Message body is required', variant: 'destructive' })
       return
@@ -103,13 +146,14 @@ export default function StudentDetailPage() {
     try {
       const recipientIds: string[] = []
 
-      if (msgTarget === 'student' || msgTarget === 'all') {
-        if (student?.user?.id) recipientIds.push(student.user.id)
-      }
       if (msgTarget === 'guardians' || msgTarget === 'all') {
         student?.guardianLinks?.forEach((link: any) => {
           if (link.guardian?.user?.id) recipientIds.push(link.guardian.user.id)
         })
+      }
+      // 'all' also includes the student
+      if (msgTarget === 'all' && student?.user?.id) {
+        recipientIds.push(student.user.id)
       }
 
       if (recipientIds.length === 0) {
@@ -135,7 +179,15 @@ export default function StudentDetailPage() {
     }
   }
 
-  const canEdit = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
+  // SA-STUDENT-01: SUPER_ADMIN is a platform role — not a school-scoped admin.
+  // Editing student profiles is a school-scoped action (SCHOOL_ADMIN membership role).
+  const canEdit = activeRole === 'SCHOOL_ADMIN' || activeRole === 'TEACHER'
+
+  // ID card is viewable by admins/teachers AND by the student themselves (own card) AND guardians
+  const canViewIdCard = canEdit
+    || activeRole === 'GUARDIAN'
+    || (activeRole === 'STUDENT' && student?.userId === user?.id)
+    || (student?.user?.id === user?.id) // fallback: viewing own record
 
   if (isLoading) {
     return (
@@ -190,7 +242,6 @@ export default function StudentDetailPage() {
       {showIdCard && student && (
         <StudentIdCard
           student={student}
-          schoolName={student.school?.name}
           onClose={() => setShowIdCard(false)}
         />
       )}
@@ -202,44 +253,65 @@ export default function StudentDetailPage() {
       ]} />
 
       {/* Back + actions */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <Link href="/students" className="flex items-center gap-2 text-gray-500 hover:text-gray-700 text-sm">
           <ArrowLeft className="w-4 h-4" /> Back to Students
         </Link>
-        {canEdit && (
-          <div className="flex gap-2 flex-wrap">
-            <Link href={`/students/${id}/attendance`}>
-              <Button variant="outline" size="sm" className="gap-2 text-green-700 border-green-200 hover:bg-green-50">
-                <CheckCircle className="w-4 h-4" /> Attendance
-              </Button>
-            </Link>
-            <Link href={`/students/${id}/report`}>
-              <Button variant="outline" size="sm" className="gap-2">
-                <Download className="w-4 h-4" /> Report Card
-              </Button>
-            </Link>
-            <Button variant="outline" size="sm" className="gap-2 text-purple-700 border-purple-200 hover:bg-purple-50"
-              onClick={() => setShowIdCard(true)}>
-              <QrCode className="w-4 h-4" /> ID Card
-            </Button>
-            <Button variant="outline" size="sm" className="gap-2 text-blue-700 border-blue-200 hover:bg-blue-50"
-              onClick={() => setShowMsgModal(true)}>
-              <MessageSquare className="w-4 h-4" /> Message
-            </Button>
-            <Link href={`/students/${id}/edit`}>
-              <Button variant="outline" size="sm" className="gap-2">
-                <Edit className="w-4 h-4" /> Edit
-              </Button>
-            </Link>
+
+        <div className="flex gap-2 flex-wrap">
+          {/* ID Card — visible to admin, teacher, guardian, and the student themselves */}
+          {canViewIdCard && (
             <Button
               variant="outline" size="sm"
-              className="gap-2 text-red-600 border-red-200 hover:bg-red-50"
-              onClick={() => setShowDeleteConfirm(true)}
+              className="gap-2 text-purple-700 border-purple-200 hover:bg-purple-50"
+              onClick={() => setShowIdCard(true)}
             >
-              <Trash2 className="w-4 h-4" /> Delete
+              <QrCode className="w-4 h-4" /> ID Card
             </Button>
-          </div>
-        )}
+          )}
+
+          {/* Edit-gated actions — SCHOOL_ADMIN and TEACHER only */}
+          {canEdit && (
+            <>
+              <Link href={`/students/${id}/attendance`}>
+                <Button variant="outline" size="sm" className="gap-2 text-green-700 border-green-200 hover:bg-green-50">
+                  <CheckCircle className="w-4 h-4" /> Attendance
+                </Button>
+              </Link>
+              <Link href={`/students/${id}/report`}>
+                <Button variant="outline" size="sm" className="gap-2">
+                  <Download className="w-4 h-4" /> Report Card
+                </Button>
+              </Link>
+              <Button
+                variant="outline" size="sm"
+                className="gap-2 text-blue-700 border-blue-200 hover:bg-blue-50"
+                onClick={() => setShowMsgModal(true)}
+              >
+                <MessageSquare className="w-4 h-4" /> Message
+              </Button>
+              <Link href={`/students/${id}/edit`}>
+                <Button variant="outline" size="sm" className="gap-2">
+                  <Edit className="w-4 h-4" /> Edit
+                </Button>
+              </Link>
+              <Button
+                variant="outline" size="sm"
+                className="gap-2 text-indigo-600 border-indigo-200 hover:bg-indigo-50"
+                onClick={() => setShowClassPanel(p => !p)}
+              >
+                <ArrowRightLeft className="w-4 h-4" /> Classes
+              </Button>
+              <Button
+                variant="outline" size="sm"
+                className="gap-2 text-red-600 border-red-200 hover:bg-red-50"
+                onClick={() => setShowDeleteConfirm(true)}
+              >
+                <Trash2 className="w-4 h-4" /> Delete
+              </Button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Confirm delete dialog */}
@@ -312,10 +384,86 @@ export default function StudentDetailPage() {
                     <Badge variant="secondary" className="gap-1 cursor-pointer hover:bg-halqa-100">
                       <BookOpen className="w-3 h-3" />
                       {e.class?.name}
+                      {e.class?.isDefault && <span className="text-amber-600 ml-0.5">★</span>}
                     </Badge>
                   </Link>
                 ))}
+                {(!student.enrollments || student.enrollments.length === 0) && (
+                  <span className="text-xs text-gray-400 italic">Not enrolled in any class</span>
+                )}
               </div>
+
+              {/* ── Class reassignment panel ──────────────────────────────── */}
+              {showClassPanel && canEdit && (
+                <div className="mt-4 border border-indigo-100 rounded-xl bg-indigo-50/50 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold text-indigo-700 flex items-center gap-1.5">
+                      <ArrowRightLeft className="w-4 h-4" /> Manage Class Enrollment
+                    </p>
+                    <button onClick={() => setShowClassPanel(false)} className="text-gray-400 hover:text-gray-600">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Currently enrolled */}
+                  {student.enrollments?.length > 0 && (
+                    <div>
+                      <p className="text-xs font-medium text-gray-500 mb-1.5 uppercase tracking-wide">Currently enrolled in</p>
+                      <div className="flex flex-wrap gap-2">
+                        {student.enrollments.map((e: any) => (
+                          <div key={e.class?.id} className="flex items-center gap-1.5 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5">
+                            <BookOpen className="w-3 h-3 text-indigo-500" />
+                            <span className="text-sm font-medium text-gray-800">{e.class?.name}</span>
+                            {e.class?.isDefault && (
+                              <Badge className="text-[10px] bg-amber-100 text-amber-700 border-0 px-1.5 py-0">Default</Badge>
+                            )}
+                            <button
+                              onClick={() => unenrollMutation.mutate(e.class?.id)}
+                              disabled={unenrollMutation.isPending}
+                              className="text-gray-300 hover:text-red-500 transition-colors ml-0.5"
+                              title="Remove from this class"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Add to another class */}
+                  <div>
+                    <p className="text-xs font-medium text-gray-500 mb-1.5 uppercase tracking-wide">Add to a class</p>
+                    {!classesData ? (
+                      <p className="text-xs text-gray-400">Loading classes…</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {allClasses
+                          .filter((c: any) => !student.enrollments?.find((e: any) => e.class?.id === c.id))
+                          .map((c: any) => (
+                            <button
+                              key={c.id}
+                              onClick={() => enrollMutation.mutate(c.id)}
+                              disabled={enrollMutation.isPending}
+                              className="flex items-center gap-1.5 bg-white border border-dashed border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50 rounded-lg px-2.5 py-1.5 transition-colors text-sm text-indigo-600"
+                            >
+                              <BookOpen className="w-3 h-3" />
+                              {c.name}
+                              {c.isDefault && <span className="text-amber-500 text-[10px]">★</span>}
+                            </button>
+                          ))
+                        }
+                        {allClasses.filter((c: any) => !student.enrollments?.find((e: any) => e.class?.id === c.id)).length === 0 && (
+                          <p className="text-xs text-gray-400 italic">Enrolled in all available classes</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-400">
+                    Students are auto-enrolled in the default class when they join. Assign to specific classes as needed.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Quick stats */}
@@ -621,15 +769,15 @@ export default function StudentDetailPage() {
         <TabsContent value="communicate" className="space-y-4 mt-4">
           {/* Quick action cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* Message student */}
+            {/* Message student — goes directly to DM (WhatsApp-style) */}
             <Card className="border-0 shadow-sm hover:shadow-md transition-all cursor-pointer group"
-              onClick={() => { setMsgTarget('student'); setShowMsgModal(true) }}>
+              onClick={() => router.push(`/dm?userId=${student.user?.id}`)}>
               <CardContent className="p-5 text-center">
-                <div className="w-12 h-12 bg-blue-50 group-hover:bg-blue-100 rounded-xl flex items-center justify-center mx-auto mb-3 transition-colors">
-                  <MessageSquare className="w-6 h-6 text-blue-600" />
+                <div className="w-12 h-12 bg-green-50 group-hover:bg-green-100 rounded-xl flex items-center justify-center mx-auto mb-3 transition-colors">
+                  <MessageSquare className="w-6 h-6 text-green-600" />
                 </div>
                 <p className="font-semibold text-gray-900">Message Student</p>
-                <p className="text-xs text-gray-500 mt-1">Send a direct message to {student.user?.firstName}</p>
+                <p className="text-xs text-gray-500 mt-1">Open chat with {student.user?.firstName}</p>
               </CardContent>
             </Card>
 
@@ -760,7 +908,7 @@ export default function StudentDetailPage() {
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <Link href="/messages">
+                <Link href={`/dm?userId=${student.user?.id}`}>
                   <div className="flex flex-col items-center gap-2 p-3 rounded-xl bg-gray-50 hover:bg-halqa-50 hover:text-halqa-700 transition-colors text-gray-600 cursor-pointer">
                     <MessageSquare className="w-5 h-5" />
                     <span className="text-xs font-medium">All Messages</span>
@@ -795,15 +943,12 @@ export default function StudentDetailPage() {
         open={showMsgModal}
         onClose={() => setShowMsgModal(false)}
         title={
-          msgTarget === 'student' ? `Message ${student.user?.firstName}`
-          : msgTarget === 'guardians' ? 'Message Guardians'
+          msgTarget === 'guardians' ? 'Message Guardians'
           : `Notify Everyone`
         }
         description={
-          msgTarget === 'student'
-            ? `Send a direct message to ${student.user?.firstName} ${student.user?.lastName}`
-            : msgTarget === 'guardians'
-            ? `Send to ${student.guardianLinks?.length || 0} guardian(s)`
+          msgTarget === 'guardians'
+            ? `Send a broadcast message to ${student.guardianLinks?.length || 0} guardian(s)`
             : `Send to student + ${student.guardianLinks?.length || 0} guardian(s)`
         }
         size="md"
@@ -848,12 +993,12 @@ export default function StudentDetailPage() {
             ))}
           </div>
 
-          {/* Subject */}
+          {/* Subject — optional for broadcast messages to guardians */}
           <div>
-            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Subject (optional)</label>
+            <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Subject <span className="font-normal lowercase normal-case text-gray-400">(optional)</span></label>
             <input
               className="mt-1.5 w-full px-3 py-2 text-sm border border-gray-200 rounded-lg outline-none focus:border-halqa-400 transition-colors"
-              placeholder={`Regarding ${student.user?.firstName} ${student.user?.lastName}...`}
+              placeholder={`Regarding ${student.user?.firstName} ${student.user?.lastName}…`}
               value={msgSubject}
               onChange={e => setMsgSubject(e.target.value)}
             />

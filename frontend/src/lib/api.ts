@@ -6,9 +6,10 @@ const api = axios.create({
   baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api/v1',
   withCredentials: true,
   timeout: 30000,
-  headers: {
-    'Content-Type': 'application/json'
-  }
+  // Note: Content-Type is NOT set globally here.
+  // For JSON requests (default), axios sets it to 'application/json' automatically.
+  // For FormData requests (file uploads), axios sets 'multipart/form-data; boundary=...'
+  // Setting it globally to application/json would break all file uploads.
 })
 
 // ─── Single-flight refresh ────────────────────────────────────────────────────
@@ -40,6 +41,18 @@ api.interceptors.request.use(
         }
       } catch {
         // Store not yet initialized — proceed without token (login page etc.)
+      }
+
+      // Attach active school context so backend requireSchoolMember() resolves
+      // the school for education endpoints without needing schoolId in params/body.
+      try {
+        const { useSchoolStore } = require('@/store/school.store')
+        const activeSchoolId = useSchoolStore.getState().activeSchoolId
+        if (activeSchoolId) {
+          config.headers['x-school-id'] = activeSchoolId
+        }
+      } catch {
+        // School store not yet loaded — skip header
       }
     }
     return config

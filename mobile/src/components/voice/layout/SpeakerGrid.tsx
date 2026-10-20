@@ -23,7 +23,7 @@ import {
   StyleSheet,
   StyleProp,
   ViewStyle,
-  FlatList,
+  FlatList
 } from 'react-native';
 import Animated, { LinearTransition } from 'react-native-reanimated';
 
@@ -36,7 +36,7 @@ import { GiftOverlay, GiftEvent } from './GiftOverlay';
 import type {
   SeatData,
   LayoutMode,
-  SpeakerSlot,
+  SpeakerSlot
 } from '../../../../../src/lib/layout/layoutTypes';
 
 // ---------------------------------------------------------------------------
@@ -329,7 +329,7 @@ export function SpeakerGrid({
   const pageWidth = screenWidth;
 
   const getItemLayout = useCallback(
-    (_data: SeatData[][] | null | undefined, index: number) => ({
+    (_data: ArrayLike<SeatData[]> | null | undefined, index: number) => ({
       length: pageWidth,
       offset: pageWidth * index,
       index,
@@ -603,3 +603,4 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
 });
+

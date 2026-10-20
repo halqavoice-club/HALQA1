@@ -32,9 +32,9 @@ export function initSocket(token: string): Socket {
     transports: ['polling', 'websocket'],
     upgrade: true,
     reconnection: true,
-    reconnectionAttempts: 10,
+    reconnectionAttempts: Infinity,  // keep retrying indefinitely — backend may restart
     reconnectionDelay: 1000,
-    reconnectionDelayMax: 30_000,
+    reconnectionDelayMax: 10_000,    // cap at 10s so reconnect is prompt after a restart
     randomizationFactor: 0.5,
     timeout: 20_000,
     forceNew: false,
@@ -89,7 +89,7 @@ export function updateSocketToken(token: string): void {
   // If the socket is currently disconnected (e.g. mid-reconnect loop),
   // reconnect immediately with the fresh token instead of waiting for
   // the next reconnection delay.
-  if (!socket.connected && !socket.connecting) {
+  if (!socket.connected && !socket.active) {
     socket.connect()
   }
 }
@@ -107,9 +107,9 @@ export function disconnectSocket() {
 }
 
 export function joinClass(classId: string) {
-  socket?.emit('join:class', classId)
+  socket?.emit('class:join', classId)
 }
 
 export function leaveClass(classId: string) {
-  socket?.emit('leave:class', classId)
+  socket?.emit('class:leave', classId)
 }

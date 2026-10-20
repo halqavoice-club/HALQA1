@@ -68,7 +68,7 @@ class LiveClassErrorBoundary extends React.Component<
                 Reconnect
               </button>
               <a
-                href="/live-classes"
+                href="/live-class"
                 className="flex items-center gap-2 px-4 py-2 bg-gray-800 text-gray-200 rounded-lg text-sm font-medium hover:bg-gray-700 transition-colors"
               >
                 <LogOut className="w-4 h-4" />

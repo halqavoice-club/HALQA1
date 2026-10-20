@@ -91,10 +91,6 @@ export default function ChatScreen() {
       <View style={styles.header}>
         <Text allowFontScaling={false} style={styles.title}>Messages</Text>
         <View style={{ flexDirection: 'row', gap: 8 }}>
-          <TouchableOpacity onPress={() => router.push('/messages' as any)} style={styles.headerBtn}>
-            <Ionicons name="mail-outline" size={20} color="#4f46e5" />
-            <Text style={styles.headerBtnText}>Inbox</Text>
-          </TouchableOpacity>
           <TouchableOpacity onPress={() => router.push('/group-chat' as any)} style={styles.headerBtn}>
             <Ionicons name="people-outline" size={20} color="#4f46e5" />
             <Text style={styles.headerBtnText}>Groups</Text>

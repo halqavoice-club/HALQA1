@@ -3,16 +3,26 @@ import { resolveMediaUrl } from '@/lib/media'
 import { resolveMediaLayout } from '@/lib/mediaUtils'
 import type { PostMedia } from '@/lib/posts'
 import { cn } from '@/lib/utils'
-import { Play } from 'lucide-react'
+import { Play, Clapperboard } from 'lucide-react'
 
 interface Props {
-  media: PostMedia[]
-  onOpen: (index: number) => void
+  media:          PostMedia[]
+  onOpen:         (index: number) => void
+  onOpenReels?:   () => void   // called when user clicks a VIDEO cell — navigates to Reels
 }
 
-export function MediaGrid({ media, onOpen }: Props) {
+export function MediaGrid({ media, onOpen, onOpenReels }: Props) {
   if (!media.length) return null
   const layout = resolveMediaLayout(media)
+
+  // Helper: decide click handler — video → reels, image → lightbox
+  const handleClick = (m: PostMedia, index: number) => {
+    if (m.type === 'VIDEO' && onOpenReels) {
+      onOpenReels()
+    } else {
+      onOpen(index)
+    }
+  }
 
   // Single item — full width 16:9
   if (layout.type === 'single') {
@@ -20,7 +30,7 @@ export function MediaGrid({ media, onOpen }: Props) {
     return (
       <div
         className="relative w-full aspect-video rounded-xl overflow-hidden bg-gray-100 cursor-pointer"
-        onClick={() => onOpen(0)}
+        onClick={() => handleClick(m, 0)}
       >
         <MediaCell m={m} />
       </div>
@@ -35,7 +45,7 @@ export function MediaGrid({ media, onOpen }: Props) {
           <div
             key={m.id}
             className="relative aspect-square bg-gray-100 cursor-pointer overflow-hidden"
-            onClick={() => onOpen(i)}
+            onClick={() => handleClick(m, i)}
           >
             <MediaCell m={m} />
           </div>
@@ -51,7 +61,7 @@ export function MediaGrid({ media, onOpen }: Props) {
         <div
           className="row-span-2 relative bg-gray-100 cursor-pointer overflow-hidden"
           style={{ aspectRatio: '1/1' }}
-          onClick={() => onOpen(0)}
+          onClick={() => handleClick(media[0], 0)}
         >
           <MediaCell m={media[0]} fill />
         </div>
@@ -59,7 +69,7 @@ export function MediaGrid({ media, onOpen }: Props) {
           <div
             key={m.id}
             className="relative aspect-square bg-gray-100 cursor-pointer overflow-hidden"
-            onClick={() => onOpen(i + 1)}
+            onClick={() => handleClick(m, i + 1)}
           >
             <MediaCell m={m} />
           </div>
@@ -77,7 +87,7 @@ export function MediaGrid({ media, onOpen }: Props) {
         <div
           key={m.id}
           className="relative aspect-square bg-gray-100 cursor-pointer overflow-hidden"
-          onClick={() => onOpen(i)}
+          onClick={() => handleClick(m, i)}
         >
           <MediaCell m={m} />
           {i === 3 && overflow > 0 && (
@@ -106,9 +116,15 @@ function MediaCell({ m, fill = false }: { m: PostMedia; fill?: boolean }) {
           muted
           playsInline
         />
-        <div className="absolute inset-0 flex items-center justify-center">
+        {/* Play overlay */}
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5">
           <div className="w-10 h-10 bg-black/50 rounded-full flex items-center justify-center">
             <Play className="w-5 h-5 text-white fill-white" />
+          </div>
+          {/* Reels hint badge */}
+          <div className="flex items-center gap-1 bg-black/50 rounded-full px-2 py-0.5">
+            <Clapperboard className="w-3 h-3 text-white" />
+            <span className="text-white text-[10px] font-semibold">Reels</span>
           </div>
         </div>
       </>

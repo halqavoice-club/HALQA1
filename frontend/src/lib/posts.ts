@@ -63,6 +63,7 @@ export interface Post {
   updatedAt: string
   location?: string                 // display label for location tag (no GPS required)
   liveData?: LiveData               // present on LIVE_ROOM_SHARE / LIVE_CLASS_SHARE posts
+  isFollowing?: boolean             // true if the viewer follows this post's author
 }
 
 export interface Comment {
@@ -91,8 +92,12 @@ export type ReactionType = 'LIKE' | 'LOVE' | 'CELEBRATE' | 'SUPPORT' | 'INSIGHTF
 
 export const postsApi = {
   // Feed
-  getFeed:    (cursor?: string, limit = 20) =>
-    api.get<{ data: FeedPage }>('/posts/feed', { params: { cursor, limit } }),
+  getFeed:    (cursor?: string, limit = 20, filter: 'all' | 'following' = 'all') =>
+    api.get<{ data: FeedPage }>('/posts/feed', { params: { cursor, limit, filter } }),
+
+  // Reels — TikTok-style video-only feed
+  getReels:   (cursor?: string, limit = 10) =>
+    api.get<{ data: FeedPage }>('/posts/reels', { params: { cursor, limit } }),
 
   // CRUD
   create: (data: {
@@ -108,6 +113,7 @@ export const postsApi = {
   update:  (id: string, data: any) => api.patch<{ data: Post }>(`/posts/${id}`, data),
   remove:  (id: string)           => api.delete(`/posts/${id}`),
   recordView: (id: string)        => api.post(`/posts/${id}/view`),
+  recordShare: (id: string)       => api.post(`/posts/${id}/share`),
 
   // User posts / profile tabs
   getUserPosts: (userId: string, tab = 'posts', cursor?: string, limit = 20) =>
@@ -144,4 +150,14 @@ export const postsApi = {
 
   // Live sessions (voice rooms + live classes currently LIVE)
   getLiveSessions: () => api.get<{ data: Post[] }>('/posts/live'),
+
+  // Poll voting
+  votePoll: (id: string, optionId: string) =>
+    api.post(`/posts/${id}/poll/vote`, { optionId }),
+
+  // Link preview scrape
+  getLinkPreview: (url: string) =>
+    api.get<{ data: { url: string; title: string | null; description: string | null; image: string | null } }>(
+      '/posts/link-preview', { params: { url } }
+    ),
 }

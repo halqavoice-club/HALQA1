@@ -39,6 +39,17 @@ async function createGrade(req, res, next) {
 
     const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
 
+    // P2-001 FIX: Verify classId and studentId both belong to the caller's school.
+    const schoolId = req.schoolId || req.user.schoolId;
+    if (schoolId) {
+      const [cls, student] = await Promise.all([
+        prisma.class.findFirst({ where: { id: classId, schoolId, deletedAt: null }, select: { id: true } }),
+        prisma.student.findFirst({ where: { id: studentId, schoolId, deletedAt: null }, select: { id: true } })
+      ]);
+      if (!cls)     return errorResponse(res, 'Class not found in your school', 403);
+      if (!student) return errorResponse(res, 'Student not found in your school', 403);
+    }
+
     const grade = await prisma.grade.create({
       data: {
         studentId, classId, termId, categoryId,
@@ -74,6 +85,24 @@ async function bulkCreateGrades(req, res, next) {
     const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
     const safeMax = maxScore && maxScore > 0 ? maxScore : 100;
 
+    // P2-001 FIX: Verify classId and all studentIds belong to the caller's school.
+    const schoolId = req.schoolId || req.user.schoolId;
+    if (schoolId) {
+      const cls = await prisma.class.findFirst({ where: { id: classId, schoolId, deletedAt: null }, select: { id: true } });
+      if (!cls) return errorResponse(res, 'Class not found in your school', 403);
+
+      const studentIds = [...new Set(grades.map(g => g.studentId))];
+      const validStudents = await prisma.student.findMany({
+        where: { id: { in: studentIds }, schoolId, deletedAt: null },
+        select: { id: true }
+      });
+      const validIds = new Set(validStudents.map(s => s.id));
+      const invalid = studentIds.filter(id => !validIds.has(id));
+      if (invalid.length > 0) {
+        return errorResponse(res, `Students not found in your school: ${invalid.join(', ')}`, 403);
+      }
+    }
+
     const created = await prisma.$transaction(
       grades.map(g => {
         const percentage = (g.score / safeMax) * 100;
@@ -104,6 +133,20 @@ async function getStudentGrades(req, res, next) {
   try {
     const { studentId } = req.params;
     const { classId, termId, type } = req.query;
+
+    // H-4 FIX: Students can only view their own grades; guardians can only view their linked students.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (effectiveRole === 'STUDENT') {
+      const myStudent = await prisma.student.findFirst({ where: { userId: req.user.id, deletedAt: null }, select: { id: true } });
+      if (!myStudent || myStudent.id !== studentId) return errorResponse(res, 'Access denied', 403);
+    }
+    if (effectiveRole === 'GUARDIAN') {
+      const guardian = await prisma.guardian.findFirst({
+        where: { userId: req.user.id, deletedAt: null },
+        include: { students: { where: { studentId } } }
+      });
+      if (!guardian || guardian.students.length === 0) return errorResponse(res, 'Access denied — not your student', 403);
+    }
 
     const where = { studentId, deletedAt: null };
     if (classId) where.classId = classId;
@@ -147,6 +190,13 @@ async function getClassGrades(req, res, next) {
     const { classId } = req.params;
     const { termId, type, categoryId } = req.query;
 
+    // P2-001 FIX: Verify classId belongs to the caller's school before reading grades.
+    const schoolId = req.schoolId || req.user.schoolId;
+    if (schoolId) {
+      const cls = await prisma.class.findFirst({ where: { id: classId, schoolId, deletedAt: null }, select: { id: true } });
+      if (!cls) return errorResponse(res, 'Class not found in your school', 404);
+    }
+
     const where = { classId, deletedAt: null };
     if (termId) where.termId = termId;
     if (type) where.type = type;
@@ -177,12 +227,30 @@ async function updateGrade(req, res, next) {
     const { id } = req.params;
     const { score, maxScore, feedback } = req.body;
 
-    const percentage = (score / maxScore) * 100;
+    // H-5 FIX: Verify grade belongs to caller's school and teacher owns it.
+    const existing = await prisma.grade.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) return errorResponse(res, 'Grade not found', 404);
+
+    const schoolId = req.schoolId || req.user.schoolId;
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    // P2-003 FIX: Unconditional school boundary check — removed dead SUPER_ADMIN bypass.
+    // requireSchoolMember middleware already blocks SUPER_ADMIN before reaching here.
+    if (schoolId && existing.classId) {
+      const cls = await prisma.class.findFirst({ where: { id: existing.classId, schoolId }, select: { id: true } });
+      if (!cls) return errorResponse(res, 'Access denied to this school\'s grade', 403);
+    }
+    if (effectiveRole === 'TEACHER') {
+      const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id, deletedAt: null }, select: { id: true } });
+      if (!teacher || existing.teacherId !== teacher.id) return errorResponse(res, 'You can only update grades you created', 403);
+    }
+
+    const safeMax = maxScore && maxScore > 0 ? maxScore : existing.maxScore;
+    const percentage = (score / safeMax) * 100;
     const letterGrade = calculateLetterGrade(percentage);
 
     const grade = await prisma.grade.update({
       where: { id },
-      data: { score, maxScore, percentage, letterGrade, feedback }
+      data: { score, maxScore: safeMax, percentage, letterGrade, feedback }
     });
 
     return successResponse(res, grade, 'Grade updated');
@@ -194,6 +262,29 @@ async function updateGrade(req, res, next) {
 async function deleteGrade(req, res, next) {
   try {
     const { id } = req.params;
+
+    // H-5 FIX: Verify grade belongs to caller's school before deleting.
+    const existing = await prisma.grade.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) return errorResponse(res, 'Grade not found', 404);
+
+    const schoolId = req.schoolId || req.user.schoolId;
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    // P2-003 FIX: Unconditional school boundary check — removed dead SUPER_ADMIN bypass.
+    // requireSchoolMember middleware already blocks SUPER_ADMIN before reaching here.
+    if (schoolId && existing.classId) {
+      const cls = await prisma.class.findFirst({
+        where: { id: existing.classId, schoolId },
+        select: { id: true }
+      });
+      if (!cls) return errorResponse(res, 'Access denied to this school\'s grade', 403);
+    }
+    if (effectiveRole === 'TEACHER') {
+      const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id, deletedAt: null }, select: { id: true } });
+      if (!teacher || existing.teacherId !== teacher.id) {
+        return errorResponse(res, 'You can only delete grades you created', 403);
+      }
+    }
+
     await prisma.grade.update({ where: { id }, data: { deletedAt: new Date() } });
     return successResponse(res, null, 'Grade deleted');
   } catch (error) {
@@ -217,6 +308,17 @@ async function getGradeCategories(req, res, next) {
 async function createGradeCategory(req, res, next) {
   try {
     const { classId, name, type, weight, maxPoints } = req.body;
+    // M-7 FIX: Verify classId belongs to the caller's school before creating category.
+    const schoolId = req.schoolId || req.user.schoolId;
+    // P2-003 FIX: Unconditional school boundary check — removed dead SUPER_ADMIN bypass.
+    // requireSchoolMember middleware already blocks SUPER_ADMIN before reaching here.
+    if (schoolId) {
+      const cls = await prisma.class.findFirst({
+        where: { id: classId, schoolId, deletedAt: null },
+        select: { id: true }
+      });
+      if (!cls) return errorResponse(res, 'Class not found or not in your school', 404);
+    }
     const category = await prisma.gradeCategory.create({
       data: { classId, name, type, weight, maxPoints }
     });

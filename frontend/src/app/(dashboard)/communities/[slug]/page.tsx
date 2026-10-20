@@ -14,7 +14,7 @@ import { useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { useQuery, useMutation, useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { communitiesApi, type Community, type CommunityMember } from '@/lib/communities'
+import { communitiesApi, type Community, type CommunityMember, type CommunityInvite } from '@/lib/communities'
 import { postsApi, type Post } from '@/lib/posts'
 import { resolveMediaUrl } from '@/lib/media'
 import { PostCard } from '@/components/feed/PostCard'
@@ -27,6 +27,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import {
   Users, FileText, Info, ArrowLeft, BadgeCheck, Lock, Globe, Shield,
   Search, X, Settings, UserPlus, UserMinus, Image, Video, Check, XCircle,
+  Mail, Trash2,
 } from 'lucide-react'
 import Link from 'next/link'
 import { format } from 'date-fns'
@@ -43,7 +44,16 @@ export default function CommunityDetailPage() {
   const [tab, setTab] = useState<TabType>('feed')
   const [memberSearch, setMemberSearch] = useState('')
   const [adminPanelOpen, setAdminPanelOpen] = useState(false)
+  const [adminSection, setAdminSection] = useState<'requests' | 'invites' | 'settings' | 'danger'>('requests')
   const [joinDisabled, setJoinDisabled] = useState(false)
+  // Edit settings form state
+  const [editName, setEditName] = useState('')
+  const [editDescription, setEditDescription] = useState('')
+  const [editPrivacy, setEditPrivacy] = useState('')
+  const [editRules, setEditRules] = useState('')
+  const [editCategory, setEditCategory] = useState('')
+  // Invite form state
+  const [inviteUserId, setInviteUserId] = useState('')
 
   const { data: community, isLoading } = useQuery({
     queryKey: ['community', slug],
@@ -69,6 +79,12 @@ export default function CommunityDetailPage() {
     queryKey: ['community-pending-requests', slug],
     queryFn: () => communitiesApi.getPendingRequests(slug).then(r => r.data.data),
     enabled: adminPanelOpen && !!slug,
+  })
+
+  const { data: pendingInvitesData, refetch: refetchInvites } = useQuery({
+    queryKey: ['community-pending-invites', slug],
+    queryFn: () => communitiesApi.listInvites(slug).then(r => r.data.data),
+    enabled: adminPanelOpen && adminSection === 'invites' && !!slug,
   })
 
   const joinMutation = useMutation({
@@ -114,9 +130,70 @@ export default function CommunityDetailPage() {
     onError: () => toast({ title: 'Failed to decline request', variant: 'destructive' })
   })
 
+  // Edit community settings
+  const updateMutation = useMutation({
+    mutationFn: () => communitiesApi.update(slug, {
+      name:        editName.trim() || undefined,
+      description: editDescription.trim() || undefined,
+      privacy:     editPrivacy as any || undefined,
+      rules:       editRules.trim() || undefined,
+      category:    editCategory || undefined,
+    }),
+    onSuccess: () => {
+      toast({ title: '✅ Community updated' })
+      queryClient.invalidateQueries({ queryKey: ['community', slug] })
+      queryClient.invalidateQueries({ queryKey: ['communities'] })
+      queryClient.invalidateQueries({ queryKey: ['my-communities'] })
+    },
+    onError: (e: any) => toast({ title: e?.response?.data?.message || 'Update failed', variant: 'destructive' })
+  })
+
+  // Ban member
+  const banMutation = useMutation({
+    mutationFn: (userId: string) => communitiesApi.banMember(slug, userId),
+    onSuccess: () => {
+      toast({ title: 'Member banned' })
+      queryClient.invalidateQueries({ queryKey: ['community-members', slug] })
+    },
+    onError: (e: any) => toast({ title: e?.response?.data?.message || 'Ban failed', variant: 'destructive' })
+  })
+
+  // Update member role
+  const roleMutation = useMutation({
+    mutationFn: ({ userId, role }: { userId: string; role: string }) =>
+      communitiesApi.updateMemberRole(slug, userId, role),
+    onSuccess: () => {
+      toast({ title: 'Role updated' })
+      queryClient.invalidateQueries({ queryKey: ['community-members', slug] })
+    },
+    onError: (e: any) => toast({ title: e?.response?.data?.message || 'Role update failed', variant: 'destructive' })
+  })
+
+  // Send invite
+  const sendInviteMutation = useMutation({
+    mutationFn: (userId: string) => communitiesApi.sendInvite(slug, userId),
+    onSuccess: () => {
+      toast({ title: '✅ Invite sent' })
+      setInviteUserId('')
+      refetchInvites()
+    },
+    onError: (e: any) => toast({ title: e?.response?.data?.message || 'Failed to send invite', variant: 'destructive' })
+  })
+
+  // Revoke invite
+  const revokeInviteMutation = useMutation({
+    mutationFn: (inviteId: string) => communitiesApi.revokeInvite(slug, inviteId),
+    onSuccess: () => {
+      toast({ title: 'Invite revoked' })
+      refetchInvites()
+    },
+    onError: (e: any) => toast({ title: e?.response?.data?.message || 'Failed to revoke invite', variant: 'destructive' })
+  })
+
   const posts = feedData?.pages.flatMap((p: any) => p.items) ?? []
   const members = membersData?.items ?? []
   const pendingRequests = pendingRequestsData?.items ?? []
+  const pendingInvites = pendingInvitesData?.items ?? []
 
   const filteredMembers = members.filter((m: CommunityMember) => {
     const search = memberSearch.toLowerCase()
@@ -178,7 +255,16 @@ export default function CommunityDetailPage() {
         {/* Admin Panel Button */}
         {isOwnerOrAdmin && (
           <button
-            onClick={() => setAdminPanelOpen(true)}
+            onClick={() => {
+              // Pre-fill edit form with current values
+              setEditName(community.name || '')
+              setEditDescription(community.description || '')
+              setEditPrivacy(community.privacy || 'PUBLIC')
+              setEditRules(community.rules || '')
+              setEditCategory(community.category || '')
+              setAdminSection('requests')
+              setAdminPanelOpen(true)
+            }}
             className="absolute top-4 right-4 p-2 bg-white/20 backdrop-blur-sm rounded-full text-white hover:bg-white/30 transition-colors"
           >
             <Settings className="w-5 h-5" />
@@ -343,19 +429,51 @@ export default function CommunityDetailPage() {
                         </span>
                       </div>
                       {canRemove && (
-                        <button
-                          onClick={() => {
-                            if (confirm(`Remove ${m.user.firstName} ${m.user.lastName} from this community?`)) {
-                              communitiesApi.kickMember(slug, m.user.id).then(() => {
-                                toast({ title: 'Member removed' })
-                                queryClient.invalidateQueries({ queryKey: ['community-members', slug] })
-                              })
-                            }
-                          }}
-                          className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                        >
-                          <UserMinus className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-1">
+                          {/* Role picker — OWNER can promote/demote */}
+                          {isOwner && m.role !== 'OWNER' && (
+                            <select
+                              value={m.role}
+                              onChange={(e) => {
+                                if (confirm(`Change ${m.user.firstName}'s role to ${e.target.value}?`)) {
+                                  roleMutation.mutate({ userId: m.user.id, role: e.target.value })
+                                }
+                              }}
+                              className="text-xs border border-gray-200 rounded-lg px-1.5 py-1 text-gray-600 focus:outline-none focus:border-indigo-300"
+                            >
+                              <option value="MEMBER">Member</option>
+                              <option value="MODERATOR">Moderator</option>
+                              <option value="ADMIN">Admin</option>
+                            </select>
+                          )}
+                          {/* Kick button */}
+                          <button
+                            onClick={() => {
+                              if (confirm(`Remove ${m.user.firstName} ${m.user.lastName} from this community?`)) {
+                                communitiesApi.kickMember(slug, m.user.id).then(() => {
+                                  toast({ title: 'Member removed' })
+                                  queryClient.invalidateQueries({ queryKey: ['community-members', slug] })
+                                }).catch((e: any) => toast({ title: e?.response?.data?.message || 'Failed', variant: 'destructive' }))
+                              }
+                            }}
+                            title="Kick"
+                            className="p-1.5 text-orange-500 hover:bg-orange-50 rounded-lg transition-colors"
+                          >
+                            <UserMinus className="w-3.5 h-3.5" />
+                          </button>
+                          {/* Ban button */}
+                          <button
+                            onClick={() => {
+                              if (confirm(`Ban ${m.user.firstName} ${m.user.lastName}? They will be removed and cannot rejoin.`)) {
+                                banMutation.mutate(m.user.id)
+                              }
+                            }}
+                            title="Ban"
+                            className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                          >
+                            <XCircle className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       )}
                     </div>
                   )
@@ -460,10 +578,14 @@ export default function CommunityDetailPage() {
               animate={{ x: 0 }}
               exit={{ x: '100%' }}
               transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="fixed right-0 top-0 h-full w-full max-w-md bg-white z-50 shadow-xl"
+              className="fixed right-0 top-0 h-full w-full max-w-md bg-white z-50 shadow-xl flex flex-col"
             >
-              <div className="p-4 border-b flex items-center justify-between">
-                <h2 className="text-lg font-semibold">Pending Join Requests</h2>
+              {/* Header */}
+              <div className="p-4 border-b flex items-center justify-between flex-shrink-0">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                  <Settings className="w-5 h-5 text-indigo-500" />
+                  Admin Panel
+                </h2>
                 <button
                   onClick={() => setAdminPanelOpen(false)}
                   className="p-2 hover:bg-gray-100 rounded-full"
@@ -471,40 +593,242 @@ export default function CommunityDetailPage() {
                   <X className="w-5 h-5" />
                 </button>
               </div>
-              <div className="p-4 overflow-y-auto h-[calc(100%-60px)]">
-                {pendingRequests.length === 0 ? (
-                  <p className="text-center text-gray-400 py-8">No pending requests</p>
-                ) : (
-                  <div className="space-y-3">
-                    {pendingRequests.map((request: any) => (
-                      <div key={request.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
-                        <div className="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center text-sm font-bold text-indigo-600 flex-shrink-0">
-                          {request.user.firstName[0]}{request.user.lastName[0]}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-gray-800 truncate">
-                            {request.user.firstName} {request.user.lastName}
-                          </p>
-                          <p className="text-xs text-gray-500">
-                            Requested {format(new Date(request.createdAt), 'MMM d')}
-                          </p>
-                        </div>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => acceptRequestMutation.mutate(request.id)}
-                            className="p-2 bg-green-100 text-green-600 rounded-lg hover:bg-green-200 transition-colors"
-                          >
-                            <Check className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => declineRequestMutation.mutate(request.id)}
-                            className="p-2 bg-red-100 text-red-600 rounded-lg hover:bg-red-200 transition-colors"
-                          >
-                            <XCircle className="w-4 h-4" />
-                          </button>
-                        </div>
+
+              {/* Section tabs */}
+              <div className="flex border-b flex-shrink-0">
+                {[
+                  { id: 'requests', label: `Requests${pendingRequests.length > 0 ? ` (${pendingRequests.length})` : ''}` },
+                  { id: 'invites',  label: `Invites${pendingInvites.length > 0 ? ` (${pendingInvites.length})` : ''}` },
+                  { id: 'settings', label: 'Settings' },
+                  { id: 'danger',   label: 'Danger' },
+                ].map(s => (
+                  <button
+                    key={s.id}
+                    onClick={() => setAdminSection(s.id as any)}
+                    className={cn(
+                      'flex-1 py-2.5 text-xs font-semibold transition-colors',
+                      adminSection === s.id
+                        ? 'text-indigo-600 border-b-2 border-indigo-600 bg-indigo-50'
+                        : 'text-gray-500 hover:text-gray-700'
+                    )}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex-1 overflow-y-auto">
+
+                {/* ── Join Requests ── */}
+                {adminSection === 'requests' && (
+                  <div className="p-4 space-y-3">
+                    {pendingRequests.length === 0 ? (
+                      <div className="text-center py-12 text-gray-400">
+                        <Users className="w-10 h-10 mx-auto mb-2 opacity-30" />
+                        <p className="text-sm">No pending join requests</p>
                       </div>
-                    ))}
+                    ) : (
+                      pendingRequests.map((request: any) => (
+                        <div key={request.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
+                          <div className="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center text-sm font-bold text-indigo-600 flex-shrink-0">
+                            {request.user.firstName[0]}{request.user.lastName[0]}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-semibold text-gray-800 truncate">
+                              {request.user.firstName} {request.user.lastName}
+                            </p>
+                            {request.message && (
+                              <p className="text-xs text-gray-500 truncate italic">"{request.message}"</p>
+                            )}
+                            <p className="text-xs text-gray-400">
+                              {format(new Date(request.createdAt), 'MMM d, yyyy')}
+                            </p>
+                          </div>
+                          <div className="flex gap-1.5">
+                            <button
+                              onClick={() => acceptRequestMutation.mutate(request.user.id)}
+                              disabled={acceptRequestMutation.isPending}
+                              className="p-2 bg-green-100 text-green-600 rounded-lg hover:bg-green-200 transition-colors"
+                              title="Accept"
+                            >
+                              <Check className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => declineRequestMutation.mutate(request.user.id)}
+                              disabled={declineRequestMutation.isPending}
+                              className="p-2 bg-red-100 text-red-600 rounded-lg hover:bg-red-200 transition-colors"
+                              title="Decline"
+                            >
+                              <XCircle className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+
+                {/* ── Invites ── */}
+                {adminSection === 'invites' && (
+                  <div className="p-4 space-y-4">
+                    {/* Send invite form */}
+                    <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 space-y-3">
+                      <h3 className="text-sm font-semibold text-indigo-700 flex items-center gap-2">
+                        <Mail className="w-4 h-4" />
+                        Invite a User
+                      </h3>
+                      <p className="text-xs text-indigo-600">
+                        Enter the User ID of the person you want to invite. Invites expire after 7 days.
+                      </p>
+                      <input
+                        type="text"
+                        placeholder="User ID (UUID)"
+                        value={inviteUserId}
+                        onChange={e => setInviteUserId(e.target.value.trim())}
+                        className="w-full px-3 py-2 border border-indigo-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400"
+                      />
+                      <button
+                        onClick={() => {
+                          if (inviteUserId) sendInviteMutation.mutate(inviteUserId)
+                        }}
+                        disabled={!inviteUserId || sendInviteMutation.isPending}
+                        className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors"
+                      >
+                        {sendInviteMutation.isPending ? 'Sending…' : 'Send Invite'}
+                      </button>
+                    </div>
+
+                    {/* Pending invites list */}
+                    <div>
+                      <p className="text-xs font-semibold text-gray-500 uppercase mb-2">Pending Invites</p>
+                      {pendingInvites.length === 0 ? (
+                        <div className="text-center py-8 text-gray-400">
+                          <Mail className="w-8 h-8 mx-auto mb-2 opacity-30" />
+                          <p className="text-sm">No pending invites</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {pendingInvites.map((inv: CommunityInvite) => (
+                            <div key={inv.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl">
+                              <div className="w-9 h-9 rounded-full bg-indigo-100 flex items-center justify-center text-xs font-bold text-indigo-600 flex-shrink-0">
+                                {inv.invitedUser.firstName[0]}{inv.invitedUser.lastName[0]}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-semibold text-gray-800 truncate">
+                                  {inv.invitedUser.firstName} {inv.invitedUser.lastName}
+                                </p>
+                                <p className="text-xs text-gray-400">
+                                  Invited by {inv.invitedBy.firstName} · Expires {format(new Date(inv.expiresAt), 'MMM d')}
+                                </p>
+                              </div>
+                              <button
+                                onClick={() => {
+                                  if (confirm(`Revoke invite for ${inv.invitedUser.firstName} ${inv.invitedUser.lastName}?`)) {
+                                    revokeInviteMutation.mutate(inv.id)
+                                  }
+                                }}
+                                disabled={revokeInviteMutation.isPending}
+                                title="Revoke invite"
+                                className="p-1.5 text-red-400 hover:bg-red-50 rounded-lg transition-colors"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* ── Settings ── */}
+                {adminSection === 'settings' && (
+                  <div className="p-4 space-y-4">
+                    <div>
+                      <label className="text-xs font-semibold text-gray-500 uppercase">Name</label>
+                      <input
+                        value={editName}
+                        onChange={e => setEditName(e.target.value)}
+                        maxLength={120}
+                        className="mt-1 w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-semibold text-gray-500 uppercase">Description</label>
+                      <textarea
+                        value={editDescription}
+                        onChange={e => setEditDescription(e.target.value)}
+                        rows={3}
+                        maxLength={2000}
+                        className="mt-1 w-full px-3 py-2 border border-gray-200 rounded-xl text-sm resize-none focus:outline-none focus:border-indigo-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-semibold text-gray-500 uppercase">Privacy</label>
+                      <div className="mt-1 grid grid-cols-3 gap-2">
+                        {[['PUBLIC','🌍 Public'],['PRIVATE','🔒 Private'],['INVITE_ONLY','✉️ Invite']] .map(([v, l]) => (
+                          <button
+                            key={v}
+                            type="button"
+                            onClick={() => setEditPrivacy(v)}
+                            className={cn(
+                              'py-2 rounded-xl text-xs font-semibold border transition-colors',
+                              editPrivacy === v
+                                ? 'bg-indigo-600 text-white border-indigo-600'
+                                : 'border-gray-200 text-gray-600 hover:border-indigo-300'
+                            )}
+                          >
+                            {l}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-xs font-semibold text-gray-500 uppercase">Rules</label>
+                      <textarea
+                        value={editRules}
+                        onChange={e => setEditRules(e.target.value)}
+                        rows={4}
+                        maxLength={5000}
+                        placeholder="Community rules…"
+                        className="mt-1 w-full px-3 py-2 border border-gray-200 rounded-xl text-sm resize-none focus:outline-none focus:border-indigo-400"
+                      />
+                    </div>
+                    <button
+                      onClick={() => updateMutation.mutate()}
+                      disabled={updateMutation.isPending || !editName.trim()}
+                      className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors"
+                    >
+                      {updateMutation.isPending ? 'Saving…' : 'Save Changes'}
+                    </button>
+                  </div>
+                )}
+
+                {/* ── Danger Zone ── */}
+                {adminSection === 'danger' && (
+                  <div className="p-4 space-y-4">
+                    <div className="bg-red-50 border border-red-200 rounded-xl p-4 space-y-3">
+                      <h3 className="text-sm font-bold text-red-700">Danger Zone</h3>
+                      <p className="text-xs text-red-600">
+                        These actions are irreversible. Only the community owner can delete the community.
+                      </p>
+                      {isOwner && (
+                        <button
+                          onClick={() => {
+                            if (confirm(`Delete "${community.name}"? This cannot be undone. All posts and members will be removed.`)) {
+                              deleteMutation.mutate()
+                            }
+                          }}
+                          disabled={deleteMutation.isPending}
+                          className="w-full py-2.5 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors"
+                        >
+                          {deleteMutation.isPending ? 'Deleting…' : '🗑️ Delete Community'}
+                        </button>
+                      )}
+                      {!isOwner && (
+                        <p className="text-xs text-gray-400 text-center">Only the owner can delete this community.</p>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>

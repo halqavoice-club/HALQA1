@@ -12,19 +12,90 @@ const logger = require('../utils/logger');
 
 /**
  * Create a new assignment submission
+ *
+ * FIND-02 FIX: schoolId, classId, gradeId, teacherId and studentId must be
+ * server-controlled — never trusted from req.body for authorization.
+ *
+ * Authorization chain (enforced by route middleware + this controller):
+ *   1. requireSchoolMember() → sets req.schoolId (authoritative school context)
+ *   2. Resolve authenticated student record for req.schoolId
+ *   3. Validate classId belongs to req.schoolId
+ *   4. Validate gradeId (if supplied) belongs to req.schoolId
+ *   5. Ignore body.schoolId, body.studentId (spoofable), body.teacherId
+ *   6. Create submission using server-derived values only
  */
 async function createAssignmentSubmission(req, res) {
   try {
-    const { schoolId, classId, gradeId, studentId, teacherId, title, description, attachments, textContent } = req.body;
-    const userId = req.user.id;
+    // FIND-02: use req.schoolId (set by requireSchoolMember middleware) not req.body.schoolId
+    const schoolId = req.schoolId;
+    const userId   = req.user.id;
+
+    if (!schoolId) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VAL_002', message: 'School context required', statusCode: 400 }
+      });
+    }
+
+    // Extract only safe client fields — authorization fields are server-resolved
+    const { classId, gradeId, title, description, attachments, textContent } = req.body;
+
+    // Validate required fields
+    if (!classId) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'VAL_002', message: 'classId is required', statusCode: 400 }
+      });
+    }
+
+    // FIND-02: Verify classId belongs to the authenticated user's school.
+    // Prevents a School A student from submitting to a School B class using a valid School B ID.
+    const cls = await prisma.class.findFirst({
+      where: { id: classId, schoolId, deletedAt: null },
+      select: { id: true }
+    });
+    if (!cls) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'AUTH_002', message: 'Class not found in your school', statusCode: 403 }
+      });
+    }
+
+    // FIND-02: Verify gradeId (if supplied) belongs to the same school via its class.
+    if (gradeId) {
+      const grade = await prisma.grade.findFirst({
+        where: { id: gradeId, classId, deletedAt: null },
+        select: { id: true }
+      });
+      if (!grade) {
+        return res.status(403).json({
+          success: false,
+          error: { code: 'AUTH_002', message: 'Grade not found in this class', statusCode: 403 }
+        });
+      }
+    }
+
+    // FIND-02: Resolve the Student record for the authenticated user in this school.
+    // body.studentId is ignored — a student cannot submit on behalf of another student.
+    const student = await prisma.student.findFirst({
+      where: { userId, schoolId, deletedAt: null },
+      select: { id: true }
+    });
+    if (!student) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'AUTH_002', message: 'Student profile not found in your school', statusCode: 403 }
+      });
+    }
 
     const submission = await prisma.assignmentSubmission.create({
       data: {
-        schoolId,
-        classId,
-        gradeId,
-        studentId: studentId || userId,
-        teacherId,
+        // FIND-02: all authorization-sensitive fields are server-derived
+        schoolId,                  // from requireSchoolMember, not req.body
+        classId,                   // validated to belong to schoolId above
+        gradeId:   gradeId || null, // validated to belong to classId above
+        studentId: student.id,     // from authenticated user's own student record
+        teacherId: null,           // not accepted from client; set by grading endpoints
         title,
         description,
         attachments: attachments || [],
@@ -33,8 +104,8 @@ async function createAssignmentSubmission(req, res) {
       }
     });
 
-    logger.info(`Assignment submission created: ${submission.id} by student ${submission.studentId}`);
-    
+    logger.info(`Assignment submission created: ${submission.id} by student ${student.id}`);
+
     res.status(201).json({
       success: true,
       data: submission
@@ -43,11 +114,7 @@ async function createAssignmentSubmission(req, res) {
     logger.error('Failed to create assignment submission:', error);
     res.status(500).json({
       success: false,
-      error:({
-        code: 'INT_001',
-        message: 'Failed to create assignment submission',
-        statusCode: 500
-      })
+      error: { code: 'INT_001', message: 'Failed to create assignment submission', statusCode: 500 }
     });
   }
 }
@@ -146,8 +213,12 @@ async function getStudentSubmissions(req, res) {
     const { status, gradeId } = req.query;
     const userId = req.user.id;
 
+    // F-5 FIX: Use effectiveRole so new MEMBER users with school-scoped TEACHER/ADMIN
+    // memberships are recognized. req.schoolMembership is set by requireSchoolMember().
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+
     // Check if user is the student or a teacher/admin
-    if (studentId !== userId && req.user.role !== 'TEACHER' && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    if (studentId !== userId && effectiveRole !== 'TEACHER' && effectiveRole !== 'SCHOOL_ADMIN' && effectiveRole !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -205,8 +276,11 @@ async function getGradeSubmissions(req, res) {
     const { status } = req.query;
     const userId = req.user.id;
 
+    // F-5 FIX: Use effectiveRole for school-scoped role recognition.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+
     // Check if user is a teacher/admin
-    if (req.user.role !== 'TEACHER' && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    if (effectiveRole !== 'TEACHER' && effectiveRole !== 'SCHOOL_ADMIN' && effectiveRole !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -278,8 +352,11 @@ async function gradeSubmission(req, res) {
       });
     }
 
+    // F-5 FIX: Use effectiveRole — recognizes MEMBER users with school-scoped TEACHER/ADMIN.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+
     // Check if user is the teacher
-    if (submission.teacherId !== userId && req.user.role !== 'SCHOOL_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    if (submission.teacherId !== userId && effectiveRole !== 'SCHOOL_ADMIN' && effectiveRole !== 'SUPER_ADMIN') {
       return res.status(403).json({
         success: false,
         error:({
@@ -359,9 +436,11 @@ async function getSubmission(req, res) {
     }
 
     // Check authorization
+    // F-5 FIX: Use effectiveRole — recognizes MEMBER users with school-scoped roles.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
     const isStudent = submission.studentId === userId;
     const isTeacher = submission.teacherId === userId;
-    const isAdmin = req.user.role === 'SCHOOL_ADMIN' || req.user.role === 'SUPER_ADMIN';
+    const isAdmin = effectiveRole === 'SCHOOL_ADMIN' || effectiveRole === 'SUPER_ADMIN';
 
     if (!isStudent && !isTeacher && !isAdmin) {
       return res.status(403).json({

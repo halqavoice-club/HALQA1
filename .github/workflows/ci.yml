@@ -1,18 +1,31 @@
-name: HALQA CI
+﻿name: HALQA CI
 
 on:
   push:
-    branches: [main, develop]
+    branches:
+      - main
+      - develop
+      - 'fix/**'
+      - 'feat/**'
+      - 'hotfix/**'
   pull_request:
-    branches: [main, develop]
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual trigger'
+        required: false
+        default: 'Manual CI run'
 
 jobs:
-  # ─── Backend Unit Tests ─────────────────────────────────────────────────────
+  # --- Backend Unit Tests ---------------------------------------------------
   # DO-003: Run the financial unit tests (auth/stripe/gift/wallet) on every PR.
-  # These tests mock all external deps — no real DB or Redis needed.
+  # These tests mock all external deps -- no real DB or Redis needed.
   # They protect the most critical code paths: payment, auth, gifting.
   backend-tests:
-    name: Backend — Unit Tests
+    name: Backend -- Unit Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -22,7 +35,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
 
@@ -30,24 +43,23 @@ jobs:
         run: npm ci
         working-directory: backend
 
-      - name: Run unit tests (auth + stripe + gift + wallet)
+      - name: Run unit tests (all unit tests, excluding integration)
         run: npm run test:unit -- --ci --reporters=default
         working-directory: backend
         env:
           NODE_ENV: test
-          # Jest setup file sets all required env vars, but CI needs
-          # DATABASE_URL to satisfy validateEnv (not actually connected)
           DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
           JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'
           JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
           PORT: '5001'
           SERVICE_NAME: 'halqa-ci'
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'
 
-  # ─── Backend Lint + Schema Validate ────────────────────────────────────────
+  # --- Backend Lint + Schema Validate ---------------------------------------
   backend:
-    name: Backend — Lint & Schema
+    name: Backend -- Lint & Schema
     runs-on: ubuntu-latest
-    # Run in parallel with unit tests — both are fast and independent
     needs: []
 
     steps:
@@ -57,7 +69,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
 
@@ -72,18 +84,25 @@ jobs:
           DATABASE_URL: 'mysql://root:password@localhost:3306/halqa_test'
 
       - name: Check for syntax errors
-        run: node -e "
-          const files = require('fs').readdirSync('./src', { recursive: true })
-            .filter(f => f.endsWith('.js'))
-            .map(f => './src/' + f);
-          let ok = 0, fail = 0;
-          files.forEach(f => {
-            try { require(f); ok++; }
-            catch(e) { if (!e.message.includes('Cannot find module')) { console.error('FAIL:', f, e.message); fail++; } else ok++; }
-          });
-          console.log('Syntax check:', ok, 'OK,', fail, 'FAIL');
-          if (fail > 0) process.exit(1);
-        "
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            function walk(dir) {
+              return fs.readdirSync(dir).flatMap(f => {
+                const full = path.join(dir, f);
+                return fs.statSync(full).isDirectory() ? walk(full) : [full];
+              });
+            }
+            const files = walk('./src').filter(f => f.endsWith('.js'));
+            let ok = 0, fail = 0;
+            files.forEach(f => {
+              try { require(f); ok++; }
+              catch(e) { if (!e.message.includes('Cannot find module')) { console.error('FAIL:', f, e.message); fail++; } else ok++; }
+            });
+            console.log('Syntax check:', ok, 'OK,', fail, 'FAIL');
+            if (fail > 0) process.exit(1);
+          "
         working-directory: backend
         env:
           NODE_ENV: test
@@ -92,9 +111,9 @@ jobs:
           JWT_REFRESH_SECRET: 'test_refresh_secret_for_ci_only'
           PORT: '5001'
 
-  # ─── Frontend Type Check + Lint ────────────────────────────────────────────
+  # --- Frontend Type Check + Lint -------------------------------------------
   frontend:
-    name: Frontend — TypeScript & Lint
+    name: Frontend -- TypeScript & Lint
     runs-on: ubuntu-latest
 
     steps:
@@ -120,9 +139,16 @@ jobs:
         run: npm run lint
         working-directory: frontend
 
-  # ─── Mobile Type Check + Lint ──────────────────────────────────────────────
+      - name: Jest unit + PBT tests
+        run: npm test -- --ci --reporters=default
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: 'http://localhost:5000/api/v1'
+          NEXT_PUBLIC_SOCKET_URL: 'http://localhost:5000'
+
+  # --- Mobile Type Check + Lint ---------------------------------------------
   mobile:
-    name: Mobile — TypeScript & Lint
+    name: Mobile -- TypeScript & Lint
     runs-on: ubuntu-latest
 
     steps:
@@ -148,12 +174,16 @@ jobs:
         run: npm run lint
         working-directory: mobile
 
-  # ─── Backend Integration Tests ─────────────────────────────────────────────
+      - name: Jest unit tests
+        run: npm test -- --ci --passWithNoTests --reporters=default
+        working-directory: mobile
+
+  # --- Backend Integration Tests --------------------------------------------
   # REQ-19.3, REQ-20.9: Run integration tests against a real MySQL + Redis.
   # Runs after backend lint and unit tests both pass.
   # Blocks the Docker build if any integration test fails.
   backend-integration:
-    name: Backend — Integration Tests
+    name: Backend -- Integration Tests
     runs-on: ubuntu-latest
     needs: [backend, backend-tests]
 
@@ -168,7 +198,7 @@ jobs:
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-cmd="mysqladmin ping -h localhost -u root --password=root --silent"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=10
@@ -190,7 +220,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
 
@@ -198,8 +228,41 @@ jobs:
         run: npm ci
         working-directory: backend
 
+      - name: Wait for Redis to be ready
+        run: |
+          node -e "
+            const net = require('net');
+            let attempts = 0;
+            const MAX = 10;
+            function check() {
+              attempts++;
+              const c = net.createConnection({ port: 6379, host: 'localhost' });
+              c.on('connect', () => { console.log('Redis is ready.'); c.destroy(); process.exit(0); });
+              c.on('error', () => {
+                c.destroy();
+                if (attempts >= MAX) { console.error('ERROR: Redis did not become ready in time.'); process.exit(1); }
+                console.log('Waiting for Redis... attempt ' + attempts + '/' + MAX);
+                setTimeout(check, 2000);
+              });
+            }
+            check();
+          "
+
       - name: Run Prisma migrations against test DB
         run: npx prisma migrate deploy
+        working-directory: backend
+        env:
+          DATABASE_URL: 'mysql://halqa:halqa_test_pw@localhost:3306/halqa_test'
+
+      - name: Verify no pending migrations (drift detection)
+        run: |
+          STATUS=$(npx prisma migrate status 2>&1)
+          echo "$STATUS"
+          if echo "$STATUS" | grep -q "have not yet been applied"; then
+            echo "ERROR: Unapplied migrations detected. Schema and migrations are out of sync."
+            exit 1
+          fi
+          echo "Migration drift check passed -- database schema is up to date."
         working-directory: backend
         env:
           DATABASE_URL: 'mysql://halqa:halqa_test_pw@localhost:3306/halqa_test'
@@ -215,26 +278,431 @@ jobs:
           JWT_REFRESH_SECRET: 'ci_integration_refresh_secret_32_chars!!'
           PORT: '5002'
           SERVICE_NAME: 'halqa-integration-ci'
+          HEALTH_TOKEN: 'ci_health_token_integration_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_integration_tests_only_!!'
+          PAYOUT_ENCRYPTION_KEY: 'ci_payout_encryption_key_32bytes_placeholder!!'
 
-  # ─── Docker Build Test ─────────────────────────────────────────────────────
+      - name: Verify backup and restore procedure
+        run: |
+          echo "=== Step 1: Create backup of test database ==="
+          mysqldump --host=127.0.0.1 --port=3306 --protocol=TCP -u halqa -phalqa_test_pw halqa_test > /tmp/halqa_test_backup.sql
+          echo "Backup size: $(wc -c < /tmp/halqa_test_backup.sql) bytes"
+
+          echo "=== Step 2: Verify backup file is non-empty ==="
+          if [ ! -s /tmp/halqa_test_backup.sql ]; then
+            echo "ERROR: Backup file is empty"
+            exit 1
+          fi
+
+          echo "=== Step 3: Drop and recreate the test database ==="
+          mysql --host=127.0.0.1 --port=3306 --protocol=TCP -u halqa -phalqa_test_pw -e "DROP DATABASE halqa_test; CREATE DATABASE halqa_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+
+          echo "=== Step 4: Restore from backup ==="
+          mysql --host=127.0.0.1 --port=3306 --protocol=TCP -u halqa -phalqa_test_pw halqa_test < /tmp/halqa_test_backup.sql
+
+          echo "=== Step 5: Verify table count is non-zero ==="
+          TABLE_COUNT=$(mysql --host=127.0.0.1 --port=3306 --protocol=TCP -u halqa -phalqa_test_pw halqa_test --skip-column-names -e \
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='halqa_test' AND table_type='BASE TABLE';")
+          echo "Tables restored: $TABLE_COUNT"
+          if [ "$TABLE_COUNT" -lt "10" ]; then
+            echo "ERROR: Restore failed -- too few tables ($TABLE_COUNT)"
+            exit 1
+          fi
+
+          echo "=== Backup/restore verification PASSED -- $TABLE_COUNT tables restored ==="
+          rm -f /tmp/halqa_test_backup.sql
+
+  # --- Docker Build Test ----------------------------------------------------
+  # DO-003: Docker build only runs after lint, unit tests, AND integration tests pass.
+  # Also validates both Compose files with stub env vars before building images.
   docker:
     name: Docker Build Test
     runs-on: ubuntu-latest
-    # DO-003: Docker build only runs after lint, unit tests, AND integration tests pass
     needs: [backend, backend-tests, backend-integration, frontend]
     # Only run on main branch or PRs to main (not on every push to develop)
-    if: github.ref == 'refs/heads/main' || github.base_ref == 'main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate docker-compose.yml
+        # Write a stub .env to satisfy :? required-var guards without real secrets.
+        # Validates YAML structure, volume declarations, service references, build.args.
+        # Uses printf to avoid heredoc indentation issues (leading spaces break parsing).
+        run: |
+          printf '%s\n' \
+            'MYSQL_ROOT_PASSWORD=ci_stub' \
+            'MYSQL_USER=ci_stub' \
+            'MYSQL_PASSWORD=ci_stub' \
+            'JWT_SECRET=ci_stub_jwt_secret_32_chars_placeholder' \
+            'JWT_REFRESH_SECRET=ci_stub_refresh_secret_32_chars_xx' \
+            'CLIENT_URL=http://localhost:3000' \
+            'NEXT_PUBLIC_API_URL=http://localhost:5000/api/v1' \
+            'NEXT_PUBLIC_SOCKET_URL=http://localhost:5000' \
+            'LIVEKIT_URL=wss://placeholder.livekit.cloud' \
+            > .env.ci-stub
+          docker compose --env-file .env.ci-stub -f docker-compose.yml config --quiet
+          echo "docker-compose.yml validation PASSED"
+
+      - name: Validate docker-compose.prod.yml
+        # Prod compose uses bare ${VAR} (no :? guard) -- pass CI placeholders via env:.
+        run: |
+          docker compose -f docker-compose.prod.yml config --quiet
+          echo "docker-compose.prod.yml validation PASSED"
+        env:
+          MYSQL_ROOT_PASSWORD: ci_stub
+          MYSQL_USER: ci_stub
+          MYSQL_PASSWORD: ci_stub
+          REDIS_PASSWORD: ci_stub
+          JWT_SECRET: ci_stub_jwt_secret_32_chars_placeholder
+          JWT_REFRESH_SECRET: ci_stub_refresh_32_chars_placeholder
+          CLIENT_URL: http://localhost:3000
+          NEXT_PUBLIC_API_URL: https://api.halqa.app/api/v1
+          NEXT_PUBLIC_SOCKET_URL: https://api.halqa.app
+          LIVEKIT_URL: wss://placeholder.livekit.cloud
+          LIVEKIT_API_KEY: ci_placeholder
+          LIVEKIT_API_SECRET: ci_placeholder
+          STRIPE_SECRET_KEY: ci_placeholder
+          STRIPE_PUBLISHABLE_KEY: ci_placeholder
+          STRIPE_WEBHOOK_SECRET: ci_placeholder
+          R2_ACCOUNT_ID: ci_placeholder
+          R2_ACCESS_KEY_ID: ci_placeholder
+          R2_SECRET_ACCESS_KEY: ci_placeholder
+          R2_PUBLIC_URL: https://placeholder.r2.dev
+          SMTP_HOST: smtp.placeholder.com
+          SMTP_PORT: '587'
+          SMTP_USER: ci_placeholder
+          SMTP_PASS: ci_placeholder
+          EMAIL_FROM: ci@placeholder.com
+          METRICS_TOKEN: ci_placeholder
+          SERVICE_NAME: halqa-ci
+
       - name: Build backend Docker image
         run: docker build -t halqa-backend:test ./backend
 
-      - name: Build frontend Docker image
-        run: docker build -t halqa-frontend:test ./frontend
+      - name: Pre-flight frontend build check (exposes full next build errors)
+        # Run next build directly on the runner before the Docker build.
+        # Docker swallows build output by default; this step shows the full
+        # Next.js compiler error so failures are visible in CI logs.
+        # Do NOT set NODE_ENV=production here -- npm ci skips devDependencies
+        # when NODE_ENV is production, but next build needs autoprefixer,
+        # tailwindcss, postcss, and typescript from devDependencies.
+        # next build sets production mode internally regardless.
+        run: |
+          npm ci
+          npm run build
+        working-directory: frontend
         env:
           NEXT_PUBLIC_API_URL: 'https://api.halqa.app/api/v1'
           NEXT_PUBLIC_SOCKET_URL: 'https://api.halqa.app'
           NEXT_PUBLIC_LIVEKIT_URL: 'wss://placeholder.livekit.cloud'
+          DISABLE_PWA: 'true'
+
+      - name: Build frontend Docker image
+        # NEXT_PUBLIC_* vars must be --build-arg, not env:.
+        # Next.js inlines them at build time inside the container;
+        # host env: vars do NOT reach the Docker build context.
+        run: |
+          docker build --progress=plain -t halqa-frontend:test \
+            --build-arg NEXT_PUBLIC_API_URL=https://api.halqa.app/api/v1 \
+            --build-arg NEXT_PUBLIC_SOCKET_URL=https://api.halqa.app \
+            --build-arg NEXT_PUBLIC_LIVEKIT_URL=wss://placeholder.livekit.cloud \
+            ./frontend
+
+  # --- Playwright E2E Tests -------------------------------------------------
+  # Uses a real backend + seeded DB so tests exercise the actual auth flow.
+  # The frontend is built in standalone mode and served with next start.
+  e2e:
+    name: Frontend -- Playwright E2E
+    runs-on: ubuntu-latest
+    needs: [frontend, backend-integration]
+    # Only run on main or PRs to main -- E2E is expensive, skip feature branches
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+
+    services:
+      mysql:
+        image: mariadb:10.11
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: halqa_test
+          MYSQL_USER: halqa
+          MYSQL_PASSWORD: halqa_test_pw
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -u root --password=root --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Backend needs Node 22; set it up first for backend install + start
+      - name: Setup Node.js 22 (backend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      # -- Start backend -------------------------------------------------------
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      - name: Run Prisma migrations and seed
+        run: npx prisma migrate deploy && node src/prisma/seed.js
+        working-directory: backend
+        env:
+          DATABASE_URL: 'mysql://halqa:halqa_test_pw@localhost:3306/halqa_test'
+          NODE_ENV: test
+
+      - name: Start backend server
+        run: npm start &
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: 'mysql://halqa:halqa_test_pw@localhost:3306/halqa_test'
+          REDIS_URL: 'redis://localhost:6379'
+          JWT_SECRET: 'ci_e2e_jwt_secret_at_least_32_chars!!'
+          JWT_REFRESH_SECRET: 'ci_e2e_refresh_secret_32_chars!!'
+          PORT: '5000'
+          CLIENT_URL: 'http://localhost:3000'
+          STORAGE_TYPE: 'local'
+          SERVICE_NAME: 'halqa-e2e'
+          LIVEKIT_URL: 'wss://placeholder.livekit.cloud'
+          LIVEKIT_API_KEY: 'ci_placeholder'
+          LIVEKIT_API_SECRET: 'ci_placeholder_api_key_only'
+          HEALTH_TOKEN: 'ci_health_token_e2e_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_e2e_tests_only_!!'
+          # validateEnv() requires this key at startup -- CI-only placeholder
+          PAYOUT_ENCRYPTION_KEY: 'ci_payout_encryption_key_32bytes_placeholder!!'
+
+      - name: Wait for backend
+        run: npx wait-on http://localhost:5000/health --timeout 30000
+
+      # -- Build and start frontend --------------------------------------------
+      # Switch to Node 20 -- frontend package-lock.json was generated with Node 20.
+      # Mismatched Node version causes npm ci to fail or produce wrong installs.
+      - name: Setup Node.js 20 (frontend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Build frontend
+        # NEXT_PUBLIC_* are set as host env vars here -- this is correct because
+        # npm run build runs directly on the runner (not inside Docker).
+        run: npm run build
+        working-directory: frontend
+        env:
+          NEXT_PUBLIC_API_URL: 'http://localhost:5000/api/v1'
+          NEXT_PUBLIC_SOCKET_URL: 'http://localhost:5000'
+          NEXT_PUBLIC_LIVEKIT_URL: 'wss://placeholder.livekit.cloud'
+
+      - name: Start frontend server
+        run: npm start &
+        working-directory: frontend
+        env:
+          PORT: '3000'
+
+      - name: Wait for frontend
+        run: npx wait-on http://localhost:3000 --timeout 30000
+
+      # -- Run Playwright ------------------------------------------------------
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+
+      - name: Run E2E tests
+        run: npm run test:e2e
+        working-directory: frontend
+        env:
+          PLAYWRIGHT_BASE_URL: 'http://localhost:3000'
+          # Credentials match users created by seed.js.
+          # student1@halqa.com (STUDENT) -- used by auth.spec, voice.spec, purchase.spec
+          E2E_TEST_EMAIL: 'student1@halqa.com'
+          E2E_TEST_PASSWORD: 'Student@2024'
+          # teacher@halqa-academy.com (TEACHER) -- used by live-class.spec
+          # seed.js creates this user; teachers can create live classes.
+          E2E_TEACHER_EMAIL: 'teacher@halqa-academy.com'
+          E2E_TEACHER_PASSWORD: 'Teacher@2024'
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7
+
+  # --- Dependency-Aware Regression: Classify changed files ------------------
+  # Runs on every push/PR. Diffs HEAD against the PR base (or previous commit
+  # on a push). Outputs a comma-separated group list, e.g. "G1,G3".
+  # Falls back to "G1,G2,G3,G4,G5" (all groups) on any error.
+  # Does NOT require MySQL/Redis — pure bash + git.
+  classify:
+    name: Classify Changed Files
+    runs-on: ubuntu-latest
+    outputs:
+      groups: ${{ steps.classify.outputs.groups }}
+
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine diff base
+        id: base
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -n "$PR_BASE" ]; then
+            echo "base=$PR_BASE" >> "$GITHUB_OUTPUT"
+          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            echo "base=$PUSH_BEFORE" >> "$GITHUB_OUTPUT"
+          else
+            # First push, force-push, or workflow_dispatch: compare against HEAD~1; fall back to all groups
+            echo "base=HEAD~1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run classifier
+        id: classify
+        run: |
+          chmod +x scripts/ci-group-classifier.sh
+          CI_GROUPS=$(bash scripts/ci-group-classifier.sh "${{ steps.base.outputs.base }}" HEAD 2>/dev/null) || CI_GROUPS=""
+          if [ -z "$CI_GROUPS" ]; then
+            CI_GROUPS="G1,G2,G3,G4,G5"
+          fi
+          echo "groups=$CI_GROUPS" >> "$GITHUB_OUTPUT"
+          echo "Selected groups: $CI_GROUPS"
+
+      - name: Verify classifier tests pass
+        run: |
+          chmod +x scripts/ci-group-classifier.test.sh
+          bash scripts/ci-group-classifier.test.sh
+
+  # --- Dependency-Aware Regression: Run selected groups --------------------
+  # Runs only the test groups that cover the changed files.
+  # Needs backend-tests (unit gate) + classify (group selection) to complete.
+  # Each group step is conditional on its group letter appearing in the output.
+  # A group that is NOT selected is skipped (not failed).
+  # If any selected group fails, this job fails and blocks the Docker build.
+  regression-groups:
+    name: Regression -- Selected Groups
+    runs-on: ubuntu-latest
+    needs: [backend-tests, classify]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      - name: Show selected groups
+        run: |
+          echo "Groups selected by classifier: ${{ needs.classify.outputs.groups }}"
+
+      # G1 — Feed / Social
+      - name: G1 -- Feed / Social
+        if: contains(needs.classify.outputs.groups, 'G1')
+        run: npm run test:group:social -- --ci --reporters=default
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
+          JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'
+          JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
+          PORT: '5001'
+          SERVICE_NAME: 'halqa-ci'
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'
+
+      # G2 — Voice Club
+      - name: G2 -- Voice Club
+        if: contains(needs.classify.outputs.groups, 'G2')
+        run: npm run test:group:voice -- --ci --reporters=default
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
+          JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'
+          JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
+          PORT: '5001'
+          SERVICE_NAME: 'halqa-ci'
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'
+
+      # G3 — School Live Classes
+      - name: G3 -- School Live Classes
+        if: contains(needs.classify.outputs.groups, 'G3')
+        run: npm run test:group:live-class -- --ci --reporters=default
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
+          JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'
+          JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
+          PORT: '5001'
+          SERVICE_NAME: 'halqa-ci'
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'
+
+      # G4 — Authentication / Authorization
+      - name: G4 -- Auth / Authorization
+        if: contains(needs.classify.outputs.groups, 'G4')
+        run: npm run test:group:auth -- --ci --reporters=default
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
+          JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'
+          JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
+          PORT: '5001'
+          SERVICE_NAME: 'halqa-ci'
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'
+
+      # G5 — Shared Realtime
+      - name: G5 -- Shared Realtime
+        if: contains(needs.classify.outputs.groups, 'G5')
+        run: npm run test:group:realtime -- --ci --reporters=default
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          DATABASE_URL: 'mysql://root:test@localhost:3306/halqa_test'
+          JWT_SECRET: 'ci_jwt_secret_at_least_32_characters_!!'
+          JWT_REFRESH_SECRET: 'ci_refresh_secret_at_least_32_chars_!!'
+          PORT: '5001'
+          SERVICE_NAME: 'halqa-ci'
+          HEALTH_TOKEN: 'ci_health_token_for_unit_tests_only_!!'
+          METRICS_TOKEN: 'ci_metrics_token_for_unit_tests_only_!!'

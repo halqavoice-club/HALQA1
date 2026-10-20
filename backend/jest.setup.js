@@ -16,14 +16,22 @@ process.env.PORT                = '5001';
 process.env.NODE_ENV            = 'test';
 process.env.SERVICE_NAME        = 'halqa-test';
 
-// ─── Database (not used in unit tests but prevents validateEnv crash) ─────────
-process.env.DATABASE_URL        = 'mysql://test:test@localhost:3306/halqa_test';
+// ─── Database ─────────────────────────────────────────────────────────────────
+// Don't override DATABASE_URL if already set by the caller (e.g. integration
+// tests running against XAMPP/halqa_db). Unit tests don't hit the DB at all.
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = 'mysql://root:@localhost:3306/halqa_db';
+}
 
 // ─── Redis (disabled in unit tests — mocked) ──────────────────────────────────
 // No REDIS_URL set → isRedisReady() returns false → fail-open mode
 
 // ─── Stripe (disabled — no real Stripe calls in unit tests) ───────────────────
 // Tests that need Stripe configured set STRIPE_SECRET_KEY themselves
+// M-9 FIX: Explicitly enable signature bypass for tests (replaces NODE_ENV check).
+// This is safe because NODE_ENV=test is already set above and this var is
+// only respected when NODE_ENV !== 'production'.
+process.env.STRIPE_SKIP_SIGNATURE = 'true';
 
 // ─── LiveKit ──────────────────────────────────────────────────────────────────
 process.env.LIVEKIT_URL         = 'wss://test.livekit.cloud';
@@ -42,5 +50,16 @@ process.env.STORAGE_TYPE        = 'local';
 // ─── Metrics token ────────────────────────────────────────────────────────────
 process.env.METRICS_TOKEN       = 'test_metrics_token_32_chars_min_!!';
 
+// ─── Health token (UIGAP-014 fix) ─────────────────────────────────────────────
+// Tests that exercise /health/detailed token gate set HEALTH_TOKEN themselves.
+// This default prevents accidental 401s in tests that boot the full app.
+process.env.HEALTH_TOKEN        = 'test_health_token_32_chars_min_!!!!';
+
 // ─── Client URL ──────────────────────────────────────────────────────────────
 process.env.CLIENT_URL          = 'http://localhost:3000';
+
+// ─── Payout encryption key ────────────────────────────────────────────────────
+// Required in production; set here to suppress validateEnv warnings in test runs
+// and ensure payout subsystem initializes without error during integration tests.
+// Value is a test-only placeholder — no real crypto operations are performed.
+process.env.PAYOUT_ENCRYPTION_KEY = 'test_payout_encryption_key_32bytes!!!';

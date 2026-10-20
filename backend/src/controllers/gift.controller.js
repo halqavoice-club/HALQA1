@@ -26,6 +26,8 @@ const { getCache, setCache } = require('../utils/redis');
 const { successResponse, errorResponse } = require('../utils/response');
 const { resolveRoom, resolveParticipant, resolveActiveRecipients } = require('../utils/roomResolver');
 const logger = require('../utils/logger');
+const { toDiamonds } = require('../services/economy.config');
+const { writePlatformRevenueFromSpend } = require('../utils/platformRevenue');
 
 // Safe cache wrappers — a cache failure must never abort a gift transaction.
 // The daily spend cap and combo counter are best-effort; the DB transaction
@@ -40,7 +42,7 @@ async function safeSetCache(key, value, ttl) {
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const PLATFORM_CUT   = 0.5;   // 50% platform fee
+// PLATFORM_CUT and toDiamonds are imported from economy.config.js (single source of truth)
 const DAILY_CAP      = parseInt(process.env.GIFT_DAILY_CAP || '50000', 10);
 const COMBO_WINDOW   = 5000;  // ms — rapid sends within this window count as combo
 
@@ -59,11 +61,6 @@ const PRIORITY_HOLD_MS = {
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Coins → diamonds after platform cut (floor) */
-function toDiamonds(coins) {
-  return Math.floor(coins * (1 - PLATFORM_CUT));
-}
 
 /** Redis key for daily spend tracking */
 const dailySpendKey = (userId) => {
@@ -99,6 +96,10 @@ async function listGifts(req, res) {
  */
 async function sendGift(req, res) {
   try {
+    // SUPER_ADMIN isolation (Task 10.1): platform admin cannot send gifts
+    if (req.user.role === 'SUPER_ADMIN') {
+      return errorResponse(res, 'SUPER_ADMIN cannot send gifts in platform rooms', 403);
+    }
     // roomType is injected by the route middleware; defaults to 'voice' for backward compat
     const roomType = req.roomType || 'voice';
     const roomId   = req.params.id;
@@ -149,13 +150,21 @@ async function sendGift(req, res) {
     const totalCoins    = gift.priceCoins * giftCount;
     const totalDiamonds = toDiamonds(totalCoins);
 
-    // ── Daily spend cap ───────────────────────────────────────────────────
+    // ── Daily spend cap — DB-authoritative with Redis fast-path cache ─────
+    // P1-002 FIX: The authoritative cap enforcement has been moved INSIDE the
+    // $transaction (see step 4d below) so the check-and-increment are atomic.
+    //
+    // Redis is used here as a read-only fast path to provide an early 429 before
+    // entering the heavier transaction. Redis unavailability is acceptable —
+    // the DB-level enforcement inside the transaction is the real gate.
+    // A stale Redis read at most allows entering the transaction unnecessarily;
+    // the DB check inside the transaction prevents any actual cap violation.
     const rawSpent = await safeGetCache(dailySpendKey(senderId));
-    const spentToday = typeof rawSpent === 'number' ? rawSpent
-      : typeof rawSpent === 'string' ? parseInt(rawSpent, 10)
-      : 0;
-    if (spentToday + totalCoins > DAILY_CAP) {
-      return errorResponse(res, `Daily spending limit of ${DAILY_CAP} coins reached`, 429);
+    if (rawSpent !== null && rawSpent !== undefined) {
+      const cachedSpent = typeof rawSpent === 'number' ? rawSpent : parseInt(rawSpent, 10);
+      if (cachedSpent + totalCoins > DAILY_CAP) {
+        return errorResponse(res, `Daily spending limit of ${DAILY_CAP} coins reached`, 429);
+      }
     }
 
     // ── Atomic transaction ────────────────────────────────────────────────
@@ -173,9 +182,11 @@ async function sendGift(req, res) {
           throw new Error(`INSUFFICIENT_COINS:${sw.coins}:${totalCoins}`);
         }
 
-        // 2. Deduct coins from sender
+        // 2. Deduct coins from sender — optimistic lock prevents race conditions:
+        // WHERE coins >= totalCoins means if a concurrent tx already deducted coins,
+        // this update affects 0 rows, Prisma throws RecordNotFound, and the tx rolls back.
         const updatedSender = await tx.wallet.update({
-          where: { userId: senderId },
+          where: { userId: senderId, coins: { gte: totalCoins } },
           data:  {
             coins:      { decrement: totalCoins },
             totalSpent: { increment: totalCoins }
@@ -210,7 +221,7 @@ async function sendGift(req, res) {
           }
         });
 
-        // 4b. Write wallet ledger entry for audit trail
+        // 4b. Write sender wallet ledger entry — FATAL (no .catch)
         await tx.walletTransaction.create({
           data: {
             userId:      senderId,
@@ -219,7 +230,46 @@ async function sendGift(req, res) {
             description: `Sent ${giftCount}x ${gift.name} to room ${roomId}`,
             giftTxId:    txn.id
           }
-        }).catch(() => {}); // non-fatal — gift succeeds even if ledger fails
+        });
+
+        // 4b2. P2-003: Write receiver diamond credit ledger entry — FATAL (no .catch)
+        // Completes the diamond ledger: sender debit (GIFT_SEND) + receiver credit (GIFT_RECEIVE).
+        // Only written if receiver actually earns diamonds (odd-coin edge case: toDiamonds(1)=0).
+        if (totalDiamonds > 0) {
+          await tx.walletTransaction.create({
+            data: {
+              userId:      receiverId,
+              type:        'GIFT_RECEIVE',
+              coins:       0,
+              diamonds:    totalDiamonds,  // positive = credit
+              description: `Received ${giftCount}x ${gift.name} in room ${roomId}`,
+              giftTxId:    txn.id
+            }
+          });
+        }
+
+        // 4c. Write platform revenue entry — FATAL (no .catch)
+        await writePlatformRevenueFromSpend(tx, {
+          sourceType: 'GIFT',
+          sourceId:   txn.id,
+          userId:     senderId,
+          spendCoins: totalCoins,
+        });
+
+        // 4d. P1-002: Atomic daily cap enforcement in DB — FATAL (no .catch)
+        // UserDailyGiftSpend is upserted inside this transaction so the cap check
+        // and totalSpent increment are committed atomically with the wallet debit.
+        // This prevents concurrent requests from bypassing the cap via race conditions.
+        const today = new Date().toISOString().slice(0, 10); // UTC YYYY-MM-DD
+        const dailySpend = await tx.userDailyGiftSpend.upsert({
+          where:  { userId_date: { userId: senderId, date: today } },
+          create: { id: require('uuid').v4(), userId: senderId, date: today, totalSpent: totalCoins },
+          update: { totalSpent: { increment: totalCoins } }
+        });
+        // Check cap AFTER increment — reject if exceeded
+        if (dailySpend.totalSpent > DAILY_CAP) {
+          throw new Error(`DAILY_CAP_EXCEEDED:${dailySpend.totalSpent - totalCoins}:${totalCoins}`);
+        }
 
         // 5. Upsert room leaderboard
         await tx.roomGiftLeaderboard.upsert({
@@ -250,11 +300,26 @@ async function sendGift(req, res) {
         const parts = txErr.message.split(':');
         return errorResponse(res, `Not enough coins. You have ${parts[1]}, need ${parts[2]}`, 402);
       }
+      // P1-002: Daily cap exceeded atomically inside the transaction
+      if (txErr.message?.startsWith('DAILY_CAP_EXCEEDED:')) {
+        return errorResponse(res, `Daily spending limit of ${DAILY_CAP} coins reached`, 429);
+      }
       throw txErr;
     }
 
-    // ── Update daily spend in Redis ───────────────────────────────────────
-    await safeSetCache(dailySpendKey(senderId), spentToday + totalCoins, 86400);
+    // ── Update daily spend in Redis (cache only — DB is authoritative) ───
+    // Warm up or update the Redis fast-path cache so subsequent requests
+    // get the early rejection before entering the DB transaction.
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      const dbSpend = await prisma.userDailyGiftSpend.findUnique({
+        where: { userId_date: { userId: senderId, date: today } },
+        select: { totalSpent: true }
+      });
+      if (dbSpend) {
+        await safeSetCache(dailySpendKey(senderId), dbSpend.totalSpent, 86400);
+      }
+    } catch { /* non-fatal — Redis cache miss is acceptable */ }
 
     // ── Combo detection ───────────────────────────────────────────────────
     let combo = 1;
@@ -353,6 +418,31 @@ async function sendGift(req, res) {
         ...payload,
         newDiamondBalance: null,
       });
+    }
+
+    // ── PK Gift Scoring Hook ───────────────────────────────────────────────
+    // If this gift was sent inside a PK room (roomType = 'pk'), process PK scoring.
+    // The gift transaction is already committed — scoring is derived, never financial.
+    // Non-fatal: PK scoring failure must never fail the gift response.
+    if (roomType === 'pk') {
+      try {
+        const pkService = require('../services/pk.service');
+        // Find the active PK match for this room
+        const pkMatch = await prisma.pKMatch.findFirst({
+          where: {
+            state: 'LIVE',
+            OR: [{ roomIdA: roomId }, { roomIdB: roomId }]
+          },
+          include: { participants: { select: { userId: true, side: true } } }
+        });
+        if (pkMatch) {
+          const recvParticipant = pkMatch.participants.find(p => p.userId === receiverId);
+          const side            = recvParticipant?.side || (pkMatch.roomIdA === roomId ? 'A' : 'B');
+          await pkService.processPKGift(pkMatch.id, transaction, side, receiverId);
+        }
+      } catch (pkErr) {
+        logger.error(`[gift:pk] PK scoring failed for tx ${transaction.id}: ${pkErr.message}`);
+      }
     }
 
     return successResponse(res, {
@@ -490,6 +580,10 @@ async function getDailyLeaderboard(req, res) {
  */
 async function sendGiftToAll(req, res) {
   try {
+    // SUPER_ADMIN isolation (Task 10.1): platform admin cannot send gifts
+    if (req.user.role === 'SUPER_ADMIN') {
+      return errorResponse(res, 'SUPER_ADMIN cannot send gifts in platform rooms', 403);
+    }
     const roomType = req.roomType || 'voice';
     const roomId   = req.params.id;
     const senderId = req.user.id;
@@ -539,10 +633,27 @@ async function sendGiftToAll(req, res) {
     const diamondsPerReceiver = toDiamonds(coinsPerReceiver);
     const totalCoinsNeeded    = coinsPerReceiver * receiverParticipants.length;
 
-    // ── Daily spend cap ───────────────────────────────────────────────────
+    // ── Daily spend cap — Redis fast path + DB fallback ──────────────────
     const rawSpent   = await safeGetCache(dailySpendKey(senderId));
-    const spentToday = typeof rawSpent === 'number' ? rawSpent
-      : typeof rawSpent === 'string' ? parseInt(rawSpent, 10) : 0;
+    let spentToday;
+    if (rawSpent !== null && rawSpent !== undefined) {
+      spentToday = typeof rawSpent === 'number' ? rawSpent
+        : typeof rawSpent === 'string' ? parseInt(rawSpent, 10) : 0;
+    } else {
+      try {
+        const startOfDay = new Date();
+        startOfDay.setUTCHours(0, 0, 0, 0);
+        const agg = await prisma.giftTransaction.aggregate({
+          where: { senderId, createdAt: { gte: startOfDay } },
+          _sum:  { coinsSpent: true }
+        });
+        spentToday = agg._sum.coinsSpent ?? 0;
+        logger.warn(`[gift] Redis unavailable — used DB fallback for daily cap (user ${senderId}, spent ${spentToday})`);
+      } catch (dbErr) {
+        logger.error(`[gift] DB cap fallback failed for user ${senderId}: ${dbErr.message}`);
+        return errorResponse(res, 'Service temporarily unavailable — please retry in a moment', 503);
+      }
+    }
     if (spentToday + totalCoinsNeeded > DAILY_CAP) {
       return errorResponse(res, `Daily spending limit of ${DAILY_CAP} coins reached`, 429);
     }
@@ -564,9 +675,9 @@ async function sendGiftToAll(req, res) {
           throw new Error(`INSUFFICIENT_COINS:${sw.coins}:${totalCoinsNeeded}`);
         }
 
-        // 2. Deduct total coins from sender
+        // 2. Deduct total coins from sender — optimistic lock prevents race conditions
         const updatedSender = await tx.wallet.update({
-          where: { userId: senderId },
+          where: { userId: senderId, coins: { gte: totalCoinsNeeded } },
           data:  {
             coins:      { decrement: totalCoinsNeeded },
             totalSpent: { increment: totalCoinsNeeded }
@@ -601,14 +712,28 @@ async function sendGiftToAll(req, res) {
             }
           });
           txns.push(txn);
-
-          // Update leaderboard
-          await tx.roomGiftLeaderboard.upsert({
-            where:  { roomId_userId: { roomId, userId: senderId } },
-            create: { roomId, roomType, userId: senderId, totalCoins: coinsPerReceiver, giftCount: effectiveCount, updatedAt: new Date() },
-            update: { totalCoins: { increment: coinsPerReceiver }, giftCount: { increment: effectiveCount }, updatedAt: new Date() }
-          });
         }
+
+        // PERF-FIX: leaderboard upsert moved OUTSIDE the per-receiver loop.
+        // Previously this ran N times (once per receiver) with cumulative increments,
+        // wasting N-1 round-trips. A single upsert with the total amount is correct
+        // and reduces DB ops from O(N) to O(1) for the leaderboard update.
+        const totalCoinsForLeaderboard = coinsPerReceiver * receiverParticipants.length;
+        const totalGiftCountForLeaderboard = effectiveCount * receiverParticipants.length;
+        await tx.roomGiftLeaderboard.upsert({
+          where:  { roomId_userId: { roomId, userId: senderId } },
+          create: { roomId, roomType, userId: senderId, totalCoins: totalCoinsForLeaderboard, giftCount: totalGiftCountForLeaderboard, updatedAt: new Date() },
+          update: { totalCoins: { increment: totalCoinsForLeaderboard }, giftCount: { increment: totalGiftCountForLeaderboard }, updatedAt: new Date() }
+        });
+
+        // Write platform revenue entry for the entire send-to-all — FATAL (no .catch)
+        // One consolidated entry per send-to-all call (platform takes 50% of total spend).
+        await writePlatformRevenueFromSpend(tx, {
+          sourceType: 'GIFT',
+          sourceId:   txns[0]?.id || uuidv4(), // reference first transaction
+          userId:     senderId,
+          spendCoins: totalCoinsNeeded,
+        });
 
         return { updatedSender, txns };
       }, {

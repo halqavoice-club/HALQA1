@@ -1,14 +1,14 @@
-/**
+﻿/**
  * HALQA Mobile — Assignments & Exams
  * Students: view + submit work, see grades + feedback
  * Teachers: review queue, grade submissions
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   TextInput, Modal, ScrollView, ActivityIndicator,
-  RefreshControl, KeyboardAvoidingView, Platform,
-} from 'react-native';
+  RefreshControl, Platform} from 'react-native';
 import { useRouter, Stack } from 'expo-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
@@ -216,7 +216,7 @@ function GradeModal({ sub, tab, visible, onClose, onDone }: {
           <Text style={styles.modalTitle}>Grade Submission</Text>
           <TouchableOpacity onPress={onClose}><Ionicons name="close" size={24} color="#374151" /></TouchableOpacity>
         </View>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <ScrollView contentContainerStyle={{ padding: 20, gap: 14 }}>
             <View style={styles.detailBox}>
               <Text style={styles.detailValue}>{sub.title}</Text>
@@ -319,7 +319,7 @@ function SubmitModal({ tab, visible, onClose, onDone, studentId }: {
           <Text style={styles.modalTitle}>New {tab === 'assignments' ? 'Assignment' : 'Exam'} Submission</Text>
           <TouchableOpacity onPress={onClose}><Ionicons name="close" size={24} color="#374151" /></TouchableOpacity>
         </View>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <ScrollView contentContainerStyle={{ padding: 20, gap: 14 }}>
             <View>
               <Text style={styles.detailLabel}>Title *</Text>
@@ -372,7 +372,9 @@ export default function AssignmentsScreen() {
   const qc = useQueryClient();
   const { user } = useAuthStore();
 
-  const isTeacher = user?.role === 'TEACHER' || user?.role === 'SCHOOL_ADMIN' || user?.role === 'SUPER_ADMIN';
+  // SA-EDU-01: SUPER_ADMIN is a platform role — not a school-scoped teacher/admin.
+  // Education role checks must use SchoolMembership, not User.role === 'SUPER_ADMIN'.
+  const isTeacher = user?.role === 'TEACHER' || user?.role === 'SCHOOL_ADMIN';
   const isStudent = user?.role === 'STUDENT';
 
   const [tab, setTab] = useState<TabType>('assignments');
@@ -569,3 +571,9 @@ const styles = StyleSheet.create({
   classChipActive: { backgroundColor: '#4f46e5', borderColor: '#4f46e5' },
   classChipText:   { fontSize: 13, fontWeight: '500', color: '#374151' },
 });
+
+
+
+
+
+

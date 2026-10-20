@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Badge } from '@/components/ui/badge'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { QrCode, CheckCircle, Camera, Keyboard, Printer, Users } from 'lucide-react'
 import { QrScanner } from '@/components/qr-scanner'
 import { ErrorState } from '@/components/ui/error-state'
@@ -26,13 +27,13 @@ type CheckInMode = 'qr' | 'manual' | 'student' | 'bulk'
 export default function QrCheckInPage() {
   const { toast } = useToast()
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const [mode, setMode] = useState<CheckInMode>('manual')
   const [classId, setClassId] = useState('')
   const [manualCode, setManualCode] = useState('')
   const [lastCheckedIn, setLastCheckedIn] = useState<any>(null)
 
-  const isStudent = user?.role === 'STUDENT'
-  const canMark = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  const canMark = isTeacher
 
   // Fetch own profile for student QR display
   const { data: myProfile } = useQuery({

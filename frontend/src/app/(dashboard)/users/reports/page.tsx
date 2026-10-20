@@ -4,9 +4,11 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
 import { useToast } from '@/components/ui/use-toast'
+import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { getAvatarUrl } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
-import { Flag, Loader2, ArrowLeft, CheckCircle, XCircle, AlertTriangle, ChevronDown } from 'lucide-react'
+import { Flag, Loader2, ArrowLeft, CheckCircle, XCircle, AlertTriangle, ChevronDown, ShieldOff } from 'lucide-react'
 import Link from 'next/link'
 
 interface UserReport {
@@ -170,13 +172,19 @@ function ReportRow({ report, onReview }: {
 export default function UserReportsPage() {
   const { toast }     = useToast()
   const queryClient   = useQueryClient()
+  const user          = useAuthStore(s => s.user)
   const [filter, setFilter] = useState<'all' | ReportStatus>('all')
+
+  // F-1 FIX: Platform-wide social report moderation is SUPER_ADMIN only.
+  // SCHOOL_ADMIN, TEACHER, STUDENT, GUARDIAN, MEMBER cannot moderate platform reports.
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN'
 
   const { data, isLoading } = useQuery<{ reports: UserReport[]; total: number }>({
     queryKey: ['user-reports', filter],
     queryFn:  () => api.get('/social/reports', {
       params: filter !== 'all' ? { status: filter } : {},
     }).then(r => r.data.data),
+    enabled: isSuperAdmin,
   })
 
   const reviewMutation = useMutation({
@@ -188,6 +196,16 @@ export default function UserReportsPage() {
     },
     onError: (e: any) => toast({ title: e?.response?.data?.message || 'Failed', variant: 'destructive' }),
   })
+
+  // Guard — SUPER_ADMIN only (after all hooks to satisfy Rules of Hooks)
+  if (!isSuperAdmin) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 gap-3 text-gray-400">
+        <ShieldOff className="w-10 h-10 opacity-40" />
+        <p className="font-medium text-sm">Access restricted to platform administrators.</p>
+      </div>
+    )
+  }
 
   const reports  = data?.reports ?? []
   const pending  = reports.filter(r => r.status === 'PENDING').length

@@ -33,6 +33,16 @@ async function getExploreFeed(req, res, next) {
     const since24h  = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const since7d   = new Date(Date.now() - 7  * 24 * 60 * 60 * 1000);
 
+    // BLOCK FIX: Load bilateral block list once for the whole explore feed.
+    // Used to exclude blocked authors from trending posts and suggested people.
+    const blocks = await prisma.userBlock.findMany({
+      where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
+      select: { blockerId: true, blockedId: true }
+    }).catch(() => []);
+    const blockedUserIds = [
+      ...new Set(blocks.flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== viewerId))
+    ];
+
     const [
       trendingPosts,
       trendingHashtags,
@@ -43,8 +53,12 @@ async function getExploreFeed(req, res, next) {
     ] = await Promise.all([
 
       // Trending posts (last 24h, sorted by reactions + comments)
+      // BLOCK FIX: exclude posts authored by blocked users (both directions).
       prisma.post.findMany({
-        where: { deletedAt: null, isDraft: false, visibility: 'PUBLIC', createdAt: { gte: since24h } },
+        where: {
+          deletedAt: null, isDraft: false, visibility: 'PUBLIC', createdAt: { gte: since24h },
+          ...(blockedUserIds.length > 0 ? { NOT: { authorId: { in: blockedUserIds } } } : {}),
+        },
         include: {
           author:    { select: USER_SELECT },
           media:     { orderBy: { orderIndex: 'asc' }, take: 1 },
@@ -91,28 +105,47 @@ async function getExploreFeed(req, res, next) {
         take: 10,
       }),
 
-      // Live classes (school-scoped — only show if viewer belongs to same school, or all if SUPER_ADMIN)
-      prisma.liveClass.findMany({
-        where: {
-          status: 'LIVE',
-          deletedAt: null,
-        },
-        include: {
-          teacher: { include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } } } },
-          class:   { select: { id: true, name: true } },
-          _count:  { select: { participants: { where: { isActive: true } } } },
-        },
-        orderBy: { startedAt: 'desc' },
-        take: 6,
-      }),
+      // Live classes (school-scoped — only show classes from the viewer's school,
+      // or all classes for SUPER_ADMIN)
+      (async () => {
+        const viewer = await prisma.user.findUnique({
+          where: { id: viewerId },
+          select: { schoolId: true, role: true },
+        });
+        const isSuperAdmin = viewer?.role === 'SUPER_ADMIN';
+        const schoolFilter = !isSuperAdmin && viewer?.schoolId ? { schoolId: viewer.schoolId } : {};
+
+        // Fetch classes without teacher include to avoid null reference crash
+        const classes = await prisma.liveClass.findMany({
+          where: { status: 'LIVE', deletedAt: null, ...schoolFilter },
+          include: {
+            class:  { select: { id: true, name: true } },
+            _count: { select: { participants: { where: { isActive: true } } } },
+          },
+          orderBy: { startedAt: 'desc' },
+          take: 6,
+        });
+
+        // Fetch teachers separately to handle orphaned references gracefully
+        const teacherIds = [...new Set(classes.map(c => c.teacherId).filter(Boolean))];
+        const teachers = teacherIds.length > 0 ? await prisma.teacher.findMany({
+          where: { id: { in: teacherIds } },
+          include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } } },
+        }) : [];
+        const teacherMap = Object.fromEntries(teachers.map(t => [t.id, t]));
+        return classes.map(c => ({ ...c, teacher: teacherMap[c.teacherId] ?? null }));
+      })(),
 
       // Suggested people — users the viewer doesn't follow yet, globally
+      // Ordered by follower count descending so well-known users appear first
+      // BLOCK FIX: Also exclude blocked users (both directions) from suggestions.
       (async () => {
         const alreadyFollowing = await prisma.follow.findMany({
           where: { followerId: viewerId },
           select: { followingId: true },
         });
-        const excludeIds = [viewerId, ...alreadyFollowing.map(f => f.followingId)];
+        // Union: already-following + viewer themselves + blocked users (both directions)
+        const excludeIds = [viewerId, ...alreadyFollowing.map(f => f.followingId), ...blockedUserIds];
 
         const people = await prisma.user.findMany({
           where: {
@@ -124,7 +157,10 @@ async function getExploreFeed(req, res, next) {
             ...USER_SELECT,
             _count: { select: { followers: true } },
           },
-          orderBy: { createdAt: 'desc' },
+          orderBy: [
+            { followers: { _count: 'desc' } },  // most-followed first
+            { createdAt: 'desc' },               // newest as tiebreaker
+          ],
           take: 12,
         });
         return people;

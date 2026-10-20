@@ -1,12 +1,12 @@
 'use client'
 
 import { create } from 'zustand'
-import { computeLayout } from '../../../../../src/lib/layout/computeLayout'
+import { computeLayout } from '@/lib/layout/computeLayout'
 import type {
   LayoutMode,
   LayoutResult,
   SpeakerSlot,
-} from '../../../../../src/lib/layout/layoutTypes'
+} from '@/lib/layout/layoutTypes'
 
 // ---------------------------------------------------------------------------
 // Module-scope debounce state for addSpeaker / removeSpeaker batch (32ms)

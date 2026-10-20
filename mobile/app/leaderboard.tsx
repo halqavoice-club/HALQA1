@@ -3,10 +3,10 @@
  * Global + School tabs, All-Time / Monthly / Weekly periods,
  * Top-3 podium, rank-change indicator, "my rank" banner.
  */
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  Image, ActivityIndicator, RefreshControl, ScrollView,
+  Image, ActivityIndicator, RefreshControl
 } from 'react-native';
 import { useQuery } from '@tanstack/react-query';
 import { useRouter, Stack } from 'expo-router';
@@ -262,3 +262,4 @@ const lb = StyleSheet.create({
   empty:            { alignItems: 'center', paddingTop: 60, gap: 8 },
   emptyTxt:         { fontSize: 15, color: '#94a3b8', marginTop: 12 },
 });
+

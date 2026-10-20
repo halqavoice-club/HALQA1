@@ -1,9 +1,10 @@
-﻿'use client'
+'use client'
 
 import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { useToast } from '@/components/ui/use-toast'
 import { downloadFile, buildFilename } from '@/lib/download'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -153,12 +154,11 @@ const TYPE_LABELS: Record<GradeType, string> = {
 
 export default function GradesPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
 
-  const isStudent = user?.role === 'STUDENT'
-  const isGuardian = user?.role === 'GUARDIAN'
-  const canManage = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  const canManage = isTeacher
 
   // ── State ──
   const [selectedClassId, setSelectedClassId] = useState<string>('')
@@ -605,11 +605,12 @@ export default function GradesPage() {
       {/* Filters */}
       <div className="flex gap-3 flex-wrap">
         <div className="w-56">
-          <Select value={selectedClassId} onValueChange={v => { setSelectedClassId(v); setStudentFilter('all') }}>
+          <Select value={selectedClassId || '__none__'} onValueChange={v => { if (v !== '__none__') { setSelectedClassId(v); setStudentFilter('all') } }}>
             <SelectTrigger>
               <SelectValue placeholder="Select a class..." />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value="__none__">Select a class…</SelectItem>
               {classes.map(c => (
                 <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
               ))}
@@ -647,11 +648,12 @@ export default function GradesPage() {
             <form onSubmit={handleAddGrade} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               <div className="space-y-1">
                 <Label>Student</Label>
-                <Select value={form.studentId} onValueChange={v => setForm(f => ({ ...f, studentId: v }))}>
+                <Select value={form.studentId || '__none__'} onValueChange={v => setForm(f => ({ ...f, studentId: v === '__none__' ? '' : v }))}>
                   <SelectTrigger>
                     <SelectValue placeholder="Select student..." />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="__none__">Select a student…</SelectItem>
                     {enrollments.map(({ student }) => (
                       <SelectItem key={student.id} value={student.id}>
                         {student.user?.firstName} {student.user?.lastName}

@@ -6,7 +6,7 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  Image, ActivityIndicator, RefreshControl,
+  Image, ActivityIndicator, RefreshControl
 } from 'react-native';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRouter, Stack } from 'expo-router';
@@ -216,3 +216,4 @@ const s = StyleSheet.create({
   empty:        { alignItems: 'center', paddingTop: 60, gap: 8 },
   emptyTxt:     { fontSize: 15, color: '#94a3b8', marginTop: 12 },
 });
+

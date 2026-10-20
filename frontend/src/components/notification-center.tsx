@@ -84,9 +84,12 @@ export function NotificationCenter({
     }
   }
 
-  const formatTime = (date: Date) => {
+  const formatTime = (date: Date | string | null | undefined) => {
+    if (!date) return ''
+    const d = date instanceof Date ? date : new Date(date)
+    if (isNaN(d.getTime())) return ''
     const now = new Date()
-    const diff = now.getTime() - date.getTime()
+    const diff = now.getTime() - d.getTime()
     const minutes = Math.floor(diff / 60000)
     const hours = Math.floor(diff / 3600000)
     const days = Math.floor(diff / 86400000)

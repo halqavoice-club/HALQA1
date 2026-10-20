@@ -1,0 +1,29 @@
+-- Migration M-D: Document new WalletTransaction type values (informational)
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Purpose:
+--   The wallet_transactions.type column is VARCHAR(50) with no enum constraint.
+--   This migration is informational only — it documents that the following new
+--   type values are now valid and in use after the economy consolidation.
+--
+-- New valid type values (in addition to existing ones):
+--
+--   PAYOUT           — Diamond reservation when a payout request is created.
+--                      coins = 0, diamonds = -(requested amount).
+--                      Created atomically with the PayoutRequest record.
+--
+--   PAYOUT_REVERSAL  — Diamond restoration when a payout request is rejected
+--                      or cancelled by the user or admin.
+--                      coins = 0, diamonds = +(returned amount).
+--                      Created atomically with the status update.
+--
+--   DISPUTED         — Flags a STRIPE_PURCHASE transaction when a Stripe
+--                      charge.dispute.created webhook is received.
+--                      coins = 0, diamonds = 0. Informational flag only.
+--                      No automatic coin clawback — requires admin review.
+--
+-- This migration runs a harmless SELECT so it has a valid SQL statement
+-- and is recorded in the migration history for audit purposes.
+--
+-- Rollback: Not applicable (no DDL change to reverse).
+
+SELECT 'M-D: PAYOUT, PAYOUT_REVERSAL, DISPUTED are now valid WalletTransaction type values.' AS economy_consolidation_note;

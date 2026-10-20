@@ -54,7 +54,7 @@ export function StoryComposer({ onClose }: Props) {
     try {
       const form = new FormData()
       form.append('file', file)
-      const r = await api.post('/upload', form, { headers: { 'Content-Type': 'multipart/form-data' } })
+      const r = await api.post('/upload', form)
       setMediaUrl(r.data.data.url)
       setMode('image')
     } catch { toast({ title: 'Upload failed', variant: 'destructive' }) }
@@ -77,11 +77,11 @@ export function StoryComposer({ onClose }: Props) {
 
         {/* Mode switcher */}
         <div className="flex gap-1 p-3 bg-gray-900/50">
-          {([['text', <Type className="w-4 h-4" />, 'Text'], ['image', <Image className="w-4 h-4" />, 'Photo']] as any[]).map(([m, icon, label]) => (
-            <button key={m} onClick={() => m === 'image' ? fileRef.current?.click() : setMode(m)}
+          {([['text', 'text', 'Text'], ['image', 'image', 'Photo']] as const).map(([m, iconType, label]) => (
+            <button key={m} onClick={() => m === 'image' ? fileRef.current?.click() : setMode(m as 'text' | 'image')}
               className={cn('flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl text-xs font-semibold transition-colors',
                 mode === m ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white')}>
-              {icon}{label}
+              {iconType === 'text' ? <Type className="w-4 h-4" /> : <Image className="w-4 h-4" />}{label}
             </button>
           ))}
           <input ref={fileRef} type="file" accept="image/*,video/*" className="hidden" onChange={handleFile} />

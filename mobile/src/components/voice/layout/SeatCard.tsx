@@ -19,7 +19,7 @@ import {
   Pressable,
   StyleProp,
   ViewStyle,
-  StyleSheet,
+  StyleSheet
 } from 'react-native';
 import { SeatData, LayoutMode } from '../../../../../src/lib/layout/layoutTypes';
 import { SpeakingRing } from './SpeakingRing';
@@ -295,3 +295,4 @@ function areEqual(prev: SeatCardProps, next: SeatCardProps): boolean {
 export const SeatCard = React.memo(SeatCardBase, areEqual);
 
 SeatCard.displayName = 'SeatCard';
+

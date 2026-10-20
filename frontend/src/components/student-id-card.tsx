@@ -1,9 +1,28 @@
 'use client'
 
+/**
+ * StudentIdCard
+ *
+ * ID CARD SCHOOL OWNERSHIP INVARIANT:
+ *   The school name and school logo on this card ALWAYS come from
+ *   student.school — the school record fetched by the backend for
+ *   THIS student's own enrollment (Student.schoolId → School).
+ *
+ *   They NEVER come from:
+ *     - The currently logged-in admin's school
+ *     - The frontend school context / Zustand school store
+ *     - Any hardcoded string ("Halqa Academy", etc.)
+ *     - Any prop that could be overridden by caller context
+ *
+ *   The backend (GET /students/:id) is the authoritative source and
+ *   always includes { school: { id, name, logoUrl, ... } } in the
+ *   response from the student's own School record.
+ */
+
 import { useRef } from 'react'
-import { Printer, Download, X } from 'lucide-react'
+import { Printer, X, School } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { getAvatarUrl } from '@/lib/avatar'
+import { getFileUrl } from '@/lib/avatar'
 import { format } from 'date-fns'
 
 interface StudentIdCardProps {
@@ -19,28 +38,49 @@ interface StudentIdCardProps {
       dateOfBirth?: string | null
     }
     enrollments?: { class: { name: string } }[]
-    school?: { name: string; logoUrl?: string | null }
+    // ID-CARD-01: school is the authoritative source of school branding.
+    // The backend MUST include this via Student → School relation.
+    // The frontend must NOT substitute with any other school context.
+    school?: {
+      id: string
+      name: string
+      logoUrl?: string | null
+      address?: string | null
+      phone?: string | null
+    } | null
   }
-  schoolName?: string
   onClose: () => void
 }
 
-export function StudentIdCard({ student, schoolName, onClose }: StudentIdCardProps) {
+export function StudentIdCard({ student, onClose }: StudentIdCardProps) {
   const cardRef = useRef<HTMLDivElement>(null)
 
   const handlePrint = () => window.print()
 
   const classes = student.enrollments?.map(e => e.class.name).join(', ') || '—'
-  const avatarSrc = getAvatarUrl(student.user.avatarUrl)
+
+  // Avatar: student's own photo
+  const avatarSrc = student.user.avatarUrl
+    ? getFileUrl(student.user.avatarUrl)
+    : null
   const initials = `${student.user.firstName[0]}${student.user.lastName[0]}`
 
-  // QR code URL using a free API (no library needed)
+  // ID-CARD-02: School branding — ALWAYS from student.school (backend-authoritative).
+  // Do NOT fall back to any admin/teacher school context.
+  // If the school record is missing (school deleted/inactive), show a safe
+  // neutral placeholder — never substitute another school's branding.
+  const school = student.school
+  const schoolName  = school?.name    ?? '(School not available)'
+  const schoolLogo  = school?.logoUrl ? getFileUrl(school.logoUrl) : null
+
+  // QR code URL using free API — encodes the student's own QR token
   const qrValue = student.qrCode || student.studentId
   const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(qrValue)}&bgcolor=ffffff&color=1e3a8a`
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm">
+
         {/* Modal header */}
         <div className="flex items-center justify-between p-4 border-b">
           <h3 className="font-semibold text-gray-900">Student ID Card</h3>
@@ -61,16 +101,35 @@ export function StudentIdCard({ student, schoolName, onClose }: StudentIdCardPro
             className="relative rounded-xl overflow-hidden border-2 border-halqa-700"
             style={{ width: '100%', aspectRatio: '1.586' }}
           >
-            {/* Header band */}
+            {/* ── Header band ─────────────────────────────────────────────
+                ID-CARD-03: school name and logo come ONLY from student.school.
+                Never from the admin's school context or any hardcoded value.
+            ─────────────────────────────────────────────────────────────── */}
             <div className="bg-halqa-800 px-4 py-2 flex items-center justify-between">
               <div>
                 <p className="text-white font-bold text-sm leading-tight">
-                  {schoolName || student.school?.name || 'Halqa Academy'}
+                  {schoolName}
                 </p>
                 <p className="text-halqa-300 text-xs">Student Identification Card</p>
               </div>
-              <div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center">
-                <span className="text-white font-bold text-sm">H</span>
+
+              {/* School logo — from student's own school record only */}
+              <div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center overflow-hidden flex-shrink-0">
+                {schoolLogo ? (
+                  <img
+                    src={schoolLogo}
+                    alt={schoolName}
+                    className="w-full h-full object-contain p-0.5"
+                    onError={(e) => {
+                      // If logo fails to load, show neutral school icon
+                      (e.target as HTMLImageElement).style.display = 'none'
+                    }}
+                  />
+                ) : (
+                  // ID-CARD-04: Neutral placeholder — NEVER another school's logo.
+                  // School icon represents "a school" generically, not Halqa specifically.
+                  <School className="w-5 h-5 text-white/80" />
+                )}
               </div>
             </div>
 
@@ -91,7 +150,7 @@ export function StudentIdCard({ student, schoolName, onClose }: StudentIdCardPro
                 )}
               </div>
 
-              {/* Info */}
+              {/* Student info */}
               <div className="flex-1 min-w-0">
                 <p className="font-bold text-gray-900 text-base leading-tight truncate">
                   {student.user.firstName} {student.user.lastName}
@@ -138,7 +197,7 @@ export function StudentIdCard({ student, schoolName, onClose }: StudentIdCardPro
         </p>
       </div>
 
-      {/* Print-only styles */}
+      {/* Print-only styles — same card, same school branding */}
       <style jsx global>{`
         @media print {
           body * { visibility: hidden !important; }

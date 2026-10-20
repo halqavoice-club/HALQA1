@@ -1,5 +1,5 @@
 /**
- * HALQA Mobile — Create Live Class Screen
+ * HALQA Mobile ΓÇö Create Live Class Screen
  * Teachers and School Admins only.
  * Supports scheduling with a native date/time picker.
  */
@@ -49,7 +49,7 @@ export default function CreateLiveClassScreen() {
     }),
   });
 
-  // ── Date/time picker helpers ─────────────────────────────────────────────────
+  // ΓöÇΓöÇ Date/time picker helpers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   const openDatePicker = () => {
     const base = scheduledAt ?? new Date(Date.now() + 30 * 60_000); // default: 30 min from now
     if (Platform.OS === 'android') {
@@ -99,7 +99,7 @@ export default function CreateLiveClassScreen() {
         whiteboardEnabled: whiteboard,
       });
       const lc = res.data.data;
-      showMessage({ message: '🎥 Live class created!', type: 'success' });
+      showMessage({ message: '≡ƒÄÑ Live class created!', type: 'success' });
       router.replace({ pathname: '/live-class/[id]', params: { id: lc.id } } as any);
     } catch (err: any) {
       showMessage({
@@ -129,7 +129,7 @@ export default function CreateLiveClassScreen() {
             {/* Title */}
             <Text style={st.label}>Title *</Text>
             <TextInput style={st.input} value={title} onChangeText={setTitle}
-              placeholder="e.g. Quran Level 2 — Chapter 5"
+              placeholder="e.g. Quran Level 2 ΓÇö Chapter 5"
               placeholderTextColor="#94a3b8" maxLength={120} />
 
             {/* Description */}
@@ -184,9 +184,9 @@ export default function CreateLiveClassScreen() {
             {/* Settings toggles */}
             <Text style={st.label}>Settings</Text>
             {[
-              { label: '💬 Enable Chat',   value: chatEnabled, onChange: setChatEnabled },
-              { label: '✋ Hand Raise',     value: handRaise,   onChange: setHandRaise },
-              { label: '🖊️ Whiteboard',    value: whiteboard,  onChange: setWhiteboard },
+              { label: '≡ƒÆ¼ Enable Chat',   value: chatEnabled, onChange: setChatEnabled },
+              { label: 'Γ£ï Hand Raise',     value: handRaise,   onChange: setHandRaise },
+              { label: '≡ƒûè∩╕Å Whiteboard',    value: whiteboard,  onChange: setWhiteboard },
             ].map(item => (
               <View key={item.label} style={st.toggle}>
                 <Text style={st.toggleLabel}>{item.label}</Text>
@@ -203,7 +203,7 @@ export default function CreateLiveClassScreen() {
             >
               {loading
                 ? <ActivityIndicator color="#fff" />
-                : <Text style={st.createBtnTxt}>📹  Create Live Class</Text>
+                : <Text style={st.createBtnTxt}>≡ƒô╣  Create Live Class</Text>
               }
             </TouchableOpacity>
 
@@ -234,7 +234,7 @@ export default function CreateLiveClassScreen() {
                 onPress={() => setIosPickerMode('date')}
               >
                 <Text style={[st.iosPickerTabTxt, iosPickerMode === 'date' && st.iosPickerTabTxtActive]}>
-                  📅 Date
+                  ≡ƒôà Date
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -242,7 +242,7 @@ export default function CreateLiveClassScreen() {
                 onPress={() => setIosPickerMode('time')}
               >
                 <Text style={[st.iosPickerTabTxt, iosPickerMode === 'time' && st.iosPickerTabTxtActive]}>
-                  🕐 Time
+                  ≡ƒòÉ Time
                 </Text>
               </TouchableOpacity>
             </View>

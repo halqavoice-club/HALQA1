@@ -48,13 +48,45 @@ function ThemeManager() {
 }
 
 export function Providers({ children }: { children: React.ReactNode }) {
-  const { accessToken, isAuthenticated } = useAuthStore()
+  const { isAuthenticated, getAccessToken } = useAuthStore()
+  const accessToken = getAccessToken()
   // Track whether the socket has been successfully initialised this session
   const socketReadyRef = useRef(false)
 
   useEffect(() => {
+    // Rehydrate the Zustand persist store from localStorage on mount.
+    // The store uses skipHydration: true to avoid SSR mismatches, so we
+    // must trigger hydration manually here on the client.
+    useAuthStore.persist.rehydrate()
+  }, [])
+
+  useEffect(() => {
     // Initialize analytics once
     analytics.initialize()
+  }, [])
+
+  // FE-R-005: Cross-tab logout synchronisation via BroadcastChannel.
+  // BroadcastChannel messages are ONLY received by other tabs/windows —
+  // never by the tab that posted the message — so there is no same-tab
+  // loop risk. This replaces the previous storage-event approach which
+  // had subtle same-context timing issues in E2E test environments.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return
+
+    const channel = new BroadcastChannel('halqa-auth')
+
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type !== 'LOGOUT') return
+      // Only act if this tab currently believes it is authenticated
+      if (!useAuthStore.getState().isAuthenticated) return
+      useAuthStore.getState().logout()
+    }
+
+    channel.addEventListener('message', handleMessage)
+    return () => {
+      channel.removeEventListener('message', handleMessage)
+      channel.close()
+    }
   }, [])
 
   useEffect(() => {
@@ -65,11 +97,15 @@ export function Providers({ children }: { children: React.ReactNode }) {
       disconnectSocket()
       socketReadyRef.current = false
     }
+    // Cleanup only on unmount (logout / app close), NOT on every token refresh.
+    // If accessToken changes while authenticated, updateSocketToken() keeps the
+    // existing socket alive with the new token — no reconnect needed.
     return () => {
       disconnectSocket()
       socketReadyRef.current = false
     }
-  }, [isAuthenticated, accessToken])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated]) // ← removed accessToken from deps intentionally
 
   return (
     <QueryClientProvider client={queryClient}>

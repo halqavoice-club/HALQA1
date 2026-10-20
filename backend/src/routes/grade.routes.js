@@ -1,13 +1,17 @@
+'use strict';
 const router = require('express').Router();
 const { body } = require('express-validator');
 const validate = require('../middleware/validate');
-const { authenticate, authorize } = require('../middleware/auth.middleware');
+const { authenticate } = require('../middleware/auth.middleware');
+const { eduMember, eduStaff } = require('../middleware/educationAuth');
+const auditLog = require('../middleware/audit.middleware');
 const ctrl = require('../controllers/grade.controller');
 
 router.use(authenticate);
 
+// Create / update grades — staff only
 router.post('/',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
+  ...eduStaff,
   [
     body('studentId').notEmpty(),
     body('classId').notEmpty(),
@@ -17,31 +21,36 @@ router.post('/',
     body('maxScore').isFloat({ min: 1 })
   ],
   validate,
+  auditLog('CREATE', 'grades'),
   ctrl.createGrade
 );
 
-router.post('/bulk',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
+router.post('/bulk', ...eduStaff,
+  auditLog('CREATE', 'grades'),
   ctrl.bulkCreateGrades
 );
 
-router.get('/student/:studentId', ctrl.getStudentGrades);
-router.get('/class/:classId', ctrl.getClassGrades);
+// View grades — any school member
+router.get('/student/:studentId', ...eduMember, ctrl.getStudentGrades);
+router.get('/class/:classId',     ...eduMember, ctrl.getClassGrades);
 
 router.put('/:id',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
+  ...eduStaff,
+  auditLog('UPDATE', 'grades'),
   ctrl.updateGrade
 );
 
 router.delete('/:id',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
+  ...eduStaff,
+  auditLog('DELETE', 'grades'),
   ctrl.deleteGrade
 );
 
 // Grade categories
-router.get('/categories/:classId', ctrl.getGradeCategories);
+router.get('/categories/:classId', ...eduMember, ctrl.getGradeCategories);
 router.post('/categories',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'),
+  ...eduStaff,
+  auditLog('CREATE', 'grade_categories'),
   ctrl.createGradeCategory
 );
 

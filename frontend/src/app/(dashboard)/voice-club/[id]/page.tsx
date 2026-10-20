@@ -7,6 +7,7 @@ import api from '@/lib/api'
 import { useAuthStore } from '@/store/auth.store'
 import { useVoiceStore, VoiceRoom } from '@/store/voice.store'
 import { useToast } from '@/components/ui/use-toast'
+import { getSocket } from '@/lib/socket'
 // FE-002: Use the error-boundary-wrapped version so LiveKit/SDK crashes
 // show a recovery UI instead of crashing the entire page.
 import { VoiceRoomWithBoundary } from '@/components/voice/VoiceRoomWithBoundary'
@@ -26,8 +27,10 @@ export default function VoiceRoomPage() {
   const router = useRouter()
   const { user } = useAuthStore()
   const { toast } = useToast()
-  const { activeRoom, setActiveRoom } = useVoiceStore()
-  const resetRoom = useVoiceStore(s => s.resetRoom)
+  const {
+    activeRoom, setActiveRoom, resetRoom,
+    _liveKitDisconnect,
+  } = useVoiceStore()
 
   // Clean up all room-scoped store state when navigating away from this page
   useEffect(() => () => resetRoom(), [resetRoom])
@@ -36,6 +39,71 @@ export default function VoiceRoomPage() {
   const [loading, setLoading] = useState(true)
   const [joining, setJoining] = useState(false)
   const [error, setError]     = useState<string | null>(null)
+
+  // P0-A FIX: Register an early voice:stage_state listener on mount (before
+  // the user clicks Join and before useVoiceRoom mounts). Any snapshot events
+  // that arrive during the race window between POST /join returning and
+  // useVoiceRoom registering its own listener are buffered in the store.
+  // useVoiceRoom drains this buffer after all listeners are registered.
+  useEffect(() => {
+    if (!id) return
+    const socket = getSocket()
+    if (!socket) return
+    const earlyStageHandler = (payload: {
+      roomId: string
+      stageParticipants: Array<{
+        userId: string; role: string; isMuted: boolean; seatNumber: number | null
+        isPinned: boolean; handRaised: boolean; mutedByModerator: boolean
+        joinedAt: string; firstName?: string | null; lastName?: string | null; avatarUrl?: string | null
+      }>
+      stageCount: number
+    }) => {
+      if (payload.roomId !== id) return
+      useVoiceStore.getState().pushSyncEvent(payload)
+    }
+
+    // Buffer voice:user_joined events that arrive before useVoiceRoom mounts.
+    // Without this buffer, new joiners are invisible to existing room members
+    // until they refresh — the event fires during the race window between
+    // POST /join completing and useVoiceRoom registering its listener.
+    const earlyUserJoinedHandler = (payload: {
+      roomId: string; userId: string; firstName: string; lastName: string
+      avatarUrl: string | null; role: string; isMuted?: boolean
+      mutedByModerator?: boolean; handRaised?: boolean; handRaisedAt?: string
+      isPinned?: boolean; seatNumber?: number | null; joinedAt?: string
+    }) => {
+      if (payload.roomId !== id) return
+      useVoiceStore.getState().pushUserJoinedEvent(payload)
+    }
+
+    // Buffer voice:queue_updated events that arrive before useVoiceRoom mounts.
+    // Without this buffer, host/mod do not see new raised-hand queue entries
+    // until they refresh.
+    const earlyQueueUpdatedHandler = (payload: {
+      roomId: string
+      queue: Array<{ userId: string; firstName: string; lastName: string; avatarUrl: string | null; raisedAt: string }>
+      queueLength: number
+    }) => {
+      if (payload.roomId !== id) return
+      useVoiceStore.getState().pushQueueUpdatedEvent(payload)
+    }
+
+    socket.on('voice:stage_state',   earlyStageHandler)
+    socket.on('voice:user_joined',   earlyUserJoinedHandler)
+    socket.on('voice:queue_updated', earlyQueueUpdatedHandler)
+    return () => {
+      socket.off('voice:stage_state',   earlyStageHandler)
+      socket.off('voice:user_joined',   earlyUserJoinedHandler)
+      socket.off('voice:queue_updated', earlyQueueUpdatedHandler)
+    }
+  }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Active-session conflict state — shown when user tries to join while in another room.
+  // conflictRoom holds the full metadata of room B returned by the 409 response.
+  const [conflictRoom, setConflictRoom] = useState<{
+    id: string; title: string; emoji: string; topic: string | null
+  } | null>(null)
+  const [leavingConflict, setLeavingConflict] = useState(false)
 
   // Load room info
   useEffect(() => {
@@ -51,12 +119,32 @@ export default function VoiceRoomPage() {
   useEffect(() => {
     if (activeRoom?.id === id) return
     if (autoJoinedRef.current) return
+    // SA-VOICE-AUTOJOIN-01: SUPER_ADMIN cannot join voice rooms as participants
+    if (user?.role === 'SUPER_ADMIN') return
     // If user is already an active participant, auto-join
     if (room && user) {
       const existing = room.participants?.find(p => p.userId === user.id && p.isActive)
       if (existing) {
         autoJoinedRef.current = true
-        handleJoin()
+        // STAGE-PRESERVE FIX: If the returning user is demonstrably on stage
+        // (role is HOST/MODERATOR/SPEAKER AND seatNumber is assigned), bypass
+        // POST /join entirely and hydrate the store directly from the room
+        // snapshot we already have. POST /join is still needed for cold joins
+        // and audience reconnects, but calling it for on-stage users is fragile —
+        // it depends on the backend reconnect fix to preserve the seat. Skipping
+        // the round-trip eliminates that dependency for the most common case.
+        const isOnStage = (
+          (existing.role === 'HOST' || existing.role === 'MODERATOR' || existing.role === 'SPEAKER') &&
+          (existing as any).seatNumber != null
+        )
+        if (isOnStage) {
+          // Use the room snapshot from GET /voice/:id — DB state is preserved,
+          // no backend write needed. Socket reconnect and stage-state re-fetch
+          // in useVoiceRoom will reconcile any drift.
+          setActiveRoom(room as any)
+        } else {
+          handleJoin()
+        }
       }
     }
   }, [room, user]) // eslint-disable-line
@@ -68,7 +156,79 @@ export default function VoiceRoomPage() {
       const res = await api.post(`/voice/${id}/join`)
       setActiveRoom(res.data.data)
     } catch (e: any) {
+      const code = e?.response?.data?.errors?.code
+      if (code === 'VOICE_ROOM_ALREADY_ACTIVE') {
+        // Backend now returns full room B metadata — use it to show the user
+        // exactly which room they're currently in, not the destination room.
+        // The conflict data lives under response.data.errors (not response.data directly).
+        setConflictRoom({
+          id:    e?.response?.data?.errors?.activeRoomId    ?? '',
+          title: e?.response?.data?.errors?.activeRoomTitle ?? 'another room',
+          emoji: e?.response?.data?.errors?.activeRoomEmoji ?? '🎙️',
+          topic: e?.response?.data?.errors?.activeRoomTopic ?? null,
+        })
+        setJoining(false)
+        return
+      }
       toast({ title: e?.response?.data?.message || 'Failed to join room', variant: 'destructive' })
+      // Discard ALL pre-join buffers so stale events don't replay on the next attempt.
+      // earlyBufferActive stays true — the early handlers remain armed for the next join.
+      useVoiceStore.getState().drainSyncEvents()
+      useVoiceStore.getState().drainUserJoinedEvents()
+      useVoiceStore.getState().drainQueueUpdatedEvents()
+      setJoining(false)
+    }
+  }
+
+  // Full teardown of room B, then join room A
+  const handleLeaveAndJoin = async () => {
+    if (!conflictRoom || !id) return
+    setLeavingConflict(true)
+
+    // 1. Disconnect LiveKit audio from room B (stops mic, detaches audio elements)
+    _liveKitDisconnect?.()
+
+    // 2. Leave room B via API (marks voiceParticipant.isActive = false in DB)
+    try {
+      await api.post(`/voice/${conflictRoom.id}/leave`)
+    } catch {
+      // Proceed even if already gone
+    }
+
+    // 3. Leave Socket.IO voice room B so no further events arrive from B
+    const socket = getSocket()
+    if (socket) {
+      socket.emit('voice:leave_room', conflictRoom.id)
+    }
+
+    // 4. Reset all room-scoped Zustand state (clears activeRoom, messages,
+    //    participants, queue, gifts, etc.)
+    resetRoom()
+
+    setConflictRoom(null)
+    setLeavingConflict(false)
+
+    // 5. Join room A — setActiveRoom triggers VoiceRoomView to mount and
+    //    connect LiveKit to A automatically
+    setJoining(true)
+    try {
+      const res = await api.post(`/voice/${id}/join`)
+      setActiveRoom(res.data.data)
+      setJoining(false)
+    } catch (e: any) {
+      const code = e?.response?.data?.errors?.code
+      if (code === 'VOICE_ROOM_ALREADY_ACTIVE') {
+        // Rare race: user somehow got active in another room between leave and join.
+        // Show the conflict dialog again with the new active room info.
+        setConflictRoom({
+          id:    e?.response?.data?.errors?.activeRoomId    ?? '',
+          title: e?.response?.data?.errors?.activeRoomTitle ?? 'another room',
+          emoji: e?.response?.data?.errors?.activeRoomEmoji ?? '🎙️',
+          topic: e?.response?.data?.errors?.activeRoomTopic ?? null,
+        })
+      } else {
+        toast({ title: e?.response?.data?.message || 'Failed to join room', variant: 'destructive' })
+      }
       setJoining(false)
     }
   }
@@ -76,6 +236,9 @@ export default function VoiceRoomPage() {
   // Show room view when active
   if (activeRoom?.id === id) {
     return (
+      // -m-4/-m-6 removes dashboard page padding so the voice room fills the viewport.
+      // MobileNav hides itself when activeRoom is set (via useVoiceStore check in mobile-nav.tsx).
+      // Layout removes mobile-content-bottom padding when voice room is active.
       <div className="-m-4 md:-m-6 min-h-screen bg-[#f0f4ff]">
         <VoiceRoomWithBoundary onLeave={() => {
           setActiveRoom(null)
@@ -121,6 +284,53 @@ export default function VoiceRoomPage() {
 
   return (
     <div className="max-w-md mx-auto py-8 px-4">
+      {/* ── Active-session conflict dialog ─────────────────────────────────── */}
+      {conflictRoom && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.92 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full max-w-sm bg-white rounded-3xl shadow-2xl overflow-hidden"
+          >
+            <div className="bg-gradient-to-br from-orange-400 to-pink-500 p-6 text-white text-center">
+              <span className="text-4xl">{conflictRoom.emoji}</span>
+              <h2 className="text-lg font-black mt-2">You&apos;re already in a room</h2>
+              <p className="text-white/90 text-sm mt-1 font-semibold">
+                &ldquo;{conflictRoom.title}&rdquo;
+              </p>
+              {conflictRoom.topic && (
+                <p className="text-white/70 text-xs mt-0.5">{conflictRoom.topic}</p>
+              )}
+            </div>
+            <div className="p-6 space-y-3">
+              <p className="text-sm text-gray-600 text-center">
+                Leave <strong className="text-gray-900">&ldquo;{conflictRoom.title}&rdquo;</strong> and
+                join <strong className="text-gray-900">&ldquo;{room?.title ?? 'this room'}&rdquo;</strong>?
+              </p>
+              <button
+                onClick={handleLeaveAndJoin}
+                disabled={leavingConflict}
+                className="w-full flex items-center justify-center gap-2 py-3 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-2xl font-bold text-sm hover:opacity-90 disabled:opacity-60 transition-all"
+              >
+                {leavingConflict ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Mic className="w-4 h-4" />
+                )}
+                {leavingConflict ? 'Leaving…' : 'Leave & Join This Room'}
+              </button>
+              <button
+                onClick={() => setConflictRoom(null)}
+                disabled={leavingConflict}
+                className="w-full py-3 border border-gray-200 rounded-2xl font-semibold text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-60 transition-all"
+              >
+                Cancel
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
       {/* Back link */}
       <Link href="/voice-club" className="inline-flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-700 mb-6 transition-colors">
         <ArrowLeft className="w-4 h-4" />
@@ -236,13 +446,23 @@ export default function VoiceRoomPage() {
             </span>
           </div>
 
-          {/* Join button */}
+          {/* Join button — hidden for SUPER_ADMIN (platform admins cannot join voice rooms as participants) */}
           {isEnded ? (
             <div className="text-center py-3">
               <p className="text-sm text-gray-400 font-medium">This room has ended</p>
               <Link href="/voice-club">
                 <button className="mt-3 text-sm text-purple-600 hover:text-purple-700 font-medium">
                   Browse other rooms →
+                </button>
+              </Link>
+            </div>
+          ) : user?.role === 'SUPER_ADMIN' ? (
+            <div className="text-center py-3 bg-amber-50 rounded-2xl border border-amber-200">
+              <p className="text-sm text-amber-700 font-semibold">Platform admins cannot join voice rooms</p>
+              <p className="text-xs text-amber-600 mt-1">Use the admin panel to manage rooms</p>
+              <Link href="/admin/live-voice">
+                <button className="mt-3 text-sm text-amber-700 hover:text-amber-800 font-semibold underline">
+                  Go to Admin Panel →
                 </button>
               </Link>
             </div>

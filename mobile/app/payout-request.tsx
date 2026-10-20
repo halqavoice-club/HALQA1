@@ -1,16 +1,20 @@
-/**
+﻿/**
  * HALQA Mobile — Payout Request Screen
- * Creators request to withdraw their diamond earnings.
+ *
+ * Task 11.2: Updated to use authoritative payout endpoint and server-provided rates.
+ *   - API: POST /api/v1/wallet/payout/request (was /creators/me/payout-request)
+ *   - Rates: GET /api/v1/wallet/payout/info (was /creators/me/payout-info)
+ *   - No hardcoded DIAMOND_TO_USD or minimum diamond constants
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  SafeAreaView, ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform
-} from 'react-native';
+  SafeAreaView, ScrollView, ActivityIndicator, Platform} from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
 import { showMessage } from 'react-native-flash-message';
-import { useScreenProtection } from '@/src/hooks/useScreenProtection';
+import { useScreenProtection } from '@/hooks/useScreenProtection';
 import api from '@/lib/api';
 
 const METHODS = [
@@ -24,9 +28,10 @@ export default function PayoutRequestScreen() {
   // MOB-003: Prevent screenshots on payout screen (shows account numbers, balances).
   useScreenProtection();
 
+  // Task 11.2: Fetch payout info from authoritative endpoint — all rates from server
   const { data: info, isLoading } = useQuery({
     queryKey: ['payout-info'],
-    queryFn:  () => api.get('/creators/me/payout-info').then(r => r.data.data),
+    queryFn:  () => api.get('/wallet/payout/info').then(r => r.data.data),
   });
 
   const [diamonds,       setDiamonds]       = useState('');
@@ -36,13 +41,16 @@ export default function PayoutRequestScreen() {
   const [bankName,       setBankName]       = useState('');
   const [loading,        setLoading]        = useState(false);
 
-  const diamondNum = parseInt(diamonds) || 0;
-  const usd = info ? (diamondNum / (info.conversionRate?.split(' ')[0] || 100)).toFixed(2) : '0.00';
-  const net = info ? (parseFloat(usd) * 0.9).toFixed(2) : '0.00';
+  // All values derived from server response — no hardcoded constants
+  const diamondNum   = parseInt(diamonds) || 0;
+  const minPayout    = info?.minPayoutDiamonds ?? 0;
+  const diamondToUsd = info?.diamondToUsd ?? 0;
+  const usd          = (diamondNum * diamondToUsd).toFixed(2);
+  const net          = (parseFloat(usd) * 0.9).toFixed(2);
 
   const handleSubmit = async () => {
-    if (!diamondNum || diamondNum < (info?.minPayout || 1000)) {
-      showMessage({ message: `Minimum ${info?.minPayout || 1000} diamonds required`, type: 'warning' });
+    if (!diamondNum || diamondNum < minPayout) {
+      showMessage({ message: `Minimum ${minPayout} diamonds required`, type: 'warning' });
       return;
     }
     if (!accountHolder.trim()) {
@@ -51,12 +59,13 @@ export default function PayoutRequestScreen() {
     }
     setLoading(true);
     try {
-      await api.post('/creators/me/payout-request', {
+      // Task 11.2: Use authoritative payout endpoint
+      await api.post('/wallet/payout/request', {
         diamonds:       diamondNum,
-        paymentMethod:  method,
-        paymentDetails: {
+        method,
+        accountDetails: {
           accountHolder: accountHolder.trim(),
-          accountNumber: accountNumber.trim() || undefined,
+          account:       accountNumber.trim() || undefined,
           bankName:      bankName.trim()      || undefined,
         }
       });
@@ -79,8 +88,8 @@ export default function PayoutRequestScreen() {
               <View style={styles.balanceCard}>
                 <Text style={styles.balLabel}>Available Balance</Text>
                 <Text style={styles.balValue}>💎 {(info.diamonds || 0).toLocaleString()} diamonds</Text>
-                <Text style={styles.balRate}>{info.conversionRate} · {info.platformFeeRate} fee</Text>
-                <Text style={styles.balMin}>Minimum: {info.minPayout?.toLocaleString()} diamonds (${info.minPayoutUsd?.toFixed(2)})</Text>
+                <Text style={styles.balRate}>{info.diamondToUsd} USD/diamond · {info.platformSharePercent}% platform share</Text>
+                <Text style={styles.balMin}>Minimum: {info.minPayoutDiamonds?.toLocaleString()} diamonds (${info.minPayoutUsd})</Text>
               </View>
             )}
 
@@ -157,3 +166,7 @@ const styles = StyleSheet.create({
   submitBtnText:  { color: '#fff', fontSize: 16, fontWeight: '800' },
   note:           { textAlign: 'center', color: '#94a3b8', fontSize: 12, marginTop: 12 },
 });
+
+
+
+

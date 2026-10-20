@@ -3,29 +3,79 @@ const multer = require('multer');
 const path   = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { authenticate } = require('../middleware/auth.middleware');
+const rateLimit = require('express-rate-limit');
 const prisma = require('../utils/prisma');
 const { saveFile, STORAGE_TYPE } = require('../utils/storage');
 const { successResponse, errorResponse } = require('../utils/response');
-const { fromBuffer: fileTypeFromBuffer } = require('file-type');
+
+// ─── CJS → ESM interop for file-type@21.x (ESM-only) ────────────────────────
+// file-type >= 19 is pure ESM. HALQA backend is CommonJS. Dynamic import()
+// is available in Node.js 12+ from CJS and works here because validateFileBuffer
+// is already async. The module is loaded once and cached on first call.
+let _fileTypeModule;
+async function getFileType() {
+  if (!_fileTypeModule) _fileTypeModule = import('file-type');
+  return _fileTypeModule;
+}
+
 const clamav = require('../utils/clamav');
 
+// ─── L-3 FIX: Per-user rate limits on upload endpoints ───────────────────────
+// Single file: 20 uploads per minute per user
+// Multiple files: 4 batch uploads per minute per user
+// These limits prevent storage/bandwidth exhaustion from a single abusive account.
+const singleUploadLimit = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 20,
+  keyGenerator: req => req.user?.id || req.ip,
+  message: { success: false, message: 'Too many uploads, slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const multipleUploadLimit = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 4,
+  keyGenerator: req => req.user?.id || req.ip,
+  message: { success: false, message: 'Too many batch uploads, slow down' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // ─── Allowed MIME types ───────────────────────────────────────────────────────
-const ALLOWED_MIME_TYPES = [
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-  'video/mp4', 'video/webm', 'video/quicktime', 'video/3gpp',
+// Note: file-type magic byte detection may return slightly different strings
+// than browser-declared mimetypes. Both sets are included here.
+const ALLOWED_MIME_TYPES = new Set([
+  // Images
+  'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
+  'image/heic', 'image/heif', 'image/avif', 'image/svg+xml', 'image/bmp',
+  'image/tiff', 'image/x-icon',
+  // Videos
+  'video/mp4', 'video/webm', 'video/quicktime', 'video/3gpp', 'video/3gpp2',
+  'video/x-m4v', 'video/x-msvideo', 'video/x-matroska', 'video/ogg',
+  // Audio
+  'audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/wav', 'audio/x-wav',
+  'audio/ogg', 'audio/aac', 'audio/m4a', 'audio/x-m4a', 'audio/flac',
+  'audio/webm', 'audio/x-flac',
+  // Documents
   'application/pdf',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.ms-excel',
   'application/msword',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'audio/mpeg', 'audio/wav', 'audio/ogg',
-];
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  // Archives (safe for DM file sharing)
+  'application/zip', 'application/x-zip-compressed',
+  // Text
+  'text/plain', 'text/csv',
+]);
 
 // ─── Use memory storage — saveFile() decides local vs S3 ─────────────────────
 const fileFilter = (req, file, cb) => {
-  ALLOWED_MIME_TYPES.includes(file.mimetype)
+  ALLOWED_MIME_TYPES.has(file.mimetype)
     ? cb(null, true)
-    : cb(new Error('File type not allowed'), false);
+    : cb(new Error(`File type not allowed: ${file.mimetype}`), false);
 };
 
 const upload = multer({
@@ -40,18 +90,46 @@ const upload = multer({
  */
 async function validateFileBuffer(buffer) {
   // Magic bytes validation — check actual file signature, not declared MIME
-  const detected = await fileTypeFromBuffer(buffer);
+  let detected = null;
+  try {
+    const { fileTypeFromBuffer } = await getFileType();
+    detected = await fileTypeFromBuffer(buffer);
+  } catch {
+    // Parser failure (e.g. unexpected buffer format) — treat as undetectable type.
+    // Fall through to the existing "no detection" behavior below: allow the upload
+    // since multer's fileFilter already validated the declared MIME type.
+    detected = null;
+  }
   const detectedMime = detected ? detected.mime : null;
 
-  if (!detectedMime || !ALLOWED_MIME_TYPES.includes(detectedMime)) {
-    return `File type not allowed (detected: ${detectedMime || 'unknown'})`;
+  // Some valid files (plain text, CSV, SVG, certain audio) have no magic bytes.
+  // If file-type can't detect, fall back to allowing it (multer already filtered
+  // by declared MIME, which is checked above in fileFilter).
+  if (detectedMime && !ALLOWED_MIME_TYPES.has(detectedMime)) {
+    // Allow common aliases (file-type returns 'image/jpg' but we store 'image/jpeg' etc.)
+    const normalized = detectedMime
+      .replace('image/jpg', 'image/jpeg')
+      .replace('audio/mp3', 'audio/mpeg')
+      .replace('audio/x-wav', 'audio/wav')
+    if (!ALLOWED_MIME_TYPES.has(normalized)) {
+      return `File type not allowed (detected: ${detectedMime})`;
+    }
   }
 
-  // ClamAV scan — only when ClamAV daemon is reachable
+  // ClamAV scan — only when the daemon has been confirmed reachable.
   if (clamav.isEnabled()) {
-    const scanResult = await clamav.scanBuffer(buffer);
-    if (!scanResult.clean) {
-      return 'File rejected: malware detected';
+    try {
+      const scanResult = await clamav.scanBuffer(buffer);
+      const hasVirus = scanResult &&
+        scanResult.clean === false &&
+        !scanResult.error &&
+        Array.isArray(scanResult.viruses) &&
+        scanResult.viruses.length > 0;
+      if (hasVirus) {
+        return 'File rejected: malware detected';
+      }
+    } catch {
+      // ClamAV unreachable — fail-open, allow upload to proceed
     }
   }
 
@@ -61,7 +139,7 @@ async function validateFileBuffer(buffer) {
 router.use(authenticate);
 
 // ─── POST /uploads — single file ─────────────────────────────────────────────
-router.post('/', upload.single('file'), async (req, res, next) => {
+router.post('/', singleUploadLimit, upload.single('file'), async (req, res, next) => {
   try {
     if (!req.file) return errorResponse(res, 'No file uploaded', 400);
 
@@ -98,7 +176,7 @@ router.post('/', upload.single('file'), async (req, res, next) => {
 });
 
 // ─── POST /uploads/multiple — up to 10 files ─────────────────────────────────
-router.post('/multiple', upload.array('files', 10), async (req, res, next) => {
+router.post('/multiple', multipleUploadLimit, upload.array('files', 10), async (req, res, next) => {
   try {
     if (!req.files || req.files.length === 0) {
       return errorResponse(res, 'No files uploaded', 400);

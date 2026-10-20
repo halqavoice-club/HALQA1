@@ -22,6 +22,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // S-01: Stop the scheduler started by startServer() so cron jobs do not
+  // fire dynamic require() calls after Jest tears down the module sandbox.
+  try {
+    const jobScheduler = require('../../utils/jobScheduler');
+    jobScheduler.shutdown();
+  } catch { /* non-fatal */ }
+
   await prisma.$disconnect();
 });
 
@@ -93,6 +100,13 @@ describe('Auth — login lockout (REQ-8.3, 8.4, 8.5)', () => {
   });
 
   it('locks account after 5 failures and returns HTTP 429', async () => {
+    // This test requires Redis for the lockout counter — skip gracefully if unavailable
+    const { isRedisReady } = require('../../utils/redis');
+    if (!isRedisReady()) {
+      console.log('  [skip] Redis not available — lockout test requires Redis');
+      return;
+    }
+
     // Hit the endpoint 5 times with the wrong password
     for (let i = 0; i < 5; i++) {
       await request(app)
@@ -158,9 +172,29 @@ describe('Auth — refresh token & logout', () => {
 
   it('clears refresh token cookie on logout', async () => {
     if (!refreshToken) return;
+
+    // Logout needs the Bearer token — get it from the login response
+    const email2 = testEmail();
+    await prisma.user.create({
+      data: {
+        email: email2,
+        passwordHash: require('bcryptjs').hashSync(VALID_PASSWORD, 10),
+        firstName: 'Logout', lastName: 'Test', role: 'STUDENT',
+        status: 'ACTIVE', emailVerified: true,
+      }
+    });
+    const loginRes2 = await request(app)
+      .post('/api/v1/auth/login')
+      .send({ email: email2, password: VALID_PASSWORD });
+
+    const accessToken  = loginRes2.body.data?.accessToken;
+    const refreshToken2 = loginRes2.body.data?.refreshToken;
+    if (!accessToken) return;
+
     const res = await request(app)
       .post('/api/v1/auth/logout')
-      .send({ refreshToken });
+      .set('Authorization', `Bearer ${accessToken}`)
+      .send({ refreshToken: refreshToken2 });
 
     expect([200, 204]).toContain(res.status);
   });

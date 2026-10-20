@@ -91,7 +91,17 @@ async function createVoiceRoom(hostId) {
 // ─── Cleanup ──────────────────────────────────────────────────────────────────
 afterEach(async () => {
   try {
-    await prisma.giftTransaction.deleteMany({ where: { room: { title: { contains: 'Gift Test Room' } } } });
+    // V-INTEG-FIX: GiftTransaction has no `room` Prisma relation (roomId is a bare String,
+    // not a typed relation). Delete gift transactions by matching the voice rooms first,
+    // then clean rooms, wallets, tokens, and users in dependency order.
+    const testRooms = await prisma.voiceRoom.findMany({
+      where: { title: { contains: 'Gift Test Room' } },
+      select: { id: true },
+    });
+    const testRoomIds = testRooms.map(function(r) { return r.id; });
+    if (testRoomIds.length > 0) {
+      await prisma.giftTransaction.deleteMany({ where: { roomId: { in: testRoomIds } } });
+    }
     await prisma.voiceRoom.deleteMany({ where: { title: { contains: 'Gift Test Room' } } });
     await prisma.wallet.deleteMany({ where: { user: { email: { contains: '@integration-test.halqa' } } } });
     await prisma.refreshToken.deleteMany({ where: { user: { email: { contains: '@integration-test.halqa' } } } });

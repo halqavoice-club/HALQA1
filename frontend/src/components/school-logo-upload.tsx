@@ -38,9 +38,7 @@ export function SchoolLogoUpload({ schoolId, currentLogoUrl, schoolName, onUpdat
     try {
       const fd = new FormData()
       fd.append('logo', file)
-      const res = await api.post(`/schools/${schoolId}/logo`, fd, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      })
+      const res = await api.post(`/schools/${schoolId}/logo`, fd)
       const logoUrl = res.data.data?.logoUrl
       onUpdated?.(logoUrl)
       queryClient.invalidateQueries({ queryKey: ['school'] })
@@ -57,7 +55,8 @@ export function SchoolLogoUpload({ schoolId, currentLogoUrl, schoolName, onUpdat
   const handleRemove = async () => {
     setUploading(true)
     try {
-      await api.put(`/schools/${schoolId}`, { logoUrl: null })
+      // Use PATCH (not PUT) so MEMBER users with SCHOOL_ADMIN membership can remove the logo
+      await api.patch(`/schools/${schoolId}`, { logoUrl: null })
       setPreview(null)
       onUpdated?.(null)
       queryClient.invalidateQueries({ queryKey: ['school'] })

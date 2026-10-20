@@ -317,6 +317,10 @@ const ERROR_CODES = {
  * Convert Prisma errors to AppError
  */
 function handlePrismaError(error) {
+  if (!error) {
+    return new InternalServerError('Unknown database error');
+  }
+
   if (error.code === 'P2002') {
     // Unique constraint violation
     const field = error.meta?.target?.[0] || 'field';
@@ -338,14 +342,18 @@ function handlePrismaError(error) {
     return new ValidationError('Required relation missing', { relation: error.meta?.relation_name });
   }
   
-  // Default to database error
-  return new DatabaseError(error.message, { originalCode: error.code });
+  // Default to internal server error (unknown Prisma error code)
+  return new InternalServerError(error.message || 'Database error', { originalCode: error.code });
 }
 
 /**
  * Convert unknown errors to AppError
  */
 function handleUnknownError(error) {
+  if (!error) {
+    return new InternalServerError('Unknown error');
+  }
+
   if (error instanceof AppError) {
     return error;
   }

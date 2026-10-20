@@ -1,15 +1,15 @@
-/**
+﻿/**
  * HALQA Mobile — Create Post Screen
  * Supports TEXT, IMAGE, VIDEO posts with media picker,
  * visibility selector, location tag, and character count.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
-  ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform,
-  Image, Alert,
-} from 'react-native';
-import { useRouter } from 'expo-router';
+  ScrollView, ActivityIndicator, Platform,
+  Image, Alert} from 'react-native';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -19,11 +19,14 @@ import * as DocumentPicker from 'expo-document-picker';
 import api from '@/lib/api';
 import { useAuthStore } from '@/store/auth.store';
 
-const VISIBILITY_OPTIONS = [
-  { value: 'PUBLIC',    label: '🌍 Everyone'    },
-  { value: 'FOLLOWERS', label: '👥 Followers'   },
-  { value: 'PRIVATE',   label: '🔒 Only me'     },
+const BASE_VISIBILITY_OPTIONS = [
+  { value: 'PUBLIC',      label: '🌍 Everyone'    },
+  { value: 'FOLLOWERS',   label: '👥 Followers'   },
+  { value: 'PRIVATE',     label: '🔒 Only me'     },
 ];
+
+// SCHOOL_ONLY is appended at runtime for users who belong to a school
+const SCHOOL_ONLY_OPTION = { value: 'SCHOOL_ONLY', label: '🏫 School only' };
 
 type MediaItem = {
   uri: string;
@@ -37,6 +40,12 @@ export default function CreatePostScreen() {
   const router = useRouter();
   const { user } = useAuthStore();
   const queryClient = useQueryClient();
+
+  // communityId is passed when navigating from a community detail page
+  const { communityId, communityName } = useLocalSearchParams<{
+    communityId?: string;
+    communityName?: string;
+  }>();
 
   const [body,       setBody]       = useState('');
   const [visibility, setVisibility] = useState('PUBLIC');
@@ -62,6 +71,13 @@ export default function CreatePostScreen() {
     if (result.canceled || !result.assets?.[0]) return;
     const asset = result.assets[0];
     const isVideo = asset.type === 'video';
+
+    // Client-side guard: 50 MB max (matches backend multer limit)
+    if (asset.fileSize && asset.fileSize > 50 * 1024 * 1024) {
+      showMessage({ message: 'File too large (max 50 MB)', type: 'warning' });
+      return;
+    }
+
     setMedia({
       uri: asset.uri,
       type: isVideo ? 'VIDEO' : 'IMAGE',
@@ -82,58 +98,77 @@ export default function CreatePostScreen() {
     }
     setUploading(true);
     try {
-      let postData: any;
+      let mediaPayload: { url: string; type: string; mimeType: string }[] = [];
 
       if (media) {
-        // Multipart form upload for media posts
+        // Step 1: Upload the media file to /upload — get back a URL
         const form = new FormData();
-        form.append('body', body.trim());
-        form.append('type', media.type);
-        form.append('visibility', visibility);
-        if (location.trim()) form.append('location', location.trim());
-        form.append('media', {
+        form.append('file', {
           uri: media.uri,
           type: media.mimeType,
           name: media.name,
         } as any);
 
-        const res = await api.post('/posts', form, {
+        const uploadRes = await api.post('/upload', form, {
           headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 120_000, // 2 min for large videos
         });
-        postData = res.data;
-      } else {
-        // Plain text post
-        const res = await api.post('/posts', {
-          body: body.trim(),
-          type: 'TEXT',
-          visibility,
-          ...(location.trim() ? { location: location.trim() } : {}),
-        });
-        postData = res.data;
+
+        const uploadedUrl: string = uploadRes.data?.data?.url;
+        if (!uploadedUrl) throw new Error('Upload failed — no URL returned');
+
+        mediaPayload = [{
+          url:      uploadedUrl,
+          type:     media.type,      // 'IMAGE' | 'VIDEO'
+          mimeType: media.mimeType,
+        }];
       }
+
+      // Step 2: Create the post with the uploaded media URL(s)
+      await api.post('/posts', {
+        body:       body.trim() || undefined,
+        type:       mediaPayload.length > 0 ? mediaPayload[0].type : 'TEXT',
+        visibility,
+        media:      mediaPayload,
+        ...(location.trim() ? { location: location.trim() } : {}),
+        // Include communityId if posting from a community page
+        ...(communityId ? { communityId } : {}),
+      });
 
       showMessage({ message: '✅ Posted!', type: 'success' });
       queryClient.invalidateQueries({ queryKey: ['feed'] });
+      // Also invalidate the community feed if posting in a community
+      if (communityId) {
+        queryClient.invalidateQueries({ queryKey: ['community-feed'] });
+      }
       router.back();
     } catch (e: any) {
-      showMessage({ message: e?.response?.data?.message ?? 'Failed to post', type: 'danger' });
+      const msg = e?.response?.data?.message ?? e?.message ?? 'Failed to post';
+      showMessage({ message: msg, type: 'danger' });
     } finally {
       setUploading(false);
     }
-  }, [body, media, visibility, location, queryClient, router]);
+  }, [body, media, visibility, location, communityId, queryClient, router]);
+
+  // Build visibility options: include SCHOOL_ONLY only when user has a school
+  const VISIBILITY_OPTIONS = user?.schoolId
+    ? [...BASE_VISIBILITY_OPTIONS, SCHOOL_ONLY_OPTION]
+    : BASE_VISIBILITY_OPTIONS;
 
   const canPost = (body.trim().length > 0 || !!media) && !uploading;
   const visLabel = VISIBILITY_OPTIONS.find(v => v.value === visibility)?.label ?? '';
+  // Screen title changes when posting in a community
+  const screenTitle = communityName ? `Post to ${communityName}` : 'New Post';
 
   return (
     <SafeAreaView style={s.container} edges={['top']}>
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         {/* Header */}
         <View style={s.header}>
           <TouchableOpacity onPress={() => router.back()} style={s.cancelBtn}>
             <Text style={s.cancelText}>Cancel</Text>
           </TouchableOpacity>
-          <Text style={s.title}>New Post</Text>
+          <Text style={s.title}>{screenTitle}</Text>
           <TouchableOpacity
             style={[s.postBtn, !canPost && s.postBtnDisabled]}
             onPress={handlePost}
@@ -292,3 +327,9 @@ const s = StyleSheet.create({
   toolBtn:          { padding: 8, borderRadius: 20 },
   charCount:        { marginLeft: 'auto', fontSize: 12, color: '#9ca3af' },
 });
+
+
+
+
+
+

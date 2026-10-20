@@ -1,13 +1,13 @@
-/**
+﻿/**
  * HALQA Mobile — Notes
  * Create, edit, delete, and search personal/shared notes.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   TextInput, ActivityIndicator, Alert, Modal,
-  KeyboardAvoidingView, Platform, Switch, ScrollView,
-} from 'react-native';
+  Platform, Switch, ScrollView} from 'react-native';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -327,3 +327,8 @@ const s = StyleSheet.create({
   emptyTitle:  { fontSize: 16, fontWeight: '700', color: '#374151', marginTop: 8 },
   emptySub:    { fontSize: 13, color: '#94a3b8', textAlign: 'center', paddingHorizontal: 24 },
 });
+
+
+
+
+

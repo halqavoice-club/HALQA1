@@ -9,14 +9,18 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SearchInput } from '@/components/ui/search-input'
 import { useDebounce } from '@/hooks/useDebounce'
-import { BookOpen, Users, ChevronRight, Plus } from 'lucide-react'
+import { BookOpen, Users, ChevronRight, Plus, Star } from 'lucide-react'
 import Link from 'next/link'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
+import { useSchoolAccess } from '@/hooks/useSchoolAccess'
 import { ErrorState } from '@/components/ui/error-state'
 
 export default function ClassesPage() {
   const [search, setSearch] = useState('')
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
+  const { activeRole } = useSchoolAccess()
   const debouncedSearch = useDebounce(search, 300)
 
   const { data, isLoading, isError, refetch } = useQuery({
@@ -25,7 +29,12 @@ export default function ClassesPage() {
   })
 
   const classes = data?.data || []
-  const canCreate = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
+
+  // Check both legacy User.role and new-arch SchoolMembership.role
+  const canCreate = user?.role === 'SUPER_ADMIN' ||
+                    activeRole === 'SUPER_ADMIN' ||
+                    activeRole === 'SCHOOL_ADMIN' ||
+                    user?.role === 'SCHOOL_ADMIN'
 
   return (
     <div className="space-y-5">
@@ -76,7 +85,14 @@ export default function ClassesPage() {
                     <div className="bg-halqa-100 p-2 rounded-lg group-hover:bg-halqa-200 transition-colors">
                       <BookOpen className="w-5 h-5 text-halqa-700" />
                     </div>
-                    <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-halqa-500 transition-colors" />
+                    <div className="flex items-center gap-1.5">
+                      {cls.isDefault && (
+                        <Badge className="text-xs bg-amber-100 text-amber-700 border-0 gap-1">
+                          <Star className="w-2.5 h-2.5" /> Default
+                        </Badge>
+                      )}
+                      <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-halqa-500 transition-colors" />
+                    </div>
                   </div>
                   <h3 className="font-semibold text-gray-900 group-hover:text-halqa-700 transition-colors">
                     {cls.name}

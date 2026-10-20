@@ -137,3 +137,42 @@ eas submit --platform android
 
 **"Install blocked" on phone**
 → Settings → Security → Install unknown apps → Files → Allow
+
+---
+
+## OTA Updates (Over-the-Air) — No Rebuild Required
+
+Once users have the APK installed, you can push JavaScript updates without a full rebuild using **EAS Update**. This is the fix for the "every change requires a new APK" limitation.
+
+### How it works
+- Native code (Expo modules, permissions, plugins) requires a new APK
+- JavaScript/TypeScript changes (UI, logic, API calls) can be pushed OTA
+- The app checks for updates on every cold start and applies them silently
+
+### Push an OTA update
+
+```powershell
+# From the mobile/ directory:
+eas update --channel production --message "Fix: group chat reply bug"
+```
+
+The update is live within seconds. Users get it on their next app open.
+
+### OTA update channels
+
+| Channel | Target | Use for |
+|---|---|---|
+| `development` | Dev builds only | Testing new features |
+| `preview` | Internal testers | QA and stakeholder review |
+| `production` | All users | Live updates |
+
+### Limitations (requires new APK build)
+- Adding new Expo modules (e.g. new camera features)
+- Changing `app.json` (icons, splash, permissions)
+- Upgrading Expo SDK major version
+- Native Android/iOS code changes
+
+### Check update status
+```powershell
+eas update:list --branch production
+```

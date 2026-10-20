@@ -14,7 +14,7 @@ import {
   Text,
   Pressable,
   StyleSheet,
-  TouchableWithoutFeedback,
+  TouchableWithoutFeedback
 } from 'react-native';
 import type { SeatData } from '../../../../../src/lib/layout/layoutTypes';
 
@@ -141,3 +141,4 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 });
+

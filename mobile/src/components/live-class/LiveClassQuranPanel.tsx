@@ -7,7 +7,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, FlatList,
-  StyleSheet, ActivityIndicator, Modal, ScrollView,
+  StyleSheet, ActivityIndicator, Modal, ScrollView
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from '@tanstack/react-query';
@@ -164,7 +164,7 @@ export function LiveClassQuranPanel({ isHost, liveClassId, syncedPosition, onPos
   // When a sync position arrives (student), scroll to the ayah
   useEffect(() => {
     if (!syncedPosition || !verses.length || isHost) return;
-    const idx = verses.findIndex(v => v.verse_number === syncedPosition.ayahNumber);
+    const idx = verses.findIndex((v: Verse) => v.verse_number === syncedPosition.ayahNumber);
     if (idx >= 0) {
       setTimeout(() => listRef.current?.scrollToIndex({ index: idx, animated: true }), 300);
     }
@@ -285,3 +285,4 @@ const qp = StyleSheet.create({
   empty:       { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10, paddingTop: 40 },
   emptyText:   { color: '#6b7280', fontSize: 14, textAlign: 'center' },
 });
+

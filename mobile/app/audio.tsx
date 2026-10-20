@@ -1,14 +1,14 @@
-/**
+﻿/**
  * HALQA Mobile — Audio Lessons
  * Browse Islamic audio lessons by category/course with built-in player.
  * Teachers/Admins can upload audio directly from their phone.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, ScrollView,
   TextInput, ActivityIndicator, RefreshControl, Modal,
-  Alert, KeyboardAvoidingView, Platform,
-} from 'react-native';
+  Alert, Platform} from 'react-native';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -27,7 +27,7 @@ interface Lesson {
   id: string; title: string; description?: string; audioUrl: string;
   duration?: number; fileSize: number; playCount: number;
   course: Course; category: Category;
-  teacher: { user: { firstName: string; lastName: string } };
+  teacher: { user: { id: string; firstName: string; lastName: string } };
   createdAt: string;
 }
 
@@ -230,7 +230,7 @@ function UploadTab() {
 
       const uploadResult = await FileSystem.uploadAsync(url, pickedFile.uri, {
         httpMethod: 'POST',
-        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+        uploadType: 1 as any, // MULTIPART = 1 in expo-file-system
         fieldName: 'audio',
         headers: { Authorization: `Bearer ${token}` },
         parameters: {
@@ -450,8 +450,10 @@ export default function AudioScreen() {
   const insets = useSafeAreaInsets();
   const { user } = useAuthStore();
   const queryClient = useQueryClient();
-  const canUpload = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role ?? '');
-  const isAdmin   = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role ?? '');
+  // SA-EDU-04: SUPER_ADMIN is a platform role — not a school-scoped teacher/admin.
+  // Audio upload belongs to SCHOOL_ADMIN and TEACHER (school membership roles).
+  // Edit/delete of a lesson is only allowed for the teacher who created it.
+  const canUpload = ['SCHOOL_ADMIN', 'TEACHER'].includes(user?.role ?? '');
 
   const [activeTab, setActiveTab] = useState<'browse' | 'upload'>('browse');
   const [search, setSearch]         = useState('');
@@ -742,7 +744,7 @@ export default function AudioScreen() {
                     lesson={l}
                     isPlaying={nowPlaying?.id === l.id}
                     onPlay={() => playLesson(l, grp.lessons)}
-                    canEdit={canUpload && (isAdmin || l.teacher?.user?.firstName === user?.name)}
+                    canEdit={canUpload && l.teacher?.user?.id === user?.id}
                     onDelete={() => Alert.alert('Delete Lesson', `Delete "${l.title}"?`, [
                       { text: 'Cancel', style: 'cancel' },
                       { text: 'Delete', style: 'destructive', onPress: () => deleteMutation.mutate(l.id) },
@@ -805,3 +807,8 @@ const a = StyleSheet.create({
   emptyTxt:        { fontSize: 15, color: '#94a3b8', marginTop: 12 },
   emptySub:        { fontSize: 12, color: '#cbd5e1' },
 });
+
+
+
+
+

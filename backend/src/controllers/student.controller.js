@@ -68,11 +68,17 @@ async function listStudents(req, res, next) {
     }
 
     const { skip, ...pagination } = getPagination(page, limit);
-    const schoolId = req.user.schoolId;
+    const schoolId = req.schoolId || req.user.schoolId;
+
+    // ARCH-01: ALL users (including SUPER_ADMIN) must be scoped to a school.
+    // SUPER_ADMIN must have an explicit SchoolMembership to view school student data.
+    if (!schoolId) {
+      return errorResponse(res, 'School context required', 400);
+    }
 
     const where = {
       deletedAt: null,
-      ...(schoolId && req.user.role !== 'SUPER_ADMIN' && { schoolId })
+      schoolId,   // always filter by school — no bypass for any role
     };
 
     // Search filter
@@ -131,9 +137,23 @@ async function listStudents(req, res, next) {
 
 async function getStudent(req, res, next) {
   try {
-    const student = await prisma.student.findUnique({
-      where: { id: req.params.id },
+    // C-4 FIX: Verify the student belongs to the requester's school.
+    // Previously only the list endpoint was school-scoped; individual fetch was not,
+    // allowing cross-school data access via guessed/discovered UUIDs.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const student = await prisma.student.findFirst({
+      where: {
+        id: req.params.id,
+        deletedAt: null,
+        ...(schoolId && { schoolId })  // ARCH-01: always filter by school
+      },
       include: {
+        // ID-CARD-01: Always include the student's own school record so the ID card
+        // always uses the STUDENT's enrolled school name/logo — never the requesting
+        // admin's school or any other context-dependent school.
+        school: {
+          select: { id: true, name: true, logoUrl: true, address: true, phone: true, email: true }
+        },
         user: { select: { id: true, firstName: true, lastName: true, email: true, phone: true, avatarUrl: true, dateOfBirth: true, gender: true, status: true, emailVerified: true, lastLoginAt: true } },
         enrollments: {
           where: { isActive: true },
@@ -155,10 +175,85 @@ async function getStudent(req, res, next) {
 
 async function createStudent(req, res, next) {
   try {
-    const { email, firstName, lastName, studentId, phone, dateOfBirth, gender, gradeLevel, classId, guardianId } = req.body;
-    const schoolId = req.user.schoolId || req.body.schoolId;
+    let { email, firstName, lastName, studentId, phone, dateOfBirth, gender, gradeLevel, classId, guardianId } = req.body;
+    // H-2 FIX: Never trust req.body.schoolId — always use the school resolved from
+    // the authenticated context (set by requireSchoolMember middleware).
+    const schoolId = req.schoolId || req.user.schoolId;
+    if (!schoolId) return errorResponse(res, 'School context required', 400);
 
-    const passwordHash = await bcrypt.hash('Halqa@2024', 12);
+    // FRIEND-STUDENT-02: If a linkedUserId is provided (admin adding a social friend),
+    // the user ALREADY EXISTS on the platform. We must NOT create a new User record —
+    // instead we link the existing user to this school as a Student.
+    const { linkedUserId } = req.body;
+
+    if (linkedUserId) {
+      // ── PATH A: Existing HALQA user being added as a student ─────────────────
+      const existingUser = await prisma.user.findUnique({
+        where: { id: linkedUserId, deletedAt: null },
+        select: { id: true, email: true, firstName: true, lastName: true, schoolId: true }
+      });
+      if (!existingUser) return errorResponse(res, 'Linked user not found', 404);
+
+      // Check they aren't already a student in this school
+      const alreadyStudent = await prisma.student.findFirst({
+        where: { userId: existingUser.id, schoolId, deletedAt: null }
+      });
+      if (alreadyStudent) {
+        return errorResponse(res, `${existingUser.firstName} is already a student in this school`, 409);
+      }
+
+      const qrCode = `STU-${uuidv4().split('-')[0].toUpperCase()}`;
+
+      const student = await prisma.$transaction(async (tx) => {
+        // Update the existing user's schoolId if not set
+        if (!existingUser.schoolId) {
+          await tx.user.update({
+            where: { id: existingUser.id },
+            data: { schoolId }
+          });
+        }
+
+        const s = await tx.student.create({
+          data: {
+            userId: existingUser.id,
+            schoolId,
+            studentId,
+            qrCode,
+            gradeLevel: gradeLevel || null
+          }
+        });
+
+        if (classId) {
+          await tx.enrollment.create({ data: { studentId: s.id, classId } });
+        }
+
+        if (guardianId) {
+          await tx.guardianStudent.create({
+            data: { guardianId, studentId: s.id, isPrimary: true }
+          });
+        }
+
+        // Create/update SchoolMembership so the user gets STUDENT role in this school
+        await tx.schoolMembership.upsert({
+          where: { userId_schoolId: { userId: existingUser.id, schoolId } },
+          create: { userId: existingUser.id, schoolId, role: 'STUDENT', status: 'ACTIVE', joinedAt: new Date() },
+          update: { role: 'STUDENT', status: 'ACTIVE', deletedAt: null }
+        });
+
+        return s;
+      });
+
+      return successResponse(res, student, 'Student added successfully', 201);
+    }
+
+    // ── PATH B: Brand new user (manual entry) ───────────────────────────────────
+    // linkedUserId is not set — create a fresh User record with the provided fields.
+    if (!email) return errorResponse(res, 'Email is required', 400);
+
+    // Generate a cryptographically random temporary password instead of a hardcoded default (L-1 fix)
+    const crypto = require('crypto');
+    const tempPassword = crypto.randomBytes(12).toString('hex'); // 24-char hex — user must reset via email
+    const passwordHash = await bcrypt.hash(tempPassword, 12);
     const qrCode = `STU-${uuidv4().split('-')[0].toUpperCase()}`;
 
     const student = await prisma.$transaction(async (tx) => {
@@ -170,7 +265,8 @@ async function createStudent(req, res, next) {
           role: 'STUDENT',
           schoolId,
           status: 'ACTIVE',
-          emailVerified: true
+          emailVerified: true,
+          mustChangePassword: true  // Step 8: force password reset on first login
         }
       });
 
@@ -187,6 +283,13 @@ async function createStudent(req, res, next) {
           data: { guardianId, studentId: s.id, isPrimary: true }
         });
       }
+
+      // GAP FIX: Create SchoolMembership so requireSchoolMember() sets effectiveRole correctly.
+      await tx.schoolMembership.upsert({
+        where: { userId_schoolId: { userId: user.id, schoolId } },
+        create: { userId: user.id, schoolId, role: 'STUDENT', status: 'ACTIVE', joinedAt: new Date() },
+        update: { role: 'STUDENT', status: 'ACTIVE', deletedAt: null }
+      });
 
       return s;
     });
@@ -208,18 +311,44 @@ async function createStudent(req, res, next) {
 
 async function updateStudent(req, res, next) {
   try {
-    const { firstName, lastName, phone, dateOfBirth, gender, gradeLevel, medicalNotes, emergencyContact } = req.body;
-    const student = await prisma.student.findUnique({ where: { id: req.params.id } });
+    const { gradeLevel, studentId } = req.body;
+    // PERM-FIX: A School Admin may ONLY update school-specific student fields:
+    //   - studentId  (school-assigned identifier)
+    //   - gradeLevel (academic level in this school)
+    //
+    // The following fields are NOT accepted, regardless of what is sent in the body:
+    //   - firstName, lastName, phone  (identity — user-owned)
+    //   - email                       (identity — user-owned)
+    //   - dateOfBirth, gender         (personal — user-owned)
+    //   - medicalNotes, emergencyContact  (removed from permitted fields)
+    //
+    // Personal information can only be changed by the user themselves
+    // via PUT /users/profile (self-service).
+    const schoolId = req.schoolId || req.user.schoolId;
+    const student = await prisma.student.findFirst({
+      where: {
+        id: req.params.id,
+        deletedAt: null,
+        ...(schoolId && { schoolId })
+      }
+    });
     if (!student) return errorResponse(res, 'Student not found', 404);
 
-    await prisma.user.update({
-      where: { id: student.userId },
-      data: { firstName, lastName, phone, dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : undefined, gender }
-    });
+    // If studentId is being changed, check it isn't already taken in this school
+    if (studentId && studentId !== student.studentId) {
+      const conflict = await prisma.student.findFirst({
+        where: { schoolId, studentId, id: { not: req.params.id }, deletedAt: null }
+      });
+      if (conflict) return errorResponse(res, `Student ID "${studentId}" is already in use`, 409);
+    }
 
+    // Only update the Student record — never touch the User record here.
     const updated = await prisma.student.update({
       where: { id: req.params.id },
-      data: { gradeLevel: gradeLevel || null, medicalNotes, emergencyContact }
+      data: {
+        ...(studentId && { studentId }),
+        gradeLevel: gradeLevel !== undefined ? (gradeLevel || null) : undefined,
+      }
     });
 
     return successResponse(res, updated, 'Student updated');
@@ -228,6 +357,15 @@ async function updateStudent(req, res, next) {
 
 async function enrollStudent(req, res, next) {
   try {
+    // H-9 FIX: Verify both student and class belong to the caller's school.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const [student, cls] = await Promise.all([
+      prisma.student.findFirst({ where: { id: req.params.id, deletedAt: null, ...(schoolId && { schoolId }) }, select: { id: true } }),
+      prisma.class.findFirst({ where: { id: req.body.classId, deletedAt: null, ...(schoolId && { schoolId }) }, select: { id: true } })
+    ]);
+    if (!student) return errorResponse(res, 'Student not found or not in your school', 404);
+    if (!cls) return errorResponse(res, 'Class not found or not in your school', 404);
+
     const enrollment = await prisma.enrollment.upsert({
       where: { studentId_classId: { studentId: req.params.id, classId: req.body.classId } },
       update: { isActive: true, droppedAt: null },
@@ -239,6 +377,21 @@ async function enrollStudent(req, res, next) {
 
 async function unenrollStudent(req, res, next) {
   try {
+    // C-4 FIX: Verify both student and class belong to the caller's school before unenrolling.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const [student, cls] = await Promise.all([
+      prisma.student.findFirst({
+        where: { id: req.params.id, deletedAt: null, ...(schoolId && { schoolId }) },
+        select: { id: true }
+      }),
+      prisma.class.findFirst({
+        where: { id: req.params.classId, deletedAt: null, ...(schoolId && { schoolId }) },
+        select: { id: true }
+      })
+    ]);
+    if (!student) return errorResponse(res, 'Student not found or not in your school', 404);
+    if (!cls)     return errorResponse(res, 'Class not found or not in your school', 404);
+
     await prisma.enrollment.update({
       where: { studentId_classId: { studentId: req.params.id, classId: req.params.classId } },
       data: { isActive: false, droppedAt: new Date() }
@@ -249,6 +402,13 @@ async function unenrollStudent(req, res, next) {
 
 async function deleteStudent(req, res, next) {
   try {
+    // C-4 FIX: Verify school ownership before soft-delete.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const student = await prisma.student.findFirst({
+      where: { id: req.params.id, ...(schoolId && { schoolId }) },
+      select: { id: true }
+    });
+    if (!student) return errorResponse(res, 'Student not found', 404);
     await prisma.student.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
     return successResponse(res, null, 'Student deleted');
   } catch (error) { next(error); }
@@ -256,6 +416,15 @@ async function deleteStudent(req, res, next) {
 
 async function regenerateQr(req, res, next) {
   try {
+    // ID-CARD-QR-01: Verify school ownership before regenerating QR code.
+    // This prevents cross-school QR regeneration via IDOR.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const existing = await prisma.student.findFirst({
+      where: { id: req.params.id, ...(schoolId && { schoolId }), deletedAt: null },
+      select: { id: true }
+    });
+    if (!existing) return errorResponse(res, 'Student not found', 404);
+
     const qrCode = `STU-${uuidv4().split('-')[0].toUpperCase()}`;
     const student = await prisma.student.update({
       where: { id: req.params.id },

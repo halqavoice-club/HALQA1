@@ -74,6 +74,12 @@ export function ReactionPicker({ postId, current, count, onReact, disabled }: Pr
   const isActive = !!current
   const emoji    = current ? REACTION_EMOJI[current] : null
 
+  const formatCount = (n: number) =>
+    n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M`
+    : n >= 1_000   ? `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`
+    : n > 0        ? `${n}`
+    : ''
+
   return (
     <div className="relative" onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
       <button
@@ -81,19 +87,20 @@ export function ReactionPicker({ postId, current, count, onReact, disabled }: Pr
         disabled={disabled}
         onClick={() => { if (!open) onReact(current ?? 'LIKE') }}
         className={cn(
-          'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium transition-colors select-none',
+          'flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-sm font-semibold transition-colors select-none',
           isActive
-            ? 'text-indigo-600 bg-indigo-50 hover:bg-indigo-100'
-            : 'text-gray-500 hover:text-indigo-600 hover:bg-indigo-50',
+            ? 'bg-indigo-100 text-indigo-600 hover:bg-indigo-200'
+            : 'bg-gray-100 text-gray-600 hover:bg-gray-200',
           disabled && 'opacity-50 cursor-not-allowed'
         )}
       >
         {emoji
           ? <span className="text-base leading-none">{emoji}</span>
-          : <ThumbsUp className="w-4 h-4" />
+          : <ThumbsUp className={cn('w-4 h-4', isActive ? 'text-indigo-600 fill-indigo-600' : 'text-gray-500')} />
         }
-        <span>{isActive ? (current!.charAt(0) + current!.slice(1).toLowerCase()) : 'Like'}</span>
-        {count > 0 && <span className="text-xs text-gray-400">{count}</span>}
+        {formatCount(count) && (
+          <span>{formatCount(count)}</span>
+        )}
       </button>
 
       {/* Portal-rendered picker */}

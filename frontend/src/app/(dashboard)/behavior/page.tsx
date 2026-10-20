@@ -15,6 +15,7 @@ import { NoSSRChart } from '@/components/charts/no-ssr-chart'
 import { useToast } from '@/components/ui/use-toast'
 import { Plus, Star, TrendingUp, TrendingDown, Users, ThumbsUp, ThumbsDown } from 'lucide-react'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { useDebounce } from '@/hooks/useDebounce'
 import { ErrorState } from '@/components/ui/error-state'
 import {
@@ -36,6 +37,7 @@ const BEHAVIOR_CATEGORIES = [
 
 function StudentBehaviorView() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
 
   const { data: myProfile } = useQuery({
     queryKey: ['my-profile-behavior'],
@@ -207,12 +209,11 @@ function StudentBehaviorView() {
   )
 }
 
-export default function BehaviorPage() {
+// ─── Teacher/Admin view component ────────────────────────────────────────────
+
+function TeacherBehaviorView() {
   const { user } = useAuthStore()
-
-  // Students see their own behavior — no conditional hook calls
-  if (user?.role === 'STUDENT') return <StudentBehaviorView />
-
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [selectedStudent, setSelectedStudent] = useState('')
@@ -255,7 +256,7 @@ export default function BehaviorPage() {
     onError: () => toast({ title: 'Failed to add behavior log', variant: 'destructive' })
   })
 
-  const canCreate = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  const canCreate = isTeacher
   const logs = behaviorData?.data?.logs || []
   const stats = behaviorData?.data?.stats || {}
 
@@ -554,4 +555,12 @@ export default function BehaviorPage() {
       </Tabs>
     </div>
   )
+}
+
+// ─── Entry point — routes to role-specific view ───────────────────────────────
+export default function BehaviorPage() {
+  const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
+  if (isStudent) return <StudentBehaviorView />
+  return <TeacherBehaviorView />
 }

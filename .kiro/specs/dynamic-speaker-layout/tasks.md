@@ -34,7 +34,7 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - Handle pinnedUserId: move that speaker to index 1 after the owner
     - _Requirements: 10.1–10.6_
 
-  - [ ]* 2.2 Write property test for speaker sort order (Property 11)
+  - [x]* 2.2 Write property test for speaker sort order (Property 11)
     - **Property 11: Sort Order Invariant** — owner always first, pinned always at index 1, active before muted
     - **Validates: Requirements 10.2, 10.3, 10.4, 10.5, 10.6**
     - Use `fcSpeakersArray` arbitrary with `fast-check`
@@ -55,7 +55,7 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - Determine `format` from team sizes: `1v1`, `2v2`, `3v3`, or `'club'`
     - _Requirements: 6.1–6.3_
 
-  - [ ]* 2.5 Write property test for PK team balance (Property 10)
+  - [x]* 2.5 Write property test for PK team balance (Property 10)
     - **Property 10: PK Team Balance** — `|teamA.length - teamB.length| ≤ 1`; odd n → teamA gets ceil(n/2)
     - **Validates: Requirements 6.1, 6.2, 6.3**
 
@@ -67,27 +67,27 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - `totalPages = Math.ceil(Math.max(speakers.length, 1) / pageSize)`
     - _Requirements: 1.9–1.10, 3.1–3.2, 3.9, 5.1–5.2, 9.1–9.6_
 
-  - [ ]* 2.7 Write property test for empty seat integrity (Property 9)
+  - [x]* 2.7 Write property test for empty seat integrity (Property 9)
     - **Property 9: Empty Seat Integrity** — every padding entry has correct empty defaults, no stale fields
     - **Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6**
 
-  - [ ]* 2.8 Write property test for page size invariant (Property 2)
+  - [x]* 2.8 Write property test for page size invariant (Property 2)
     - **Property 2: Page Size Invariant** — `∀ page in pages: page.length === gridDef.columns * gridDef.rows`
     - **Validates: Requirements 3.2**
 
-  - [ ]* 2.9 Write property test for stable seat keys (Property 4)
+  - [x]* 2.9 Write property test for stable seat keys (Property 4)
     - **Property 4: Stable Seat Keys** — `seat.key === "seat-${seatIndex}"` always; no key reassigned across recomputations for unchanged position
     - **Validates: Requirements 5.1, 5.2**
 
-  - [ ]* 2.10 Write property test for host invariant (Property 1)
+  - [x]* 2.10 Write property test for host invariant (Property 1)
     - **Property 1: Host Invariant** — `pages[0][0].role === 'owner'` whenever an owner is present, for all speaker counts 1–1000 and all modes
     - **Validates: Requirements 1.9, 10.1**
 
-  - [ ]* 2.11 Write property test for pagination consistency (Property 6)
+  - [x]* 2.11 Write property test for pagination consistency (Property 6)
     - **Property 6: Pagination Consistency** — `totalPages === ceil(max(n,1)/p)`, never < 1, `currentPage` always in `[0, totalPages-1]`
     - **Validates: Requirements 3.1, 3.3, 3.4, 3.9**
 
-  - [ ]* 2.12 Write performance test for computation budget (Property 8)
+  - [x]* 2.12 Write performance test for computation budget (Property 8)
     - **Property 8: 60 FPS Computation Budget** — `computeLayout(200 speakers, mode)` completes in < 2ms via `performance.now()`
     - **Validates: Requirements 5.4**
     - Run 50 iterations to get stable measurement
@@ -121,7 +121,7 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - The function is pure and deterministic: same inputs always produce the same output
     - _Requirements: 8.8, 8.9, 8.10_
 
-  - [ ]* 4.6 Write unit tests for `resolveSeatConflict`
+  - [x]* 4.6 Write unit tests for `resolveSeatConflict`
     - Test: no conflict — incoming seatIndex unoccupied → only target participant updates, no relocation
     - Test: duplicate seat — two participants collide → winner keeps seat, loser goes to lowest available
     - Test: self-update — same userId updates own seatIndex → in-place update, no relocation
@@ -132,12 +132,12 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - Test: idempotency — applying same event to already-resolved state produces no further changes
     - _Requirements: 8.8, 8.9, 8.10_
 
-  - [ ]* 4.3 Write property test for no-duplicate seats (Property 3)
+  - [x]* 4.3 Write property test for no-duplicate seats (Property 3)
     - **Property 3: No Duplicate Seats** — after any sequence of `addSpeaker` calls (including repeats), each `userId` appears in at most one seat
     - **Validates: Requirements 7.8**
     - Test with `fast-check` by replaying random action sequences
 
-  - [ ]* 4.4 Write property test for manual override isolation (Property 5)
+  - [x]* 4.4 Write property test for manual override isolation (Property 5)
     - **Property 5: Manual Override Isolation** — `setManualMode` does not modify `speakers`; `clearManualMode` restores identical `LayoutResult` to pre-setManualMode state
     - **Validates: Requirements 2.9, 2.10**
 
@@ -161,14 +161,14 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - `onLongPress` shows admin menu when `isHost === true`
     - _Requirements: 5.3, 8.1, 8.6, 8.7, 11.1, 11.5, 12.1, 12.4_
 
-  - [ ]* 5.3 Write unit tests for SeatCard (web)
+  - [x]* 5.3 Write unit tests for SeatCard (web)
     - Test avatar fallback on `onError`
     - Test displayName fallback when empty
     - Test accessibilityLabel format (occupied vs empty)
     - Test React.memo does not re-render on unrelated prop change
     - _Requirements: 8.1, 8.6, 12.1, 12.4_
 
-  - [ ]* 5.4 Write property test for accessibility label completeness (Property 12)
+  - [x]* 5.4 Write property test for accessibility label completeness (Property 12)
     - **Property 12: Accessibility Label Completeness** — label format holds for all valid `displayName`, `role`, `isSpeaking` combinations
     - **Validates: Requirements 12.1**
 
@@ -220,13 +220,13 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - `will-change: transform` on animated elements
     - _Requirements: 3.5–3.8, 5.5, 5.7, 6.4–6.7, 8.2, 8.4_
 
-  - [ ]* 7.3 Write integration tests for useDynamicLayout hook (web)
+  - [x]* 7.3 Write integration tests for useDynamicLayout hook (web)
     - Mock LiveKit `useParticipants`; assert `addSpeaker` called on join
     - Mock socket events; assert `updateSpeaker` called with correct patch
     - Verify no re-render of `SpeakerGrid` when unrelated participant property changes
     - _Requirements: 7.1–7.7_
 
-- [ ] 8. Checkpoint — web component tests
+- [x] 8. Checkpoint — web component tests
   - Ensure all web component tests and integration tests pass. Ask the user if any test output is unclear.
 
 - [x] 9. Mobile presentation components — SeatCard and SpeakingRing
@@ -247,7 +247,7 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - Wrap with `React.memo` + same custom comparator
     - _Requirements: 5.3, 8.1, 8.6, 8.7, 11.1, 11.5, 12.1, 12.4_
 
-  - [ ]* 9.3 Write unit tests for SeatCard (mobile)
+  - [x]* 9.3 Write unit tests for SeatCard (mobile)
     - Same coverage as web: fallback avatar, displayName fallback, accessibilityLabel, memo behaviour
     - _Requirements: 8.1, 8.6, 12.1, 12.4_
 
@@ -287,7 +287,7 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - Seat sizing via the algorithm in the design: `seatWidth = (screenWidth - (columns+1)*GAP) / columns`
     - _Requirements: 3.5–3.8, 5.5, 5.6, 6.4–6.7, 8.2, 8.4_
 
-  - [ ]* 11.3 Write integration tests for useDynamicLayout hook (mobile)
+  - [x]* 11.3 Write integration tests for useDynamicLayout hook (mobile)
     - Same coverage as web integration tests adapted for RN test environment
     - _Requirements: 7.1–7.7_
 
@@ -303,7 +303,7 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - Only shown when `isHost === true`
     - _Requirements: 11.5_
 
-  - [ ]* 12.3 Write unit tests for admin store actions
+  - [x]* 12.3 Write unit tests for admin store actions
     - Test `lockSeat` adds/removes from `lockedSeats`; test `swapSeats` exchanges occupants and triggers recompute
     - _Requirements: 11.1–11.4_
 
@@ -313,7 +313,7 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - On `updateSpeaker({ isSpeaking })`: clear existing timer for that userId; set new 50ms timer before committing the state change
     - _Requirements: 4.6_
 
-  - [ ]* 13.2 Write property test for speaking animation safety (Property 7)
+  - [x]* 13.2 Write property test for speaking animation safety (Property 7)
     - **Property 7: Speaking Animation Safety** — simulate rapid oscillating `isSpeaking` events within 50ms; verify store commits at most one state transition per 50ms per seat
     - **Validates: Requirements 4.6**
     - Use fake timers (`jest.useFakeTimers`) in the test
@@ -330,7 +330,7 @@ Implement a two-layer layout system: a pure TypeScript computation engine shared
     - Verify minimum 44dp touch target sizes
     - _Requirements: 12.1–12.4_
 
-  - [ ]* 14.3 Write accessibility unit tests (web + mobile)
+  - [x]* 14.3 Write accessibility unit tests (web + mobile)
     - Assert `accessibilityLabel` output for occupied seat, empty seat, muted speaker
     - Assert `accessibilityRole` and `accessibilityState` on LayoutControlBar buttons
     - _Requirements: 12.1–12.4_

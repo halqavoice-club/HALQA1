@@ -19,13 +19,13 @@
  *     roomId={id}
  *     offeredBy={{ id, name, avatar }}
  *     onClose={() => setShowMicPassIncoming(false)}
- *     onAccepted={() => { setShowMicPassIncoming(false); /* mic promoted */ }}
+ *     onAccepted={() => { setShowMicPassIncoming(false); }} // role updated via socket
  *   />
  */
 import React, { useEffect, useRef } from 'react';
 import {
   Modal, View, Text, TouchableOpacity, StyleSheet,
-  Image, Animated, Easing, ActivityIndicator,
+  Image, Animated, Easing, ActivityIndicator
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { showMessage } from 'react-native-flash-message';
@@ -302,3 +302,4 @@ const st = StyleSheet.create({
   acceptBtn:        { flex: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: '#4f46e5', borderRadius: 14, paddingVertical: 14 },
   acceptTxt:        { color: '#fff', fontWeight: '800', fontSize: 14 },
 });
+

@@ -80,7 +80,7 @@ class VoiceRoomErrorBoundary extends React.Component<Props, State> {
       )
     }
 
-    return <VoiceRoomView onLeave={this.props.onLeave} />
+    return <VoiceRoomView onLeave={this.props.onLeave ?? (() => {})} />
   }
 }
 

@@ -22,9 +22,11 @@ import { useToast } from '@/components/ui/use-toast'
 import { v4 as uuidv4 } from 'uuid'
 
 interface Props {
-  postId:       string
-  initialCount: number
-  open:         boolean
+  postId:           string
+  initialCount:     number
+  open:             boolean
+  onCommentAdded?:  () => void
+  onCommentDeleted?: () => void
 }
 
 // ─── Shared CommentRow — used for both top-level comments and replies ──────────
@@ -33,12 +35,14 @@ function CommentRow({
   postId,
   depth = 0,
   onReplyTo,
+  onDeleted,
   showReplies = true,
 }: {
   comment:      Comment & { _optimistic?: boolean }
   postId:       string
   depth?:       number
   onReplyTo:    (c: Comment) => void
+  onDeleted?:   () => void
   showReplies?: boolean
 }) {
   const { user }    = useAuthStore()
@@ -106,6 +110,8 @@ function CommentRow({
       toast({ title: 'Failed to delete', variant: 'destructive' })
     },
     onSuccess: () => {
+      // Only decrement for top-level comments (depth 0), not replies
+      if (!comment.parentId) onDeleted?.()
       queryClient.invalidateQueries({ queryKey: ['comments', postId] })
       queryClient.invalidateQueries({ queryKey: ['feed'] })
     },
@@ -371,7 +377,7 @@ function CommentRow({
 }
 
 // ─── Main section ─────────────────────────────────────────────────────────────
-export function CommentsSection({ postId, initialCount, open }: Props) {
+export function CommentsSection({ postId, initialCount, open, onCommentAdded, onCommentDeleted }: Props) {
   const { user }    = useAuthStore()
   const { toast }   = useToast()
   const queryClient = useQueryClient()
@@ -441,6 +447,7 @@ export function CommentsSection({ postId, initialCount, open }: Props) {
       toast({ title: 'Failed to add comment', variant: 'destructive' })
     },
     onSuccess: () => {
+      onCommentAdded?.()
       queryClient.invalidateQueries({ queryKey: ['comments', postId] })
       queryClient.invalidateQueries({ queryKey: ['feed'] })
       queryClient.invalidateQueries({ queryKey: ['post', postId] })
@@ -479,6 +486,7 @@ export function CommentsSection({ postId, initialCount, open }: Props) {
             setReplyTo({ id: comment.id, authorName: `${comment.author.firstName} ${comment.author.lastName}` })
             inputRef.current?.focus()
           }}
+          onDeleted={onCommentDeleted}
         />
       ))}
 

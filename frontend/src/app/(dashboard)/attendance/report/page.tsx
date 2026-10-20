@@ -16,6 +16,7 @@ import { Progress } from '@/components/ui/progress'
 import { Breadcrumb } from '@/components/ui/breadcrumb'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import {
   CheckCircle, XCircle, Clock, AlertCircle, Download,
   FileSpreadsheet, Users, TrendingUp, Calendar, ArrowLeft
@@ -35,6 +36,7 @@ const STATUS_COLORS = {
 
 export default function AttendanceReportPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const [classId, setClassId] = useState('')
   const [studentId, setStudentId] = useState('')
@@ -42,11 +44,6 @@ export default function AttendanceReportPage() {
   const [endDate, setEndDate] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [downloading, setDownloading] = useState(false)
-
-  const isAdmin = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(user?.role || '')
-  const isTeacher = user?.role === 'TEACHER'
-  const isStudent = user?.role === 'STUDENT'
-  const isGuardian = user?.role === 'GUARDIAN'
 
   const { data: classes } = useQuery({
     queryKey: ['classes'],
@@ -70,11 +67,34 @@ export default function AttendanceReportPage() {
         endDate: endDate || undefined,
         status: statusFilter || undefined
       }
-    }).then(r => r.data.data)
+    }).then(r => r.data.data),
+    // Only staff (teacher/admin) can access this endpoint — students/guardians get 403
+    enabled: isAdmin || isTeacher,
   })
 
   const records = reportData?.records || []
   const summary = reportData?.summary || {}
+
+  // Students and guardians cannot access the staff report endpoint.
+  // Redirect them to the attendance page which uses the correct endpoints.
+  if (isStudent || isGuardian) {
+    return (
+      <div className="space-y-4 max-w-md mx-auto text-center py-16">
+        <div className="w-14 h-14 bg-blue-50 rounded-2xl flex items-center justify-center mx-auto">
+          <Calendar className="w-7 h-7 text-blue-600" />
+        </div>
+        <h1 className="text-xl font-bold text-gray-900">Your Attendance</h1>
+        <p className="text-gray-500 text-sm">
+          Use the Attendance section to view your personal attendance history.
+        </p>
+        <Link href="/attendance">
+          <Button className="bg-halqa-700 hover:bg-halqa-800 gap-2">
+            <ArrowLeft className="w-4 h-4" /> View My Attendance
+          </Button>
+        </Link>
+      </div>
+    )
+  }
 
   // Build pie chart data
   const pieData = [

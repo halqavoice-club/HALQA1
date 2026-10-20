@@ -2,14 +2,74 @@ import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 
 // Public routes that don't require authentication
-const PUBLIC_ROUTES = ['/login', '/forgot-password', '/reset-password', '/register']
+const PUBLIC_ROUTES = ['/login', '/forgot-password', '/reset-password', '/register', '/change-password']
+
+// ─── Security headers ─────────────────────────────────────────────────────────
+// FE-007: Add security headers to every response.
+// Note: 'unsafe-inline' is required by Next.js for styled-jsx and inline scripts.
+// A nonce-based CSP would be stronger but requires custom Next.js server setup.
+const SECURITY_HEADERS: Record<string, string> = {
+  // Prevent MIME type sniffing (FE-006, BE-013)
+  'X-Content-Type-Options': 'nosniff',
+  // Block clickjacking
+  'X-Frame-Options': 'SAMEORIGIN',
+  // Prevent XSS reflection in older browsers
+  'X-XSS-Protection': '1; mode=block',
+  // Enforce HTTPS for 1 year (only in production)
+  ...(process.env.NODE_ENV === 'production' && {
+    'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
+  }),
+  // Restrict Referer leakage on cross-origin navigations
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  // Control browser feature access
+  // camera=*          — required for LiveKit camera in Live Class (top-level page)
+  // microphone=*      — required for LiveKit audio in Voice Club and Live Class
+  // display-capture=* — required for screen sharing in Live Class
+  // geolocation=()    — not used by HALQA, deny it
+  //
+  // AUDIT-043-SEC: This is the SINGLE authoritative source for Permissions-Policy.
+  // The duplicate in next.config.js headers() has been removed, and the nginx
+  // Permissions-Policy directive has been removed, to prevent conflicting values.
+  // Browsers take the intersection of duplicate headers — camera=() would have
+  // won over camera=*, breaking LiveKit camera access.
+  'Permissions-Policy': 'camera=*, microphone=*, display-capture=*, geolocation=()',
+  // Step 9 — CSP (Report-Only mode): collects violations without blocking anything.
+  // This allows us to discover any sources we need to allow before switching to
+  // enforcing mode. Review the report-uri endpoint and gradually tighten the policy.
+  // Switch to Content-Security-Policy (enforcing) once no violations are reported.
+  //
+  // Current policy:
+  //   default-src 'self'       — block unknown sources by default
+  //   script-src  'self' + unsafe-inline/eval — required by Next.js (move to nonce later)
+  //   style-src   'self' + unsafe-inline — required by Tailwind/styled-jsx
+  //   img-src     'self' data: blob: https: — allow images from any https source
+  //   font-src    'self' data:             — allow embedded fonts
+  //   connect-src 'self' wss: ws:          — allow WebSocket connections
+  //   media-src   'self' blob: https:      — allow audio/video
+  //   frame-src   'none'                   — no iframes
+  'Content-Security-Policy-Report-Only': [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com/gsi/client",
+    "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data:",
+    "connect-src 'self' wss: ws: https: https://accounts.google.com/gsi/",
+    "media-src 'self' blob: https:",
+    "frame-src 'none' https://accounts.google.com/gsi/",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join('; '),
+}
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
   // Allow public routes
   if (PUBLIC_ROUTES.some(r => pathname.startsWith(r))) {
-    return NextResponse.next()
+    const response = NextResponse.next()
+    applySecurityHeaders(response)
+    return response
   }
 
   // Allow static files and API routes
@@ -41,12 +101,22 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl)
   }
 
-  // Redirect root to dashboard
+  // Redirect root to feed
   if (pathname === '/') {
-    return NextResponse.redirect(new URL('/dashboard', request.url))
+    const response = NextResponse.redirect(new URL('/feed', request.url))
+    applySecurityHeaders(response)
+    return response
   }
 
-  return NextResponse.next()
+  const response = NextResponse.next()
+  applySecurityHeaders(response)
+  return response
+}
+
+function applySecurityHeaders(response: NextResponse) {
+  Object.entries(SECURITY_HEADERS).forEach(([key, value]) => {
+    response.headers.set(key, value)
+  })
 }
 
 export const config = {

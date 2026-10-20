@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useSearchParams } from 'next/navigation'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { useToast } from '@/components/ui/use-toast'
 import { assignmentApi, examApi, type SubmissionStatus } from '@/lib/submissions'
 import { cn } from '@/lib/utils'
@@ -401,12 +402,11 @@ function CreateModal({ tab, onClose, onDone, studentId }: {
 // ─── Main page ────────────────────────────────────────────────────────────────
 function AssignmentsContent() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const qc = useQueryClient()
 
   const searchParams = useSearchParams()
-  const isTeacher = user?.role === 'TEACHER' || user?.role === 'SCHOOL_ADMIN' || user?.role === 'SUPER_ADMIN'
-  const isStudent = user?.role === 'STUDENT'
 
   const [tab, setTab] = useState<TabType>(() =>
     searchParams.get('tab') === 'exams' ? 'exams' : 'assignments'

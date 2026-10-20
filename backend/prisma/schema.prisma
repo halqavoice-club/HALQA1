@@ -16,6 +16,11 @@ enum UserRole {
   STUDENT
   GUARDIAN
   REPRESENTATIVE
+  // ── Social-only users (no school required) ───────────────────────────────
+  // New users register as MEMBER. Education roles (TEACHER, STUDENT, etc.)
+  // are now stored per-school in SchoolMembership, not as a global User role.
+  // Existing users keep their legacy global role for backward compatibility.
+  MEMBER
 }
 
 enum UserStatus {
@@ -23,6 +28,7 @@ enum UserStatus {
   INACTIVE
   SUSPENDED
   PENDING
+  BANNED
 }
 
 enum AttendanceStatus {
@@ -86,6 +92,15 @@ enum NotificationType {
   VOICE_ROOM_LIVE   // A host you follow started a voice room
   LIVE_CLASS_START  // A teacher started a live class for your class
   COINS_PURCHASED   // Stripe payment confirmed — coins credited
+  // ── PK system notification types (additive) ───────────────────────────────
+  PK_INVITATION     // You received a PK invitation
+  PK_ACCEPTED       // Your PK invitation was accepted
+  PK_STARTING       // PK is about to start (countdown)
+  PK_RESULT         // PK completed — win/loss/draw notification
+  PK_ACHIEVEMENT    // You unlocked a PK achievement
+  PK_MISSION        // You completed a PK mission
+  PK_TOURNAMENT     // Tournament update (start, round, result)
+  PK_SEASON         // Season ended — rank result
 }
 
 enum EventType {
@@ -127,6 +142,7 @@ model School {
   name        String
   slug        String   @unique
   type        String   @default("school") // school, academy, college, daycare, camp
+  description String?  @db.Text           // school bio / about text
   address     String?  @db.Text
   city        String?
   state       String?
@@ -155,6 +171,9 @@ model School {
   notifications   Notification[]
   reports         Report[]
   liveClasses     LiveClass[]
+  attendance      Attendance[]   @relation("AttendanceSchool")
+  // School memberships — the authoritative source for school-scoped roles
+  memberships     SchoolMembership[]
   // Phase C-1: Group Chat
   groupConversations GroupConversation[] @relation("GroupConversations")
   // Phase C-2: Assignment Submissions
@@ -168,6 +187,8 @@ model School {
   schoolBuses SchoolBus[] @relation("SchoolBuses")
   busRoutes BusRoute[] @relation("BusRoutes")
   drivers Driver[] @relation("Drivers")
+  // Practice Quiz back-relations
+  quizzes Quiz[]
 
   @@index([slug])
   @@map("schools")
@@ -205,7 +226,7 @@ model User {
   school          School?    @relation(fields: [schoolId], references: [id])
   email           String     @unique
   phone           String?
-  passwordHash    String
+  passwordHash    String?    // Nullable: OAuth-only users (Google etc.) have no password
   role            UserRole
   status          UserStatus @default(PENDING)
   firstName       String
@@ -232,6 +253,11 @@ model User {
   emailVerified   Boolean    @default(false)
   phoneVerified   Boolean    @default(false)
   twoFactorEnabled Boolean   @default(false)
+  twoFactorSecret  String?   @db.Text  // AES-256 encrypted TOTP secret
+  // mustChangePassword — set to true for admin-created accounts (students, teachers, guardians).
+  // The login endpoint returns { mustChangePassword: true } when this flag is set,
+  // and the frontend forces the user to the change-password screen before any navigation.
+  mustChangePassword Boolean  @default(false)
   deletedAt       DateTime?
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
@@ -242,6 +268,8 @@ model User {
   student            Student?
   teacher            Teacher?
   guardian           Guardian?
+  // School memberships — school-scoped Education roles
+  schoolMemberships  SchoolMembership[]
   sentMessages       Message[]          @relation("SentMessages")
   receivedMessages   MessageRecipient[]
   notifications      Notification[]
@@ -258,6 +286,8 @@ model User {
   giftsSent          GiftTransaction[]  @relation("GiftSender")
   giftsReceived      GiftTransaction[]  @relation("GiftReceiver")
   giftLeaderboard    RoomGiftLeaderboard[] @relation("GiftLeaderboard")
+  payoutRequests     PayoutRequest[]       @relation("UserPayouts")
+  dailyGiftSpend     UserDailyGiftSpend[]  @relation("UserDailyGiftSpend")
   // Social
   following          Follow[]           @relation("Follower")
   followers          Follow[]           @relation("Following")
@@ -268,13 +298,19 @@ model User {
   dmConvsAsB         DmConversation[]   @relation("DmConvB")
   dmSent             DirectMessage[]    @relation("DmSender")
   dmReceived         DirectMessage[]    @relation("DmReceiver")
+  dmReactions        DmReaction[]       @relation("DmReactions")
   // Live Classes
   liveClassParticipations LiveClassParticipant[] @relation("LiveClassParticipant")
   liveClassMessages       LiveClassMessage[]     @relation("LiveClassMessage")
   liveClassHandQueue      LiveClassHandQueue[]   @relation("LiveClassHandQueue")
+  // Hosted public live streams (no school required)
+  hostedPublicLiveStreams LiveClass[]            @relation("LiveClassHost")
+  // Delegated hosting — live classes where this user is the current delegated operational host
+  delegatedLiveClasses    LiveClass[]            @relation("LiveClassDelegatedHost")
   // Report & Block
   reportsSent        UserReport[]       @relation("ReportsSent")
   reportsReceived    UserReport[]       @relation("ReportsReceived")
+  postReportsSent    PostReport[]       @relation("PostReportsSent")
   blocksSent         UserBlock[]        @relation("BlocksSent")
   blocksReceived     UserBlock[]        @relation("BlocksReceived")
   // Social Feed (Phase B-1)
@@ -290,8 +326,12 @@ model User {
   storyViews         StoryView[]        @relation("StoryViewer")
   storyReactions     StoryReaction[]    @relation("StoryReactions")
   // Communities (Phase B-4)
-  ownedCommunities   Community[]        @relation("CommunityOwner")
-  communityMemberships CommunityMember[] @relation("CommunityMembers")
+  ownedCommunities     Community[]            @relation("CommunityOwner")
+  communityMemberships CommunityMember[]      @relation("CommunityMembers")
+  communityJoinRequests CommunityJoinRequest[] @relation("CommunityJoinRequests")
+  communityBans        CommunityBan[]         @relation("CommunityBans")
+  communityInvitesSent CommunityInvite[]      @relation("CommunityInviteSender")
+  communityInvitesReceived CommunityInvite[]  @relation("CommunityInviteReceiver")
   // Creator Economy (Phase B-6)
   creatorProfile     CreatorProfile?    @relation("CreatorProfile")
   creatorSubscriptions CreatorSubscription[] @relation("CreatorSubscriber")
@@ -314,6 +354,13 @@ model User {
   schoolLeaderboards SchoolLeaderboard[] @relation("SchoolLeaderboard")
   // Session management
   sessions           Session[]
+  // OAuth provider links (Google, Apple, Facebook, etc.)
+  authProviders      AuthProvider[]
+  // PK system (additive — all nullable/optional)
+  pkParticipations   PKParticipant[]    @relation("PKUserParticipant")
+  pkStats            PKUserStats?       @relation("PKUserStats")
+  pkAchievements     PKUserAchievement[] @relation("PKUserAchievement")
+  pkMissionProgress  PKMissionProgress[] @relation("PKMissionProgress")
 
   @@index([email])
   @@index([schoolId])
@@ -322,6 +369,73 @@ model User {
   @@index([lastName])
   @@index([username])
   @@map("users")
+}
+
+// ─── SCHOOL MEMBERSHIP ───────────────────────────────────────────────────────
+// Separates Education roles (school-scoped) from the global User.role field.
+// A user may belong to multiple schools with different roles in each.
+// This is the authoritative source for school-scoped authorization.
+// The legacy User.schoolId + User.role fields are retained for backward compat.
+model SchoolMembership {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  schoolId   String
+  school     School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  // Education role within THIS school only — NOT a global platform role.
+  // Valid values: SCHOOL_ADMIN | TEACHER | STUDENT | GUARDIAN | REPRESENTATIVE
+  // Enforced at DB level by CHECK constraint chk_membership_role (migration 20260821).
+  // SUPER_ADMIN is NOT a valid school membership role.
+  role       String
+  // ACTIVE = full access, PENDING = awaiting approval, SUSPENDED = suspended
+  status     String    @default("ACTIVE")
+  invitedBy  String?   // userId of whoever invited this member
+  joinedAt   DateTime  @default(now())
+  deletedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([userId, schoolId])
+  @@index([userId])
+  @@index([schoolId])
+  @@index([role])
+  @@index([status])
+  @@index([userId, status])
+  @@index([schoolId, role, status])
+  @@map("school_memberships")
+}
+
+// ─── AUTH PROVIDERS ──────────────────────────────────────────────────────────
+// Stores OAuth identity links — supports Google, Apple, Facebook, etc.
+// A user can have multiple providers (e.g. Google + password simultaneously).
+// This is additive: existing password-only users are unaffected.
+//
+// Security notes:
+//   - providerAccountId = verified sub/UID from the provider (never trusted from client)
+//   - email = informational only — identity is based on provider + providerAccountId
+//   - No provider access/refresh tokens are stored
+model AuthProvider {
+  id                String   @id @default(uuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Provider name — e.g. GOOGLE, APPLE, FACEBOOK
+  provider          String   @db.VarChar(50)
+  // Provider's user ID (Google sub claim, Apple sub, Facebook ID, etc.)
+  providerAccountId String   @db.VarChar(255)
+  // Verified email from provider — informational only, NOT used for identity
+  email             String?  @db.VarChar(255)
+  displayName       String?  @db.VarChar(255)
+  avatarUrl         String?  @db.VarChar(512)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // One record per provider+account (prevents duplicate OAuth links)
+  @@unique([provider, providerAccountId])
+  // One Google account per HALQA user (prevents linking two Google accounts)
+  @@unique([userId, provider])
+  @@index([userId])
+  @@index([provider])
+  @@map("auth_providers")
 }
 
 model RefreshToken {
@@ -336,6 +450,8 @@ model RefreshToken {
   createdAt   DateTime @default(now())
 
   @@index([userId])
+  @@index([expiresAt])
+  @@index([isRevoked])
   @@map("refresh_tokens")
 }
 
@@ -350,6 +466,9 @@ model OtpCode {
   createdAt   DateTime @default(now())
 
   @@index([userId])
+  @@index([expiresAt])
+  @@index([isUsed])
+  @@index([userId, type, isUsed])
   @@map("otp_codes")
 }
 
@@ -388,6 +507,7 @@ model Class {
   capacity    Int      @default(30)
   schedule    Json?    // weekly schedule
   isActive    Boolean  @default(true)
+  isDefault   Boolean  @default(false) // auto-created when school is founded; new students auto-enroll here
   deletedAt   DateTime?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -408,10 +528,13 @@ model Class {
   assignmentSubmissions AssignmentSubmission[] @relation("AssignmentSubmissions")
   // Phase C-3: Exam Submissions
   examSubmissions ExamSubmission[] @relation("ExamSubmissions")
+  // Practice Quiz back-relations
+  quizzes Quiz[]
 
   @@index([schoolId])
   @@index([termId])
   @@index([schoolId, isActive]) // active classes filter
+  @@index([schoolId, isDefault]) // find default class of a school
   @@map("classes")
 }
 
@@ -451,6 +574,8 @@ model Student {
   examSubmissions ExamSubmission[]
   // Phase C-5: Transport
   busAssignments BusAssignment[]
+  // Practice Quiz back-relations
+  quizAttempts QuizAttempt[]
 
   @@unique([schoolId, studentId])
   @@index([schoolId])
@@ -484,6 +609,8 @@ model Teacher {
   audioCourses    AudioCourse[]
   audioLessons    AudioLesson[]
   liveClasses     LiveClass[]
+  // Practice Quiz back-relations
+  quizzes         Quiz[]
 
   @@index([schoolId])
   @@index([schoolId, deletedAt]) // active teachers filter
@@ -562,6 +689,7 @@ model Enrollment {
 model Attendance {
   id              String           @id @default(uuid())
   schoolId        String?
+  school          School?          @relation("AttendanceSchool", fields: [schoolId], references: [id], onDelete: SetNull)
   classId         String
   class           Class            @relation(fields: [classId], references: [id])
   studentId       String
@@ -801,6 +929,7 @@ model Notification {
   @@index([isRead])
   @@index([userId, isRead, createdAt])   // unread count + inbox sort
   @@index([userId, type, createdAt])     // filtered notification inbox
+  @@index([userId, type, isRead])        // typed notification inbox with read filter
   @@map("notifications")
 }
 
@@ -967,26 +1096,28 @@ model LibraryIssue {
   @@index([bookId])
   @@index([studentId])
   @@index([status])
-  @@index([dueDate]) // overdue books query
+  @@index([dueDate])                       // overdue books query
+  @@index([bookId, studentId, status])     // dedup active issue guard
   @@map("library_issues")
 }
 
 // ─── FEE MANAGEMENT ──────────────────────────────────────────────────────────
 model FeeRecord {
-  id          String   @id @default(uuid())
-  schoolId    String?
-  studentId   String
-  student     Student  @relation(fields: [studentId], references: [id])
-  feeType     String   @default("TUITION") // TUITION, REGISTRATION, EXAM, ACTIVITY, TRANSPORT, OTHER
-  amount      Decimal  @db.Decimal(10, 2)
-  description String?  @db.Text
-  status      String   @default("PENDING") // PENDING, PAID, OVERDUE, WAIVED
-  dueDate     DateTime?
-  paidAt      DateTime?
-  notes       String?  @db.Text
-  createdBy   String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id              String   @id @default(uuid())
+  schoolId        String?
+  studentId       String
+  student         Student  @relation(fields: [studentId], references: [id])
+  feeType         String   @default("TUITION") // TUITION, REGISTRATION, EXAM, ACTIVITY, TRANSPORT, OTHER
+  amount          Decimal  @db.Decimal(10, 2)
+  description     String?  @db.Text
+  status          String   @default("PENDING") // PENDING, PAID, OVERDUE, WAIVED
+  dueDate         DateTime?
+  paidAt          DateTime?
+  notes           String?  @db.Text
+  createdBy       String?
+  stripeSessionId String?  @unique @db.VarChar(255) // M-C: Stripe session ID for fee-payment idempotency guard
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([schoolId])
   @@index([studentId])
@@ -1102,9 +1233,10 @@ model VoiceRoom {
   description  String?           @db.Text
   privacy      VoiceRoomPrivacy  @default(PUBLIC)
   status          VoiceRoomStatus   @default(IDLE)
-  maxSpeakers     Int               @default(10)
+  maxSpeakers     Int               @default(12)
   isOpenMic       Boolean           @default(false)  // when true, audience can grab mic directly
   micLocked       Boolean           @default(false)  // when true, nobody can grab or use mic
+  allMuted        Boolean           @default(false)  // when true, all speakers are room-wide muted
   roomLevel       Int               @default(1)      // 1-10: controls max permanent members
   coverEmoji      String?           @default("🎙️")
   coverImageUrl   String?           // uploaded room avatar/banner image
@@ -1119,6 +1251,7 @@ model VoiceRoom {
   slowMode        Boolean           @default(false)  // 1 message per 5s per user
   messageType     String            @default("all")  // "all" | "followers" | "none"
   reactionsEnabled Boolean          @default(true)   // allow emoji reactions in room
+  lockedSeats     Json?                               // array of locked seat indices e.g. [0,2,4]
   deletedAt       DateTime?
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
@@ -1147,16 +1280,26 @@ model VoiceParticipant {
   user         User                 @relation("VoiceParticipant", fields: [userId], references: [id], onDelete: Cascade)
   role         VoiceParticipantRole @default(AUDIENCE)
   isMuted      Boolean              @default(true)
+  mutedByModerator Boolean          @default(false)  // P1-2: when true, only HOST/MOD can unmute
   handRaised   Boolean              @default(false)
   handRaisedAt DateTime?
   isPinned     Boolean              @default(false)   // pinned to top of stage grid by host/mod
+  seatNumber   Int?                                   // 1–12 when on stage; null when in audience
   joinedAt     DateTime             @default(now())
   leftAt       DateTime?
   isActive     Boolean              @default(true)
+  // PH24C-003: session-scoped kick protection — same pattern as LiveClassParticipant.wasKicked.
+  // Set to true by kickParticipant(); checked in joinRoom() same-room reconnect path.
+  // A kicked user's next joinRoom() call to the same room is rejected with 403.
+  // Reset: the host can call unbanParticipant (or a future dedicated unkick endpoint)
+  //        to allow re-entry. wasKicked is never reset automatically within the session.
+  // Default: false — fully backward-compatible with all existing participant records.
+  wasKicked    Boolean              @default(false)
   createdAt    DateTime             @default(now())
   updatedAt    DateTime             @updatedAt
 
   @@unique([roomId, userId])
+  @@unique([roomId, seatNumber])    // no two active participants can share the same seat
   @@index([roomId])
   @@index([userId])
   @@index([isActive])
@@ -1283,14 +1426,36 @@ model Wallet {
 // Additive model — records every coin credit and debit with source traceability.
 // stripeSessionId has a @unique constraint — this is the primary defence against
 // Stripe webhook double-credit at the DB layer (beyond Redis idempotency).
+//
+// idempotencyKey — nullable unique field added in Phase 24G remediation (P2-004).
+// Used by ADMIN_GRANT to prevent duplicate grants on concurrent/retry requests.
+// Other types (STRIPE_PURCHASE, GIFT_SEND etc.) use their own dedicated unique
+// fields (stripeSessionId, GiftTransaction.idempotencyKey) and leave this null.
+//
+// Valid type values (as of economy consolidation M-D):
+//   STRIPE_PURCHASE  — Stripe checkout completed; coins credited
+//   GIFT_SEND        — Gift sent; coins debited from sender
+//   GIFT_RECEIVE     — Gift received; diamonds credited to receiver (P2-003)
+//   TIP_SEND         — Creator tip sent; coins debited from sender
+//   SUBSCRIPTION     — Creator subscription charged; coins debited
+//   ADMIN_GRANT      — Admin coin grant; coins credited
+//   REFUND           — Coin refund; coins credited (legacy)
+//   PAYOUT           — Diamond reservation on payout request; diamonds debited
+//   PAYOUT_REVERSAL  — Diamond restoration on payout reject/cancel; diamonds credited
+//   DISPUTED         — Stripe chargeback flag; no coin/diamond movement
 model WalletTransaction {
   id               String   @id @default(uuid())
   userId           String
   user             User     @relation("WalletTransactions", fields: [userId], references: [id], onDelete: Cascade)
-  type             String   // STRIPE_PURCHASE | GIFT_SEND | TIP_SEND | SUBSCRIPTION | ADMIN_GRANT | REFUND
-  coins            Int      // positive = credit, negative = debit
+  type             String   // see valid type values above
+  coins            Int      // positive = credit, negative = debit (coins)
+  diamonds         Int      @default(0) // positive = credit, negative = debit (diamonds); 0 for coin-only records
   description      String?  @db.VarChar(255)
   stripeSessionId  String?  @unique  // unique constraint prevents Stripe double-credit
+  // P2-004: authoritative idempotency key for ADMIN_GRANT (and future use).
+  // Nullable so existing rows are unaffected. @unique ensures at most one grant
+  // per key even under concurrent requests hitting the DB simultaneously.
+  idempotencyKey   String?  @unique  @db.VarChar(128)
   packageId        String?
   giftTxId         String?
   tipId            String?
@@ -1302,6 +1467,38 @@ model WalletTransaction {
   @@index([createdAt])
   @@index([userId, createdAt])
   @@map("wallet_transactions")
+}
+
+// ─── PLATFORM REVENUE LEDGER ─────────────────────────────────────────────────
+// Explicit record of every coin amount retained by the platform (50% share).
+// Previously this was implicit — coins disappeared into the void.
+// Now every monetised event writes one entry here inside the same DB transaction.
+//
+// P1-003 (Phase 24G): @@unique([sourceType, sourceId]) added to prevent duplicate
+// revenue entries for the same originating economic event. The application already
+// prevents duplicates via GiftTransaction.idempotencyKey; this constraint is the
+// DB-level backstop. Migration verified: 0 existing rows, no conflicts.
+//
+// source_type values:
+//   GIFT         — platform share of a gift send
+//   TIP          — platform share of a creator tip
+//   SUBSCRIPTION — platform share of a subscription charge
+//   COIN_PURCHASE— full gross inflow from a Stripe coin purchase
+model PlatformRevenueEntry {
+  id          String   @id @default(uuid())
+  sourceType  String   @db.VarChar(50)  @map("source_type") // GIFT | TIP | SUBSCRIPTION | COIN_PURCHASE
+  sourceId    String   @db.VarChar(36)  @map("source_id")   // ID of originating record
+  userId      String   @db.VarChar(36)  @map("user_id")     // user whose action generated the revenue
+  coins       Int                                            // platform share in coins (positive)
+  usdEquiv    Decimal  @db.Decimal(10, 2) @default(0) @map("usd_equiv") // coins / 100
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([sourceType, sourceId], name: "uq_platform_revenue_source", map: "uq_platform_revenue_source")
+  @@index([sourceType])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([sourceType, createdAt])
+  @@map("platform_revenue_entries")
 }
 
 model CoinPackage {
@@ -1453,12 +1650,37 @@ model UserReport {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  @@unique([reporterId, reportedId])   // one report per pair (reporter can update)
+  @@unique([reporterId, reportedId])   // one PENDING report per pair (enforced in code)
   @@index([reporterId])
   @@index([reportedId])
+  @@index([reporterId, reportedId, status])  // app-level pending check
   @@index([status])
   @@index([createdAt])
   @@map("user_reports")
+}
+
+// Post Report — persists every report submission for admin moderation queue.
+// Mirrors UserReport pattern. One PENDING report per reporter+post pair at a time.
+model PostReport {
+  id          String    @id @default(uuid())
+  reporterId  String
+  reporter    User      @relation("PostReportsSent", fields: [reporterId], references: [id], onDelete: Cascade)
+  postId      String
+  post        Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reason      String    // spam | harassment | hate_speech | sexual_content | scam | impersonation | underage | other
+  description String?   @db.Text
+  status      String    @default("PENDING") // PENDING | REVIEWED | DISMISSED | ACTION_TAKEN
+  reviewedBy  String?
+  reviewedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([reporterId])
+  @@index([postId])
+  @@index([reporterId, postId, status])
+  @@index([status])
+  @@index([createdAt])
+  @@map("post_reports")
 }
 
 // Block a user — blocks DMs, hides them from voice rooms, prevents gifting
@@ -1487,6 +1709,7 @@ enum LiveClassStatus {
 
 enum LiveClassParticipantRole {
   HOST
+  MODERATOR  // Promoted by creator — same management rights except end/delete
   STUDENT
   OBSERVER
 }
@@ -1513,29 +1736,46 @@ enum LiveClassAttendanceStatus {
 
 model LiveClass {
   id                 String          @id @default(uuid())
-  schoolId           String
-  school             School          @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  classId            String
-  class              Class           @relation(fields: [classId], references: [id], onDelete: Cascade)
-  teacherId          String
-  teacher            Teacher         @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  // ── Stream type ──────────────────────────────────────────────────────────
+  // SCHOOL = traditional school class (requires schoolId + classId + teacherId)
+  // PUBLIC = open broadcast — any authenticated user can host; anyone can join.
+  //          schoolId, classId, teacherId are null for PUBLIC streams.
+  streamType         String          @default("SCHOOL") @db.VarChar(20) @map("stream_type")
+  schoolId           String?
+  school             School?         @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classId            String?
+  class              Class?          @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacherId          String?
+  teacher            Teacher?        @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  // hostUserId: used for PUBLIC streams where there is no Teacher record.
+  // For SCHOOL streams this duplicates teacher.userId but is set for consistency.
+  hostUserId         String?         @map("host_user_id")
+  hostUser           User?           @relation("LiveClassHost", fields: [hostUserId], references: [id], onDelete: SetNull)
+  // delegatedHostId: optional delegated operational host for SCHOOL streams.
+  // NULL = creator is the operational host (default / backward-compatible).
+  // Non-NULL = this user is the currently authorized operational host in addition to the creator.
+  // Only the creator (hostUserId) may set or clear this field.
+  // Always NULL for PUBLIC streams. Cleared atomically when the class ends.
+  delegatedHostId    String?         @map("delegated_host_id")
+  delegatedHost      User?           @relation("LiveClassDelegatedHost", fields: [delegatedHostId], references: [id], onDelete: SetNull)
   title              String
   description        String?         @db.Text
   scheduledAt        DateTime?
-  duration           Int?                            // minutes — null means unlimited (permanent room)
+  duration           Int?                            // minutes — null means unlimited
   status             LiveClassStatus @default(SCHEDULED)
   livekitRoomName    String?
   recordingUrl       String?
   coverImageUrl      String?
-  maxParticipants    Int             @default(100)
+  maxParticipants    Int?                            // null means unlimited viewers (public streams)
+  maxSpeakers        Int             @default(20)    // max simultaneous active speakers (audience queue applies above this)
   isRecorded            Boolean         @default(false)
-  recordingStartedAt    DateTime?                       // set when recording is active
+  recordingStartedAt    DateTime?
   chatEnabled           Boolean         @default(true)
   handRaiseEnabled      Boolean         @default(true)
   whiteboardEnabled     Boolean         @default(true)
   quranPanelEnabled     Boolean         @default(false)
-  isOpenMic             Boolean         @default(false)  // when true, all students can publish freely
-  screenShareEnabled    Boolean         @default(true)   // when true, all participants can share screen
+  isOpenMic             Boolean         @default(false)
+  screenShareEnabled    Boolean         @default(true)
   startedAt             DateTime?
   endedAt               DateTime?
   deletedAt          DateTime?
@@ -1546,10 +1786,15 @@ model LiveClass {
   messages      LiveClassMessage[]
   handQueue     LiveClassHandQueue[]
   attendance    LiveClassAttendance[]
+  polls             LiveClassPoll[]
+  whiteboardSnapshot LiveClassWhiteboardSnapshot?
 
+  @@index([streamType])
   @@index([schoolId])
   @@index([classId])
   @@index([teacherId])
+  @@index([hostUserId])
+  @@index([delegatedHostId])
   @@index([status])
   @@index([scheduledAt])
   @@map("live_classes")
@@ -1566,10 +1811,21 @@ model LiveClassParticipant {
   isVideoOn     Boolean                  @default(false)
   handRaised    Boolean                  @default(false)
   handRaisedAt  DateTime?
+  // speakerSlot: non-null when this participant is an active speaker on stage.
+  // Null = audience (subscribe-only). Non-null = speaker slot index (0-based).
+  // Used to enforce maxSpeakers cap and track who is on stage.
+  speakerSlot   Int?
   joinedAt      DateTime                 @default(now())
   leftAt        DateTime?
   totalDuration Int                      @default(0)  // seconds
   isActive      Boolean                  @default(true)
+  // Task 3: session-scoped kick protection.
+  // When a host kicks a participant, wasKicked is set to true.
+  // joinLiveClass checks this field and returns 403 if wasKicked = true,
+  // preventing the kicked participant from immediately rejoining the same session.
+  // Reset: never reset within the same class session. A new LiveClass creates
+  //        fresh participant records.
+  wasKicked     Boolean                  @default(false)
   createdAt     DateTime                 @default(now())
   updatedAt     DateTime                 @updatedAt
 
@@ -1577,6 +1833,10 @@ model LiveClassParticipant {
   @@index([liveClassId])
   @@index([userId])
   @@index([isActive])
+  // DB-level safety net: prevents two participants from sharing the same stage slot.
+  // MySQL allows multiple NULLs in a UNIQUE constraint, so audience participants
+  // (speakerSlot=NULL) remain valid. Only non-null slot values are deduplicated.
+  @@unique([liveClassId, speakerSlot], name: "unique_liveclass_speaker_slot")
   @@map("live_class_participants")
 }
 
@@ -1630,6 +1890,39 @@ model LiveClassAttendance {
   @@map("live_class_attendance")
 }
 
+// ─── LIVE CLASS POLLS (LC-GAP-004) ─────────────────────────────────────────
+// Durable fallback for poll state when Redis is unavailable or restarted.
+// Redis remains the hot path; this table is the source of truth on cold load.
+model LiveClassPoll {
+  id          String    @id @default(uuid())
+  liveClassId String
+  liveClass   LiveClass @relation(fields: [liveClassId], references: [id], onDelete: Cascade)
+  question    String    @db.VarChar(500)
+  options     Json      // [{ id, text, votes: userId[] }]
+  isActive    Boolean   @default(true)
+  createdBy   String    // userId of the teacher (JWT-verified)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([liveClassId])
+  @@index([isActive])
+  @@map("live_class_polls")
+}
+
+// ─── LIVE CLASS WHITEBOARD SNAPSHOTS (LC-GAP-005) ───────────────────────────
+// One row per live class — upserted on every snapshot event.
+// Allows whiteboard state to survive Redis flush or server restart.
+model LiveClassWhiteboardSnapshot {
+  id          String    @id @default(uuid())
+  liveClassId String    @unique
+  liveClass   LiveClass @relation(fields: [liveClassId], references: [id], onDelete: Cascade)
+  strokes     String    @db.LongText // JSON array of stroke objects
+  snapshotAt  DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("live_class_whiteboard_snapshots")
+}
+
 // ─── DIRECT MESSAGES ─────────────────────────────────────────────────────────
 // 1-to-1 real-time private chat (separate from broadcast Message system)
 
@@ -1667,16 +1960,40 @@ model DirectMessage {
   sender         User           @relation("DmSender",   fields: [senderId],   references: [id], onDelete: Cascade)
   receiverId     String
   receiver       User           @relation("DmReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
-  body           String         @db.Text
+  body           String?        @db.Text            // text content (null for media-only messages)
+  // ── Media fields (mirrors GroupMessage pattern) ───────────────────────────
+  msgType        String         @default("TEXT")     // TEXT | IMAGE | VIDEO | GIF | VOICE | AUDIO | FILE
+  mediaUrl       String?        @db.VarChar(2048)    // storage URL
+  mimeType       String?        @db.VarChar(128)     // e.g. image/jpeg, audio/mpeg
+  fileSize       Int?                                // bytes
+  fileName       String?        @db.VarChar(255)     // original filename for download
+  duration       Int?                                // seconds (audio/video/voice)
+  width          Int?                                // px (image/video)
+  height         Int?                                // px (image/video)
+  thumbnail      String?        @db.VarChar(2048)    // video/voice waveform thumbnail URL
+  // ─────────────────────────────────────────────────────────────────────────
   status         DmStatus       @default(SENT)
   deliveredAt    DateTime?
   readAt         DateTime?
+  isEdited       Boolean        @default(false)
+  editedAt       DateTime?
   deletedBySender   Boolean     @default(false)
   deletedByReceiver Boolean     @default(false)
-  // Story reply context — L8 fix: allows replying to a story via DM.
-  // When set, the message is a story reply; the client shows a story preview above the message.
-  storyId        String?        // optional FK → stories.id
+  // Reply-to: quote a previous message in this conversation
+  replyToId      String?
+  replyTo        DirectMessage? @relation("DmReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies        DirectMessage[] @relation("DmReplies")
+  // Story reply context
+  storyId        String?
   story          Story?         @relation("StoryReplies", fields: [storyId], references: [id], onDelete: SetNull)
+  // Reactions
+  reactions      DmReaction[]
+  // ── Structured entity reference (e.g. VOICE_ROOM_SHARE) ──────────────────
+  // Phase 5: null for all existing message types; populated only for share cards.
+  // VoiceRoom enrichment is applied at read time — never from client data.
+  refEntityType  String?        @db.VarChar(50)   // e.g. "VoiceRoom"
+  refEntityId    String?        @db.VarChar(36)   // UUID of the referenced entity
+  // ─────────────────────────────────────────────────────────────────────────
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
@@ -1686,8 +2003,25 @@ model DirectMessage {
   @@index([createdAt])
   @@index([conversationId, createdAt])
   @@index([receiverId, status, createdAt])
-  @@index([storyId])   // fetch all replies to a specific story
+  @@index([storyId])
+  @@index([msgType])  // filter by media type
+  @@index([refEntityType, refEntityId])  // entity share lookup
   @@map("direct_messages")
+}
+
+model DmReaction {
+  id        String        @id @default(uuid())
+  messageId String
+  message   DirectMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User          @relation("DmReactions", fields: [userId], references: [id], onDelete: Cascade)
+  emoji     String        @db.VarChar(10)
+  createdAt DateTime      @default(now())
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+  @@index([userId])
+  @@map("dm_reactions")
 }
 
 enum DmStatus {
@@ -1764,6 +2098,7 @@ model Post {
   mentions    PostMention[]
   bookmarks   PostBookmark[]
   views       PostView[]
+  reports     PostReport[]
 
   @@index([authorId])
   @@index([visibility])
@@ -1774,6 +2109,9 @@ model Post {
   @@index([scheduledAt])
   @@index([originalPostId])
   @@index([deletedAt])
+  @@index([authorId, visibility, createdAt])   // personal feed query
+  @@index([schoolId, visibility, createdAt])   // school-scoped feed
+  @@index([communityId, createdAt])            // community feed
   @@map("posts")
 }
 
@@ -1892,12 +2230,17 @@ model PostBookmark {
 }
 
 model PostView {
-  id        String   @id @default(uuid())
-  postId    String
-  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
-  userId    String
-  user      User     @relation("PostViews", fields: [userId], references: [id], onDelete: Cascade)
-  createdAt DateTime @default(now())
+  id            String   @id @default(uuid())
+  postId        String
+  post          Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User     @relation("PostViews", fields: [userId], references: [id], onDelete: Cascade)
+  // FIND-009 FIX: Store which poll option the user voted for.
+  // NULL means a regular view (not a poll vote). The votePoll controller
+  // uses PostView as a combined view+vote record to avoid a separate migration.
+  // Adding this column makes poll vote recording and count queries work correctly.
+  votedOptionId String?
+  createdAt     DateTime @default(now())
 
   @@unique([postId, userId])
   @@index([postId])
@@ -1992,8 +2335,11 @@ model Community {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  members CommunityMember[]
-  posts   Post[]
+  members      CommunityMember[]
+  posts        Post[]
+  joinRequests CommunityJoinRequest[] @relation("CommunityJoinRequests")
+  bans         CommunityBan[]         @relation("CommunityBans")
+  invites      CommunityInvite[]      @relation("CommunityInvites")
 
   @@index([ownerId])
   @@index([privacy])
@@ -2017,6 +2363,76 @@ model CommunityMember {
   @@index([userId])
   @@index([role])
   @@map("community_members")
+}
+
+// ─── Community Join Requests ──────────────────────────────────────────────────
+// Created when a user requests to join a PRIVATE or INVITE_ONLY community.
+// Replaces the Redis-only stub. Admins review via GET /join-requests.
+model CommunityJoinRequest {
+  id          String    @id @default(uuid())
+  communityId String
+  community   Community @relation("CommunityJoinRequests", fields: [communityId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation("CommunityJoinRequests", fields: [userId], references: [id], onDelete: Cascade)
+  status      String    @default("PENDING")  // PENDING | ACCEPTED | DECLINED
+  message     String?   @db.VarChar(500)
+  reviewedBy  String?
+  reviewedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([communityId, userId, status])
+  @@index([communityId])
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("community_join_requests")
+}
+
+// ─── Community Bans ───────────────────────────────────────────────────────────
+// Persistent ban records — source of truth. Redis SET is a fast cache layer.
+model CommunityBan {
+  id          String    @id @default(uuid())
+  communityId String
+  community   Community @relation("CommunityBans", fields: [communityId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation("CommunityBans", fields: [userId], references: [id], onDelete: Cascade)
+  bannedBy    String
+  reason      String?   @db.VarChar(500)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([communityId, userId])
+  @@index([communityId])
+  @@index([userId])
+  @@map("community_bans")
+}
+
+// ─── Community Invites ────────────────────────────────────────────────────────
+// Admin/Owner can invite specific users to INVITE_ONLY (or any) community.
+// Token is a cryptographically random UUID — used in accept/decline links.
+// Status: PENDING → ACCEPTED | DECLINED | EXPIRED
+model CommunityInvite {
+  id            String    @id @default(uuid())
+  communityId   String
+  community     Community @relation("CommunityInvites", fields: [communityId], references: [id], onDelete: Cascade)
+  invitedBy     String
+  inviter       User      @relation("CommunityInviteSender", fields: [invitedBy], references: [id], onDelete: Cascade)
+  invitedUserId String
+  invitee       User      @relation("CommunityInviteReceiver", fields: [invitedUserId], references: [id], onDelete: Cascade)
+  token         String    @unique @db.VarChar(36)  // UUID v4 — never sequential
+  status        String    @default("PENDING")      // PENDING | ACCEPTED | DECLINED | EXPIRED
+  expiresAt     DateTime
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // One pending invite per user per community at a time
+  @@unique([communityId, invitedUserId, status])
+  @@index([communityId])
+  @@index([invitedUserId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("community_invites")
 }
 
 // ─── CREATOR ECONOMY ──────────────────────────────────────────────────────────
@@ -2085,6 +2501,7 @@ model CreatorSubscription {
   @@index([subscriberId])
   @@index([expiresAt])
   @@index([status])
+  @@index([expiresAt, status])   // renewal job: WHERE expiresAt <= NOW() AND status='ACTIVE'
   @@map("creator_subscriptions")
 }
 
@@ -2129,10 +2546,14 @@ enum GroupMessageType {
   TEXT
   IMAGE
   VIDEO
+  GIF
   AUDIO
+  VOICE
+  FILE
   DOCUMENT
   POLL
   SYSTEM
+  VOICE_ROOM_SHARE  // Phase 5: structured Voice Club share card
 }
 
 model GroupConversation {
@@ -2148,6 +2569,8 @@ model GroupConversation {
   maxMembers  Int              @default(100)
   isMuted     Boolean          @default(false)  // when true, only admins can send
   slowMode    Boolean          @default(false)  // 1 message per 5s per user
+  onlyAdminsCanSendMessages Boolean @default(false)  // explicit permission flag
+  onlyAdminsCanSendMedia    Boolean @default(false)  // media restricted to admins only
   memberCount Int              @default(1)
   messageCount Int             @default(0)
   lastMessage  String?          @db.Text
@@ -2199,8 +2622,10 @@ model GroupMessage {
   type           GroupMessageType @default(TEXT)
   body           String?          @db.Text
   mediaUrl       String?          @db.VarChar(2048)
-  mimeType       String?
+  mimeType       String?          @db.VarChar(128)
   fileSize       Int?
+  fileName       String?          @db.VarChar(255)    // original filename for download
+  duration       Int?                                 // seconds (audio/video/voice)
   replyToId      String?          // reply to another message in same group
   replyTo        GroupMessage?    @relation("MessageReplies", fields: [replyToId], references: [id], onDelete: SetNull)
   replies        GroupMessage[]   @relation("MessageReplies")
@@ -2209,6 +2634,12 @@ model GroupMessage {
   pinnedBy       String?          // userId who pinned it
   deletedBy      Json?            // array of userIds who deleted this message
   deletedAt      DateTime?
+  // ── Structured entity reference (e.g. VOICE_ROOM_SHARE) ──────────────────
+  // Phase 5: null for all existing message types; populated only for share cards.
+  // VoiceRoom enrichment is applied at read time — never from client data.
+  refEntityType  String?          @db.VarChar(50)   // e.g. "VoiceRoom"
+  refEntityId    String?          @db.VarChar(36)   // UUID of the referenced entity
+  // ─────────────────────────────────────────────────────────────────────────
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 
@@ -2220,6 +2651,7 @@ model GroupMessage {
   @@index([createdAt])
   @@index([conversationId, createdAt])
   @@index([conversationId, isPinned])
+  @@index([refEntityType, refEntityId])  // entity share lookup
   @@map("group_messages")
 }
 
@@ -2692,6 +3124,7 @@ model GlobalLeaderboard {
 
   @@index([rank])
   @@index([period])
+  @@index([period, rank])    // leaderboard top-N by period
   @@map("global_leaderboard")
 }
 
@@ -2806,6 +3239,7 @@ model Session {
   @@index([userId])
   @@index([userId, isActive])
   @@index([deviceFingerprint])
+  @@index([lastSeenAt, isActive])   // session cleanup + limit enforcement
   @@map("sessions")
 }
 
@@ -2896,3 +3330,827 @@ model JobExecution {
 // - responseStatus: Int? (HTTP response code)
 // - durationMs: Int? (request duration in milliseconds)
 // These would be added via migration without breaking existing data.
+
+// ─── USER DAILY GIFT SPEND ────────────────────────────────────────────────────
+// P1-002 (Phase 24G): DB-authoritative daily gift spending counter.
+// Replaces the Redis-only daily cap check which was not atomic with the gift
+// transaction. This table is updated inside the same $transaction as the gift,
+// making the cap check and spend increment atomic at the database level.
+//
+// Redis may still serve as a fast read-path cache for the current day's total,
+// but this table is the source of truth. On Redis unavailability the controller
+// falls back to this table without any cap bypass risk.
+//
+// date field uses UTC (YYYY-MM-DD) matching the Redis key format.
+// totalSpent is atomically incremented via UPDATE WHERE totalSpent + amount <= cap.
+model UserDailyGiftSpend {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation("UserDailyGiftSpend", fields: [userId], references: [id], onDelete: Cascade)
+  date       String   @db.VarChar(10)  // UTC date: YYYY-MM-DD
+  totalSpent Int      @default(0)      // total coins spent on gifts today
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@index([date])
+  @@map("user_daily_gift_spend")
+}
+
+// ─── PAYOUT REQUESTS ─────────────────────────────────────────────────────────
+// Hosts request diamond-to-cash withdrawals via this model.
+//
+// P2-005 (Phase 24G): Full state machine explicitly documented and enforced.
+// Flow: PENDING → APPROVED → PROCESSING → COMPLETED | REJECTED | CANCELLED
+//   PENDING    — submitted by user; diamonds reserved (deducted from wallet)
+//   APPROVED   — admin has approved; ready for payment processing
+//   PROCESSING — payment transfer initiated externally (set via PATCH /admin/payouts/:id)
+//   COMPLETED  — payment confirmed; diamonds permanently paid out
+//   REJECTED   — admin rejected; diamonds restored to wallet (PAYOUT_REVERSAL)
+//   CANCELLED  — user cancelled; diamonds restored to wallet (PAYOUT_REVERSAL)
+//
+// P2-001 (Phase 24G): One active payout per user enforced by application locking
+// inside the $transaction (wallet row lock prevents diamond double-reservation).
+// On reject/cancel: diamonds are refunded to the user's wallet.
+
+model PayoutRequest {
+  id             String    @id @default(uuid())
+  userId         String
+  diamonds       Int                          // diamonds requested for withdrawal
+  usdAmount      Decimal   @db.Decimal(10, 2) // USD value stored as exact decimal (M-B: was Float)
+  method         String    @db.VarChar(30)    // 'bank_transfer' | 'paypal' | 'stripe'
+  accountDetails String    @db.Text           // JSON: method-specific payout details (encrypted)
+  status         String    @default("PENDING") @db.VarChar(20)
+  adminNote      String?   @db.VarChar(500)
+  transactionRef String?   @db.VarChar(200)  // external payment reference
+  processedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user           User      @relation("UserPayouts", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+  // P2-001: composite index to efficiently check for active payouts per user
+  @@index([userId, status])
+  @@map("payout_requests")
+}
+
+// ─── PK (PLAYER vs PLAYER) BATTLE SYSTEM ────────────────────────────────────
+// ADDITIVE ONLY — zero changes to existing tables.
+// All new PK tables use pk_ prefix. No existing model is modified.
+// GiftTransaction.roomType already supports 'pk' as a value (checked in gift controller).
+// RoomGiftLeaderboard.roomType already supports 'pk' as a value.
+
+// ─── PK ENUMS ────────────────────────────────────────────────────────────────
+
+enum PKMatchType {
+  ONE_V_ONE       // 1v1 host battle
+  ROOM_V_ROOM     // two rooms compete
+  TEAM_V_TEAM     // team battle (2v2, 3v3, 5v5)
+  CLUB_V_CLUB     // club challenge
+  TOURNAMENT      // tournament bracket match
+}
+
+enum PKState {
+  IDLE
+  MATCHMAKING
+  INVITED
+  PENDING_ACCEPTANCE
+  ACCEPTED
+  PREPARING
+  COUNTDOWN
+  LIVE
+  PAUSED
+  FINISHING
+  COMPLETED
+  CANCELLED
+  ABORTED
+  DISPUTED
+}
+
+enum PKInvitationStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum PKRank {
+  BRONZE
+  SILVER
+  GOLD
+  PLATINUM
+  DIAMOND
+  MASTER
+  GRANDMASTER
+}
+
+enum PKSeasonStatus {
+  UPCOMING
+  ACTIVE
+  ENDED
+}
+
+enum PKTournamentStatus {
+  DRAFT
+  REGISTRATION
+  SEEDING
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+// ─── PK SEASON ────────────────────────────────────────────────────────────────
+// Seasons define ranking periods. All rating changes are scoped to a season.
+
+model PKSeason {
+  id          String         @id @default(uuid())
+  name        String         @db.VarChar(120)
+  startDate   DateTime
+  endDate     DateTime
+  status      PKSeasonStatus @default(UPCOMING)
+  description String?        @db.Text
+  rules       Json?          // configurable scoring rules
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  matches     PKMatch[]
+  ranks       PKRank_[]
+  leaderboard PKLeaderboardEntry[]
+
+  @@index([status])
+  @@index([startDate])
+  @@map("pk_seasons")
+}
+
+// ─── PK CONFIGURATION ─────────────────────────────────────────────────────────
+// Single-row configuration table for platform-wide PK settings.
+// Loaded on startup, cached in Redis.
+
+model PKConfig {
+  id                       String   @id @default(uuid())
+  // Matchmaking
+  matchmakingEnabled        Boolean  @default(true)
+  maxRatingDiffInitial      Int      @default(50)
+  maxRatingDiffExpand       Int      @default(100)   // after 10s
+  maxRatingDiffFinal        Int      @default(200)   // after 20s
+  matchmakingExpandInterval Int      @default(10)    // seconds
+  // Match defaults
+  defaultDurationSeconds    Int      @default(300)   // 5 minutes
+  minDurationSeconds        Int      @default(60)
+  maxDurationSeconds        Int      @default(600)
+  countdownSeconds          Int      @default(5)
+  // Scoring
+  platformCutPercent        Int      @default(0)     // PK uses gift engine — no extra cut
+  comboThresholds           Json     // [5, 10, 20, 50, 100]
+  comebackThresholdPercent  Int      @default(30)    // % behind to enable comeback
+  comebackMultiplier        Float    @default(1.5)
+  audienceVoteWeight        Float    @default(0.1)   // votes count as 10% of final score
+  // Leaderboard
+  leaderboardCacheTtl       Int      @default(300)   // seconds
+  // Feature flags
+  pkEnabled                 Boolean  @default(true)
+  tournamentEnabled         Boolean  @default(true)
+  rankingEnabled            Boolean  @default(true)
+  votingEnabled             Boolean  @default(true)
+  teamEnabled               Boolean  @default(true)
+  clubEnabled               Boolean  @default(true)
+  // Anti-cheat
+  maxGiftVelocityPerMinute  Int      @default(20)
+  suspiciousRatingThreshold Float    @default(0.9)   // win rate above this triggers review
+  minMatchesForRating       Int      @default(5)     // min matches before rating counts
+  updatedAt                 DateTime @updatedAt
+
+  @@map("pk_config")
+}
+
+// ─── PK MATCH ─────────────────────────────────────────────────────────────────
+// Central match record. All other PK tables reference this via pkMatchId.
+
+model PKMatch {
+  id              String      @id @default(uuid())
+  type            PKMatchType @default(ONE_V_ONE)
+  state           PKState     @default(IDLE)
+  seasonId        String?
+  season          PKSeason?   @relation(fields: [seasonId], references: [id], onDelete: SetNull)
+  tournamentId    String?
+  tournament      PKTournament? @relation(fields: [tournamentId], references: [id], onDelete: SetNull)
+  tournamentRound Int?
+  // Room context — null for standalone PK, non-null for room-linked PK
+  roomIdA         String?     // voice room ID for side A (no FK — roomType determines table)
+  roomIdB         String?     // voice room ID for side B
+  roomTypeA       String      @default("voice")  // voice | live_class
+  roomTypeB       String      @default("voice")
+  // Timing
+  durationSeconds Int         @default(300)
+  countdownSeconds Int        @default(5)
+  scheduledAt     DateTime?
+  startedAt       DateTime?
+  endedAt         DateTime?
+  pausedAt        DateTime?
+  pausedDuration  Int         @default(0)  // accumulated pause time in seconds
+  // Result
+  winnerId        String?     // userId of winner (null if draw)
+  winnerSide      String?     // 'A' | 'B' | 'DRAW'
+  scoreA          Int         @default(0)
+  scoreB          Int         @default(0)
+  giftScoreA      Int         @default(0)  // raw gift value (no bonuses)
+  giftScoreB      Int         @default(0)
+  bonusScoreA     Int         @default(0)  // combo + comeback + vote bonus
+  bonusScoreB     Int         @default(0)
+  voteScoreA      Int         @default(0)  // audience votes for side A
+  voteScoreB      Int         @default(0)
+  peakComboA      Int         @default(0)
+  peakComboB      Int         @default(0)
+  peakViewers     Int         @default(0)
+  // Metadata
+  isRematch       Boolean     @default(false)
+  previousMatchId String?     // if rematch, links to prior match
+  previousMatch   PKMatch?    @relation("PKRematch", fields: [previousMatchId], references: [id], onDelete: SetNull)
+  rematches       PKMatch[]   @relation("PKRematch")
+  // Admin
+  endedByAdmin    Boolean     @default(false)
+  adminNote       String?     @db.Text
+  disputeReason   String?     @db.Text
+  idempotencyKey  String      @unique
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  participants    PKParticipant[]
+  teams           PKTeam[]
+  gifts           PKGiftEvent[]
+  votes           PKVote[]
+  auditLogs       PKAuditLog[]
+  history         PKHistory?
+
+  @@index([state])
+  @@index([seasonId])
+  @@index([tournamentId])
+  @@index([winnerId])
+  @@index([createdAt])
+  @@index([type, state])
+  @@map("pk_matches")
+}
+
+// ─── PK PARTICIPANT ───────────────────────────────────────────────────────────
+// One row per user per side (A or B) per match.
+// For 1v1: two rows (sideA=true for one, sideA=false for the other).
+// For team PK: multiple rows per side with teamId set.
+
+model PKParticipant {
+  id           String    @id @default(uuid())
+  pkMatchId    String
+  match        PKMatch   @relation(fields: [pkMatchId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User      @relation("PKUserParticipant", fields: [userId], references: [id], onDelete: Cascade)
+  side         String    @db.VarChar(1)   // 'A' | 'B'
+  role         String    @default("HOST") // HOST | CO_HOST | TEAM_CAPTAIN | TEAM_MEMBER
+  teamId       String?   // non-null for team PK
+  team         PKTeam?   @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  isActive     Boolean   @default(true)
+  joinedAt     DateTime  @default(now())
+  leftAt       DateTime?
+  disconnectedAt DateTime?
+  reconnectedAt  DateTime?
+  // Per-participant scoring contribution
+  giftScore    Int       @default(0)
+  bonusScore   Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([pkMatchId, userId])
+  @@index([pkMatchId])
+  @@index([userId])
+  @@index([side])
+  @@map("pk_participants")
+}
+
+// ─── PK TEAM ──────────────────────────────────────────────────────────────────
+// Used for team PK (2v2, 3v3, 5v5) and club PK.
+
+model PKTeam {
+  id         String          @id @default(uuid())
+  pkMatchId  String
+  match      PKMatch         @relation(fields: [pkMatchId], references: [id], onDelete: Cascade)
+  side       String          @db.VarChar(1)  // 'A' | 'B'
+  name       String          @db.VarChar(120)
+  avatarUrl  String?         @db.VarChar(2048)
+  captainId  String          // userId of team captain
+  clubId     String?         // nullable — only set for club PK
+  score      Int             @default(0)
+  giftScore  Int             @default(0)
+  bonusScore Int             @default(0)
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  members    PKParticipant[]
+
+  @@index([pkMatchId])
+  @@index([side])
+  @@map("pk_teams")
+}
+
+// ─── PK INVITATION ────────────────────────────────────────────────────────────
+// Friend/direct PK invitations.
+
+model PKInvitation {
+  id              String              @id @default(uuid())
+  senderId        String
+  receiverId      String
+  pkMatchId       String?             // created after acceptance
+  type            PKMatchType         @default(ONE_V_ONE)
+  status          PKInvitationStatus  @default(PENDING)
+  message         String?             @db.VarChar(280)
+  durationSeconds Int                 @default(300)
+  teamSize        Int                 @default(1)  // 1=1v1, 2=2v2 etc.
+  expiresAt       DateTime
+  acceptedAt      DateTime?
+  rejectedAt      DateTime?
+  cancelledAt     DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([senderId])
+  @@index([receiverId])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([receiverId, status])   // pending invitations for a user
+  @@map("pk_invitations")
+}
+
+// ─── PK GIFT EVENT ────────────────────────────────────────────────────────────
+// Immutable record linking a verified GiftTransaction to a PK match.
+// The gift engine remains the source of truth — this is a derived record only.
+// A gift counts in PK scoring ONLY if a PKGiftEvent record exists for it.
+
+model PKGiftEvent {
+  id                String   @id @default(uuid())
+  pkMatchId         String
+  match             PKMatch  @relation(fields: [pkMatchId], references: [id], onDelete: Cascade)
+  giftTransactionId String   @unique   // UNIQUE prevents double-counting
+  side              String   @db.VarChar(1)  // 'A' | 'B' — which side benefits
+  beneficiaryId     String   // userId who receives the score credit
+  coinsSpent        Int      // copied from GiftTransaction (immutable snapshot)
+  giftScore         Int      // base score (= coinsSpent)
+  comboMultiplier   Float    @default(1.0)
+  comboLevel        Int      @default(0)     // 0=none, 1=x5, 2=x10, etc.
+  isComebackBonus   Boolean  @default(false)
+  bonusScore        Int      @default(0)     // calculated bonus (not raw gift value)
+  finalScore        Int      // giftScore + bonusScore
+  processedAt       DateTime @default(now())
+  createdAt         DateTime @default(now())
+
+  @@index([pkMatchId])
+  @@index([side])
+  @@index([beneficiaryId])
+  @@index([pkMatchId, side])
+  @@map("pk_gift_events")
+}
+
+// ─── PK VOTE ──────────────────────────────────────────────────────────────────
+// Audience votes for one side. Rate-limited at the API layer.
+
+model PKVote {
+  id        String   @id @default(uuid())
+  pkMatchId String
+  match     PKMatch  @relation(fields: [pkMatchId], references: [id], onDelete: Cascade)
+  userId    String
+  side      String   @db.VarChar(1)  // 'A' | 'B'
+  createdAt DateTime @default(now())
+
+  @@unique([pkMatchId, userId])  // one vote per user per match
+  @@index([pkMatchId])
+  @@index([userId])
+  @@index([side])
+  @@map("pk_votes")
+}
+
+// ─── PK MATCHMAKING QUEUE ENTRY ───────────────────────────────────────────────
+// Persistent record of queue entry (primary state is in Redis, DB for audit).
+
+model PKMatchmakingQueue {
+  id              String   @id @default(uuid())
+  userId          String   @unique  // one queue entry per user
+  type            PKMatchType @default(ONE_V_ONE)
+  preferredRating Int?
+  preferredRegion String?  @db.VarChar(40)
+  preferredLang   String?  @db.VarChar(10)
+  durationSeconds Int      @default(300)
+  teamSize        Int      @default(1)
+  enteredAt       DateTime @default(now())
+  matchedAt       DateTime?
+  cancelledAt     DateTime?
+  pkMatchId       String?  // set when matched
+
+  @@index([type])
+  @@index([enteredAt])
+  @@map("pk_matchmaking_queue")
+}
+
+// ─── PK HISTORY ───────────────────────────────────────────────────────────────
+// Permanent, immutable record created when a match completes.
+// Never deleted. Never modified after creation.
+
+model PKHistory {
+  id              String   @id @default(uuid())
+  pkMatchId       String   @unique
+  match           PKMatch  @relation(fields: [pkMatchId], references: [id], onDelete: Restrict)
+  type            PKMatchType
+  winnerId        String?
+  winnerSide      String?  @db.VarChar(1)
+  loserSide       String?  @db.VarChar(1)
+  scoreA          Int
+  scoreB          Int
+  giftScoreA      Int
+  giftScoreB      Int
+  voteScoreA      Int
+  voteScoreB      Int
+  peakComboA      Int
+  peakComboB      Int
+  peakViewers     Int
+  durationSeconds Int
+  seasonId        String?
+  tournamentId    String?
+  participantIds  Json     // array of userId strings
+  sideAIds        Json     // array of userId strings for side A
+  sideBIds        Json     // array of userId strings for side B
+  teamAName       String?
+  teamBName       String?
+  totalGifts      Int      @default(0)
+  totalCoins      Int      @default(0)
+  wasDisputed     Boolean  @default(false)
+  recordingUrl    String?  @db.VarChar(2048)
+  createdAt       DateTime @default(now())
+
+  @@index([winnerId])
+  @@index([seasonId])
+  @@index([tournamentId])
+  @@index([createdAt])
+  @@map("pk_history")
+}
+
+// ─── PK USER STATS ────────────────────────────────────────────────────────────
+// Aggregate stats per user. Updated atomically after each match.
+
+model PKUserStats {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation("PKUserStats", fields: [userId], references: [id], onDelete: Cascade)
+  // Career stats
+  totalPKs        Int      @default(0)
+  wins            Int      @default(0)
+  losses          Int      @default(0)
+  draws           Int      @default(0)
+  winRate         Float    @default(0.0)
+  currentStreak   Int      @default(0)   // positive=wins, negative=losses
+  bestStreak      Int      @default(0)
+  totalScore      Int      @default(0)
+  highestScore    Int      @default(0)
+  totalGiftsSent  Int      @default(0)   // total coins sent during PK
+  totalGiftsRecv  Int      @default(0)   // total coins received during PK
+  avgScore        Float    @default(0.0)
+  avgDuration     Float    @default(0.0) // seconds
+  // Rating
+  rating          Int      @default(1000) // ELO-style
+  rank            PKRank   @default(BRONZE)
+  peakRating      Int      @default(1000)
+  peakRank        PKRank   @default(BRONZE)
+  // Season
+  seasonId        String?
+  seasonWins      Int      @default(0)
+  seasonLosses    Int      @default(0)
+  seasonScore     Int      @default(0)
+  seasonRating    Int      @default(1000)
+  seasonRank      PKRank   @default(BRONZE)
+  updatedAt       DateTime @updatedAt
+  createdAt       DateTime @default(now())
+
+  @@index([userId])
+  @@index([rating])
+  @@index([rank])
+  @@map("pk_user_stats")
+}
+
+// ─── PK RANK ──────────────────────────────────────────────────────────────────
+// Per-season rank record — immutable after season closes.
+
+model PKRank_ {
+  id        String   @id @default(uuid())
+  userId    String
+  seasonId  String
+  season    PKSeason @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  rank      PKRank   @default(BRONZE)
+  rating    Int      @default(1000)
+  wins      Int      @default(0)
+  losses    Int      @default(0)
+  score     Int      @default(0)
+  position  Int?     // leaderboard position at season end
+  rewards   Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, seasonId])
+  @@index([seasonId])
+  @@index([rating])
+  @@index([rank])
+  @@map("pk_ranks")
+}
+
+// ─── PK LEADERBOARD ENTRY ─────────────────────────────────────────────────────
+// Cache-backed leaderboard. Rebuilt from PKUserStats + PKHistory.
+
+model PKLeaderboardEntry {
+  id       String   @id @default(uuid())
+  scope    String   @db.VarChar(20)  // 'daily' | 'weekly' | 'monthly' | 'season' | 'all_time'
+  period   String   @db.VarChar(30)  // e.g. '2026-08' for monthly, seasonId for season
+  userId   String
+  seasonId String?
+  season   PKSeason? @relation(fields: [seasonId], references: [id], onDelete: SetNull)
+  rank     Int
+  score    Int      @default(0)
+  wins     Int      @default(0)
+  rating   Int      @default(1000)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@unique([scope, period, userId])
+  @@index([scope, period, rank])
+  @@index([userId])
+  @@map("pk_leaderboard")
+}
+
+// ─── PK TOURNAMENT ────────────────────────────────────────────────────────────
+
+model PKTournament {
+  id                String               @id @default(uuid())
+  name              String               @db.VarChar(120)
+  description       String?              @db.Text
+  status            PKTournamentStatus   @default(DRAFT)
+  type              PKMatchType          @default(ONE_V_ONE)
+  bracketType       String               @default("SINGLE_ELIMINATION") // SINGLE_ELIMINATION | ROUND_ROBIN
+  maxParticipants   Int                  @default(16)
+  registeredCount   Int                  @default(0)
+  teamSize          Int                  @default(1)
+  registrationStart DateTime
+  registrationEnd   DateTime
+  startDate         DateTime
+  endDate           DateTime
+  prizeDescription  String?              @db.Text
+  rules             Json?
+  createdBy         String               // admin userId
+  cancelledAt       DateTime?
+  cancelReason      String?              @db.Text
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  participants      PKTournamentParticipant[]
+  matches           PKMatch[]
+
+  @@index([status])
+  @@index([startDate])
+  @@map("pk_tournaments")
+}
+
+model PKTournamentParticipant {
+  id             String       @id @default(uuid())
+  tournamentId   String
+  tournament     PKTournament @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  userId         String
+  seed           Int?
+  wins           Int          @default(0)
+  losses         Int          @default(0)
+  eliminated     Boolean      @default(false)
+  eliminatedAt   DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([tournamentId, userId])
+  @@index([tournamentId])
+  @@index([userId])
+  @@map("pk_tournament_participants")
+}
+
+// ─── PK ACHIEVEMENT ──────────────────────────────────────────────────────────
+
+model PKAchievement {
+  id           String   @id @default(uuid())
+  key          String   @unique  // e.g. 'first_win', 'win_10', 'combo_king'
+  name         String   @db.VarChar(120)
+  description  String   @db.Text
+  iconUrl      String?  @db.VarChar(2048)
+  condition    Json     // server-evaluated condition definition
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  userAchievements PKUserAchievement[]
+
+  @@index([isActive])
+  @@map("pk_achievements")
+}
+
+model PKUserAchievement {
+  id            String        @id @default(uuid())
+  userId        String
+  user          User          @relation("PKUserAchievement", fields: [userId], references: [id], onDelete: Cascade)
+  achievementId String
+  achievement   PKAchievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+  unlockedAt    DateTime      @default(now())
+  pkMatchId     String?       // the match that triggered the unlock
+
+  @@unique([userId, achievementId])
+  @@index([userId])
+  @@map("pk_user_achievements")
+}
+
+// ─── PK MISSION ───────────────────────────────────────────────────────────────
+
+model PKMission {
+  id           String   @id @default(uuid())
+  key          String   @unique
+  name         String   @db.VarChar(120)
+  description  String   @db.Text
+  type         String   @default("DAILY")  // DAILY | WEEKLY
+  condition    Json     // server-evaluated condition
+  reward       Json?    // reward definition
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  progress     PKMissionProgress[]
+
+  @@index([type])
+  @@index([isActive])
+  @@map("pk_missions")
+}
+
+model PKMissionProgress {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation("PKMissionProgress", fields: [userId], references: [id], onDelete: Cascade)
+  missionId  String
+  mission    PKMission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  progress   Int       @default(0)
+  target     Int
+  completed  Boolean   @default(false)
+  completedAt DateTime?
+  periodStart DateTime  // day/week start
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([userId, missionId, periodStart])
+  @@index([userId])
+  @@index([missionId])
+  @@index([completed])
+  @@map("pk_mission_progress")
+}
+
+// ─── PK AUDIT LOG ─────────────────────────────────────────────────────────────
+// Every administrative action on a PK match is logged here.
+
+model PKAuditLog {
+  id          String   @id @default(uuid())
+  pkMatchId   String
+  match       PKMatch  @relation(fields: [pkMatchId], references: [id], onDelete: Cascade)
+  adminId     String   // userId performing the action
+  action      String   @db.VarChar(60)  // e.g. 'FORCE_END', 'PAUSE', 'CORRECT_SCORE'
+  reason      String?  @db.Text
+  beforeValue Json?
+  afterValue  Json?
+  createdAt   DateTime @default(now())
+
+  @@index([pkMatchId])
+  @@index([adminId])
+  @@map("pk_audit_logs")
+}
+
+// ─── PK ANALYTICS EVENT ───────────────────────────────────────────────────────
+// Structured event stream for the analytics pipeline. Batch-written asynchronously.
+
+model PKAnalyticsEvent {
+  id        String   @id @default(uuid())
+  eventType String   @db.VarChar(60)  // PK_CREATED | PK_STARTED | PK_GIFT | PK_ENDED | etc.
+  pkMatchId String?
+  userId    String?
+  side      String?  @db.VarChar(1)
+  data      Json?
+  createdAt DateTime @default(now())
+
+  @@index([eventType])
+  @@index([pkMatchId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("pk_analytics_events")
+}
+
+// ─── END PK SYSTEM ────────────────────────────────────────────────────────────
+
+// ─── PRACTICE QUIZ SYSTEM ──────────────────────────────────────────────────────
+// Migration: 20260905_add_practice_quiz (tables already committed)
+// Models restored here to match the existing migration SQL.
+// Feature status: V1-DEFERRED — tables exist, backend controller/routes
+// are NOT yet implemented. Models restored to eliminate schema/migration drift.
+// Back-relations on Class, Teacher, Student are uncommented above.
+
+model Quiz {
+  id           String   @id @default(uuid())
+  schoolId     String
+  school       School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  classId      String
+  class        Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  teacherId    String
+  teacher      Teacher  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  title        String   @db.VarChar(200)
+  description  String?  @db.Text
+  status       String   @default("DRAFT") @db.VarChar(20)
+  timeLimitMin Int?
+  openAt       DateTime?
+  closeAt      DateTime?
+  deletedAt    DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  questions    QuizQuestion[]
+  attempts     QuizAttempt[]
+
+  @@index([schoolId])
+  @@index([classId])
+  @@index([teacherId])
+  @@index([classId, status])
+  @@map("quizzes")
+}
+
+model QuizQuestion {
+  id           String   @id @default(uuid())
+  quizId       String
+  quiz         Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  position     Int
+  questionType String   @db.VarChar(30)
+  prompt       String   @db.Text
+  modelAnswer  String?  @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  options      QuizOption[]
+  answers      QuizAnswer[]
+
+  @@index([quizId])
+  @@index([quizId, position])
+  @@map("quiz_questions")
+}
+
+model QuizOption {
+  id         String      @id @default(uuid())
+  questionId String
+  question   QuizQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  text       String      @db.VarChar(500)
+  isCorrect  Boolean     @default(false)
+  position   Int
+
+  answers    QuizAnswer[]
+
+  @@index([questionId])
+  @@map("quiz_options")
+}
+
+model QuizAttempt {
+  id          String   @id @default(uuid())
+  quizId      String
+  quiz        Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  studentId   String
+  student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  userId      String
+  status      String   @default("IN_PROGRESS") @db.VarChar(20)
+  score       Float?
+  feedback    String?  @db.Text
+  startedAt   DateTime @default(now())
+  submittedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  answers     QuizAnswer[]
+
+  @@unique([quizId, studentId])
+  @@index([quizId])
+  @@index([studentId])
+  @@index([quizId, status])
+  @@map("quiz_attempts")
+}
+
+model QuizAnswer {
+  id               String       @id @default(uuid())
+  attemptId        String
+  attempt          QuizAttempt  @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  questionId       String
+  question         QuizQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  selectedOptionId String?
+  selectedOption   QuizOption?  @relation(fields: [selectedOptionId], references: [id], onDelete: SetNull)
+  answerText       String?      @db.Text
+  isCorrect        Boolean?
+
+  @@unique([attemptId, questionId])
+  @@index([attemptId])
+  @@map("quiz_answers")
+}

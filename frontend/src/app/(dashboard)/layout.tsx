@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, usePathname } from 'next/navigation'
 import { useAuthStore } from '@/store/auth.store'
 import { Sidebar } from '@/components/layout/sidebar'
 import { Header } from '@/components/layout/header'
@@ -21,20 +21,34 @@ import { NotificationCenter } from '@/components/notification-center'
 import { useNotificationStore } from '@/store/notifications.store'
 import { useKeyboardShortcuts, commonShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useAnalytics } from '@/lib/analytics'
+import { useVoiceStore } from '@/store/voice.store'
+import { PKInvitationToast } from '@/components/pk/PKInvitationToast'
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return <ClientOnly><DashboardContent>{children}</DashboardContent></ClientOnly>
 }
 
 function DashboardContent({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, user } = useAuthStore()
+  const { isAuthenticated, user, mustChangePassword, fetchMe } = useAuthStore()
   const router = useRouter()
+  const pathname = usePathname()
   useRoleAccess()
   useSocialSocket()
   useDmSocket()
   useGroupChatSocket()
   useRealtimeNotifications()
   const { trackPageView } = useAnalytics()
+
+  // FIX: When a voice room is active, suppress mobile nav bottom padding
+  // so the voice room's bottom bar (gift, mic, hand-raise) is not pushed
+  // off-screen by the 64px dashboard mobile navigation padding.
+  const activeVoiceRoom = useVoiceStore(s => s.activeRoom)
+  const isInVoiceRoom = !!activeVoiceRoom
+
+  // FIX: Same treatment for live class rooms — /live-class/[id] has its own
+  // full-height layout with a bottom controls bar that must not be clipped by
+  // the bottom nav padding or the mobile-content-bottom padding.
+  const isInLiveClass = /^\/live-class\/[^/]+/.test(pathname ?? '')
 
   const notifications = useNotificationStore((state) => state.notifications)
   const markAsRead = useNotificationStore((state) => state.markAsRead)
@@ -52,13 +66,30 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
     },
   ])
 
+  // Hydrate the full user profile (including schoolMemberships) on mount.
+  // The login response includes schoolMemberships, but after a page refresh
+  // only the persisted user metadata is restored from localStorage — the
+  // schoolMemberships array is not persisted for security reasons.
+  // This single call ensures the Education sidebar section appears correctly
+  // after any page reload without the user having to log out and back in.
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchMe()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated])
+
   useEffect(() => {
     if (!isAuthenticated) {
       router.push('/login')
+    } else if (mustChangePassword) {
+      // Step 8: Admin-created accounts must change their temporary password
+      // before accessing any dashboard content.
+      router.replace('/change-password')
     } else {
       trackPageView(window.location.pathname, { userId: user?.id })
     }
-  }, [isAuthenticated, router, user, trackPageView])
+  }, [isAuthenticated, mustChangePassword, router, user, trackPageView])
 
   if (!isAuthenticated || !user) {
     return (
@@ -72,28 +103,43 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen bg-gray-50 overflow-hidden" dir="ltr">
       {/* dir="ltr" on the shell keeps sidebar-left layout consistent.
           Individual text content uses the html dir attribute for RTL text. */}
-      <Sidebar />
+
+      {/* FIX: On /admin/* routes, the admin layout renders its own sidebar.
+          Suppress the standard Sidebar and Header here to avoid double navigation.
+          This only applies to SUPER_ADMIN — school roles never see /admin routes. */}
+      {!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) && <Sidebar />}
+
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <Header>
-          <NotificationCenter
-            notifications={notifications}
-            onMarkAsRead={markAsRead}
-            onMarkAllAsRead={markAllAsRead}
-            onDelete={deleteNotification}
-            onClearAll={clearAll}
-          />
-        </Header>
-        <main className="flex-1 overflow-y-auto p-4 md:p-6 pb-20 md:pb-6">
+        {!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) && (
+          // Hide the desktop header on mobile when inside a live class room.
+          // The live class room has its own full-height layout with a built-in header.
+          // On desktop (md+) the header is always shown.
+          <div className={isInLiveClass ? 'hidden md:block' : undefined}>
+            <Header>
+              <NotificationCenter
+                notifications={notifications}
+                onMarkAsRead={markAsRead}
+                onMarkAllAsRead={markAllAsRead}
+                onDelete={deleteNotification}
+                onClearAll={clearAll}
+              />
+            </Header>
+          </div>
+        )}
+        <main className={`flex-1 overflow-y-auto ${!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) ? isInLiveClass ? 'p-0 overflow-hidden' : `p-4 md:p-6 ${(isInVoiceRoom) ? 'pb-0' : 'mobile-content-bottom'} md:pb-6 mobile-content-top md:pt-4` : ''}`}>
           <ErrorBoundary>
             {children}
           </ErrorBoundary>
         </main>
       </div>
-      <MobileNav />
+
+      {!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) && <MobileNav />}
       <SessionTimeout />
       <NotificationPermissionBanner />
       <OfflineBanner />
-      <FloatingActionButton />
+      {!(user.role === 'SUPER_ADMIN' && pathname.startsWith('/admin')) && !isInLiveClass && <FloatingActionButton />}
+      {/* Global PK challenge toast — shows accept/decline popup for incoming PK invitations */}
+      <PKInvitationToast />
     </div>
   )
 }

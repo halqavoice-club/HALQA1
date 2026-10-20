@@ -31,7 +31,7 @@ import { LayoutControlBar } from './LayoutControlBar'
 import { PaginationDots } from './PaginationDots'
 import { GiftOverlay, type GiftEvent } from './GiftOverlay'
 import { SeatCard } from './SeatCard'
-import type { SeatData, LayoutMode } from '../../../../../src/lib/layout/layoutTypes'
+import type { SeatData, LayoutMode } from '@/lib/layout/layoutTypes'
 
 // ---------------------------------------------------------------------------
 // Constants

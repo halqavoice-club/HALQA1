@@ -5,7 +5,7 @@ async function listClasses(req, res, next) {
   try {
     const { page = 1, limit = 50, search, termId } = req.query;
     const { skip, ...pagination } = getPagination(page, limit);
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
 
     const where = {
       isActive: true,
@@ -21,6 +21,7 @@ async function listClasses(req, res, next) {
         where,
         include: {
           teacherClasses: {
+            where: { teacher: { is: { id: { not: undefined } } } },
             include: {
               teacher: {
                 include: { user: { select: { firstName: true, lastName: true } } }
@@ -42,8 +43,14 @@ async function listClasses(req, res, next) {
 
 async function getClass(req, res, next) {
   try {
-    const cls = await prisma.class.findUnique({
-      where: { id: req.params.id },
+    // C-5 FIX: Verify the class belongs to the requester's school.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const cls = await prisma.class.findFirst({
+      where: {
+        id: req.params.id,
+        deletedAt: null,
+        ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId })
+      },
       include: {
         teacherClasses: {
           include: {
@@ -71,12 +78,14 @@ async function getClass(req, res, next) {
 
 async function createClass(req, res, next) {
   try {
-    const schoolId = req.user.schoolId || req.body.schoolId;
+    // H-2 FIX: Never trust req.body.schoolId.
+    const schoolId = req.schoolId || req.user.schoolId;
+    if (!schoolId) return errorResponse(res, 'School context required', 400);
 
     // Explicit field extraction prevents mass assignment
     const {
       name, description, gradeLevel, room, capacity,
-      schedule, termId, isActive
+      schedule, termId, isActive, isDefault
     } = req.body;
 
     const cls = await prisma.class.create({
@@ -90,6 +99,7 @@ async function createClass(req, res, next) {
         schedule:     schedule     || null,
         termId:       termId       || null,
         isActive:     isActive !== undefined ? Boolean(isActive) : true,
+        isDefault:    false, // manually-created classes are never the default; only auto-created ones are
       }
     });
     return successResponse(res, cls, 'Class created', 201);
@@ -98,7 +108,13 @@ async function createClass(req, res, next) {
 
 async function updateClass(req, res, next) {
   try {
-    // Explicit field extraction prevents mass assignment
+    // C-5 FIX: Verify class belongs to caller's school before updating.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const existing = await prisma.class.findFirst({
+      where: { id: req.params.id, deletedAt: null, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) },
+      select: { id: true }
+    });
+    if (!existing) return errorResponse(res, 'Class not found', 404);
     // Sensitive fields (deletedAt, schoolId) are NOT accepted from req.body
     const {
       name, description, gradeLevel, room, capacity,
@@ -125,6 +141,13 @@ async function updateClass(req, res, next) {
 
 async function deleteClass(req, res, next) {
   try {
+    // C-5 FIX: Verify class belongs to caller's school before soft-delete.
+    const schoolId = req.schoolId || req.user.schoolId;
+    const existing = await prisma.class.findFirst({
+      where: { id: req.params.id, ...(req.user.role !== 'SUPER_ADMIN' && schoolId && { schoolId }) },
+      select: { id: true }
+    });
+    if (!existing) return errorResponse(res, 'Class not found', 404);
     await prisma.class.update({ where: { id: req.params.id }, data: { deletedAt: new Date() } });
     return successResponse(res, null, 'Class deleted');
   } catch (error) { next(error); }

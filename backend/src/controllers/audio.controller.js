@@ -38,7 +38,7 @@ async function seedDefaultCategories(schoolId) {
 
 async function listCategories(req, res, next) {
   try {
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
 
     // Auto-seed defaults if none exist
     const count = await prisma.audioCategory.count({
@@ -61,7 +61,7 @@ async function listCategories(req, res, next) {
 async function createCategory(req, res, next) {
   try {
     const { name, description } = req.body;
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
     const existing = await prisma.audioCategory.findFirst({
@@ -104,7 +104,7 @@ async function deleteCategory(req, res, next) {
 async function listCourses(req, res, next) {
   try {
     const { categoryId, teacherId, search, page = 1, limit = 20 } = req.query;
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const { skip, ...pagination } = getPagination(page, limit);
 
     const where = {
@@ -158,10 +158,12 @@ async function getCourse(req, res, next) {
 async function createCourse(req, res, next) {
   try {
     const { title, description, categoryId } = req.body;
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
 
     const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
-    if (!teacher && req.user.role === 'TEACHER') {
+    // F-6 FIX: Use effectiveRole — recognizes MEMBER users with school-scoped TEACHER membership.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (!teacher && effectiveRole === 'TEACHER') {
       return errorResponse(res, 'Teacher profile not found', 404);
     }
 
@@ -194,7 +196,9 @@ async function updateCourse(req, res, next) {
     if (!course) return errorResponse(res, 'Course not found', 404);
 
     // Teachers can only edit their own
-    if (req.user.role === 'TEACHER') {
+    // F-6 FIX: Use effectiveRole to recognize MEMBER users with TEACHER school membership.
+    const effectiveRole = req.schoolMembership?.role || req.user.role;
+    if (effectiveRole === 'TEACHER') {
       const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
       if (course.teacherId !== teacher?.id) return errorResponse(res, 'Not authorized', 403);
     }
@@ -212,7 +216,9 @@ async function deleteCourse(req, res, next) {
     const course = await prisma.audioCourse.findUnique({ where: { id: req.params.id } });
     if (!course) return errorResponse(res, 'Course not found', 404);
 
-    if (req.user.role === 'TEACHER') {
+    // F-6 FIX: Use effectiveRole for delete course auth.
+    const effectiveRoleDelete = req.schoolMembership?.role || req.user.role;
+    if (effectiveRoleDelete === 'TEACHER') {
       const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
       if (course.teacherId !== teacher?.id) return errorResponse(res, 'Not authorized', 403);
     }
@@ -227,7 +233,7 @@ async function deleteCourse(req, res, next) {
 async function listLessons(req, res, next) {
   try {
     const { courseId, categoryId, teacherId, search, page = 1, limit = 20 } = req.query;
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const { skip, ...pagination } = getPagination(page, limit);
 
     const where = {
@@ -285,7 +291,7 @@ async function uploadLesson(req, res, next) {
     if (!req.file) return errorResponse(res, 'Audio file required', 400);
 
     const { title, description, courseId, categoryId, orderIndex } = req.body;
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
 
     const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
     const teacherId = teacher?.id || req.body.teacherId;
@@ -294,7 +300,9 @@ async function uploadLesson(req, res, next) {
     // Verify course belongs to this teacher (or admin)
     const course = await prisma.audioCourse.findUnique({ where: { id: courseId } });
     if (!course) return errorResponse(res, 'Course not found', 404);
-    if (req.user.role === 'TEACHER' && course.teacherId !== teacherId) {
+    // F-6 FIX: Use effectiveRole for upload lesson auth.
+    const effectiveRoleUpload = req.schoolMembership?.role || req.user.role;
+    if (effectiveRoleUpload === 'TEACHER' && course.teacherId !== teacherId) {
       return errorResponse(res, 'Not authorized to add lessons to this course', 403);
     }
 
@@ -340,7 +348,9 @@ async function updateLesson(req, res, next) {
     const lesson = await prisma.audioLesson.findUnique({ where: { id: req.params.id } });
     if (!lesson) return errorResponse(res, 'Lesson not found', 404);
 
-    if (req.user.role === 'TEACHER') {
+    // F-6 FIX: Use effectiveRole for update lesson auth.
+    const effectiveRoleUpdate = req.schoolMembership?.role || req.user.role;
+    if (effectiveRoleUpdate === 'TEACHER') {
       const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
       if (lesson.teacherId !== teacher?.id) return errorResponse(res, 'Not authorized', 403);
     }
@@ -358,7 +368,9 @@ async function deleteLesson(req, res, next) {
     const lesson = await prisma.audioLesson.findUnique({ where: { id: req.params.id } });
     if (!lesson) return errorResponse(res, 'Lesson not found', 404);
 
-    if (req.user.role === 'TEACHER') {
+    // F-6 FIX: Use effectiveRole for delete lesson auth.
+    const effectiveRoleDeleteLesson = req.schoolMembership?.role || req.user.role;
+    if (effectiveRoleDeleteLesson === 'TEACHER') {
       const teacher = await prisma.teacher.findFirst({ where: { userId: req.user.id } });
       if (lesson.teacherId !== teacher?.id) return errorResponse(res, 'Not authorized', 403);
     }

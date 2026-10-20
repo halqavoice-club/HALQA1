@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { useToast } from '@/components/ui/use-toast'
 import api from '@/lib/api'
 import { cn } from '@/lib/utils'
@@ -92,13 +93,16 @@ function CustomTooltip({ active, payload, label }: any) {
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function AnalyticsPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher, isStudent, isGuardian, effectiveRole } = useEducationRole()
   const { toast } = useToast()
   const qc = useQueryClient()
   const [period, setPeriod] = useState('30d')
   const [showPeriodMenu, setShowPeriodMenu] = useState(false)
 
   const schoolId = user?.schoolId ?? ''
-  const canView = user?.role === 'SUPER_ADMIN' || user?.role === 'SCHOOL_ADMIN' || user?.role === 'TEACHER'
+  // SA-ANALYTICS-01: SUPER_ADMIN platform role does NOT grant school analytics access.
+  // School analytics is a school-scoped action (SCHOOL_ADMIN or TEACHER membership role).
+  const canView = user?.role === 'SCHOOL_ADMIN' || (effectiveRole === 'TEACHER' || isAdmin)
 
   // ── School analytics ──────────────────────────────────────────────────────
   const { data: schoolData, isLoading } = useQuery<SchoolAnalytics>({

@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation'
 import { Bell, User, Settings, LogOut, ChevronDown, GraduationCap, UserCheck, BookOpen } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/store/auth.store'
+import { useSchoolAccess } from '@/hooks/useSchoolAccess'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { SearchInput } from '@/components/ui/search-input'
 import {
@@ -25,8 +26,20 @@ import { useThemeStore } from '@/store/theme.store'
 
 export function Header({ children }: { children?: React.ReactNode }) {
   const { user, logout } = useAuthStore()
+  const { activeRole, activeSchool } = useSchoolAccess()
   const { t } = useTranslation()
   const { language } = useThemeStore()
+
+  // Display role: prefer active school membership role over platform role
+  // so MEMBER users with a TEACHER/STUDENT/SCHOOL_ADMIN membership show their real role
+  const displayRole = activeRole ?? user?.role ?? ''
+  const ROLE_BADGE: Record<string, string> = {
+    SUPER_ADMIN:  'bg-red-100 text-red-700',
+    SCHOOL_ADMIN: 'bg-purple-100 text-purple-700',
+    TEACHER:      'bg-green-100 text-green-700',
+    STUDENT:      'bg-blue-100 text-blue-700',
+    GUARDIAN:     'bg-orange-100 text-orange-700',
+  }
   const isRTL = language === 'ar'
   const [search, setSearch] = useState('')
   const [showResults, setShowResults] = useState(false)
@@ -187,7 +200,9 @@ export function Header({ children }: { children?: React.ReactNode }) {
             </Avatar>
             <div className="hidden md:block text-left">
               <p className="text-sm font-medium text-gray-900 leading-none">{user?.firstName} {user?.lastName}</p>
-              <p className="text-xs text-gray-500 mt-0.5 capitalize">{user?.role?.replace(/_/g, ' ').toLowerCase()}</p>
+              <p className="text-xs text-gray-500 mt-0.5 capitalize">
+                {activeSchool ? activeSchool.name : user?.role?.replace(/_/g, ' ').toLowerCase()}
+              </p>
             </div>
             <ChevronDown className="w-3.5 h-3.5 text-gray-400 hidden md:block" />
           </button>
@@ -198,14 +213,12 @@ export function Header({ children }: { children?: React.ReactNode }) {
               <p className="text-sm font-medium">{user?.firstName} {user?.lastName}</p>
               <p className="text-xs text-muted-foreground truncate">{user?.email}</p>
               <span className={`text-xs font-medium px-1.5 py-0.5 rounded-full w-fit mt-0.5 ${
-                user?.role === 'SUPER_ADMIN' ? 'bg-red-100 text-red-700' :
-                user?.role === 'SCHOOL_ADMIN' ? 'bg-purple-100 text-purple-700' :
-                user?.role === 'TEACHER' ? 'bg-green-100 text-green-700' :
-                user?.role === 'STUDENT' ? 'bg-blue-100 text-blue-700' :
-                user?.role === 'GUARDIAN' ? 'bg-orange-100 text-orange-700' :
-                'bg-gray-100 text-gray-700'
+                ROLE_BADGE[displayRole] ?? 'bg-gray-100 text-gray-700'
               }`}>
-                {user?.role?.replace(/_/g, ' ')}
+                {displayRole.replace(/_/g, ' ')}
+                {activeSchool && displayRole !== user?.role && (
+                  <span className="opacity-60 ml-1 text-[10px]">@ {activeSchool.name}</span>
+                )}
               </span>
             </div>
           </DropdownMenuLabel>

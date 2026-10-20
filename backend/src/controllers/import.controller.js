@@ -1,4 +1,4 @@
-const XLSX = require('xlsx');
+const { parseWorkbookBuffer, buildWorkbook } = require('../utils/excel');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const prisma = require('../utils/prisma');
@@ -13,20 +13,26 @@ async function importStudents(req, res, next) {
   try {
     if (!req.file) return errorResponse(res, 'No file uploaded', 400);
 
-    const schoolId = req.user.schoolId;
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet);
+    const schoolId = (req.schoolId || req.user.schoolId);
+    let rows;
+    try {
+      rows = await parseWorkbookBuffer(req.file.buffer);
+    } catch (parseErr) {
+      return errorResponse(res, parseErr.message, 400);
+    }
 
     if (rows.length === 0) return errorResponse(res, 'File is empty', 400);
     if (rows.length > 1000) return errorResponse(res, 'Import exceeds the maximum of 1000 rows. Split into batches of 1000 or fewer.', 400);
 
     const results = { created: 0, skipped: 0, errors: [] };
-    const defaultPassword = await bcrypt.hash('Halqa@2024', 12);
+    // L-1 FIX: Random temp password per import run (no hardcoded default).
+    // Each imported user must change their password on first login (mustChangePassword is set below).
+    const { randomBytes } = require('crypto');
+    const defaultPassword = await bcrypt.hash(randomBytes(12).toString('hex'), 12);
 
     for (const row of rows) {
       try {
-        const email = String(row.email || '').trim().toLowerCase();
+        const email = String(row.email || row['email'] || '').trim().toLowerCase();
         const studentId = String(row.studentId || row['Student ID'] || '').trim();
         const firstName = String(row.firstName || row['First Name'] || '').trim();
         const lastName = String(row.lastName || row['Last Name'] || '').trim();
@@ -64,7 +70,8 @@ async function importStudents(req, res, next) {
               role: 'STUDENT',
               schoolId,
               status: 'ACTIVE',
-              emailVerified: true
+              emailVerified: true,
+              mustChangePassword: true  // force password reset on first login
             }
           });
 
@@ -84,6 +91,12 @@ async function importStudents(req, res, next) {
               await tx.enrollment.create({ data: { studentId: student.id, classId } });
             }
           }
+          // GAP FIX: Create SchoolMembership so requireSchoolMember sets effectiveRole.
+          await tx.schoolMembership.upsert({
+            where: { userId_schoolId: { userId: user.id, schoolId } },
+            create: { userId: user.id, schoolId, role: 'STUDENT', status: 'ACTIVE', joinedAt: new Date() },
+            update: { role: 'STUDENT', status: 'ACTIVE', deletedAt: null }
+          });
         });
 
         results.created++;
@@ -104,7 +117,7 @@ async function importStudents(req, res, next) {
  */
 async function exportStudents(req, res, next) {
   try {
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const { classId } = req.query;
 
     const where = { schoolId, deletedAt: null };
@@ -136,12 +149,7 @@ async function exportStudents(req, res, next) {
       'Enrolled': s.enrollmentDate.toISOString().split('T')[0]
     }));
 
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Students');
-    ws['!cols'] = Object.keys(data[0] || {}).map(k => ({ wch: Math.max(k.length + 2, 15) }));
-
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = await buildWorkbook(data, 'Students');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=students-${Date.now()}.xlsx`);
     return res.send(buffer);
@@ -179,11 +187,7 @@ async function downloadTemplate(req, res, next) {
     };
 
     const data = templates[type] || templates.students;
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Template');
-
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = await buildWorkbook(data, 'Template');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=${type}-template.xlsx`);
     return res.send(buffer);
@@ -198,16 +202,21 @@ async function downloadTemplate(req, res, next) {
 async function importTeachers(req, res, next) {
   try {
     if (!req.file) return errorResponse(res, 'No file uploaded', 400);
-    const schoolId = req.user.schoolId;
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet);
+    const schoolId = (req.schoolId || req.user.schoolId);
+    let rows;
+    try {
+      rows = await parseWorkbookBuffer(req.file.buffer);
+    } catch (parseErr) {
+      return errorResponse(res, parseErr.message, 400);
+    }
 
     if (rows.length === 0) return errorResponse(res, 'File is empty', 400);
     if (rows.length > 1000) return errorResponse(res, 'Import exceeds the maximum of 1000 rows. Split into batches of 1000 or fewer.', 400);
 
     const results = { created: 0, skipped: 0, errors: [] };
-    const defaultPassword = await bcrypt.hash('Halqa@2024', 12);
+    // L-1 FIX: Random temp password per import run (no hardcoded default).
+    const { randomBytes } = require('crypto');
+    const defaultPassword = await bcrypt.hash(randomBytes(12).toString('hex'), 12);
 
     for (const row of rows) {
       try {
@@ -230,7 +239,8 @@ async function importTeachers(req, res, next) {
               email, firstName, lastName,
               phone: String(row.phone || '').trim() || null,
               passwordHash: defaultPassword,
-              role: 'TEACHER', schoolId, status: 'ACTIVE', emailVerified: true
+              role: 'TEACHER', schoolId, status: 'ACTIVE', emailVerified: true,
+              mustChangePassword: true  // force password reset on first login
             }
           });
           await tx.teacher.create({
@@ -240,6 +250,12 @@ async function importTeachers(req, res, next) {
               department: String(row.department || row['Department'] || '').trim() || null,
               specialization: String(row.specialization || row['Specialization'] || '').trim() || null
             }
+          });
+          // GAP FIX: Create SchoolMembership so requireSchoolMember sets effectiveRole.
+          await tx.schoolMembership.upsert({
+            where: { userId_schoolId: { userId: user.id, schoolId } },
+            create: { userId: user.id, schoolId, role: 'TEACHER', status: 'ACTIVE', joinedAt: new Date() },
+            update: { role: 'TEACHER', status: 'ACTIVE', deletedAt: null }
           });
         });
         results.created++;
@@ -258,7 +274,7 @@ async function importTeachers(req, res, next) {
  */
 async function exportTeachers(req, res, next) {
   try {
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const teachers = await prisma.teacher.findMany({
       where: { schoolId, deletedAt: null },
       include: {
@@ -281,11 +297,7 @@ async function exportTeachers(req, res, next) {
       'Hire Date': t.hireDate ? new Date(t.hireDate).toISOString().split('T')[0] : ''
     }));
 
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Teachers');
-    ws['!cols'] = Object.keys(data[0] || {}).map(k => ({ wch: Math.max(k.length + 2, 15) }));
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = await buildWorkbook(data, 'Teachers');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=teachers-${Date.now()}.xlsx`);
     return res.send(buffer);
@@ -297,7 +309,7 @@ async function exportTeachers(req, res, next) {
  */
 async function exportAttendance(req, res, next) {
   try {
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const { classId, startDate, endDate } = req.query;
 
     const where = { ...(schoolId && { schoolId }), ...(classId && { classId }) };
@@ -323,13 +335,7 @@ async function exportAttendance(req, res, next) {
       'Notes': r.notes || ''
     }));
 
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
-    if (data.length > 0) {
-      ws['!cols'] = Object.keys(data[0]).map(k => ({ wch: Math.max(k.length + 2, 15) }));
-    }
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = await buildWorkbook(data, 'Attendance');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=attendance-${Date.now()}.xlsx`);
     return res.send(buffer);
@@ -366,11 +372,7 @@ async function exportGrades(req, res, next) {
       'Date': g.gradedAt.toISOString().split('T')[0]
     }));
 
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Grades');
-    ws['!cols'] = Object.keys(data[0] || {}).map(k => ({ wch: Math.max(k.length + 2, 15) }));
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = await buildWorkbook(data, 'Grades');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=grades-${Date.now()}.xlsx`);
     return res.send(buffer);
@@ -382,7 +384,7 @@ async function exportGrades(req, res, next) {
  */
 async function exportBehavior(req, res, next) {
   try {
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
     const { classId, startDate, endDate } = req.query;
 
     const where = { deletedAt: null };
@@ -407,11 +409,7 @@ async function exportBehavior(req, res, next) {
       'Date': l.date.toISOString().split('T')[0]
     }));
 
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Behavior');
-    ws['!cols'] = Object.keys(data[0] || {}).map(k => ({ wch: Math.max(k.length + 2, 15) }));
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const buffer = await buildWorkbook(data, 'Behavior');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=behavior-${Date.now()}.xlsx`);
     return res.send(buffer);
@@ -428,16 +426,21 @@ module.exports = { importStudents, exportStudents, downloadTemplate, importTeach
 async function importGuardians(req, res, next) {
   try {
     if (!req.file) return errorResponse(res, 'No file uploaded', 400);
-    const schoolId = req.user.schoolId;
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheet    = workbook.Sheets[workbook.SheetNames[0]];
-    const rows     = XLSX.utils.sheet_to_json(sheet);
+    const schoolId = (req.schoolId || req.user.schoolId);
+    let rows;
+    try {
+      rows = await parseWorkbookBuffer(req.file.buffer);
+    } catch (parseErr) {
+      return errorResponse(res, parseErr.message, 400);
+    }
 
     if (rows.length === 0)   return errorResponse(res, 'File is empty', 400);
     if (rows.length > 1000)  return errorResponse(res, 'Import exceeds the maximum of 1000 rows. Split into batches of 1000 or fewer.', 400);
 
     const results = { created: 0, skipped: 0, errors: [] };
-    const defaultPassword = await bcrypt.hash('Halqa@2024', 12);
+    // L-1 FIX: Random temp password per import run (no hardcoded default).
+    const { randomBytes } = require('crypto');
+    const defaultPassword = await bcrypt.hash(randomBytes(12).toString('hex'), 12);
 
     for (const row of rows) {
       try {
@@ -462,7 +465,9 @@ async function importGuardians(req, res, next) {
         await prisma.$transaction(async (tx) => {
           const user = await tx.user.create({
             data: { email, firstName, lastName, phone, passwordHash: defaultPassword,
-              role: 'GUARDIAN', schoolId, status: 'ACTIVE', emailVerified: true }
+              role: 'GUARDIAN', schoolId, status: 'ACTIVE', emailVerified: true,
+              mustChangePassword: true  // force password reset on first login
+            }
           });
           const guardian = await tx.guardian.create({
             data: { userId: user.id, schoolId, relationship }
@@ -483,6 +488,12 @@ async function importGuardians(req, res, next) {
               }
             }
           }
+          // GAP FIX: Create SchoolMembership so requireSchoolMember sets effectiveRole.
+          await tx.schoolMembership.upsert({
+            where: { userId_schoolId: { userId: user.id, schoolId } },
+            create: { userId: user.id, schoolId, role: 'GUARDIAN', status: 'ACTIVE', joinedAt: new Date() },
+            update: { role: 'GUARDIAN', status: 'ACTIVE', deletedAt: null }
+          });
         });
         results.created++;
       } catch (err) {
@@ -505,10 +516,13 @@ async function importGuardians(req, res, next) {
 async function importClasses(req, res, next) {
   try {
     if (!req.file) return errorResponse(res, 'No file uploaded', 400);
-    const schoolId = req.user.schoolId;
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheet    = workbook.Sheets[workbook.SheetNames[0]];
-    const rows     = XLSX.utils.sheet_to_json(sheet);
+    const schoolId = (req.schoolId || req.user.schoolId);
+    let rows;
+    try {
+      rows = await parseWorkbookBuffer(req.file.buffer);
+    } catch (parseErr) {
+      return errorResponse(res, parseErr.message, 400);
+    }
 
     if (rows.length === 0) return errorResponse(res, 'File is empty', 400);
     if (rows.length > 1000) return errorResponse(res, 'Import exceeds the maximum of 1000 rows. Split into batches of 1000 or fewer.', 400);

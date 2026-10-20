@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import api from '@/lib/api'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
 import { useToast } from '@/components/ui/use-toast'
 import { getSocket } from '@/lib/socket'
 import { cn } from '@/lib/utils'
@@ -12,26 +13,33 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SearchInput } from '@/components/ui/search-input'
 import { useDebounce } from '@/hooks/useDebounce'
-import { Plus, Video, Users, Clock, Calendar, CheckCircle, Trash2 } from 'lucide-react'
+import { Plus, Video, Users, Clock, Calendar, CheckCircle, Trash2, Pencil, Globe, GraduationCap } from 'lucide-react'
 import Link from 'next/link'
+import { getFileUrl } from '@/lib/avatar'
 import { CreateLiveClassModal } from '@/components/live-class/CreateLiveClassModal'
+import { EditLiveClassModal } from '@/components/live-class/EditLiveClassModal'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface LiveClass {
-  id: string
-  title: string
-  description: string | null
-  status: 'SCHEDULED' | 'LIVE' | 'ENDED' | 'CANCELLED'
-  scheduledAt: string | null
-  startedAt: string | null
-  endedAt: string | null
-  duration: number
-  chatEnabled: boolean
+  id:              string
+  streamType:      'SCHOOL' | 'PUBLIC'
+  title:           string
+  description:     string | null
+  status:          'SCHEDULED' | 'LIVE' | 'ENDED' | 'CANCELLED'
+  scheduledAt:     string | null
+  startedAt:       string | null
+  endedAt:         string | null
+  duration:        number | null
+  coverImageUrl:   string | null
+  chatEnabled:     boolean
   handRaiseEnabled: boolean
   quranPanelEnabled: boolean
-  class: { id: string; name: string }
-  teacher: { user: { id: string; firstName: string; lastName: string; avatarUrl: string | null } }
-  _count: { participants: number }
+  // SCHOOL streams have class + teacher; PUBLIC streams have hostUser
+  class?:    { id: string; name: string } | null
+  teacher?:  { user: { id: string; firstName: string; lastName: string; avatarUrl: string | null } } | null
+  hostUser?: { id: string; firstName: string; lastName: string; avatarUrl: string | null } | null
+  hostUserId?: string | null  // direct creator id — present on all stream types
+  _count:    { participants: number }
 }
 
 // ─── Status badge ─────────────────────────────────────────────────────────────
@@ -45,15 +53,44 @@ function StatusBadge({ status }: { status: LiveClass['status'] }) {
   return <span className={cn('text-xs font-bold px-2 py-0.5 rounded-full', cfg.cls)}>{cfg.label}</span>
 }
 
+// ─── Stream type pill ─────────────────────────────────────────────────────────
+function StreamTypePill({ streamType }: { streamType: 'SCHOOL' | 'PUBLIC' }) {
+  if (streamType === 'PUBLIC') {
+    return (
+      <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 flex items-center gap-1 w-fit">
+        <Globe className="w-2.5 h-2.5" /> Public
+      </span>
+    )
+  }
+  return (
+    <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 flex items-center gap-1 w-fit">
+      <GraduationCap className="w-2.5 h-2.5" /> Class
+    </span>
+  )
+}
+
 // ─── Live Class Card ──────────────────────────────────────────────────────────
 function LiveClassCard({
-  lc, canManage, onDelete,
+  lc, canManage, onDelete, onEdit, liveViewerCount,
 }: {
-  lc: LiveClass; canManage: boolean; onDelete: (id: string) => void
+  lc: LiveClass; canManage: boolean; onDelete: (id: string) => void; onEdit: (lc: LiveClass) => void
+  /** SPRINT-1: real-time viewer count from socket; overrides _count.participants when set */
+  liveViewerCount?: number
 }) {
   const scheduled = lc.scheduledAt ? new Date(lc.scheduledAt) : null
-  const canEdit = canManage && (lc.status === 'SCHEDULED')
-  const canDelete = canManage && (lc.status === 'SCHEDULED' || lc.status === 'CANCELLED')
+  const canDelete  = canManage && (lc.status === 'SCHEDULED' || lc.status === 'CANCELLED')
+  // Use live socket count when available, otherwise fall back to polled API count
+  const displayCount = liveViewerCount ?? lc._count.participants
+
+  // Resolve host display name from whichever field is present
+  const hostName = lc.teacher?.user
+    ? `${lc.teacher.user.firstName} ${lc.teacher.user.lastName}`
+    : lc.hostUser
+    ? `${lc.hostUser.firstName} ${lc.hostUser.lastName}`
+    : null
+
+  // Context line: class name for school streams, nothing for public streams
+  const contextLine = lc.streamType === 'SCHOOL' && lc.class?.name ? lc.class.name : null
 
   return (
     <div className="relative group">
@@ -67,9 +104,12 @@ function LiveClassCard({
         >
           <div className="flex items-start justify-between gap-3 mb-3">
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 mb-1">
+              <div className="flex items-center gap-2 flex-wrap mb-1">
                 <StatusBadge status={lc.status} />
-                <span className="text-xs text-gray-400">{lc.class.name}</span>
+                <StreamTypePill streamType={lc.streamType} />
+                {contextLine && (
+                  <span className="text-xs text-gray-400">{contextLine}</span>
+                )}
               </div>
               <h3 className="font-semibold text-gray-900 truncate">{lc.title}</h3>
               {lc.description && (
@@ -77,10 +117,26 @@ function LiveClassCard({
               )}
             </div>
             <div className={cn(
-              'w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0',
-              lc.status === 'LIVE' ? 'bg-red-100' : 'bg-indigo-100'
+              'w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 overflow-hidden',
+              !lc.coverImageUrl && (lc.status === 'LIVE'
+                ? 'bg-red-100'
+                : lc.streamType === 'PUBLIC'
+                ? 'bg-purple-100'
+                : 'bg-indigo-100')
             )}>
-              <Video className={cn('w-5 h-5', lc.status === 'LIVE' ? 'text-red-600' : 'text-indigo-600')} />
+              {lc.coverImageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={getFileUrl(lc.coverImageUrl)} alt={lc.title} className="w-full h-full object-cover rounded-xl" />
+              ) : (
+                <Video className={cn(
+                  'w-5 h-5',
+                  lc.status === 'LIVE'
+                    ? 'text-red-600'
+                    : lc.streamType === 'PUBLIC'
+                    ? 'text-purple-600'
+                    : 'text-indigo-600'
+                )} />
+              )}
             </div>
           </div>
 
@@ -92,31 +148,61 @@ function LiveClassCard({
               </span>
             )}
             <span className="flex items-center gap-1">
-                <Clock className="w-3 h-3" />
-                {lc.duration ? `${lc.duration}m` : '∞'}
-              </span>
+              <Clock className="w-3 h-3" />
+              {lc.duration ? `${lc.duration}m` : '∞'}
+            </span>
             <span className="flex items-center gap-1">
               <Users className="w-3 h-3" />
-              {lc._count.participants}
+              {displayCount}
+              {liveViewerCount !== undefined && lc.status === 'LIVE' && (
+                <span className="text-red-500 font-semibold ml-0.5">•</span>
+              )}
             </span>
             {lc.quranPanelEnabled && <span title="Quran panel">📖</span>}
           </div>
 
           <div className="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between">
-            <span className="text-xs text-gray-400">
-              {lc.teacher.user.firstName} {lc.teacher.user.lastName}
-            </span>
+            {hostName && (() => {
+              const hostId = lc.teacher?.user?.id ?? lc.hostUser?.id ?? null
+              const avatarUrl = lc.teacher?.user?.avatarUrl ?? lc.hostUser?.avatarUrl ?? null
+              const initials = hostName.split(' ').map((n: string) => n[0]).slice(0, 2).join('').toUpperCase()
+              const inner = (
+                <div className="flex items-center gap-1.5 min-w-0">
+                  {avatarUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={getFileUrl(avatarUrl)} alt={hostName} className="w-5 h-5 rounded-full object-cover flex-shrink-0" />
+                  ) : (
+                    <div className="w-5 h-5 rounded-full bg-indigo-100 flex items-center justify-center flex-shrink-0">
+                      <span className="text-[8px] font-bold text-indigo-600">{initials}</span>
+                    </div>
+                  )}
+                  <span className="text-xs text-gray-400 truncate hover:text-indigo-600 transition-colors">{hostName}</span>
+                </div>
+              )
+              if (hostId) {
+                return (
+                  <Link
+                    href={`/profile/${hostId}`}
+                    onClick={e => e.stopPropagation()}
+                    className="min-w-0 max-w-[55%]"
+                  >
+                    {inner}
+                  </Link>
+                )
+              }
+              return <div className="min-w-0 max-w-[55%]">{inner}</div>
+            })()}
             {lc.status === 'LIVE' && (
-              <span className="text-xs font-bold text-red-600 flex items-center gap-1">
+              <span className="text-xs font-bold text-red-600 flex items-center gap-1 ml-auto">
                 <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                Join now
+                {lc.streamType === 'PUBLIC' ? 'Watch now' : 'Join now'}
               </span>
             )}
             {lc.status === 'SCHEDULED' && (
-              <span className="text-xs text-indigo-600 font-medium">View →</span>
+              <span className="text-xs text-indigo-600 font-medium ml-auto">View →</span>
             )}
             {lc.status === 'ENDED' && (
-              <span className="text-xs text-gray-400 flex items-center gap-1">
+              <span className="text-xs text-gray-400 flex items-center gap-1 ml-auto">
                 <CheckCircle className="w-3 h-3" /> Completed
               </span>
             )}
@@ -124,14 +210,25 @@ function LiveClassCard({
         </motion.div>
       </Link>
 
-      {/* Edit / Delete actions — shown on hover for managers */}
-      {canManage && (canEdit || canDelete) && (
+      {/* Edit / Delete — shown on hover for host/managers */}
+      {canManage && (
         <div className="absolute top-3 right-3 hidden group-hover:flex items-center gap-1 z-10">
+          {lc.status !== 'ENDED' && lc.status !== 'CANCELLED' && (
+            <button
+              onClick={e => { e.preventDefault(); onEdit(lc) }}
+              className="p-1.5 bg-white border border-gray-200 rounded-lg shadow-sm hover:bg-indigo-50 hover:border-indigo-300 transition-colors"
+              title="Edit"
+              aria-label="Edit live class"
+            >
+              <Pencil className="w-3.5 h-3.5 text-indigo-500" />
+            </button>
+          )}
           {canDelete && (
             <button
               onClick={e => { e.preventDefault(); onDelete(lc.id) }}
               className="p-1.5 bg-white border border-gray-200 rounded-lg shadow-sm hover:bg-red-50 hover:border-red-200 transition-colors"
               title="Delete"
+              aria-label="Delete live class"
             >
               <Trash2 className="w-3.5 h-3.5 text-red-500" />
             </button>
@@ -145,78 +242,109 @@ function LiveClassCard({
 // ─── Page ─────────────────────────────────────────────────────────────────────
 export default function LiveClassPage() {
   const { user } = useAuthStore()
+  const { isAdmin, isTeacher } = useEducationRole()
   const { toast } = useToast()
   const queryClient = useQueryClient()
-  const [search, setSearch] = useState('')
+  const [search, setSearch]           = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
-  const [showCreate, setShowCreate] = useState(false)
+  const [showCreate, setShowCreate]   = useState(false)
+  const [editingLc, setEditingLc]     = useState<LiveClass | null>(null)
+  // SPRINT-1: real-time viewer counts keyed by liveClassId
+  const [viewerCounts, setViewerCounts] = useState<Record<string, number>>({})
   const debouncedSearch = useDebounce(search, 300)
 
-  const canManage = ['TEACHER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(user?.role || '')
+  // Any authenticated user (except SUPER_ADMIN) can go live (public stream).
+  // School teachers/admins can also create school class streams.
+  // SA-LC-UI-01: SUPER_ADMIN = Platform Administration ONLY — cannot create live classes.
+  const canCreate = user?.role !== 'SUPER_ADMIN'
+  // canManage: controls delete button visibility.
+  // A user manages a stream if they're school staff OR the owner of a PUBLIC stream.
+  // The actual enforcement is on the backend — this only affects UI visibility.
+  // SA-LC-01: SUPER_ADMIN platform role does NOT grant school-scoped live class management.
+  // Management rights come from isTeacher/isAdmin (school membership roles).
+  const canManageByRole = isTeacher || isAdmin ||
+    ['TEACHER', 'SCHOOL_ADMIN'].includes(user?.role || '')
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['live-classes', debouncedSearch, statusFilter],
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: ['live-classes', statusFilter],
     queryFn: () => api.get('/live-classes', {
       params: {
         status: statusFilter !== 'all' ? statusFilter : undefined,
         limit: 50,
       }
     }).then(r => r.data.data?.items || []),
-    refetchInterval: 15000,
+    refetchInterval: 15_000,
   })
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => api.delete('/live-classes/' + id),
+    mutationFn: (id: string) => api.delete(`/live-classes/${id}`),
     onSuccess: () => {
-      toast({ title: 'Class deleted' })
+      toast({ title: 'Stream deleted' })
       queryClient.invalidateQueries({ queryKey: ['live-classes'] })
     },
     onError: (e: any) => toast({ title: e?.response?.data?.message || 'Failed to delete', variant: 'destructive' }),
   })
 
   const handleDelete = (id: string) => {
-    if (!confirm('Delete this class?')) return
+    if (!confirm('Delete this stream? This cannot be undone.')) return
     deleteMutation.mutate(id)
   }
 
-  // Real-time updates
+  // Real-time updates — join school room AND global public stream room
   useEffect(() => {
     const socket = getSocket()
     if (!socket) return
-
-    // Join school room so we receive liveclass:started / liveclass:scheduled events.
-    // The backend emits these to `school:{schoolId}` when a class goes live.
     const schoolId = user?.schoolId
     if (schoolId) socket.emit('school:join', schoolId)
+    socket.emit('feed:join:public')  // listen for public stream notifications
 
     const refresh = () => queryClient.invalidateQueries({ queryKey: ['live-classes'] })
-    const onStarted = (d: any) => {
-      refresh()
-      toast({ title: `🔴 ${d.title} is now live!` })
+    const onStarted = (d: any) => { refresh(); toast({ title: `🔴 ${d.title} is now live!` }) }
+    // SPRINT-1: real-time viewer count update — no refetch needed, just update local state
+    const onViewerCount = (d: { liveClassId: string; count: number }) => {
+      setViewerCounts(prev => ({ ...prev, [d.liveClassId]: d.count }))
     }
 
-    socket.on('liveclass:started',   onStarted)
-    socket.on('liveclass:scheduled', refresh)
-    socket.on('liveclass:ended',     refresh)
+    socket.on('liveclass:started',      onStarted)
+    socket.on('liveclass:scheduled',    refresh)
+    socket.on('liveclass:ended',        refresh)
+    socket.on('liveclass:viewer_count', onViewerCount)
 
     return () => {
       if (schoolId) socket.emit('school:leave', schoolId)
-      socket.off('liveclass:started',   onStarted)
-      socket.off('liveclass:scheduled', refresh)
-      socket.off('liveclass:ended',     refresh)
+      socket.emit('feed:leave:public')
+      socket.off('liveclass:started',      onStarted)
+      socket.off('liveclass:scheduled',    refresh)
+      socket.off('liveclass:ended',        refresh)
+      socket.off('liveclass:viewer_count', onViewerCount)
     }
   }, [queryClient, toast, user?.schoolId])
 
   const classes: LiveClass[] = data || []
+
+  // Per-card manage right: only the creator can edit/delete their own stream.
+  // Role (teacher/admin) does NOT grant edit rights on other people's streams.
+  // Backend enforces assertOwner() — this just controls UI button visibility.
+  const canManageCard = (lc: LiveClass) => {
+    // Prefer the direct hostUserId field; fall back to nested user objects
+    const creatorId = lc.hostUserId ?? lc.hostUser?.id ?? lc.teacher?.user?.id ?? null
+    return !!user && !!creatorId && creatorId === user.id
+  }
+
+  // Client-side search filter
   const filtered = classes.filter(lc =>
     !debouncedSearch ||
     lc.title.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
-    lc.class.name.toLowerCase().includes(debouncedSearch.toLowerCase())
+    (lc.class?.name || '').toLowerCase().includes(debouncedSearch.toLowerCase())
   )
 
   const live      = filtered.filter(lc => lc.status === 'LIVE')
   const scheduled = filtered.filter(lc => lc.status === 'SCHEDULED')
   const past      = filtered.filter(lc => lc.status === 'ENDED' || lc.status === 'CANCELLED')
+
+  // Split live/scheduled by stream type for section display
+  const livePublic  = live.filter(lc => lc.streamType === 'PUBLIC')
+  const liveSchool  = live.filter(lc => lc.streamType === 'SCHOOL')
 
   return (
     <div className="space-y-5 max-w-2xl">
@@ -224,31 +352,43 @@ export default function LiveClassPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <Video className="w-6 h-6 text-indigo-600" /> Live Classes
+            <Video className="w-6 h-6 text-indigo-600" /> Live
           </h1>
           <p className="text-gray-500 text-sm mt-0.5">
-            {live.length > 0 ? `${live.length} class${live.length > 1 ? 'es' : ''} live now` : 'Video + audio classes with LiveKit'}
+            {live.length > 0
+              ? `${live.length} stream${live.length > 1 ? 's' : ''} live now`
+              : 'Public streams & school classes'}
           </p>
         </div>
-        {canManage && (
-          <Button className="bg-indigo-600 hover:bg-indigo-700 gap-2" onClick={() => setShowCreate(true)}>
-            <Plus className="w-4 h-4" /> New Class
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          <Link href="/live-class/camera-test">
+            <Button variant="outline" size="sm" className="gap-1.5 text-xs text-gray-500 hidden sm:flex">
+              📷 Camera Test
+            </Button>
+          </Link>
+          {canCreate && (
+            <Button
+              className="bg-indigo-600 hover:bg-indigo-700 gap-2"
+              onClick={() => setShowCreate(true)}
+            >
+              <Plus className="w-4 h-4" /> Go Live
+            </Button>
+          )}
+        </div>
       </div>
 
-      {/* Search + filter */}
-      <div className="flex gap-2">
+      {/* Search + status filter */}
+      <div className="flex flex-col sm:flex-row gap-2">
         <div className="flex-1">
           <SearchInput
             value={search}
             onChange={setSearch}
-            placeholder="Search classes..."
+            placeholder="Search streams..."
             isLoading={isLoading && !!search}
           />
         </div>
         <div className="flex gap-1 flex-wrap">
-          {['all', 'LIVE', 'SCHEDULED', 'ENDED', 'CANCELLED'].map(s => (
+          {['all', 'LIVE', 'SCHEDULED', 'ENDED'].map(s => (
             <button
               key={s}
               onClick={() => setStatusFilter(s)}
@@ -265,47 +405,101 @@ export default function LiveClassPage() {
         </div>
       </div>
 
+      {/* ── Content ─────────────────────────────────────────────────────── */}
       {isLoading ? (
         <div className="space-y-3">
           {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-28 rounded-2xl" />)}
+        </div>
+      ) : isError ? (
+        <div className="text-center py-16">
+          <Video className="w-12 h-12 text-gray-200 mx-auto mb-3" />
+          <p className="text-gray-500 font-medium">Failed to load streams</p>
+          <p className="text-gray-400 text-sm mt-1">Check your connection and try again.</p>
+          <Button
+            variant="outline"
+            className="mt-4"
+            onClick={() => refetch()}
+          >
+            Retry
+          </Button>
         </div>
       ) : filtered.length === 0 ? (
         <div className="text-center py-16">
           <Video className="w-12 h-12 text-gray-200 mx-auto mb-3" />
           <p className="text-gray-500 font-medium">
-            {search ? `No classes matching "${search}"` : 'No live classes yet'}
+            {search ? `No streams matching "${search}"` : 'No live streams yet'}
           </p>
-          {canManage && !search && (
-            <Button className="mt-4 bg-indigo-600 hover:bg-indigo-700" onClick={() => setShowCreate(true)}>
-              Create First Class
+          <p className="text-gray-400 text-sm mt-1">
+            Anyone can go live — no school required.
+          </p>
+          {canCreate && !search && (
+            <Button
+              className="mt-4 bg-indigo-600 hover:bg-indigo-700"
+              onClick={() => setShowCreate(true)}
+            >
+              Start Your First Stream
             </Button>
           )}
         </div>
       ) : (
         <div className="space-y-6">
-          {live.length > 0 && (
+          {/* Live now — public streams first */}
+          {livePublic.length > 0 && (
             <section>
               <h2 className="text-sm font-bold text-red-600 uppercase tracking-wide mb-3 flex items-center gap-2">
-                <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" /> Live Now
+                <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                Public Streams Live
               </h2>
               <div className="space-y-3">
-                {live.map(lc => <LiveClassCard key={lc.id} lc={lc} canManage={canManage} onDelete={handleDelete} />)}
+                {/* SPRINT-2: sort PUBLIC live by real-time viewer count descending */}
+                {[...livePublic]
+                  .sort((a, b) => (viewerCounts[b.id] ?? b._count.participants) - (viewerCounts[a.id] ?? a._count.participants))
+                  .map(lc => (
+                    <LiveClassCard
+                      key={lc.id} lc={lc} canManage={canManageCard(lc)}
+                      onDelete={handleDelete} onEdit={setEditingLc}
+                      liveViewerCount={viewerCounts[lc.id]}
+                    />
+                  ))}
               </div>
             </section>
           )}
+
+          {/* Live now — school classes */}
+          {liveSchool.length > 0 && (
+            <section>
+              <h2 className="text-sm font-bold text-red-600 uppercase tracking-wide mb-3 flex items-center gap-2">
+                <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                School Classes Live
+              </h2>
+              <div className="space-y-3">
+                {liveSchool.map(lc => (
+                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} onEdit={setEditingLc} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* Upcoming */}
           {scheduled.length > 0 && (
             <section>
               <h2 className="text-sm font-bold text-gray-500 uppercase tracking-wide mb-3">Upcoming</h2>
               <div className="space-y-3">
-                {scheduled.map(lc => <LiveClassCard key={lc.id} lc={lc} canManage={canManage} onDelete={handleDelete} />)}
+                {scheduled.map(lc => (
+                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} onEdit={setEditingLc} />
+                ))}
               </div>
             </section>
           )}
+
+          {/* Past */}
           {past.length > 0 && (
             <section>
               <h2 className="text-sm font-bold text-gray-400 uppercase tracking-wide mb-3">Past</h2>
               <div className="space-y-3">
-                {past.map(lc => <LiveClassCard key={lc.id} lc={lc} canManage={canManage} onDelete={handleDelete} />)}
+                {past.map(lc => (
+                  <LiveClassCard key={lc.id} lc={lc} canManage={canManageCard(lc)} onDelete={handleDelete} onEdit={setEditingLc} />
+                ))}
               </div>
             </section>
           )}
@@ -320,6 +514,14 @@ export default function LiveClassPage() {
               setShowCreate(false)
               queryClient.invalidateQueries({ queryKey: ['live-classes'] })
             }}
+          />
+        )}
+        {editingLc && (
+          <EditLiveClassModal
+            lc={{ ...editingLc, coverImageUrl: (editingLc as any).coverImageUrl ?? null }}
+            onClose={() => setEditingLc(null)}
+            onUpdated={() => queryClient.invalidateQueries({ queryKey: ['live-classes'] })}
+            onDeleted={() => queryClient.invalidateQueries({ queryKey: ['live-classes'] })}
           />
         )}
       </AnimatePresence>

@@ -22,6 +22,102 @@ const logoUpload = multer({
 
 router.use(authenticate);
 
+// ─── GET /schools/search — public school search for the "Join a School" flow ──
+// Any authenticated user can search for schools to join.
+// Returns non-sensitive public fields only (no private settings or stats).
+router.get('/search', async (req, res, next) => {
+  try {
+    const { search = '', limit = 10 } = req.query;
+    const schools = await prisma.school.findMany({
+      where: {
+        isActive: true,
+        deletedAt: null,
+        ...(search ? {
+          OR: [
+            { name:  { contains: String(search) } },
+            { slug:  { contains: String(search) } },
+            { city:  { contains: String(search) } },
+          ]
+        } : {})
+      },
+      select: {
+        id: true, name: true, slug: true, type: true,
+        city: true, country: true, logoUrl: true
+      },
+      take: Math.min(Number(limit) || 10, 50),
+      orderBy: { name: 'asc' }
+    });
+    return res.json({ success: true, data: schools });
+  } catch (error) { next(error); }
+});
+
+// ─── GET /schools/browse — public paginated school list ───────────────────────
+// Any authenticated user can browse all active schools (public profiles only).
+// Used by the "Browse Schools" / "Discover" page. Returns school count and
+// whether the current user is already a member so the UI can show correct state.
+router.get('/browse', async (req, res, next) => {
+  try {
+    const { search = '', page = 1, limit = 20, type } = req.query;
+    const skip = (Math.max(1, Number(page)) - 1) * Math.min(Number(limit) || 20, 50);
+    const take = Math.min(Number(limit) || 20, 50);
+
+    const where = {
+      isActive: true,
+      deletedAt: null,
+      ...(type ? { type: String(type) } : {}),
+      ...(search ? {
+        OR: [
+          { name:  { contains: String(search) } },
+          { slug:  { contains: String(search) } },
+          { city:  { contains: String(search) } },
+          { country: { contains: String(search) } },
+        ]
+      } : {})
+    };
+
+    const [schools, total] = await Promise.all([
+      prisma.school.findMany({
+        where,
+        select: {
+          id: true, name: true, slug: true, type: true,
+          city: true, country: true, logoUrl: true,
+          _count: { select: { memberships: { where: { status: 'ACTIVE' } } } }
+        },
+        skip,
+        take,
+        orderBy: { name: 'asc' }
+      }),
+      prisma.school.count({ where })
+    ]);
+
+    // Enrich with current user's membership status for each school
+    const schoolIds = schools.map(s => s.id);
+    const myMemberships = await prisma.schoolMembership.findMany({
+      where: { userId: req.user.id, schoolId: { in: schoolIds } },
+      select: { schoolId: true, role: true, status: true }
+    });
+    const membershipMap = new Map(myMemberships.map(m => [m.schoolId, m]));
+
+    const enriched = schools.map(s => ({
+      id:          s.id,
+      name:        s.name,
+      slug:        s.slug,
+      type:        s.type,
+      city:        s.city,
+      country:     s.country,
+      logoUrl:     s.logoUrl,
+      memberCount: s._count.memberships,
+      myMembership: membershipMap.get(s.id) || null,
+    }));
+
+    return res.json({
+      success: true,
+      data: enriched,
+      pagination: { total, page: Number(page), limit: take, pages: Math.ceil(total / take) }
+    });
+  } catch (error) { next(error); }
+});
+
 router.get('/', authorize('SUPER_ADMIN'), ctrl.listSchools);
 router.get('/:id', ctrl.getSchool);
 router.get('/:id/stats', ctrl.getSchoolStats);
@@ -37,13 +133,146 @@ router.post('/',
   ctrl.createSchool
 );
 
-router.put('/:id', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), ctrl.updateSchool);
-router.put('/:id/settings', authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'), ctrl.updateSchoolSettings);
+router.put('/:id',
+  // ARCH-01: SUPER_ADMIN can only update a school if they have an active membership.
+  // Previously `authorize('SUPER_ADMIN', 'SCHOOL_ADMIN')` let any platform admin
+  // edit any school's settings without being a member. Now all updates require
+  // a real SCHOOL_ADMIN membership for that school.
+  async (req, res, next) => {
+    const { id } = req.params;
+    const userRole = req.user?.role;
+
+    // SUPER_ADMIN: must have an explicit SCHOOL_ADMIN membership in this school
+    if (userRole === 'SUPER_ADMIN') {
+      const membership = await prisma.schoolMembership.findUnique({
+        where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+        select: { role: true, status: true },
+      }).catch(() => null);
+      if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+        return next();
+      }
+      return errorResponse(res, 'Platform admins must have an active school membership to edit school settings', 403);
+    }
+
+    // Legacy SCHOOL_ADMIN (User.role) — own school only
+    if (userRole === 'SCHOOL_ADMIN') {
+      const ownSchoolId = req.schoolMembership?.schoolId || req.user.schoolId;
+      if (ownSchoolId !== id) return errorResponse(res, 'You can only update your own school', 403);
+      return next();
+    }
+
+    return errorResponse(res, 'Insufficient permissions', 403);
+  },
+  ctrl.updateSchool
+);
+
+// PATCH /schools/:id — same as PUT but partial update; also allows MEMBER school admins
+router.patch('/:id',
+  async (req, res, next) => {
+    const { id } = req.params;
+    const userRole = req.user?.role;
+
+    // SA-SCHOOL-PATCH-01: SUPER_ADMIN platform role must have an explicit school membership
+    // to edit school settings — same requirement as the PUT /:id handler above.
+    // Previously this was an unconditional bypass (return next()) — now requires membership.
+    if (userRole === 'SUPER_ADMIN') {
+      const membership = await prisma.schoolMembership.findUnique({
+        where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+        select: { role: true, status: true },
+      }).catch(() => null);
+      if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+        return next();
+      }
+      return errorResponse(res, 'Platform admins must have an active school membership to edit school settings', 403);
+    }
+
+    if (userRole === 'SCHOOL_ADMIN') {
+      const ownSchoolId = req.schoolMembership?.schoolId || req.user.schoolId;
+      if (ownSchoolId !== id) return errorResponse(res, 'You can only update your own school', 403);
+      return next();
+    }
+
+    // New-architecture: MEMBER user with active SCHOOL_ADMIN membership
+    const membership = await prisma.schoolMembership.findUnique({
+      where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+      select: { role: true, status: true },
+    }).catch(() => null);
+    if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+      return next();
+    }
+
+    return errorResponse(res, 'Only school admins can update this school', 403);
+  },
+  ctrl.updateSchool
+);
+router.put('/:id/settings',
+  // ARCH-01: All roles must have an explicit membership to edit school settings.
+  async (req, res, next) => {
+    const { id } = req.params;
+    const userRole = req.user?.role;
+
+    if (userRole === 'SUPER_ADMIN') {
+      const membership = await prisma.schoolMembership.findUnique({
+        where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+        select: { role: true, status: true },
+      }).catch(() => null);
+      if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+        return next();
+      }
+      return errorResponse(res, 'Platform admins must have an active school membership to edit school settings', 403);
+    }
+
+    if (userRole === 'SCHOOL_ADMIN') {
+      const ownSchoolId = req.schoolMembership?.schoolId || req.user.schoolId;
+      if (ownSchoolId !== id) return errorResponse(res, 'You can only update settings for your own school', 403);
+      return next();
+    }
+
+    return errorResponse(res, 'Insufficient permissions', 403);
+  },
+  ctrl.updateSchoolSettings
+);
 router.delete('/:id', authorize('SUPER_ADMIN'), ctrl.deleteSchool);
 
 // Logo upload
+// Auth: legacy SCHOOL_ADMIN (User.role) for own school, OR any MEMBER user who
+// holds an active SCHOOL_ADMIN membership for the target school (new architecture).
+// P2-001 FIX: SUPER_ADMIN must have an explicit school membership, same as PUT/PATCH /:id.
 router.post('/:id/logo',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  async (req, res, next) => {
+    const { id } = req.params;
+    const userRole = req.user?.role;
+
+    // SUPER_ADMIN: must have an active SCHOOL_ADMIN membership for this school
+    if (userRole === 'SUPER_ADMIN') {
+      const membership = await prisma.schoolMembership.findUnique({
+        where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+        select: { role: true, status: true },
+      }).catch(() => null);
+      if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+        return next();
+      }
+      return errorResponse(res, 'Platform admins must have an active school membership to upload a logo', 403);
+    }
+
+    // Legacy SCHOOL_ADMIN (User.role): own school only
+    if (userRole === 'SCHOOL_ADMIN') {
+      const ownSchoolId = req.schoolMembership?.schoolId || req.user.schoolId;
+      if (ownSchoolId !== id) return errorResponse(res, 'You can only upload a logo for your own school', 403);
+      return next();
+    }
+
+    // New-architecture: MEMBER user with SCHOOL_ADMIN membership for this school
+    const membership = await prisma.schoolMembership.findUnique({
+      where: { userId_schoolId: { userId: req.user.id, schoolId: id } },
+      select: { role: true, status: true },
+    }).catch(() => null);
+    if (membership?.status === 'ACTIVE' && ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(membership.role)) {
+      return next();
+    }
+
+    return errorResponse(res, 'Only school admins can upload a logo', 403);
+  },
   logoUpload.single('logo'),
   async (req, res, next) => {
     try {

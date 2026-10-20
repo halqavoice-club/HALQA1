@@ -16,7 +16,7 @@ export default function FollowingPage() {
 
   const { data: following = [], isLoading } = useQuery<SocialUser[]>({
     queryKey: ['following-full', id],
-    queryFn: () => socialApi.following(id, 100).then(r => r.data.data),
+    queryFn: () => socialApi.following(id, 100).then(r => r.data.data?.items ?? r.data.data ?? []),
     enabled: !!id
   })
 

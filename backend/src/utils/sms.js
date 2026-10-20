@@ -389,7 +389,7 @@ module.exports = {
   getUsageStats,
   sendVerificationCode,
   sendOTP,
-  sendPasswordReset,
+  sendPasswordResetCode,
   templates,
   verificationSMS,
   alertSMS,

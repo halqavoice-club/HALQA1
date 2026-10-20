@@ -12,7 +12,7 @@ import { View, Pressable, StyleSheet } from 'react-native';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
-  withTiming,
+  withTiming
 } from 'react-native-reanimated';
 
 export interface PaginationDotsProps {
@@ -96,3 +96,4 @@ const styles = StyleSheet.create({
     height: 6,
   },
 });
+

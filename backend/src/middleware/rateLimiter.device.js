@@ -134,33 +134,59 @@ function createDeviceRateLimiter(options = {}) {
 }
 
 /**
- * Pre-configured device rate limiters
+ * Pre-configured device rate limiters.
+ *
+ * Each export is a lazy-proxy middleware function. The real limiter instance
+ * is created on the first HTTP request (not at module-load time), ensuring
+ * that isRedisReady() is evaluated after connectRedis() has resolved.
  */
 
+let _strictDeviceLimiter = null;
+let _moderateDeviceLimiter = null;
+let _lenientDeviceLimiter = null;
+
 // Strict device limiter for sensitive operations
-const strictDeviceLimiter = createDeviceRateLimiter({
-  windowMs: 15 * 60 * 1000,
-  max: isDev ? 1000 : 3,
-  maxPerUser: isDev ? 5000 : 10,
-  message: 'Too many sensitive operations from this device'
-});
+const strictDeviceLimiter = (req, res, next) => {
+  if (!_strictDeviceLimiter) {
+    logger.debug('[deviceRateLimiter] Lazy-initializing strictDeviceLimiter instance');
+    _strictDeviceLimiter = createDeviceRateLimiter({
+      windowMs: 15 * 60 * 1000,
+      max: isDev ? 1000 : 3,
+      maxPerUser: isDev ? 5000 : 10,
+      message: 'Too many sensitive operations from this device'
+    });
+  }
+  return _strictDeviceLimiter(req, res, next);
+};
 
 // Moderate device limiter for regular operations
-const moderateDeviceLimiter = createDeviceRateLimiter({
-  windowMs: 15 * 60 * 1000,
-  max: isDev ? 5000 : 50,
-  maxPerUser: isDev ? 25000 : 200,
-  message: 'Rate limit exceeded for this device'
-});
+const moderateDeviceLimiter = (req, res, next) => {
+  if (!_moderateDeviceLimiter) {
+    logger.debug('[deviceRateLimiter] Lazy-initializing moderateDeviceLimiter instance');
+    _moderateDeviceLimiter = createDeviceRateLimiter({
+      windowMs: 15 * 60 * 1000,
+      max: isDev ? 5000 : 50,
+      maxPerUser: isDev ? 25000 : 200,
+      message: 'Rate limit exceeded for this device'
+    });
+  }
+  return _moderateDeviceLimiter(req, res, next);
+};
 
 // Lenient device limiter for read operations
-const lenientDeviceLimiter = createDeviceRateLimiter({
-  windowMs: 15 * 60 * 1000,
-  max: isDev ? 10000 : 200,
-  maxPerUser: isDev ? 50000 : 1000,
-  message: 'Too many read requests from this device',
-  skipIfAuthenticated: true // Skip for authenticated users on read operations
-});
+const lenientDeviceLimiter = (req, res, next) => {
+  if (!_lenientDeviceLimiter) {
+    logger.debug('[deviceRateLimiter] Lazy-initializing lenientDeviceLimiter instance');
+    _lenientDeviceLimiter = createDeviceRateLimiter({
+      windowMs: 15 * 60 * 1000,
+      max: isDev ? 10000 : 200,
+      maxPerUser: isDev ? 50000 : 1000,
+      message: 'Too many read requests from this device',
+      skipIfAuthenticated: true // Skip for authenticated users on read operations
+    });
+  }
+  return _lenientDeviceLimiter(req, res, next);
+};
 
 module.exports = {
   createDeviceRateLimiter,

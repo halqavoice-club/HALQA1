@@ -12,6 +12,8 @@ import { Badge } from '@/components/ui/badge'
 import { Modal } from '@/components/ui/modal'
 import { useToast } from '@/components/ui/use-toast'
 import { useAuthStore } from '@/store/auth.store'
+import { useEducationRole } from '@/hooks/useEducationRole'
+import { useSchoolAccess } from '@/hooks/useSchoolAccess'
 import { Megaphone, Plus, Pin, Trash2, Loader2, Calendar } from 'lucide-react'
 import { ErrorState } from '@/components/ui/error-state'
 import { format } from 'date-fns'
@@ -26,6 +28,7 @@ const TARGET_ROLES = [
 
 export default function AnnouncementsPage() {
   const { user } = useAuthStore()
+  const { activeRole } = useSchoolAccess()
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
@@ -62,7 +65,11 @@ export default function AnnouncementsPage() {
     }
   })
 
-  const canCreate = ['SUPER_ADMIN', 'SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '')
+  // SA-ANN-02: SUPER_ADMIN is a platform role — not a school-scoped teacher/admin.
+  // Announcement creation is a school-scoped action (SCHOOL_ADMIN or TEACHER membership role).
+  const canCreate = ['SCHOOL_ADMIN', 'TEACHER'].includes(user?.role || '') || ['SCHOOL_ADMIN','TEACHER'].includes(activeRole || '')
+  const { isTeacher } = useEducationRole()
+  const canCreateAnnouncement = isTeacher
 
   const toggleRole = (role: string) => {
     setForm(f => ({

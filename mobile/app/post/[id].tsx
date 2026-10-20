@@ -1,19 +1,20 @@
-/**
+﻿/**
  * HALQA Mobile — Post Detail Screen v2
  * Full post + infinite-scroll comments with correct API shape.
  * Comments use the same GET /posts/:id/comments endpoint as web.
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import { useState, useRef, useCallback } from 'react';
 import {
   View, Text, Image, StyleSheet, FlatList, TouchableOpacity,
-  TextInput, KeyboardAvoidingView, Platform, ActivityIndicator,
-  RefreshControl, Alert,
-} from 'react-native';
+  TextInput, Platform, ActivityIndicator,
+  RefreshControl, Alert} from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { useQuery, useMutation, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { showMessage } from 'react-native-flash-message';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Video, ResizeMode } from 'expo-av';
 import api from '@/lib/api';
 import { getAvatarUrl, getAvatarInitials, avatarColor } from '@/lib/avatar';
 import { useAuthStore } from '@/store/auth.store';
@@ -142,14 +143,30 @@ function PostHeader({ post, onLike }: { post: Post; onLike: () => void }) {
       {/* Body */}
       {post.body ? <Text style={st.postBody}>{post.body}</Text> : null}
 
-      {/* First media image */}
-      {post.media?.length > 0 && post.media[0].type !== 'VIDEO' && (
-        <Image
-          source={{ uri: post.media[0].url.startsWith('http') ? post.media[0].url : BASE + post.media[0].url }}
-          style={st.postMedia}
-          resizeMode="cover"
-        />
-      )}
+      {/* Media — image or video */}
+      {post.media?.length > 0 && (() => {
+        const first = post.media[0];
+        const url = first.url.startsWith('http') ? first.url : BASE + first.url;
+        if (first.type === 'VIDEO') {
+          return (
+            <Video
+              source={{ uri: url }}
+              style={st.postMedia}
+              resizeMode={ResizeMode.CONTAIN}
+              useNativeControls
+              shouldPlay={false}
+              isLooping={false}
+            />
+          );
+        }
+        return (
+          <Image
+            source={{ uri: url }}
+            style={st.postMedia}
+            resizeMode="cover"
+          />
+        );
+      })()}
 
       {/* Actions */}
       <View style={st.postActions}>
@@ -359,3 +376,8 @@ const st = StyleSheet.create({
   input:         { flex: 1, backgroundColor: '#f3f4f6', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 8, maxHeight: 100, fontSize: 14, color: '#374151' },
   sendBtn:       { width: 36, height: 36, borderRadius: 18, backgroundColor: '#4f46e5', alignItems: 'center', justifyContent: 'center' },
 });
+
+
+
+
+

@@ -17,11 +17,39 @@ import { CreateRoomModal } from '@/components/voice/CreateRoomModal'
 import { EditRoomModal } from '@/components/voice/EditRoomModal'
 import {
   Mic, Plus, Radio, Globe, Lock, UserCheck, Search, X,
-  BarChart2, Settings, Trash2, LogIn, Clock, CheckCircle2
+  BarChart2, Settings, Trash2, LogIn, Clock, CheckCircle2, Loader2
 } from 'lucide-react'
 import Link from 'next/link'
 import { cn } from '@/lib/utils'
 import { EmptyState } from '@/components/ui/empty-state'
+
+// ─── Scheduled Room Countdown ─────────────────────────────────────────────────
+function ScheduledCountdown({ scheduledAt }: { scheduledAt: string }) {
+  const [timeLeft, setTimeLeft] = useState('')
+
+  useEffect(() => {
+    const compute = () => {
+      const diff = new Date(scheduledAt).getTime() - Date.now()
+      if (diff <= 0) { setTimeLeft('Starting now…'); return }
+      const h = Math.floor(diff / 3_600_000)
+      const m = Math.floor((diff % 3_600_000) / 60_000)
+      const s = Math.floor((diff % 60_000) / 1_000)
+      if (h > 0) setTimeLeft(`${h}h ${m}m`)
+      else if (m > 0) setTimeLeft(`${m}m ${s}s`)
+      else setTimeLeft(`${s}s`)
+    }
+    compute()
+    const id = setInterval(compute, 1000)
+    return () => clearInterval(id)
+  }, [scheduledAt])
+
+  return (
+    <span className="text-[11px] font-semibold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full flex items-center gap-1">
+      <Clock className="w-3 h-3" />
+      {timeLeft}
+    </span>
+  )
+}
 
 const PRIVACY_FILTERS = [
   { value: 'all',         label: 'All',         icon: Globe },
@@ -32,9 +60,9 @@ const PRIVACY_FILTERS = [
 
 const STATUS_COLORS: Record<string, string> = {
   LIVE:      'bg-red-100 text-red-600',
-  IDLE:      'bg-gray-100 text-gray-500',
+  IDLE:      'bg-amber-50 text-amber-600',    // Offline/sleeping — can be rejoined
   SCHEDULED: 'bg-blue-100 text-blue-600',
-  ENDED:     'bg-gray-100 text-gray-400',
+  ENDED:     'bg-gray-100 text-gray-400',     // Archived — cannot be rejoined
 }
 
 const STATUS_ICONS: Record<string, React.ElementType> = {
@@ -44,8 +72,17 @@ const STATUS_ICONS: Record<string, React.ElementType> = {
   ENDED:     CheckCircle2,
 }
 
+// Human-readable label — IDLE = "Offline", ENDED = "Archived"
+const STATUS_LABELS: Record<string, string> = {
+  LIVE:      'LIVE',
+  IDLE:      'Offline',
+  SCHEDULED: 'Scheduled',
+  ENDED:     'Archived',
+}
+
 export default function VoiceClubPage() {
   const { user } = useAuthStore()
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN'
   const { toast } = useToast()
   const queryClient = useQueryClient()
   const { activeRoom, setActiveRoom } = useVoiceStore()
@@ -62,6 +99,13 @@ export default function VoiceClubPage() {
   const [deletingId, setDeletingId]     = useState<string | null>(null)
   const [searchQuery, setSearchQuery]   = useState('')
   const debouncedSearch = useDebounce(searchQuery, 350)
+
+  // Active-session conflict state — shown when user tries to join while in another room
+  const [conflictRoom, setConflictRoom] = useState<{
+    id: string; title: string; emoji: string; topic: string | null
+    targetRoomId: string
+  } | null>(null)
+  const [leavingConflict, setLeavingConflict] = useState(false)
 
   // ── Discover query ──────────────────────────────────────────────────────────
   const { data, isLoading, refetch } = useQuery({
@@ -174,9 +218,58 @@ export default function VoiceClubPage() {
 
   // ── Handlers ────────────────────────────────────────────────────────────────
   const handleJoin = async (room: VoiceRoom) => {
+    // SA-VOICE-UI-02: SUPER_ADMIN cannot join voice rooms as participants
+    if (isSuperAdmin) {
+      toast({ title: 'Platform admins cannot join voice rooms. Use the admin panel.', variant: 'destructive' })
+      return
+    }
     setJoiningId(room.id)
     try {
       const res = await api.post(`/voice/${room.id}/join`)
+      setActiveRoom(res.data.data)
+    } catch (e: any) {
+      const code = e?.response?.data?.errors?.code
+      if (code === 'VOICE_ROOM_ALREADY_ACTIVE') {
+        setConflictRoom({
+          id:           e?.response?.data?.errors?.activeRoomId    ?? '',
+          title:        e?.response?.data?.errors?.activeRoomTitle ?? 'another room',
+          emoji:        e?.response?.data?.errors?.activeRoomEmoji ?? '🎙️',
+          topic:        e?.response?.data?.errors?.activeRoomTopic ?? null,
+          targetRoomId: room.id,
+        })
+      } else {
+        toast({ title: e?.response?.data?.message || 'Failed to join room', variant: 'destructive' })
+      }
+    } finally {
+      setJoiningId(null)
+    }
+  }
+
+  // Leave room B then join the intended room
+  const handleLeaveAndJoin = async () => {
+    if (!conflictRoom) return
+    const { id: activeRoomId, targetRoomId } = conflictRoom
+    setLeavingConflict(true)
+
+    // 1. Disconnect LiveKit from room B
+    useVoiceStore.getState()._liveKitDisconnect?.()
+
+    // 2. Leave room B via API
+    try { await api.post(`/voice/${activeRoomId}/leave`) } catch {}
+
+    // 3. Leave Socket.IO room B
+    const socket = getSocket()
+    if (socket) socket.emit('voice:leave_room', activeRoomId)
+
+    // 4. Reset Zustand state
+    resetRoom()
+    setConflictRoom(null)
+    setLeavingConflict(false)
+
+    // 5. Join the target room
+    setJoiningId(targetRoomId)
+    try {
+      const res = await api.post(`/voice/${targetRoomId}/join`)
       setActiveRoom(res.data.data)
     } catch (e: any) {
       toast({ title: e?.response?.data?.message || 'Failed to join room', variant: 'destructive' })
@@ -215,15 +308,17 @@ export default function VoiceClubPage() {
   }
 
   const handleDelete = async (room: VoiceRoom) => {
-    if (!confirm(`Delete "${room.title}"? This cannot be undone.`)) return
+    // Rooms are permanent — "delete" here is an explicit archive action by the owner.
+    // The room is soft-deleted (deletedAt set) and can no longer be joined.
+    if (!confirm(`Archive "${room.title}"?\n\nThis will permanently archive the room. Members can no longer join it. This cannot be undone.`)) return
     setDeletingId(room.id)
     try {
       await api.delete(`/voice/${room.id}`)
       queryClient.invalidateQueries({ queryKey: ['voice-my-rooms'] })
       queryClient.invalidateQueries({ queryKey: ['voice-rooms'] })
-      toast({ title: '🗑️ Room deleted' })
+      toast({ title: '🗄️ Room archived' })
     } catch (e: any) {
-      toast({ title: e?.response?.data?.message || 'Failed to delete room', variant: 'destructive' })
+      toast({ title: e?.response?.data?.message || 'Failed to archive room', variant: 'destructive' })
     } finally {
       setDeletingId(null)
     }
@@ -245,6 +340,48 @@ export default function VoiceClubPage() {
   return (
     <div className="max-w-2xl mx-auto space-y-5">
 
+      {/* ── Active-session conflict dialog ─────────────────────────────────── */}
+      {conflictRoom && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.92 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full max-w-sm bg-white rounded-3xl shadow-2xl overflow-hidden"
+          >
+            <div className="bg-gradient-to-br from-orange-400 to-pink-500 p-6 text-white text-center">
+              <span className="text-4xl">{conflictRoom.emoji}</span>
+              <h2 className="text-lg font-black mt-2">You&apos;re already in a room</h2>
+              <p className="text-white/90 text-sm mt-1 font-semibold">
+                &ldquo;{conflictRoom.title}&rdquo;
+              </p>
+              {conflictRoom.topic && (
+                <p className="text-white/70 text-xs mt-0.5">{conflictRoom.topic}</p>
+              )}
+            </div>
+            <div className="p-6 space-y-3">
+              <p className="text-sm text-gray-600 text-center">
+                Leave <strong className="text-gray-900">&ldquo;{conflictRoom.title}&rdquo;</strong> and join the new room?
+              </p>
+              <button
+                onClick={handleLeaveAndJoin}
+                disabled={leavingConflict}
+                className="w-full flex items-center justify-center gap-2 py-3 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-2xl font-bold text-sm hover:opacity-90 disabled:opacity-60 transition-all"
+              >
+                {leavingConflict ? <Loader2 className="w-4 h-4 animate-spin" /> : <Mic className="w-4 h-4" />}
+                {leavingConflict ? 'Leaving…' : 'Leave & Join'}
+              </button>
+              <button
+                onClick={() => setConflictRoom(null)}
+                disabled={leavingConflict}
+                className="w-full py-3 border border-gray-200 rounded-2xl font-semibold text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-60 transition-all"
+              >
+                Cancel
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2.5">
@@ -263,13 +400,16 @@ export default function VoiceClubPage() {
               <span className="hidden sm:inline">Stats</span>
             </button>
           </Link>
-          <button
-            onClick={() => setShowCreate(true)}
-            className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-xl font-semibold text-sm hover:opacity-90 transition-opacity shadow-md"
-          >
-            <Plus className="w-4 h-4" />
-            Start Room
-          </button>
+          {/* SA-VOICE-UI-01: SUPER_ADMIN cannot create voice rooms — platform admin only */}
+          {!isSuperAdmin && (
+            <button
+              onClick={() => setShowCreate(true)}
+              className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white rounded-xl font-semibold text-sm hover:opacity-90 transition-opacity shadow-md"
+            >
+              <Plus className="w-4 h-4" />
+              Start Room
+            </button>
+          )}
         </div>
       </div>
 
@@ -296,8 +436,7 @@ export default function VoiceClubPage() {
             <span className="ml-1.5 text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-bold">
               {myRooms.filter(r => r.status !== 'ENDED').length}
             </span>
-          )}
-        </button>
+          )}        </button>
       </div>
 
       {/* ── DISCOVER TAB ─────────────────────────────────────────────────────── */}
@@ -341,11 +480,21 @@ export default function VoiceClubPage() {
             </div>
           )}
 
-          {/* Live count */}
+          {/* Joinable room count */}
           {!debouncedSearch && (
             <div className="flex items-center gap-2 text-sm text-gray-500">
               <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
-              <span className="font-semibold text-red-600">{sortedRooms.length} live</span>
+              <span className="font-semibold text-red-600">
+                {sortedRooms.filter(r => r.status === 'LIVE').length} live
+              </span>
+              {sortedRooms.filter(r => r.status === 'IDLE').length > 0 && (
+                <>
+                  <span>·</span>
+                  <span className="font-semibold text-amber-600">
+                    {sortedRooms.filter(r => r.status === 'IDLE').length} offline
+                  </span>
+                </>
+              )}
               <span>rooms</span>
             </div>
           )}
@@ -371,6 +520,14 @@ export default function VoiceClubPage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {sortedRooms.map((room, i) => (
                   <motion.div key={room.id} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.04 }}>
+                    {room.status === 'SCHEDULED' && room.scheduledAt && (
+                      <div className="flex items-center gap-2 mb-1 px-1">
+                        <ScheduledCountdown scheduledAt={room.scheduledAt} />
+                        <span className="text-[11px] text-gray-400">
+                          {new Date(room.scheduledAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                    )}
                     <VoiceRoomCard
                       room={room}
                       onJoin={() => handleJoin(room)}
@@ -402,7 +559,9 @@ export default function VoiceClubPage() {
               {myRooms.map((room, i) => {
                 const StatusIcon = STATUS_ICONS[room.status] ?? Radio
                 const activeCount = room._count?.participants ?? 0
-                const isEnded = room.status === 'ENDED'
+                // Rooms are PERMANENT — ENDED only when explicitly archived (soft-deleted).
+                // IDLE rooms can always be rejoined — they are NOT "ended".
+                const isArchived = room.status === 'ENDED'
                 const isDeleting = deletingId === room.id
 
                 return (
@@ -413,7 +572,7 @@ export default function VoiceClubPage() {
                     transition={{ delay: i * 0.04 }}
                     className={cn(
                       'bg-white rounded-2xl border p-4 transition-all',
-                      isEnded ? 'border-gray-100 opacity-60' : 'border-gray-100 hover:border-purple-200 hover:shadow-sm'
+                      isArchived ? 'border-gray-100 opacity-60' : 'border-gray-100 hover:border-purple-200 hover:shadow-sm'
                     )}
                   >
                     <div className="flex items-start gap-3">
@@ -426,8 +585,11 @@ export default function VoiceClubPage() {
                           <h3 className="font-semibold text-gray-900 text-sm truncate">{room.title}</h3>
                           <span className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1', STATUS_COLORS[room.status])}>
                             <StatusIcon className="w-2.5 h-2.5" />
-                            {room.status}
+                            {STATUS_LABELS[room.status] ?? room.status}
                           </span>
+                          {room.status === 'SCHEDULED' && room.scheduledAt && (
+                            <ScheduledCountdown scheduledAt={room.scheduledAt} />
+                          )}
                         </div>
                         {room.topic && (
                           <p className="text-xs text-gray-400 mt-0.5 truncate">{room.topic}</p>
@@ -443,8 +605,8 @@ export default function VoiceClubPage() {
 
                       {/* Actions */}
                       <div className="flex items-center gap-1.5 flex-shrink-0">
-                        {/* Enter / Rejoin */}
-                        {!isEnded && (
+                        {/* Enter / Rejoin — IDLE rooms can always be entered (permanent) */}
+                        {!isArchived && (
                           <button
                             onClick={() => handleJoin(room)}
                             disabled={joiningId === room.id}
@@ -456,7 +618,7 @@ export default function VoiceClubPage() {
                         )}
 
                         {/* Edit */}
-                        {!isEnded && (
+                        {!isArchived && (
                           <button
                             onClick={() => setEditRoom(room)}
                             className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition-colors"
@@ -466,12 +628,12 @@ export default function VoiceClubPage() {
                           </button>
                         )}
 
-                        {/* Delete */}
+                        {/* Archive (soft-delete) — shown for all rooms including IDLE */}
                         <button
                           onClick={() => handleDelete(room)}
                           disabled={isDeleting}
                           className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
-                          title="Delete room"
+                          title="Archive room (permanent)"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>

@@ -6,15 +6,23 @@
 
 const express = require('express');
 const router = express.Router();
-const { authenticate } = require('../middleware/auth.middleware');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
 const ipAllowlist = require('../middleware/ipAllowlist');
 const backupController = require('../controllers/backup.controller');
 
 // Restrict to IP allowlist before any other checks (Requirements: 10.1, 10.2)
 router.use(ipAllowlist);
 
-// All routes require authentication
+// Layer 1: Authentication — valid JWT required
 router.use(authenticate);
+
+// Layer 2: Authorization — SUPER_ADMIN only
+// SEC-CRIT-001 FIX: Backup metadata contains file paths, checksums, and
+// storage locations. Any authenticated user could previously enumerate these,
+// delete records, or trigger backup pruning. Backup management is a
+// platform-level operation — restricted to SUPER_ADMIN (platform administrators)
+// only, matching the access model used by /api/v1/internal and /api/v1/admin/stats.
+router.use(authorize('SUPER_ADMIN'));
 
 /**
  * @route   POST /api/v1/backups

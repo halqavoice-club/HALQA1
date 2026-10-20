@@ -1,18 +1,20 @@
+'use strict';
 const router = require('express').Router();
 const { body } = require('express-validator');
 const validate = require('../middleware/validate');
-const { authenticate, authorize } = require('../middleware/auth.middleware');
+const { authenticate } = require('../middleware/auth.middleware');
+const { eduMember, eduAdmin } = require('../middleware/educationAuth');
 const prisma = require('../utils/prisma');
-const XLSX = require('xlsx');
+const { buildWorkbook } = require('../utils/excel');
 const { successResponse, errorResponse, paginatedResponse, getPagination, buildPaginationMeta } = require('../utils/response');
 
 router.use(authenticate);
 
-// List fees
-router.get('/', async (req, res, next) => {
+// List fees — school members can view (students/guardians see own; admins see all)
+router.get('/', ...eduMember, async (req, res, next) => {
   try {
     const { search, status, studentId, page = 1, limit = 50 } = req.query;
-    const schoolId = req.user.schoolId;
+    const schoolId = req.schoolId || req.user.schoolId;
     const { skip, ...pagination } = getPagination(page, limit);
 
     const where = { schoolId: schoolId || undefined };
@@ -60,9 +62,9 @@ router.get('/', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-// Create fee
+// Create fee — admin only
 router.post('/',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
+  ...eduAdmin,
   [
     body('studentId').notEmpty(),
     body('amount').isFloat({ min: 0 }),
@@ -72,11 +74,23 @@ router.post('/',
   async (req, res, next) => {
     try {
       const { studentId, amount, description, dueDate, feeType } = req.body;
-      const schoolId = req.user.schoolId;
+      const schoolId = req.schoolId || req.user.schoolId;
 
       // Auto-mark overdue if due date is in the past
       let status = 'PENDING';
       if (dueDate && new Date(dueDate) < new Date()) status = 'OVERDUE';
+
+      // Dedup guard: prevent duplicate active fees of same type for same student
+      const existingFee = await prisma.feeRecord.findFirst({
+        where: {
+          studentId,
+          feeType,
+          status: { in: ['PENDING', 'OVERDUE'] }
+        }
+      });
+      if (existingFee) {
+        return errorResponse(res, `An active ${feeType} fee already exists for this student`, 409);
+      }
 
       const fee = await prisma.feeRecord.create({
         data: {
@@ -99,10 +113,8 @@ router.post('/',
   }
 );
 
-// Mark as paid (admin manual)
-router.put('/:id/pay',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
-  async (req, res, next) => {
+// Mark as paid — admin
+router.put('/:id/pay', ...eduAdmin, async (req, res, next) => {
     try {
       const fee = await prisma.feeRecord.update({
         where: { id: req.params.id },
@@ -110,8 +122,7 @@ router.put('/:id/pay',
       });
       return successResponse(res, fee, 'Marked as paid');
     } catch (error) { next(error); }
-  }
-);
+});
 
 // ─── POST /fees/:id/checkout — Pay fee via Stripe Checkout ────────────────────
 // Creates a Stripe Checkout session for a specific fee record.
@@ -138,8 +149,10 @@ router.post('/:id/checkout', async (req, res, next) => {
     if (fee.status === 'PAID') return errorResponse(res, 'This fee has already been paid', 400);
     if (fee.status === 'WAIVED') return errorResponse(res, 'This fee has been waived', 400);
 
-    // Authorization: school admin or the student's guardian
-    const isAdmin    = ['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(req.user.role);
+    // Authorization: school admin (via SchoolMembership) or the student's guardian.
+    // SA-FEE-01: SUPER_ADMIN platform role does NOT grant school-level fee administration.
+    // Fee payment is a school-scoped action — use SchoolMembership role, not User.role.
+    const isAdmin    = req.schoolMembership?.role === 'SCHOOL_ADMIN' || req.schoolMembership?.role === 'SUPER_ADMIN';
     const isGuardian = fee.student?.guardianLinks?.some(gl => gl.guardian?.userId === req.user.id);
     if (!isAdmin && !isGuardian) {
       return errorResponse(res, 'Not authorized to pay this fee', 403);
@@ -192,10 +205,8 @@ router.post('/:id/checkout', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-// Waive fee
-router.put('/:id/waive',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
-  async (req, res, next) => {
+// Waive fee — admin
+router.put('/:id/waive', ...eduAdmin, async (req, res, next) => {
     try {
       const fee = await prisma.feeRecord.update({
         where: { id: req.params.id },
@@ -203,26 +214,20 @@ router.put('/:id/waive',
       });
       return successResponse(res, fee, 'Fee waived');
     } catch (error) { next(error); }
-  }
-);
+});
 
-// Delete fee
-router.delete('/:id',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
-  async (req, res, next) => {
+// Delete fee — admin
+router.delete('/:id', ...eduAdmin, async (req, res, next) => {
     try {
       await prisma.feeRecord.delete({ where: { id: req.params.id } });
       return successResponse(res, null, 'Fee deleted');
     } catch (error) { next(error); }
-  }
-);
+});
 
-// Export fees to Excel
-router.get('/export',
-  authorize('SUPER_ADMIN', 'SCHOOL_ADMIN'),
-  async (req, res, next) => {
+// Export fees — admin
+router.get('/export', ...eduAdmin, async (req, res, next) => {
     try {
-      const schoolId = req.user.schoolId;
+      const schoolId = req.schoolId || req.user.schoolId;
       const fees = await prisma.feeRecord.findMany({
         where: { schoolId: schoolId || undefined },
         include: {
@@ -231,7 +236,7 @@ router.get('/export',
         orderBy: { createdAt: 'desc' }
       });
 
-      const data = fees.map(f => ({
+      const ws_data = fees.map(f => ({
         'Student': `${f.student?.user?.firstName} ${f.student?.user?.lastName}`,
         'Fee Type': f.feeType,
         'Description': f.description || '',
@@ -242,16 +247,11 @@ router.get('/export',
         'Created': new Date(f.createdAt).toISOString().split('T')[0]
       }));
 
-      const ws = XLSX.utils.json_to_sheet(data);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Fees');
-      ws['!cols'] = Object.keys(data[0] || {}).map(k => ({ wch: Math.max(k.length + 2, 15) }));
-      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      const buffer = await buildWorkbook(ws_data, 'Fees');
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename=fees-${Date.now()}.xlsx`);
       return res.send(buffer);
     } catch (error) { next(error); }
-  }
-);
+});
 
 module.exports = router;

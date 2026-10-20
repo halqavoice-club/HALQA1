@@ -1,6 +1,7 @@
 {
   "watch": ["src", "prisma/schema.prisma"],
   "ext": "js,json,prisma",
+  "exec": "node --max-old-space-size=512 --expose-gc",
   "ignore": [
     "node_modules/**",
     "logs/**",

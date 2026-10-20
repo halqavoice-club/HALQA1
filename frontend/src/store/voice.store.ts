@@ -18,11 +18,13 @@ export interface VoiceParticipant {
   userId: string
   role: VoiceParticipantRole
   isMuted: boolean
+  mutedByModerator: boolean   // when true, user cannot unmute themselves
   handRaised: boolean
   handRaisedAt: string | null
   joinedAt: string
   isActive: boolean
   isPinned: boolean
+  seatNumber: number | null   // 1–12 when on stage; null when in audience (authoritative)
   user: VoiceUser
 }
 
@@ -37,6 +39,7 @@ export interface VoiceRoom {
   maxSpeakers: number
   isOpenMic: boolean
   micLocked: boolean
+  lockedSeats: number[]   // individual seat indices locked by host
   coverEmoji: string
   coverImageUrl?: string | null
   topic: string | null
@@ -44,6 +47,8 @@ export interface VoiceRoom {
   endedAt: string | null
   scheduledAt: string | null
   createdAt: string
+  // Room-wide mute policy (DEF-001)
+  allMuted: boolean
   // Comment settings
   commentsEnabled: boolean
   slowMode: boolean
@@ -163,6 +168,7 @@ interface VoiceState {
   messages: VoiceMessage[]
   addMessage: (msg: VoiceMessage) => void
   setMessages: (msgs: VoiceMessage[]) => void
+  removeMessage: (msgId: string) => void
 
   // Speaking indicators — plain object for Zustand compatibility
   speakingUsers: Record<string, boolean>
@@ -232,6 +238,54 @@ interface VoiceState {
 
   // Reset all room-scoped state (call on unmount of voice room page)
   resetRoom: () => void
+
+  // LiveKit disconnect ref — set by VoiceRoomView so any page can trigger full teardown
+  _liveKitDisconnect: (() => void) | null
+  registerLiveKitDisconnect: (fn: () => void) => void
+  clearLiveKitDisconnect: () => void
+
+  // Pre-join sync buffer — holds voice:stage_state events that arrive during
+  // the race window between POST /join and useVoiceRoom mounting its listener.
+  // The early listener in page.tsx pushes here; useVoiceRoom drains on mount.
+  pendingSyncEvents: Array<{
+    roomId: string
+    stageParticipants: Array<{
+      userId: string; role: string; isMuted: boolean; seatNumber: number | null
+      isPinned: boolean; handRaised: boolean; mutedByModerator: boolean
+      joinedAt: string; firstName?: string | null; lastName?: string | null; avatarUrl?: string | null
+    }>
+    stageCount: number
+  }>
+  pushSyncEvent: (e: VoiceState['pendingSyncEvents'][number]) => void
+  drainSyncEvents: () => VoiceState['pendingSyncEvents']
+
+  // Early-buffer: voice:user_joined events that arrive before useVoiceRoom mounts
+  // (max 20 entries — oldest discarded). Drained by useVoiceRoom after all listeners registered.
+  pendingUserJoinedEvents: Array<{
+    roomId: string; userId: string; firstName: string; lastName: string
+    avatarUrl: string | null; role: string; isMuted?: boolean
+    mutedByModerator?: boolean; handRaised?: boolean; handRaisedAt?: string
+    isPinned?: boolean; seatNumber?: number | null; joinedAt?: string
+  }>
+  pushUserJoinedEvent: (e: VoiceState['pendingUserJoinedEvents'][number]) => void
+  drainUserJoinedEvents: () => VoiceState['pendingUserJoinedEvents']
+
+  // Early-buffer: voice:queue_updated events — only the last snapshot is kept
+  // because queue snapshots supersede each other.
+  pendingQueueUpdatedEvents: Array<{
+    roomId: string
+    queue: Array<{ userId: string; firstName: string; lastName: string; avatarUrl: string | null; raisedAt: string }>
+    queueLength: number
+  }>
+  pushQueueUpdatedEvent: (e: VoiceState['pendingQueueUpdatedEvents'][number]) => void
+  drainQueueUpdatedEvents: () => VoiceState['pendingQueueUpdatedEvents']
+
+  // Flag: true while page.tsx early handlers are the active listeners.
+  // useVoiceRoom sets this to false before draining the buffers so that
+  // any events arriving in the sub-ms drain gap are handled by useVoiceRoom's
+  // own registered listeners, not buffered again — preventing double-processing.
+  earlyBufferActive: boolean
+  deactivateEarlyBuffer: () => void
 }
 
 export const useVoiceStore = create<VoiceState>((set, get) => ({
@@ -254,6 +308,16 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     giftLeaderboard: [],
     // NOTE: wallet is intentionally NOT reset here — coins persist across room changes
     // and are refreshed by useVoiceRoom on mount
+    // FIX (GAP-005): re-arm the early buffer when clearing the active room so
+    // that re-joining (e.g. after kick/ban/room-end without navigating away)
+    // correctly buffers voice:user_joined and voice:queue_updated events that
+    // arrive during the race window before useVoiceRoom mounts its listeners.
+    ...(room === null && {
+      earlyBufferActive: true,
+      pendingSyncEvents: [],
+      pendingUserJoinedEvents: [],
+      pendingQueueUpdatedEvents: [],
+    }),
   }),
 
   updateRoom: (updates) => {
@@ -289,19 +353,30 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         }
       })
     } else {
-      set({ activeRoom: { ...room, participants: [...room.participants, participant] } })
+      // SEAT SYNC FIX: Insert in deterministic sorted position (role asc, joinedAt asc)
+      // instead of appending to end, so all clients see the same seat layout
+      // immediately without waiting for a full room state resync.
+      const ROLE_ORDER: Record<string, number> = { HOST: 0, MODERATOR: 1, SPEAKER: 2, AUDIENCE: 3 }
+      const newList = [...room.participants, participant].sort((a, b) => {
+        const roleDiff = (ROLE_ORDER[a.role] ?? 9) - (ROLE_ORDER[b.role] ?? 9)
+        if (roleDiff !== 0) return roleDiff
+        return (a.joinedAt ?? '').localeCompare(b.joinedAt ?? '')
+      })
+      set({ activeRoom: { ...room, participants: newList } })
     }
   },
 
   removeParticipant: (userId) => {
     const room = get().activeRoom
     if (!room) return
+    // STEP-5 FIX: Remove participant entirely (aligned with mobile behavior).
+    // Previously this marked isActive:false and kept the entry; mobile filtered
+    // it out entirely. Using filter on both platforms ensures clean state and
+    // avoids stale inactive entries accumulating on long sessions.
     set({
       activeRoom: {
         ...room,
-        participants: room.participants.map(p =>
-          p.userId === userId ? { ...p, isActive: false } : p
-        )
+        participants: room.participants.filter(p => p.userId !== userId)
       }
     })
   },
@@ -309,6 +384,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   messages: [],
   addMessage: (msg) => set(s => ({ messages: [...s.messages, msg] })),
   setMessages: (msgs) => set({ messages: msgs }),
+  removeMessage: (msgId) => set(s => ({ messages: s.messages.filter(m => m.id !== msgId) })),
 
   speakingUsers: {},
   setSpeaking: (userId, speaking) => {
@@ -394,5 +470,70 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     isChatOpen: false,
     isHandQueueOpen: false,
     isWaitingListOpen: false,
+    pendingSyncEvents: [],
+    pendingUserJoinedEvents: [],
+    pendingQueueUpdatedEvents: [],
+    earlyBufferActive: true,  // re-arm for next room join
   }),
+
+  // ─── Pre-join sync buffer ─────────────────────────────────────────────────
+  // voice:stage_state events that arrive between POST /join and the full
+  // useVoiceRoom listener mount are buffered here (max 5, oldest discarded).
+  // useVoiceRoom drains this buffer after registering all listeners.
+  pendingSyncEvents: [],
+  pushSyncEvent: (e) => set(s => ({
+    pendingSyncEvents: [...s.pendingSyncEvents.slice(-4), e],
+  })),
+  drainSyncEvents: () => {
+    const events = get().pendingSyncEvents
+    set({ pendingSyncEvents: [] })
+    return events
+  },
+
+  // ─── Early-buffer: voice:user_joined ─────────────────────────────────────
+  // Holds user_joined events that arrive before useVoiceRoom mounts its
+  // listener. Max 50 entries (oldest discarded). Drained on mount.
+  pendingUserJoinedEvents: [],
+  pushUserJoinedEvent: (e) => set(s => {
+    // Stop buffering once useVoiceRoom has taken over — events arriving
+    // after deactivateEarlyBuffer() was called will be handled by
+    // useVoiceRoom's own registered listeners directly.
+    if (!s.earlyBufferActive) return s
+    return { pendingUserJoinedEvents: [...s.pendingUserJoinedEvents.slice(-49), e] }
+  }),
+  drainUserJoinedEvents: () => {
+    const events = get().pendingUserJoinedEvents
+    set({ pendingUserJoinedEvents: [] })
+    return events
+  },
+
+  // ─── Early-buffer: voice:queue_updated ───────────────────────────────────
+  // Only the latest queue snapshot is kept because snapshots supersede each
+  // other. Drained on mount.
+  pendingQueueUpdatedEvents: [],
+  pushQueueUpdatedEvent: (e) => set(s => {
+    if (!s.earlyBufferActive) return s
+    return { pendingQueueUpdatedEvents: [e] } // only keep the latest snapshot
+  }),
+  drainQueueUpdatedEvents: () => {
+    const events = get().pendingQueueUpdatedEvents
+    set({ pendingQueueUpdatedEvents: [] })
+    return events
+  },
+
+  // ─── Early-buffer active flag ────────────────────────────────────────────
+  // Starts true (page.tsx registers early handlers before user clicks Join).
+  // useVoiceRoom calls deactivateEarlyBuffer() before draining, so any events
+  // that arrive in the sub-ms drain gap go to useVoiceRoom's own listeners
+  // instead of being buffered and processed twice.
+  earlyBufferActive: true,
+  deactivateEarlyBuffer: () => set({ earlyBufferActive: false }),
+
+  // ─── LiveKit disconnect ref ───────────────────────────────────────────────
+  // VoiceRoomView registers its disconnect() here so that any page (e.g. the
+  // join page for a different room) can fully tear down the active LiveKit
+  // session before switching rooms.
+  _liveKitDisconnect: null,
+  registerLiveKitDisconnect: (fn) => set({ _liveKitDisconnect: fn }),
+  clearLiveKitDisconnect: () => set({ _liveKitDisconnect: null }),
 }))

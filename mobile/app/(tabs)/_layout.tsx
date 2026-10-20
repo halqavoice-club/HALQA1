@@ -1,15 +1,18 @@
 /**
- * HALQA Mobile — Bottom Tab Navigator
+ * HALQA Mobile ΓÇö Bottom Tab Navigator
+ * Tabs: Feed | Voice | Live | Friend | My School | More
  * Fixed: uses useSafeAreaInsets for dynamic bottom padding
  * Fixed: disables system font scaling on tab labels
  */
 import { Tabs, Redirect } from 'expo-router';
 import { useAuthStore } from '@/store/auth.store';
 import { useVoiceStore } from '@/store/voice.store';
-import { useQueryClient } from '@tanstack/react-query';
+import { useNotificationsStore } from '@/store/notifications.store';
+import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { View, Text, StyleSheet, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import api from '@/lib/api';
 
 function TabIcon({ name, focused, badge, liveIndicator }: { name: any; focused: boolean; badge?: number; liveIndicator?: boolean }) {
   return (
@@ -33,6 +36,18 @@ function TabIcon({ name, focused, badge, liveIndicator }: { name: any; focused: 
 export default function TabLayout() {
   const { isAuthenticated } = useAuthStore();
   const { activeRoomId } = useVoiceStore();
+  const { unreadCount: notifBadge } = useNotificationsStore();
+  // Friend request pending count ΓÇö lightweight poll every 60s
+  const { data: friendRequestsData } = useQuery({
+    queryKey: ['friend-requests-count'],
+    queryFn: () => api.get('/social/friends/requests').then(r => {
+      const data = r.data.data;
+      return Array.isArray(data) ? data.length : (data?.count ?? 0);
+    }),
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+  });
+  const friendBadge: number = friendRequestsData ?? 0;
   const queryClient = useQueryClient();
   const insets = useSafeAreaInsets();
 
@@ -75,18 +90,12 @@ export default function TabLayout() {
         },
       }}
     >
+      {/* ΓöÇΓöÇ Primary visible tabs: Feed | Voice | Live | Friend | My School | More ΓöÇΓöÇ */}
       <Tabs.Screen
         name="feed"
         options={{
           title: 'Feed',
-          tabBarIcon: ({ focused }) => <TabIcon name={focused ? 'home' : 'home-outline'} focused={focused} />,
-        }}
-      />
-      <Tabs.Screen
-        name="explore"
-        options={{
-          title: 'Explore',
-          tabBarIcon: ({ focused }) => <TabIcon name={focused ? 'compass' : 'compass-outline'} focused={focused} />,
+          tabBarIcon: ({ focused }) => <TabIcon name={focused ? 'newspaper' : 'newspaper-outline'} focused={focused} />,
         }}
       />
       <Tabs.Screen
@@ -103,16 +112,9 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="chat"
-        options={{
-          title: 'Chat',
-          tabBarIcon: ({ focused }) => <TabIcon name={focused ? 'chatbubbles' : 'chatbubbles-outline'} focused={focused} />,
-        }}
-      />
-      <Tabs.Screen
         name="live-class"
         options={{
-          title: 'Classes',
+          title: 'Live',
           tabBarIcon: ({ focused }) => (
             <TabIcon
               name={focused ? 'videocam' : 'videocam-outline'}
@@ -123,16 +125,48 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="profile"
+        name="friend"
         options={{
-          title: 'Profile',
-          tabBarIcon: ({ focused }) => <TabIcon name={focused ? 'person' : 'person-outline'} focused={focused} />,
+          title: 'Friend',
+          tabBarIcon: ({ focused }) => (
+            <TabIcon
+              name={focused ? 'people' : 'people-outline'}
+              focused={focused}
+              badge={friendBadge > 0 ? friendBadge : undefined}
+            />
+          ),
         }}
       />
-      {/* Hidden tabs — navigated to programmatically */}
+      <Tabs.Screen
+        name="my-school"
+        options={{
+          title: 'My School',
+          tabBarIcon: ({ focused }) => (
+            <TabIcon name={focused ? 'school' : 'school-outline'} focused={focused} />
+          ),
+        }}
+      />
+      {/* ── Reels replaces More in the tab bar — More is still reachable programmatically ── */}
+      <Tabs.Screen
+        name="reels-tab"
+        options={{
+          title: 'Reels',
+          href: '/reels',
+          tabBarIcon: ({ focused }) => (
+            <TabIcon name={focused ? 'play-circle' : 'play-circle-outline'} focused={focused} />
+          ),
+        }}
+      />
+
+      {/* ── Hidden tabs ── navigated to programmatically or from More screen ── */}
+      <Tabs.Screen name="explore"       options={{ href: null }} />
+      <Tabs.Screen name="chat"          options={{ href: null }} />
       <Tabs.Screen name="communities"   options={{ href: null }} />
       <Tabs.Screen name="wallet"        options={{ href: null }} />
       <Tabs.Screen name="notifications" options={{ href: null }} />
+      <Tabs.Screen name="profile"       options={{ href: null }} />
+      {/* More screen still accessible as a stack push from Feed header or deep link */}
+      <Tabs.Screen name="more"          options={{ href: null }} />
     </Tabs>
   );
 }

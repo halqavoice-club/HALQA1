@@ -1,11 +1,11 @@
-/**
+﻿/**
  * HALQA Mobile — Register Screen
  */
+import KeyboardAvoidingView from '@/components/KeyboardAvoidingView';
 import React, { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
-  KeyboardAvoidingView, Platform, ScrollView, ActivityIndicator,
-} from 'react-native';
+  Platform, ScrollView, ActivityIndicator} from 'react-native';
 import { useRouter, Link } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { showMessage } from 'react-native-flash-message';
@@ -185,3 +185,8 @@ const styles = StyleSheet.create({
   loginLink: { color: '#4f46e5', fontWeight: '700', fontSize: 14 },
   terms: { textAlign: 'center', color: '#9ca3af', fontSize: 12, lineHeight: 18 },
 });
+
+
+
+
+

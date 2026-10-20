@@ -18,7 +18,9 @@ test.describe('Voice Club', () => {
       process.env.E2E_TEST_PASSWORD || 'Test1234!'
     );
     await page.locator('button[type="submit"]').first().click();
-    await page.waitForURL(/dashboard|voice-club|home/, { timeout: 15000 });
+    // Wait until we have navigated away from /login — different roles land on
+    // different routes (/feed, /admin, /dashboard) so we match any non-login URL.
+    await page.waitForURL(url => !url.pathname.includes('/login'), { timeout: 15000 });
   });
 
   test('voice room list loads and shows rooms or empty state', async ({ page }) => {

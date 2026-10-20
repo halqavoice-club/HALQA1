@@ -35,11 +35,13 @@ function getMessaging() {
   if (_initFailed)  return null;
 
   try {
-    const admin = require('firebase-admin');
+    // firebase-admin v14 uses modular imports
+    const { initializeApp, getApps, cert } = require('firebase-admin/app');
+    const { getMessaging: fbGetMessaging }  = require('firebase-admin/messaging');
 
     // Avoid double-initialisation if module is required multiple times
-    const app = admin.apps.length
-      ? admin.apps[0]
+    const app = getApps().length
+      ? getApps()[0]
       : (() => {
           let credential;
 
@@ -47,11 +49,11 @@ function getMessaging() {
           const saJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
           if (saJson) {
             const parsed = JSON.parse(Buffer.from(saJson, 'base64').toString('utf8'));
-            credential   = admin.credential.cert(parsed);
+            credential   = cert(parsed);
           }
           // Option 2: individual env vars
           else if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
-            credential = admin.credential.cert({
+            credential = cert({
               projectId:   process.env.FIREBASE_PROJECT_ID,
               clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
               // Private key in .env often has literal \n — convert to real newlines
@@ -64,12 +66,12 @@ function getMessaging() {
             return null;
           }
 
-          return admin.initializeApp({ credential });
+          return initializeApp({ credential });
         })();
 
     if (!app) { _initFailed = true; _initialized = true; return null; }
 
-    _messaging   = admin.messaging();
+    _messaging   = fbGetMessaging();
     _initialized = true;
     logger.info('[push] ✅ Firebase Admin initialized — push notifications enabled');
     return _messaging;

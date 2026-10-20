@@ -32,7 +32,7 @@ async function setDashCache(key, data) {
 
 async function getAdminDashboard(req, res, next) {
   try {
-    const schoolId = req.user.schoolId;
+    const schoolId = (req.schoolId || req.user.schoolId);
 
     // PERF-001: Return cached result if available (5-min TTL)
     const cacheKey = dashCacheKey('admin', req.user.id, schoolId);
@@ -146,7 +146,7 @@ async function getAdminDashboard(req, res, next) {
 async function getTeacherDashboard(req, res, next) {
   try {
     // PERF-001: Cache per teacher
-    const cacheKey = dashCacheKey('teacher', req.user.id, req.user.schoolId);
+    const cacheKey = dashCacheKey('teacher', req.user.id, (req.schoolId || req.user.schoolId));
     const cached = await getDashCache(cacheKey);
     if (cached) return successResponse(res, cached, 'Teacher dashboard fetched');
 
@@ -230,7 +230,7 @@ async function getTeacherDashboard(req, res, next) {
 async function getStudentDashboard(req, res, next) {
   try {
     // PERF-001: Cache per student
-    const cacheKey = dashCacheKey('student', req.user.id, req.user.schoolId);
+    const cacheKey = dashCacheKey('student', req.user.id, (req.schoolId || req.user.schoolId));
     const cached = await getDashCache(cacheKey);
     if (cached) return successResponse(res, cached, 'Student dashboard fetched');
 
@@ -315,7 +315,7 @@ async function getStudentDashboard(req, res, next) {
 async function getGuardianDashboard(req, res, next) {
   try {
     // PERF-001: Cache per guardian
-    const cacheKey = dashCacheKey('guardian', req.user.id, req.user.schoolId);
+    const cacheKey = dashCacheKey('guardian', req.user.id, (req.schoolId || req.user.schoolId));
     const cached = await getDashCache(cacheKey);
     if (cached) return successResponse(res, cached, 'Guardian dashboard fetched');
 

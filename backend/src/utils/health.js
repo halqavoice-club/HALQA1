@@ -16,7 +16,7 @@
  */
 
 const prisma = require('./prisma');
-const { isRedisReady, getRedis } = require('./redis');
+const redisModule = require('./redis');
 const logger = require('./logger');
 
 let isStartupComplete = false;
@@ -105,15 +105,20 @@ async function startup(req, res) {
  */
 async function detailed(req, res) {
   const checks = {
-    database: await checkDatabase(),
-    redis: await checkRedis(),
+    database:       await checkDatabase(),
+    redis:          await checkRedis(),
+    livekit:        await checkLiveKit(),
     circuitBreakers: checkCircuitBreakers(),
-    memory: checkMemory(),
-    disk: await checkDisk(),
-    eventLoop: checkEventLoop()
+    memory:         checkMemory(),
+    disk:           await checkDisk(),
+    eventLoop:      await checkEventLoop()
   };
 
-  const allHealthy = Object.values(checks).every(c => c.status === 'ok');
+  // livekit 'not_configured' is not a health failure — it means the feature is
+  // disabled, not broken. Treat it the same as 'ok' for overall status.
+  const allHealthy = Object.values(checks).every(
+    c => c.status === 'ok' || c.status === 'not_configured'
+  );
   const overallStatus = allHealthy ? 'healthy' : 'degraded';
 
   const response = {
@@ -126,6 +131,43 @@ async function detailed(req, res) {
   };
 
   res.status(allHealthy ? 200 : 503).json(response);
+}
+
+/**
+ * Check LiveKit server connectivity
+ * Returns ok/error with latency so load balancers know when voice features are down.
+ */
+async function checkLiveKit() {
+  const start = Date.now();
+  const livekitUrl = process.env.LIVEKIT_URL;
+
+  if (!livekitUrl) {
+    return { status: 'not_configured', message: 'LIVEKIT_URL is not set' };
+  }
+
+  try {
+    // Convert wss:// → https:// for a simple HTTP connectivity probe
+    const httpUrl = livekitUrl.replace(/^wss?:\/\//, 'https://');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+
+    const res = await fetch(`${httpUrl}/`, {
+      method:  'GET',
+      signal:  controller.signal,
+      headers: { 'User-Agent': 'halqa-health-check/1.0' },
+    }).catch(() => null);
+
+    clearTimeout(timeout);
+
+    // LiveKit returns 400/426 on bare HTTP — that means it's reachable
+    const latencyMs = Date.now() - start;
+    const reachable = res && (res.status < 500 || res.status === 400 || res.status === 426);
+    return reachable
+      ? { status: 'ok',    latencyMs }
+      : { status: 'error', latencyMs, message: `LiveKit returned HTTP ${res?.status ?? 'no response'}` };
+  } catch (err) {
+    return { status: 'error', latencyMs: Date.now() - start, message: err.message };
+  }
 }
 
 /**
@@ -155,14 +197,14 @@ async function checkDatabase() {
 async function checkRedis() {
   const start = Date.now();
   try {
-    if (!isRedisReady()) {
+    if (!redisModule.isRedisReady()) {
       return {
         status: 'disconnected',
         error: 'Redis not ready'
       };
     }
 
-    await getRedis().ping();
+    await redisModule.getRedis().ping();
     return {
       status: 'ok',
       latencyMs: Date.now() - start
@@ -330,6 +372,7 @@ module.exports = {
   requireHealthy,
   checkDatabase,
   checkRedis,
+  checkLiveKit,
   checkMemory,
   checkEventLoop
 };

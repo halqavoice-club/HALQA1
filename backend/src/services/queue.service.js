@@ -1,3 +1,4 @@
+// @ts-nocheck
 const { Queue, Worker, QueueEvents } = require('bullmq');
 const { getBullMQConnection } = require('../utils/redis');
 const logger = require('../utils/logger');
@@ -6,16 +7,20 @@ let queues  = {};
 let workers = {};
 
 const QUEUE_NAMES = {
-  EMAIL:             'email',
-  NOTIFICATIONS:     'notifications',
-  REPORTS:           'reports',
-  ATTENDANCE_ALERTS: 'attendance-alerts',
-  CLEANUP:           'cleanup',
-  STORAGE_CLEANUP:   'storage-cleanup',   // orphaned R2 file removal
-  SOCIAL_CLEANUP:    'social-cleanup',    // Phase B-3/B-6: expire stories + creator subs
-  VIEW_AGGREGATION:  'view-aggregation',  // H7: aggregate PostView rows into Post.viewCount
-  AUDIT_ARCHIVE:     'audit-archive',     // H10: archive old audit_logs to prevent unbounded growth
-  POST_SCHEDULER:    'post-scheduler',    // L3: publish scheduled posts at scheduledAt time
+  EMAIL:                'email',
+  NOTIFICATIONS:        'notifications',
+  REPORTS:              'reports',
+  ATTENDANCE_ALERTS:    'attendance-alerts',
+  CLEANUP:              'cleanup',
+  STORAGE_CLEANUP:      'storage-cleanup',
+  SOCIAL_CLEANUP:       'social-cleanup',
+  VIEW_AGGREGATION:     'view-aggregation',
+  AUDIT_ARCHIVE:        'audit-archive',
+  POST_SCHEDULER:       'post-scheduler',
+  ROOM_REMINDERS:       'room-reminders',         // Push notifications for scheduled voice rooms
+  LIVE_CLASS_AUTOEND:   'live-class-autoend',     // Sprint 3: durable auto-end for duration-limited classes
+  ECONOMY_RECONCILIATION: 'economy-reconciliation', // Task 12.2: daily wallet/ledger balance check
+  VOICE_ROOM_SLEEP:       'voice-room-sleep',       // Durable HOST-left grace period (replaces setTimeout)
 };
 
 /**
@@ -86,7 +91,12 @@ function startWorkers() {
     createReportWorker,
     createCleanupWorker,
     createStorageWorker,
-    createPostSchedulerWorker
+    createPostSchedulerWorker,
+    createRoomReminderWorker,
+    createLiveClassAutoEndWorker,
+    createEconomyReconciliationWorker,
+    createVoiceStaleSessionWorker,
+    createVoiceRoomSleepWorker,
   } = require('../workers');
 
   workers.email          = createEmailWorker(connection);
@@ -95,6 +105,19 @@ function startWorkers() {
   workers.cleanup        = createCleanupWorker(connection);
   workers.storageCleanup = createStorageWorker(connection);
   workers.postScheduler  = createPostSchedulerWorker(connection);
+  workers.roomReminders  = createRoomReminderWorker(connection);
+  workers.liveClassAutoEnd = createLiveClassAutoEndWorker(connection);
+
+  // Economy reconciliation — read-only daily wallet/ledger balance check
+  workers.economyReconciliation = createEconomyReconciliationWorker(connection);
+
+  // Voice stale-session worker — marks orphaned voiceParticipant records inactive
+  // every 10 minutes, preventing stale isActive=true records from blocking joins.
+  workers.voiceStaleSession = createVoiceStaleSessionWorker(connection);
+
+  // Voice room sleep worker — durable LIVE→IDLE transition after HOST leaves.
+  // Replaces the in-memory setTimeout in leaveRoom() which was lost on restart.
+  workers.voiceRoomSleep = createVoiceRoomSleepWorker(connection);
 
   logger.info('[queue] Core workers started from src/workers/');
 
@@ -102,6 +125,8 @@ function startWorkers() {
   // Also handles creator subscription auto-renewal (M2 fix)
   workers.socialCleanup = new Worker(QUEUE_NAMES.SOCIAL_CLEANUP, async (job) => {
     const prisma = require('../utils/prisma');
+    const { toDiamonds } = require('../services/economy.config');
+    const { writePlatformRevenueFromSpend } = require('../utils/platformRevenue');
     const now    = new Date();
 
     // ── 1. Soft-delete expired stories (24h TTL) ──────────────────────────────
@@ -140,28 +165,51 @@ function startWorkers() {
 
         if (wallet && wallet.coins >= sub.tier.priceCoins) {
           // Sufficient balance — auto-renew
-          const newExpiry    = new Date(sub.expiresAt.getTime() + 30 * 24 * 60 * 60 * 1000);
-          const diamonds     = Math.floor(sub.tier.priceCoins * 0.5);
 
-          await prisma.$transaction([
-            // Deduct coins from subscriber
-            prisma.wallet.update({
-              where: { userId: sub.subscriberId },
+          // Idempotency guard: skip if already renewed in this billing period.
+          // The billing period start is defined as expiresAt minus 30 days.
+          const periodStart = new Date(sub.expiresAt.getTime() - 30 * 24 * 60 * 60 * 1000);
+          const alreadyRenewed = await prisma.walletTransaction.findFirst({
+            where: {
+              userId:         sub.subscriberId,
+              type:           'SUBSCRIPTION',
+              subscriptionId: sub.id,
+              createdAt:      { gte: periodStart }
+            }
+          });
+          if (alreadyRenewed) {
+            logger.info(`[social-cleanup] Subscription ${sub.id} already renewed this period — skipping`);
+            continue;
+          }
+
+          const newExpiry = new Date(sub.expiresAt.getTime() + 30 * 24 * 60 * 60 * 1000);
+          // F-08 fix: use canonical toDiamonds() instead of hardcoded * 0.5
+          const diamonds  = toDiamonds(sub.tier.priceCoins);
+
+          // F-03 fix: converted from array $transaction to interactive $transaction so
+          // writePlatformRevenueFromSpend (which needs the tx client) can be called inside.
+          await prisma.$transaction(async (tx) => {
+            // Deduct coins from subscriber — optimistic lock prevents race
+            await tx.wallet.update({
+              where: { userId: sub.subscriberId, coins: { gte: sub.tier.priceCoins } },
               data:  { coins: { decrement: sub.tier.priceCoins }, totalSpent: { increment: sub.tier.priceCoins } }
-            }),
+            });
+
             // Credit diamonds to creator
-            prisma.wallet.upsert({
+            await tx.wallet.upsert({
               where:  { userId: sub.creator.userId },
               create: { userId: sub.creator.userId, coins: 0, diamonds, totalSpent: 0, totalEarned: diamonds },
               update: { diamonds: { increment: diamonds }, totalEarned: { increment: diamonds } }
-            }),
+            });
+
             // Extend subscription
-            prisma.creatorSubscription.update({
+            await tx.creatorSubscription.update({
               where: { id: sub.id },
               data:  { expiresAt: newExpiry, renewedAt: now, coinsCharged: { increment: sub.tier.priceCoins } }
-            }),
-            // Wallet ledger entry
-            prisma.walletTransaction.create({
+            });
+
+            // Wallet ledger entry (debit) — subscriber
+            await tx.walletTransaction.create({
               data: {
                 userId:         sub.subscriberId,
                 type:           'SUBSCRIPTION',
@@ -169,8 +217,23 @@ function startWorkers() {
                 description:    `Auto-renewal: ${sub.tier.name}`,
                 subscriptionId: sub.id
               }
-            })
-          ]);
+            });
+
+            // Creator profile totalEarned counter
+            await tx.creatorProfile.update({
+              where: { id: sub.creatorId },
+              data:  { totalEarned: { increment: diamonds } }
+            });
+
+            // F-03 fix: platform revenue entry — was missing from auto-renewal
+            // matches first-time subscription charge in creator.controller.js
+            await writePlatformRevenueFromSpend(tx, {
+              sourceType: 'SUBSCRIPTION',
+              sourceId:   sub.id,
+              userId:     sub.subscriberId,
+              spendCoins: sub.tier.priceCoins,
+            });
+          });
 
           renewalSuccess++;
           logger.info(`[social-cleanup] Auto-renewed subscription ${sub.id} → expires ${newExpiry.toISOString()}`);
@@ -399,6 +462,25 @@ async function scheduleCleanup() {
     repeat: { pattern: '0 4 * * 0' },  // cron: 04:00 every Sunday
     jobId:  'orphaned-gift-check',
   });
+
+  // Economy reconciliation — daily wallet/ledger balance check (Task 12.2)
+  // Read-only: computes expected wallet.coins from SUM(wallet_transactions.coins)
+  // and reports discrepancies. No automatic corrections applied.
+  // Runs at 02:00 UTC daily (after the social-cleanup and audit-archive windows).
+  const reconciliationQueue = createQueue(QUEUE_NAMES.ECONOMY_RECONCILIATION);
+  await reconciliationQueue.add('economy-reconciliation', {}, {
+    repeat: { pattern: '0 2 * * *' },  // cron: 02:00 UTC daily
+    jobId:  'economy-reconciliation',
+  });
+
+  // Voice stale-session sweep — marks orphaned voiceParticipant records inactive.
+  // Runs every 10 minutes. Protects against browser crash, force-close, server
+  // restart, and iOS background termination leaving isActive=true permanently.
+  const voiceStaleQueue = createQueue('voice-stale-session');
+  await voiceStaleQueue.add('voice-stale-sweep', {}, {
+    repeat: { every: 10 * 60 * 1000 }, // every 10 minutes
+    jobId:  'voice-stale-sweep',
+  });
 }
 
 /**
@@ -407,6 +489,183 @@ async function scheduleCleanup() {
 async function queueStorageCleanup() {
   const queue = createQueue(QUEUE_NAMES.STORAGE_CLEANUP);
   await queue.add('storage-cleanup-manual', {}, { priority: 5 });
+}
+
+/**
+ * Schedule a push notification reminder for a scheduled voice room.
+ * Called when a room is created with scheduledAt set.
+ *
+ * Sends the notification 15 minutes before the scheduled start time.
+ * If scheduledAt is less than 15 minutes away, sends immediately.
+ *
+ * @param {object} room  - { id, title, hostId, schoolId, scheduledAt }
+ */
+async function scheduleRoomReminder(room) {
+  try {
+    const queue = createQueue(QUEUE_NAMES.ROOM_REMINDERS);
+    const scheduledAt = new Date(room.scheduledAt).getTime();
+    const now         = Date.now();
+    const reminderAt  = scheduledAt - 15 * 60 * 1000; // 15 min before
+    const delay       = Math.max(0, reminderAt - now);
+
+    await queue.add('room-reminder', {
+      roomId:     room.id,
+      roomTitle:  room.title,
+      hostId:     room.hostId,
+      schoolId:   room.schoolId,
+      scheduledAt: room.scheduledAt,
+    }, {
+      delay,
+      jobId:    `room-reminder:${room.id}`, // deduplicate — one reminder per room
+      attempts: 2,
+      backoff:  { type: 'fixed', delay: 30_000 },
+    });
+
+    logger.info(`[queue] Room reminder scheduled for "${room.title}" in ${Math.round(delay / 60000)} min`);
+  } catch (err) {
+    // Non-fatal — room creation succeeds even if reminder scheduling fails
+    logger.warn(`[queue] Failed to schedule room reminder for ${room.id}: ${err.message}`);
+  }
+}
+
+/**
+ * Cancel a previously scheduled room reminder (e.g. room deleted/cancelled).
+ * @param {string} roomId
+ */
+async function cancelRoomReminder(roomId) {
+  try {
+    const queue = createQueue(QUEUE_NAMES.ROOM_REMINDERS);
+    await queue.remove(`room-reminder:${roomId}`);
+  } catch (err) {
+    logger.warn(`[queue] Failed to cancel room reminder for ${roomId}: ${err.message}`);
+  }
+}
+
+// ─── Live Class Auto-End BullMQ helpers (Sprint 3) ──────────────────────────
+// Replaces the in-process setTimeout approach (autoEndTimers Map in controller)
+// with a durable BullMQ delayed job that survives server restarts.
+
+/**
+ * Schedule a BullMQ delayed job to auto-end a live class when its duration elapses.
+ * @param {string} liveClassId
+ * @param {Date|string} startedAt  – when the class started
+ * @param {number} durationMinutes – class duration in minutes
+ */
+async function scheduleLiveClassAutoEnd(liveClassId, startedAt, durationMinutes) {
+  try {
+    const queue   = createQueue(QUEUE_NAMES.LIVE_CLASS_AUTOEND);
+    const elapsed = Date.now() - new Date(startedAt).getTime();
+    const delay   = Math.max(0, durationMinutes * 60_000 - elapsed);
+
+    await queue.add(
+      'autoend',
+      { liveClassId },
+      {
+        delay,
+        jobId:    'autoend:' + liveClassId,   // one job per class — deduped
+        attempts: 2,
+        backoff:  { type: 'fixed', delay: 15_000 },
+      }
+    );
+    logger.info('[queue] Live class auto-end scheduled for ' + liveClassId + ' in ' + Math.round(delay / 1000) + 's');
+  } catch (err) {
+    // Non-fatal: class will still end via manual endLiveClass or admin terminate
+    logger.warn('[queue] Failed to schedule live class auto-end for ' + liveClassId + ': ' + err.message);
+  }
+}
+
+/**
+ * Cancel a previously scheduled auto-end job (called on manual end / delete).
+ * @param {string} liveClassId
+ */
+async function cancelLiveClassAutoEnd(liveClassId) {
+  try {
+    const queue = createQueue(QUEUE_NAMES.LIVE_CLASS_AUTOEND);
+    await queue.remove('autoend:' + liveClassId);
+    logger.debug('[queue] Live class auto-end cancelled for ' + liveClassId);
+  } catch (err) {
+    logger.warn('[queue] Failed to cancel live class auto-end for ' + liveClassId + ': ' + err.message);
+  }
+}
+
+/**
+ * On server startup, re-schedule auto-end jobs for any LIVE classes that have
+ * a duration set and whose auto-end hasn't fired yet.
+ * Called once from app.js after workers are started.
+ */
+async function rehydrateLiveClassAutoEndJobs() {
+  try {
+    const prisma = require('../utils/prisma');
+    // Raw SQL — works even before prisma generate is run for new columns
+    const rows = await prisma.$queryRawUnsafe(
+      'SELECT id, startedAt, duration FROM live_classes WHERE status = ? AND duration IS NOT NULL AND deletedAt IS NULL',
+      'LIVE'
+    );
+    if (!rows || rows.length === 0) return;
+
+    for (const row of rows) {
+      if (!row.startedAt || !row.duration) continue;
+      const durationMs = Number(row.duration) * 60_000;
+      const elapsedMs  = Date.now() - new Date(row.startedAt).getTime();
+      if (elapsedMs >= durationMs) {
+        // Already overdue — fire immediately via a 0-delay job
+        await scheduleLiveClassAutoEnd(row.id, row.startedAt, Number(row.duration));
+      } else {
+        await scheduleLiveClassAutoEnd(row.id, row.startedAt, Number(row.duration));
+      }
+    }
+    logger.info('[queue] Rehydrated ' + rows.length + ' live class auto-end job(s) on startup');
+  } catch (err) {
+    logger.warn('[queue] Failed to rehydrate live class auto-end jobs: ' + err.message);
+  }
+}
+
+/**
+ * Schedule a durable LIVE → IDLE sleep transition for a voice room.
+ * Called from leaveRoom() when the HOST leaves and the room has 0 active participants.
+ * The job fires after a 5-minute delay. If someone rejoins before it fires,
+ * cancelRoomSleep() removes the job so the transition never happens.
+ *
+ * Replaces the in-memory setTimeout that was lost on process restart.
+ *
+ * @param {string} roomId
+ */
+async function scheduleRoomSleep(roomId) {
+  try {
+    const queue = createQueue(QUEUE_NAMES.VOICE_ROOM_SLEEP);
+    await queue.add(
+      'room-sleep',
+      { roomId },
+      {
+        delay:    5 * 60 * 1000,            // 5 minutes — same as the old setTimeout
+        jobId:    `room-sleep:${roomId}`,   // one job per room, deduped by BullMQ
+        attempts: 2,
+        backoff:  { type: 'fixed', delay: 30_000 },
+      }
+    );
+    logger.debug(`[queue] Room sleep scheduled for ${roomId} in 5 min`);
+  } catch (err) {
+    // Non-fatal: if scheduling fails, the stale-session worker will catch the
+    // orphaned LIVE room within 90 minutes via its own sweep.
+    logger.warn(`[queue] Failed to schedule room sleep for ${roomId}: ${err.message}`);
+  }
+}
+
+/**
+ * Cancel a previously scheduled room sleep (called when a new participant joins
+ * during the grace period — the room should stay LIVE).
+ *
+ * @param {string} roomId
+ */
+async function cancelRoomSleep(roomId) {
+  try {
+    const queue = createQueue(QUEUE_NAMES.VOICE_ROOM_SLEEP);
+    await queue.remove(`room-sleep:${roomId}`);
+    logger.debug(`[queue] Room sleep cancelled for ${roomId}`);
+  } catch (err) {
+    // Non-fatal: if the job was already processed or never existed, ignore.
+    logger.warn(`[queue] Failed to cancel room sleep for ${roomId}: ${err.message}`);
+  }
 }
 
 module.exports = {
@@ -418,6 +677,13 @@ module.exports = {
   queueReport,
   queueAttendanceAlert,
   queueStorageCleanup,
+  scheduleRoomReminder,
+  cancelRoomReminder,
+  scheduleLiveClassAutoEnd,
+  cancelLiveClassAutoEnd,
+  rehydrateLiveClassAutoEndJobs,
+  scheduleRoomSleep,
+  cancelRoomSleep,
   startWorkers,
   scheduleCleanup
 };

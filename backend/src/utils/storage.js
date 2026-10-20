@@ -54,7 +54,10 @@ const FOLDER_RULES = {
   },
   covers: {
     maxBytes:     2  * 1024 * 1024,
-    allowedTypes: ['image/jpeg', 'image/png', 'image/webp'],
+    allowedTypes: [
+      'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif',
+      'image/heic', 'image/heif', 'image/avif', 'image/bmp',
+    ],
   },
   reports: {
     maxBytes:     20 * 1024 * 1024,
@@ -64,8 +67,24 @@ const FOLDER_RULES = {
   media: {
     maxBytes:     50 * 1024 * 1024,
     allowedTypes: [
-      'image/jpeg', 'image/png', 'image/webp', 'image/gif',
-      'video/mp4', 'video/webm', 'video/quicktime', 'video/3gpp',
+      // Images (all common formats)
+      'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif',
+      'image/heic', 'image/heif', 'image/avif', 'image/bmp', 'image/tiff',
+      // Videos
+      'video/mp4', 'video/webm', 'video/quicktime', 'video/3gpp', 'video/3gpp2',
+      'video/x-m4v', 'video/ogg', 'video/x-matroska',
+      // Audio (voice messages, audio files)
+      'audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/wav', 'audio/x-wav',
+      'audio/ogg', 'audio/aac', 'audio/m4a', 'audio/x-m4a', 'audio/webm',
+      'audio/flac', 'audio/x-flac',
+      // Documents
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/zip', 'application/x-zip-compressed',
+      'text/plain', 'text/csv',
     ],
   },
   uploads: {
@@ -97,9 +116,14 @@ function validateFile(buffer, mimeType, folder) {
     );
   }
 
-  if (!rules.allowedTypes.includes(mimeType)) {
+  // Normalise mimeType: undefined / null / 'undefined' string → reject with clear message
+  const safeMime = (mimeType && mimeType !== 'undefined' && mimeType !== 'null')
+    ? mimeType
+    : null;
+
+  if (!safeMime || !rules.allowedTypes.includes(safeMime)) {
     throw Object.assign(
-      new Error(`File type "${mimeType}" is not allowed in ${folder}. Allowed: ${rules.allowedTypes.join(', ')}`),
+      new Error(`File type "${safeMime ?? 'unknown'}" is not allowed in ${folder}. Allowed: ${rules.allowedTypes.join(', ')}`),
       { statusCode: 415 }
     );
   }
@@ -293,13 +317,45 @@ async function generateSignedUrl(key, expiresInSeconds = 3600) {
  * @returns {Promise<{ url: string, key: string, storageType: string }>}
  */
 async function saveFile(buffer, filename, mimeType, folder = 'uploads') {
+  // If mimeType is missing/undefined, infer it from the file extension.
+  // This handles callers that forget to pass mimeType, and mobile devices
+  // where DocumentPicker returns undefined for mimeType on some Android versions.
+  let safeMime = (mimeType && mimeType !== 'undefined' && mimeType !== 'null')
+    ? mimeType
+    : null;
+  // Normalize common mime aliases to their canonical form
+  if (safeMime) {
+    safeMime = safeMime
+      .replace('image/jpg', 'image/jpeg')
+      .replace('audio/mp3', 'audio/mpeg')
+      .replace('audio/x-wav', 'audio/wav')
+      .replace('audio/x-m4a', 'audio/mp4')
+  }
+  if (!safeMime && filename) {
+    const ext = (filename.split('.').pop() || '').toLowerCase();
+    const extMap = {
+      jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+      webp: 'image/webp', gif: 'image/gif', heic: 'image/heic',
+      heif: 'image/heif', avif: 'image/avif', bmp: 'image/bmp',
+      mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
+      mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
+      aac: 'audio/aac', m4a: 'audio/mp4', flac: 'audio/flac',
+      pdf: 'application/pdf',
+      doc: 'application/msword',
+      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      xls: 'application/vnd.ms-excel',
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    };
+    safeMime = extMap[ext] || null;
+  }
+
   // Validate before touching any storage backend
-  validateFile(buffer, mimeType, folder);
+  validateFile(buffer, safeMime, folder);
 
   const key = folder ? `${folder}/${filename}` : filename;
 
   if (STORAGE_TYPE === 'r2') {
-    const url = await uploadToR2(buffer, key, mimeType);
+    const url = await uploadToR2(buffer, key, safeMime || 'application/octet-stream');
     logger.debug(`[storage] Uploaded to R2: ${key}`);
     return { url, key, storageType: 'r2' };
   }
