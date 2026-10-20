@@ -869,7 +869,13 @@ describe('Regression — muteAll SFU calls + unmuteAll DEF-003 where clause [MOC
       { id: 'p1', userId: 'user-1' },
       { id: 'p2', userId: 'user-2' },
     ];
-    prisma.voiceParticipant.findMany.mockResolvedValue(targets);
+    // First findMany: in-transaction target selection
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce(targets);
+    // Second findMany: actuallyMuted re-read (R1 fix) — same two participants were updated
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce(
+      targets.map(t => ({ userId: t.userId }))
+    );
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 2 });
 
     const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
     const res = makeRes();
@@ -1413,6 +1419,176 @@ describe('F-04 Race B — Conditional WHERE in updateMany [MOCKED]', () => {
     expect(res.body.data.allMuted).toBe(false);
     // Risk C fix: unmutedCount reflects actual updated rows (0), not targets.length (1)
     expect(res.body.data.unmutedCount).toBe(0);
+  });
+
+});
+
+// ─── R1 + P3a: unmuteAll socket accuracy and SFU canPublish restore ───────────
+//
+// R1:  unmuteAll() must emit voice:mute_changed ONLY for participants whose DB
+//      row was actually updated by updateMany. If updateMany skips a row (because
+//      a concurrent toggleMute set mutedByModerator=true between findMany and
+//      updateMany), the socket event for that participant must NOT be emitted.
+//
+// P3a: unmuteAll() must call sfuRevokePublish(canPublish=true) for each
+//      actually-unmuted participant so the SFU canPublish revocation applied by
+//      muteAll() is restored without waiting for token expiry (~1h).
+//
+// All tests are MOCKED — no real database or LiveKit required.
+
+describe('R1 + P3a — unmuteAll socket accuracy and SFU restore [MOCKED]', () => {
+
+  const prisma               = require('../utils/prisma');
+  const { sfuRevokePublish } = require('../utils/livekitService');
+  const { getIo }            = require('../sockets');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+
+    // Restore io mock chain after clearAllMocks
+    const emitFn = jest.fn();
+    const toFn   = jest.fn().mockReturnValue({ emit: emitFn });
+    getIo.mockReturnValue({ to: toFn, emit: emitFn });
+
+    sfuRevokePublish.mockResolvedValue(undefined);
+    prisma.voiceParticipant.update.mockResolvedValue({});
+    prisma.voiceParticipant.updateMany.mockResolvedValue({ count: 0 });
+    // $transaction: run callback with prisma as tx proxy (same pattern as all suites)
+    prisma.$transaction.mockImplementation(async (fn) => fn(prisma));
+  });
+
+  // ── R1-T1: voice:mute_changed emitted only for actually-updated participant ─
+  //
+  // Setup:
+  //   - findMany call 1 (inside transaction): returns 2 targets [p1/u1, p2/u2]
+  //   - updateMany: returns { count: 1 } — only 1 row updated (p2/u2 was skipped
+  //     by the conditional WHERE because a concurrent toggleMute raced ahead)
+  //   - findMany call 2 (actuallyUnmuted re-read): returns 1 participant [u1]
+  //
+  // Assertion: voice:mute_changed emitted exactly once (for u1 only, NOT u2).
+  test('R1-T1 — unmuteAll() emits voice:mute_changed only for participants actually updated by updateMany', async () => {
+    // Call 1: inside transaction — targets (2 candidates)
+    // Call 2: post-transaction — actuallyUnmuted re-read (1 actually updated)
+    prisma.voiceParticipant.findMany
+      .mockResolvedValueOnce([
+        { id: 'p1', userId: 'u1' },
+        { id: 'p2', userId: 'u2' },
+      ])
+      .mockResolvedValueOnce([
+        { userId: 'u1' }, // only u1 was actually updated (u2 skipped by concurrent race)
+      ]);
+
+    // updateMany updated 1 row (unmutedCount > 0 → triggers the actuallyUnmuted re-read)
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 1 });
+
+    const emitSpy = jest.fn();
+    getIo.mockReturnValue({ to: jest.fn().mockReturnValue({ emit: emitSpy }), emit: jest.fn() });
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    const muteChangedCalls = emitSpy.mock.calls.filter(([event]) => event === 'voice:mute_changed');
+    // Only 1 mute_changed event — for u1. u2 was skipped by updateMany so no event for u2.
+    expect(muteChangedCalls.length).toBe(1);
+    expect(muteChangedCalls[0][1]).toMatchObject({ userId: 'u1', isMuted: false, mutedByModerator: false });
+  });
+
+  // ── P3a-T1: sfuRevokePublish called with canPublish=true for actually-unmuted ─
+  //
+  // Setup:
+  //   - findMany call 1 (transaction): 2 targets
+  //   - updateMany: count: 2 (both updated)
+  //   - findMany call 2 (actuallyUnmuted): 2 participants returned
+  //
+  // Assertion: sfuRevokePublish called twice with canPublish=true.
+  test('P3a-T1 — unmuteAll() calls sfuRevokePublish(canPublish=true) for each actually-unmuted participant', async () => {
+    prisma.voiceParticipant.findMany
+      .mockResolvedValueOnce([
+        { id: 'p1', userId: 'u1' },
+        { id: 'p2', userId: 'u2' },
+      ])
+      .mockResolvedValueOnce([
+        { userId: 'u1' },
+        { userId: 'u2' },
+      ]);
+
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 2 });
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    // sfuRevokePublish called twice, both with canPublish=true
+    expect(sfuRevokePublish).toHaveBeenCalledTimes(2);
+    expect(sfuRevokePublish).toHaveBeenCalledWith('room-1', 'u1', true, '[voice:unmute-all]');
+    expect(sfuRevokePublish).toHaveBeenCalledWith('room-1', 'u2', true, '[voice:unmute-all]');
+  });
+
+  // ── P3a-T2: sfuRevokePublish NOT called for participants skipped by updateMany ─
+  //
+  // Setup:
+  //   - findMany call 1 (transaction): 2 targets [p1/u1, p2/u2]
+  //   - updateMany: count: 1 (only 1 row updated)
+  //   - findMany call 2 (actuallyUnmuted): only [u1] returned
+  //
+  // Assertion: sfuRevokePublish called once (only for u1). u2 was skipped.
+  test('P3a-T2 — unmuteAll() does NOT call sfuRevokePublish for participants skipped by conditional updateMany', async () => {
+    prisma.voiceParticipant.findMany
+      .mockResolvedValueOnce([
+        { id: 'p1', userId: 'u1' },
+        { id: 'p2', userId: 'u2' },
+      ])
+      .mockResolvedValueOnce([
+        { userId: 'u1' }, // u2 was NOT actually updated — not in re-read result
+      ]);
+
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 1 });
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    // Only 1 sfuRevokePublish call — for u1. u2 skipped.
+    expect(sfuRevokePublish).toHaveBeenCalledTimes(1);
+    expect(sfuRevokePublish).toHaveBeenCalledWith('room-1', 'u1', true, '[voice:unmute-all]');
+    expect(sfuRevokePublish).not.toHaveBeenCalledWith('room-1', 'u2', expect.anything(), expect.anything());
+  });
+
+  // ── P3a-T3: muteAll() sfuRevokePublish behavior unchanged (regression guard) ─
+  //
+  // Verifies the P3a change in unmuteAll() does not affect muteAll()'s existing
+  // PH17-003 behavior: sfuRevokePublish must still be called with canPublish=false
+  // for each target in muteAll(), regardless of what unmuteAll() now does.
+  //
+  // This is a regression guard — it extends the intent of existing T19 but
+  // explicitly tests the canPublish=false direction as a named P3a regression test.
+  test('P3a-T3 — muteAll() sfuRevokePublish still called with canPublish=false per target (PH17-003 regression)', async () => {
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([
+      { id: 'p1', userId: 'u1' },
+      { id: 'p2', userId: 'u2' },
+    ]);
+    // Second findMany: actuallyMuted re-read (R1 fix) — both participants were updated
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([
+      { userId: 'u1' },
+      { userId: 'u2' },
+    ]);
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 2 });
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+
+    await rolesCtrl.muteAll(req, res, next);
+
+    // PH17-003 behavior unchanged: sfuRevokePublish called with canPublish=false per original target
+    expect(sfuRevokePublish).toHaveBeenCalledTimes(2);
+    expect(sfuRevokePublish).toHaveBeenCalledWith('room-1', 'u1', false, '[voice:mute-all]');
+    expect(sfuRevokePublish).toHaveBeenCalledWith('room-1', 'u2', false, '[voice:mute-all]');
+    // And NOT called with canPublish=true (that is unmuteAll's job)
+    expect(sfuRevokePublish).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), true, expect.anything());
   });
 
 });

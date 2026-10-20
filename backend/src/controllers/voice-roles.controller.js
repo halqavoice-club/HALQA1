@@ -354,6 +354,10 @@ async function muteAll(req, res, next) {
           data: { isMuted: true, mutedByModerator: false, updatedAt: new Date() }
         });
         mutedCount = updateResult.count;
+        // R1 FIX: Log when concurrent state change caused some rows to be skipped.
+        if (mutedCount < targets.length) {
+          logger.warn(`[voice:mute-all] ${targets.length - mutedCount} participant(s) not muted due to concurrent state change`);
+        }
       }
       // Persist the room-wide mute policy — this is the core DEF-001 fix.
       await tx.voiceRoom.update({
@@ -364,9 +368,24 @@ async function muteAll(req, res, next) {
 
     await safeDeleteCache(roomCacheKey(roomId));
 
+    // R1 FIX: Re-read only rows that were actually updated (isMuted=true and
+    // mutedByModerator=false still), so socket events and SFU calls target only
+    // participants whose DB row was actually changed by the conditional updateMany.
+    // When mutedCount is 0, skip the DB round-trip entirely.
+    const actuallyMuted = mutedCount > 0
+      ? await prisma.voiceParticipant.findMany({
+          where: {
+            id:               { in: targets.map(t => t.id) },
+            isMuted:          true,
+            mutedByModerator: false,
+          },
+          select: { userId: true }
+        })
+      : [];
+
     const io = getIo();
     if (io) {
-      targets.forEach(t => {
+      actuallyMuted.forEach(t => {
         // F-01 FIX: emit mutedByModerator=false to match the DB write above.
         // Room-wide mute does not set the individual-mute flag.
         io.to(`voice:${roomId}`).emit('voice:mute_changed', {
@@ -382,11 +401,11 @@ async function muteAll(req, res, next) {
 
     _rolesAudit(callerId, 'MUTE_ALL', roomId, { mutedCount });
 
-    // PH17-003 FIX: Revoke SFU publish for each muted speaker — best-effort.
+    // PH17-003 FIX: Revoke SFU publish for each actually-muted speaker — best-effort.
     // A SPEAKER whose token has canPublish:true can still publish until their
     // token expires. sfuRevokePublish sets canPublish=false on the live SFU
     // connection immediately so the revocation takes effect without token expiry.
-    targets.forEach(t => {
+    actuallyMuted.forEach(t => {
       sfuRevokePublish(roomId, t.userId, false, '[voice:mute-all]').catch(() => {});
     });
 
@@ -462,9 +481,24 @@ async function unmuteAll(req, res, next) {
 
     await safeDeleteCache(roomCacheKey(roomId));
 
+    // R1 FIX: Re-read only rows that were actually updated (isMuted=false and
+    // mutedByModerator=false still), so socket events are emitted only for
+    // participants whose DB row was actually changed by updateMany.
+    // When updateMany.count is 0, skip the DB round-trip entirely.
+    const actuallyUnmuted = unmutedCount > 0
+      ? await prisma.voiceParticipant.findMany({
+          where: {
+            id:               { in: targets.map(t => t.id) },
+            isMuted:          false,
+            mutedByModerator: false,
+          },
+          select: { userId: true }
+        })
+      : [];
+
     const io = getIo();
     if (io) {
-      targets.forEach(t => {
+      actuallyUnmuted.forEach(t => {
         io.to(`voice:${roomId}`).emit('voice:mute_changed', {
           roomId, userId: t.userId, isMuted: false, mutedByModerator: false
         });
@@ -474,6 +508,14 @@ async function unmuteAll(req, res, next) {
         roomId, allMuted: false
       });
     }
+
+    // P3a FIX: Restore SFU canPublish for participants actually unmuted.
+    // muteAll() called sfuRevokePublish(canPublish=false) per target; without
+    // this restore, those participants cannot publish until their token expires (~1h).
+    // Best-effort only — catch swallows SFU errors.
+    actuallyUnmuted.forEach(t => {
+      sfuRevokePublish(roomId, t.userId, true, '[voice:unmute-all]').catch(() => {});
+    });
 
     _rolesAudit(callerId, 'UNMUTE_ALL', roomId, { unmutedCount });
     return successResponse(res, { unmutedCount, allMuted: false },
