@@ -25,7 +25,7 @@ async function autoPromoteNext(roomId, io) {
   // Check if there's room for another speaker
   const room = await prisma.voiceRoom.findUnique({
     where: { id: roomId },
-    select: { maxSpeakers: true, status: true, micLocked: true, allMuted: true }  // DEF-002: include allMuted
+    select: { maxSpeakers: true, status: true, micLocked: true, allMuted: true, lockedSeats: true }  // DEF-002 + FIX-001: include allMuted + lockedSeats
   });
   if (!room || room.status === 'ENDED') return null;
 
@@ -136,18 +136,30 @@ async function autoPromoteNext(roomId, io) {
   const occupiedSet = new Set(occupiedRows.map(r => Number(r.seatNumber)));
   const maxSp = room.maxSpeakers || 12;
 
+  // FIX-001: locked seats block new occupants (lockedSeats stored as 0-based indices → 1-based)
+  let _lockedSeats = room?.lockedSeats;
+  if (typeof _lockedSeats === 'string') { try { _lockedSeats = JSON.parse(_lockedSeats); } catch { _lockedSeats = []; } }
+  const lockedSet = new Set((Array.isArray(_lockedSeats) ? _lockedSeats : []).map(s => s + 1));
+
   // SPEAKER gets Seats 2–12; MODERATOR can also get Seat 1 if empty (first available)
   let promotedSeat = null;
   for (let s = 1; s <= maxSp; s++) {
     if (occupiedSet.has(s)) continue;
+    if (lockedSet.has(s)) continue; // FIX-001: skip locked seats
     if (s === 1 && !isMod) continue; // SPEAKER cannot take Seat 1
     promotedSeat = s;
     break;
   }
 
   if (promotedSeat === null) {
-    // No seat available (race condition) — try next in queue
-    return autoPromoteNext(roomId, io);
+    // FIX-001: no unlocked seat available (all free seats locked, or rare race) — do NOT recurse.
+    // Recursing would pop+drop every remaining queued user because locked seats stay locked.
+    // Return null so the caller stops; the just-popped user is dropped from the Redis queue
+    // (their DB handRaised flag remains, so getQueue DB fallback / re-hydration still lists them).
+    // Callers ignore the return value and do not know the popped user's identity, so they
+    // cannot re-enqueue — this matches the existing race-condition behavior and is strictly
+    // better than draining the whole queue. See FIX-001 final report (known limitation).
+    return null;
   }
 
   // PH24C-004 FIX: Wrap seat assignment in try/catch to handle concurrent seat collision.

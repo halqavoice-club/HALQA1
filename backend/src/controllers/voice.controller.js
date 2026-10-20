@@ -1346,7 +1346,7 @@ async function promoteParticipant(req, res, next) {
             WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
           `.then(rows => Number(rows[0]?.cnt ?? 0));
           // DEF-002: read allMuted inside transaction so the check is atomic with the write.
-          const txRoom = (await tx.voiceRoom.findUnique({ where: { id: roomId }, select: { maxSpeakers: true, allMuted: true } }));
+          const txRoom = (await tx.voiceRoom.findUnique({ where: { id: roomId }, select: { maxSpeakers: true, allMuted: true, lockedSeats: true } }));
           const maxSpk = txRoom?.maxSpeakers || 12;
           const roomAllMuted = Boolean(txRoom?.allMuted);
           if (stageCnt >= maxSpk) {
@@ -1359,9 +1359,15 @@ async function promoteParticipant(req, res, next) {
             WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
           `;
           const occupiedSet = new Set(occupied.map(r => Number(r.seatNumber)));
+          // FIX-001: locked seats block new occupants (lockedSeats stored as 0-based indices → 1-based)
+          let _lockedSeats = txRoom?.lockedSeats;
+          if (typeof _lockedSeats === 'string') { try { _lockedSeats = JSON.parse(_lockedSeats); } catch { _lockedSeats = []; } }
+          const lockedSet = new Set((Array.isArray(_lockedSeats) ? _lockedSeats : []).map(s => s + 1));
           let seat = null;
           for (let s = 2; s <= maxSpk; s++) { // SPEAKER starts at Seat 2
-            if (!occupiedSet.has(s)) { seat = s; break; }
+            if (occupiedSet.has(s)) continue;
+            if (lockedSet.has(s)) continue; // FIX-001: skip locked seats
+            seat = s; break;
           }
           if (seat === null) {
             const err = new Error('All seats are full'); err.statusCode = 400; throw err;
@@ -2188,7 +2194,7 @@ async function grabMic(req, res, next) {
 
         // Re-check micLocked and allMuted inside tx (DEF-002: atomic with write)
         const [rm] = await tx.$queryRaw`
-          SELECT micLocked, maxSpeakers, allMuted FROM voice_rooms WHERE id = ${roomId} LIMIT 1
+          SELECT micLocked, maxSpeakers, allMuted, lockedSeats FROM voice_rooms WHERE id = ${roomId} LIMIT 1
         `;
         if (rm?.micLocked && !isPrivileged) {
           const e = new Error('The mic is locked'); e.statusCode = 403; throw e;
@@ -2202,10 +2208,16 @@ async function grabMic(req, res, next) {
         const occupiedSet = new Set(occupiedRows.map(r => Number(r.seatNumber)));
         const maxSp = Number(rm?.maxSpeakers ?? cap);
 
+        // FIX-001: locked seats block new occupants (lockedSeats stored as 0-based indices → 1-based)
+        let _lockedSeats = rm?.lockedSeats;
+        if (typeof _lockedSeats === 'string') { try { _lockedSeats = JSON.parse(_lockedSeats); } catch { _lockedSeats = []; } }
+        const lockedSet = new Set((Array.isArray(_lockedSeats) ? _lockedSeats : []).map(s => s + 1));
+
         // Find lowest free seat respecting Seat 1 eligibility
         let seat = null;
         for (let s = 1; s <= maxSp; s++) {
           if (occupiedSet.has(s)) continue;
+          if (lockedSet.has(s)) continue; // FIX-001: skip locked seats
           if (s === 1 && !MODERATOR_ROLES.includes(curr.role) && curr.role !== 'HOST') continue; // Seat 1 = HOST/MOD only
           seat = s;
           break;

@@ -235,10 +235,15 @@ async function acceptMicOffer(req, res, next) {
     // Use raw SQL for seatNumber operations (Prisma client not regenerated yet).
 
     const roomInfo = await prisma.voiceRoom.findUnique({
-      where: { id: roomId }, select: { maxSpeakers: true, allMuted: true }  // DEF-002: include allMuted
+      where: { id: roomId }, select: { maxSpeakers: true, allMuted: true, lockedSeats: true }  // DEF-002 + FIX-001: include allMuted + lockedSeats
     });
     const maxSp = roomInfo?.maxSpeakers || 12;
     const micPassAllMuted = Boolean(roomInfo?.allMuted);
+
+    // FIX-001: locked seats block new occupants (lockedSeats stored as 0-based indices → 1-based)
+    let _lockedSeats = roomInfo?.lockedSeats;
+    if (typeof _lockedSeats === 'string') { try { _lockedSeats = JSON.parse(_lockedSeats); } catch { _lockedSeats = []; } }
+    const lockedSet = new Set((Array.isArray(_lockedSeats) ? _lockedSeats : []).map(s => s + 1));
 
     // Get passer's current seatNumber so we can assign it to target (seat swap)
     const [passerRow] = await prisma.$queryRaw`
@@ -259,7 +264,9 @@ async function acceptMicOffer(req, res, next) {
       const occupiedSet = new Set(occupied.map(r => Number(r.seatNumber)));
       targetSeat = null;
       for (let s = 2; s <= maxSp; s++) { // SPEAKER starts from Seat 2
-        if (!occupiedSet.has(s)) { targetSeat = s; break; }
+        if (occupiedSet.has(s)) continue;
+        if (lockedSet.has(s)) continue; // FIX-001: skip locked seats
+        targetSeat = s; break;
       }
       if (targetSeat === null) {
         return errorResponse(res, 'No stage seats available for the mic pass', 400);

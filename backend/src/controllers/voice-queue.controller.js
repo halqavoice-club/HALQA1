@@ -34,6 +34,9 @@ const MAX_SPEAKERS = 12;
 
 function roomCacheKey(roomId) { return `voice:room:${roomId}`; }
 
+// FIX-001: convert Json? lockedSeats (0-based array) to a 1-based Set for seat-loop checks
+function buildLockedSet(raw) { const a = Array.isArray(raw) ? raw : (typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return []; } })() : []); return new Set(a.map(s => s + 1)); }
+
 async function safeDeleteCache(key) {
   try {
     await deleteCache(key);
@@ -421,15 +424,13 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
 
   const isMod = userRow.role === 'MODERATOR';
   let preSeat = null;
-  for (let s = 1; s <= fullLimit; s++) {
+  for (let s = 1, ls = buildLockedSet(room?.lockedSeats); s <= fullLimit; s++) {
     if (occupiedSetPre.has(s)) continue;
+    if (ls.has(s)) continue;
     if (s === 1 && !isMod) continue; // SPEAKER cannot take Seat 1
     preSeat = s; break;
   }
-  if (preSeat === null) {
-    return errorResponse(res, `All ${fullLimit} stage seats are occupied — wait for a slot to open`, 400);
-  }
-
+  // FIX-001: fall through to tx if no pre-tx seat (tx re-enqueues on reject)
   let assignedSeat = preSeat;
 
   try {
@@ -476,13 +477,17 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       `;
       const occupiedSetTx = new Set(occupiedTx.map(r => Number(r.seatNumber)));
       const txIsMod = current.role === 'MODERATOR';
+      const lockedSet = buildLockedSet(room?.lockedSeats); // FIX-001: locked seats
       let seat = null;
       for (let s = 1; s <= fullLimit; s++) {
         if (occupiedSetTx.has(s)) continue;
+        if (lockedSet.has(s)) continue; // FIX-001: skip locked seats
         if (s === 1 && !txIsMod) continue;
         seat = s; break;
       }
       if (seat === null) {
+        // FIX-001: no unlocked seat — re-enqueue the user (goes to back of queue)
+        try { await queue.enqueue(roomId, { id: userId, firstName: userMeta.firstName, lastName: userMeta.lastName, avatarUrl: userMeta.avatarUrl }); } catch {}
         const err = new Error('All seats just filled — please wait'); err.statusCode = 400; throw err;
       }
       assignedSeat = seat;
