@@ -61,9 +61,40 @@ export default function VoiceRoomPage() {
       if (payload.roomId !== id) return
       useVoiceStore.getState().pushSyncEvent(payload)
     }
-    socket.on('voice:stage_state', earlyStageHandler)
+
+    // Buffer voice:user_joined events that arrive before useVoiceRoom mounts.
+    // Without this buffer, new joiners are invisible to existing room members
+    // until they refresh — the event fires during the race window between
+    // POST /join completing and useVoiceRoom registering its listener.
+    const earlyUserJoinedHandler = (payload: {
+      roomId: string; userId: string; firstName: string; lastName: string
+      avatarUrl: string | null; role: string; isMuted?: boolean
+      mutedByModerator?: boolean; handRaised?: boolean; handRaisedAt?: string
+      isPinned?: boolean; seatNumber?: number | null; joinedAt?: string
+    }) => {
+      if (payload.roomId !== id) return
+      useVoiceStore.getState().pushUserJoinedEvent(payload)
+    }
+
+    // Buffer voice:queue_updated events that arrive before useVoiceRoom mounts.
+    // Without this buffer, host/mod do not see new raised-hand queue entries
+    // until they refresh.
+    const earlyQueueUpdatedHandler = (payload: {
+      roomId: string
+      queue: Array<{ userId: string; firstName: string; lastName: string; avatarUrl: string | null; raisedAt: string }>
+      queueLength: number
+    }) => {
+      if (payload.roomId !== id) return
+      useVoiceStore.getState().pushQueueUpdatedEvent(payload)
+    }
+
+    socket.on('voice:stage_state',   earlyStageHandler)
+    socket.on('voice:user_joined',   earlyUserJoinedHandler)
+    socket.on('voice:queue_updated', earlyQueueUpdatedHandler)
     return () => {
-      socket.off('voice:stage_state', earlyStageHandler)
+      socket.off('voice:stage_state',   earlyStageHandler)
+      socket.off('voice:user_joined',   earlyUserJoinedHandler)
+      socket.off('voice:queue_updated', earlyQueueUpdatedHandler)
     }
   }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -95,7 +126,25 @@ export default function VoiceRoomPage() {
       const existing = room.participants?.find(p => p.userId === user.id && p.isActive)
       if (existing) {
         autoJoinedRef.current = true
-        handleJoin()
+        // STAGE-PRESERVE FIX: If the returning user is demonstrably on stage
+        // (role is HOST/MODERATOR/SPEAKER AND seatNumber is assigned), bypass
+        // POST /join entirely and hydrate the store directly from the room
+        // snapshot we already have. POST /join is still needed for cold joins
+        // and audience reconnects, but calling it for on-stage users is fragile —
+        // it depends on the backend reconnect fix to preserve the seat. Skipping
+        // the round-trip eliminates that dependency for the most common case.
+        const isOnStage = (
+          (existing.role === 'HOST' || existing.role === 'MODERATOR' || existing.role === 'SPEAKER') &&
+          (existing as any).seatNumber != null
+        )
+        if (isOnStage) {
+          // Use the room snapshot from GET /voice/:id — DB state is preserved,
+          // no backend write needed. Socket reconnect and stage-state re-fetch
+          // in useVoiceRoom will reconcile any drift.
+          setActiveRoom(room as any)
+        } else {
+          handleJoin()
+        }
       }
     }
   }, [room, user]) // eslint-disable-line
@@ -122,8 +171,11 @@ export default function VoiceRoomPage() {
         return
       }
       toast({ title: e?.response?.data?.message || 'Failed to join room', variant: 'destructive' })
-      // Discard any buffered stage_state events so they don't replay on next attempt
+      // Discard ALL pre-join buffers so stale events don't replay on the next attempt.
+      // earlyBufferActive stays true — the early handlers remain armed for the next join.
       useVoiceStore.getState().drainSyncEvents()
+      useVoiceStore.getState().drainUserJoinedEvents()
+      useVoiceStore.getState().drainQueueUpdatedEvents()
       setJoining(false)
     }
   }

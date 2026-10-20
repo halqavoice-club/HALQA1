@@ -267,8 +267,8 @@ describe('PH17-003: sfuRevokePublish on moderator removal and muteAll', () => {
     const fn = extractFn(src, 'muteAll', 'unmuteAll');
     expect(fn).toMatch(/sfuRevokePublish\s*\(/);
     expect(fn).toMatch(/false.*\[voice:mute-all\]|\[voice:mute-all\].*false/);
-    // Must be inside a forEach over the muted targets
-    expect(fn).toMatch(/targets\.forEach/);
+    // Must be inside a forEach over the actually-muted participants (R1 fix: re-read after updateMany)
+    expect(fn).toMatch(/actuallyMuted\.forEach/);
   });
 
   test('sfuRevokePublish calls are best-effort — source', () => {

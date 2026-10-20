@@ -81,7 +81,12 @@ async function assignModerator(req, res, next) {
       where: { roomId_userId: { roomId, userId: targetUserId } },
       data: {
         role:    'MODERATOR',
-        isMuted: false,   // moderators can speak
+        // MODERATOR EXEMPTION (DEF-002): Moderators are always unmuted on assignment.
+        // allMuted (room-wide mute policy) does NOT apply to MODERATOR or HOST roles.
+        // A newly assigned moderator must be able to speak immediately to fulfil their
+        // moderation duties. This is intentional and correct — do NOT add an allMuted
+        // check here. Individual mute via toggleMute() remains available if needed.
+        isMuted: false,
         updatedAt: new Date()
       }
     });
@@ -137,17 +142,15 @@ async function removeModerator(req, res, next) {
       return errorResponse(res, 'User is not a moderator', 400);
     }
 
-    await prisma.voiceParticipant.update({
-      where: { id: target.id },
-      data: {
-        role:    'AUDIENCE',
-        isMuted: true,
-        updatedAt: new Date()
-      }
-    });
-    // RT-FIX-10: Clear seatNumber when moderator is demoted to audience.
-    // A moderator on stage occupies a seat — demotion must free that seat.
-    await prisma.$executeRaw`UPDATE voice_participants SET seatNumber = NULL WHERE id = ${target.id}`.catch(() => {});
+    // ATOMIC FIX: collapse role=AUDIENCE + seatNumber=NULL into one raw SQL statement.
+    // The previous two-step approach (ORM update then separate raw SQL) created a
+    // race window where role=AUDIENCE but seatNumber was still set. A concurrent
+    // drop-mic call during that window would see role=AUDIENCE and be rejected.
+    await prisma.$executeRaw`
+      UPDATE voice_participants
+      SET role = 'AUDIENCE', isMuted = 1, seatNumber = NULL, updatedAt = NOW()
+      WHERE id = ${target.id}
+    `;
 
     await safeDeleteCache(roomCacheKey(roomId));
 
@@ -174,6 +177,38 @@ async function removeModerator(req, res, next) {
         roomId,
         message: 'Your moderator role has been removed.'
       });
+
+      // BUG-2 FIX: Emit authoritative stage snapshot after moderator removal so
+      // the stale-seat sweep in onStageState fires and clears the vacated slot on
+      // all connected clients — mirrors the fix applied to promoteParticipant().
+      try {
+        const stageRows = await prisma.$queryRaw`
+          SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
+                 vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+                 u.firstName, u.lastName, u.avatarUrl
+          FROM voice_participants vp
+          LEFT JOIN users u ON u.id = vp.userId
+          WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+          ORDER BY vp.role ASC, vp.joinedAt ASC
+        `;
+        io.to(`voice:${roomId}`).emit('voice:stage_state', {
+          roomId,
+          stageParticipants: stageRows.map(r => ({
+            userId:           r.userId,
+            role:             r.role,
+            isMuted:          Boolean(r.isMuted),
+            seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
+            isPinned:         Boolean(r.isPinned),
+            handRaised:       Boolean(r.handRaised),
+            mutedByModerator: Boolean(r.mutedByModerator),
+            joinedAt:         r.joinedAt,
+            firstName:        r.firstName ?? null,
+            lastName:         r.lastName ?? null,
+            avatarUrl:        r.avatarUrl ?? null,
+          })),
+          stageCount: stageRows.length,
+        });
+      } catch { /* non-fatal */ }
     }
 
     _rolesAudit(req.user.id, 'REMOVE_MODERATOR', roomId, { targetUserId });
@@ -272,56 +307,110 @@ async function transferAdmin(req, res, next) {
 /**
  * PATCH /voice/:id/mute-all
  * HOST or MODERATOR mutes all speakers (except themselves).
+ *
+ * DEF-001 FIX: Persist room-wide mute policy (VoiceRoom.allMuted=true) inside
+ * the same transaction as the per-participant writes so the policy survives
+ * restarts, reconnects, and token re-issuance.
  */
 async function muteAll(req, res, next) {
   try {
     const { id: roomId } = req.params;
     const callerId = req.user.id;
 
-    // Mute all SPEAKER and MODERATOR (not HOST, not self)
-    const targets = await prisma.voiceParticipant.findMany({
-      where: {
-        roomId,
-        isActive: true,
-        isMuted:  false,
-        userId:   { not: callerId },
-        role:     { in: [VOICE_ROLES.SPEAKER, VOICE_ROLES.MODERATOR] }
-      },
-      select: { id: true, userId: true }
-    });
+    // F-04 FIX: findMany inside the transaction so target selection sees
+    // any promotion that committed before this statement runs (READ COMMITTED).
+    // The previous pattern read targets outside the transaction, leaving a
+    // window where a concurrent promoteParticipant() could commit a new SPEAKER
+    // who would not be in the target list and would escape the mute.
+    let targets = [];
+    let mutedCount = 0;
+    await prisma.$transaction(async (tx) => {
+      targets = await tx.voiceParticipant.findMany({
+        where: {
+          roomId,
+          isActive: true,
+          isMuted:  false,
+          userId:   { not: callerId },
+          role:     { in: [VOICE_ROLES.SPEAKER, VOICE_ROLES.MODERATOR] }
+        },
+        select: { id: true, userId: true }
+      });
 
-    if (targets.length === 0) {
-      return successResponse(res, { mutedCount: 0 }, 'No active speakers to mute');
-    }
-
-    await prisma.voiceParticipant.updateMany({
-      where: { id: { in: targets.map(t => t.id) } },
-      data: { isMuted: true, mutedByModerator: true, updatedAt: new Date() }
+      // F-01 FIX: Set mutedByModerator=false (not true) for room-wide mute targets.
+      // Semantic distinction:
+      //   mutedByModerator=true  → individual disciplinary mute via toggleMute(); persists
+      //                            through the room-wide unmute operation because that
+      //                            operation filters mutedByModerator=false targets only.
+      //   mutedByModerator=false → room-wide policy mute via muteAll(); eligible for
+      //                            batch release by the unmute operation.
+      // Using mutedByModerator=true here (original bug) caused the unmute operation
+      // to be unable to find and release any participant muted by muteAll(), making
+      // the pair non-inverse.
+      if (targets.length > 0) {
+        const updateResult = await tx.voiceParticipant.updateMany({
+          // F-04 Race B: re-check isMuted=false at write time so a concurrent
+          // unmute between findMany and updateMany is not overwritten.
+          where: { id: { in: targets.map(t => t.id) }, isMuted: false },
+          data: { isMuted: true, mutedByModerator: false, updatedAt: new Date() }
+        });
+        mutedCount = updateResult.count;
+        // R1 FIX: Log when concurrent state change caused some rows to be skipped.
+        if (mutedCount < targets.length) {
+          logger.warn(`[voice:mute-all] ${targets.length - mutedCount} participant(s) not muted due to concurrent state change`);
+        }
+      }
+      // Persist the room-wide mute policy — this is the core DEF-001 fix.
+      await tx.voiceRoom.update({
+        where: { id: roomId },
+        data: { allMuted: true, updatedAt: new Date() }
+      });
     });
 
     await safeDeleteCache(roomCacheKey(roomId));
 
+    // R1 FIX: Re-read only rows that were actually updated (isMuted=true and
+    // mutedByModerator=false still), so socket events and SFU calls target only
+    // participants whose DB row was actually changed by the conditional updateMany.
+    // When mutedCount is 0, skip the DB round-trip entirely.
+    const actuallyMuted = mutedCount > 0
+      ? await prisma.voiceParticipant.findMany({
+          where: {
+            id:               { in: targets.map(t => t.id) },
+            isMuted:          true,
+            mutedByModerator: false,
+          },
+          select: { userId: true }
+        })
+      : [];
+
     const io = getIo();
     if (io) {
-      targets.forEach(t => {
+      actuallyMuted.forEach(t => {
+        // F-01 FIX: emit mutedByModerator=false to match the DB write above.
+        // Room-wide mute does not set the individual-mute flag.
         io.to(`voice:${roomId}`).emit('voice:mute_changed', {
-          roomId, userId: t.userId, isMuted: true, mutedByModerator: true
+          roomId, userId: t.userId, isMuted: true, mutedByModerator: false
         });
+      });
+      // DEF-001: Emit room policy event so all clients know allMuted=true.
+      // Emitted after per-participant events so clients apply participant state first.
+      io.to(`voice:${roomId}`).emit('voice:room_policy_changed', {
+        roomId, allMuted: true
       });
     }
 
-    _rolesAudit(callerId, 'MUTE_ALL', roomId, { mutedCount: targets.length });
+    _rolesAudit(callerId, 'MUTE_ALL', roomId, { mutedCount });
 
-    // PH17-003 FIX: Revoke SFU publish for each muted speaker — best-effort.
+    // PH17-003 FIX: Revoke SFU publish for each actually-muted speaker — best-effort.
     // A SPEAKER whose token has canPublish:true can still publish until their
     // token expires. sfuRevokePublish sets canPublish=false on the live SFU
     // connection immediately so the revocation takes effect without token expiry.
-    targets.forEach(t => {
+    actuallyMuted.forEach(t => {
       sfuRevokePublish(roomId, t.userId, false, '[voice:mute-all]').catch(() => {});
     });
 
-    return successResponse(res, { mutedCount: targets.length },
-      `Muted ${targets.length} speaker${targets.length > 1 ? 's' : ''}`);
+    return successResponse(res, { mutedCount, allMuted: true },
+      `Muted ${mutedCount} speaker${mutedCount > 1 ? 's' : ''}`);
   } catch (error) { next(error); }
 }
 
@@ -333,47 +422,104 @@ async function muteAll(req, res, next) {
  * The calling user (HOST/MOD) is excluded from the update — they control their
  * own mic independently. AUDIENCE participants are left alone (they are always
  * muted and are not stage speakers).
+ *
+ * DEF-001 FIX: Clear the room-wide mute policy (VoiceRoom.allMuted=false) in
+ * the same transaction as the per-participant writes.
+ *
+ * DEF-003/V4 FIX: Only unmute participants whose isMuted=true AND
+ * mutedByModerator=false. Participants individually muted by a moderator
+ * (mutedByModerator=true) are NOT cleared — their individual mute survives
+ * the room-wide unmute operation.
  */
 async function unmuteAll(req, res, next) {
   try {
     const { id: roomId } = req.params;
     const callerId = req.user.id;
 
-    // Find all currently muted SPEAKER and MODERATOR (not self, not HOST who controls own mic)
-    const targets = await prisma.voiceParticipant.findMany({
-      where: {
-        roomId,
-        isActive: true,
-        isMuted:  true,
-        userId:   { not: callerId },
-        role:     { in: [VOICE_ROLES.SPEAKER, VOICE_ROLES.MODERATOR] }
-      },
-      select: { id: true, userId: true }
-    });
+    // F-04 FIX: findMany inside the transaction so target selection sees
+    // any concurrent individual mute that committed before this statement
+    // runs (READ COMMITTED). The previous pattern read targets outside the
+    // transaction, leaving a window where a concurrent toggleMute() could
+    // set mutedByModerator=true on a participant who was still in the old
+    // target list (with mutedByModerator=false at read time), and the
+    // updateMany would then erase that individual mute.
+    let targets = [];
+    let unmutedCount = 0;
+    await prisma.$transaction(async (tx) => {
+      // DEF-003 FIX: Filter on mutedByModerator=false so individually muted
+      // participants are excluded from the room-wide unmute.
+      targets = await tx.voiceParticipant.findMany({
+        where: {
+          roomId,
+          isActive:         true,
+          isMuted:          true,
+          mutedByModerator: false,   // DEF-003: skip individually mod-muted participants
+          userId:           { not: callerId },
+          role:             { in: [VOICE_ROLES.SPEAKER, VOICE_ROLES.MODERATOR] }
+        },
+        select: { id: true, userId: true }
+      });
 
-    if (targets.length === 0) {
-      return successResponse(res, { unmutedCount: 0 }, 'No muted speakers to unmute');
-    }
-
-    await prisma.voiceParticipant.updateMany({
-      where: { id: { in: targets.map(t => t.id) } },
-      data: { isMuted: false, mutedByModerator: false, updatedAt: new Date() }
+      if (targets.length > 0) {
+        const updateResult = await tx.voiceParticipant.updateMany({
+          // F-04 Race B: re-check mutedByModerator=false at write time so a
+          // concurrent individual toggleMute() between findMany and updateMany
+          // is NOT overwritten. If toggleMute sets mutedByModerator=true before
+          // this updateMany runs, the WHERE clause won't match that row, and
+          // the individual disciplinary mute is preserved.
+          where: { id: { in: targets.map(t => t.id) }, mutedByModerator: false },
+          data: { isMuted: false, mutedByModerator: false, updatedAt: new Date() }
+        });
+        unmutedCount = updateResult.count;
+      }
+      // DEF-001: Clear the room-wide mute policy.
+      await tx.voiceRoom.update({
+        where: { id: roomId },
+        data: { allMuted: false, updatedAt: new Date() }
+      });
     });
 
     await safeDeleteCache(roomCacheKey(roomId));
 
+    // R1 FIX: Re-read only rows that were actually updated (isMuted=false and
+    // mutedByModerator=false still), so socket events are emitted only for
+    // participants whose DB row was actually changed by updateMany.
+    // When updateMany.count is 0, skip the DB round-trip entirely.
+    const actuallyUnmuted = unmutedCount > 0
+      ? await prisma.voiceParticipant.findMany({
+          where: {
+            id:               { in: targets.map(t => t.id) },
+            isMuted:          false,
+            mutedByModerator: false,
+          },
+          select: { userId: true }
+        })
+      : [];
+
     const io = getIo();
     if (io) {
-      targets.forEach(t => {
+      actuallyUnmuted.forEach(t => {
         io.to(`voice:${roomId}`).emit('voice:mute_changed', {
           roomId, userId: t.userId, isMuted: false, mutedByModerator: false
         });
       });
+      // DEF-001: Emit room policy event so all clients know allMuted=false.
+      io.to(`voice:${roomId}`).emit('voice:room_policy_changed', {
+        roomId, allMuted: false
+      });
     }
 
-    _rolesAudit(callerId, 'UNMUTE_ALL', roomId, { unmutedCount: targets.length });
-    return successResponse(res, { unmutedCount: targets.length },
-      `Unmuted ${targets.length} speaker${targets.length > 1 ? 's' : ''}`);
+    // P3a FIX: Restore SFU canPublish for participants actually unmuted.
+    // muteAll() called sfuRevokePublish(canPublish=false) per target; without
+    // this restore, those participants cannot publish until their token expires (~1h).
+    // Best-effort only — catch swallows SFU errors.
+    actuallyUnmuted.forEach(t => {
+      sfuRevokePublish(roomId, t.userId, true, '[voice:unmute-all]').catch(() => {});
+    });
+
+    _rolesAudit(callerId, 'UNMUTE_ALL', roomId, { unmutedCount });
+    return successResponse(res, { unmutedCount, allMuted: false },
+      `Unmuted ${unmutedCount} speaker${unmutedCount > 1 ? 's' : ''}`);
   } catch (error) { next(error); }
 }
 

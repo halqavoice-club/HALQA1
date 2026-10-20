@@ -12,7 +12,8 @@
  * Socket events emitted:
  *   voice:queue_updated   → { roomId, queue: [...], queueLength }
  *   voice:queue_position  → { roomId, position }          (to the user only)
- *   voice:role_changed    → { roomId, userId, role }       (on approve)
+ *   voice:role_changed    → { roomId, userId, role, seatNumber }       (on AUDIENCE approve)
+ *   voice:mute_changed    → { roomId, userId, isMuted, seatNumber }    (on MODERATOR approve)
  *   voice:queue_rejected  → { roomId }                     (to rejected user)
  * ─────────────────────────────────────────────────────────────────────────────
  */
@@ -48,11 +49,15 @@ async function safeDeleteCache(key) {
 async function broadcastQueue(roomId) {
   const io = getIo();
   if (!io) return;
+  // Always call queue.getQueue() — it handles Redis-unavailable internally
+  // by falling back to DB (getQueueFromDB). The previous isRedisReady() guard
+  // caused broadcastQueue to emit queue:[] when Redis was down, wiping the
+  // host's waiting list on every queue mutation (P0 bug).
   let q = [];
-  if (isRedisReady()) {
-    try { q = await queue.getQueue(roomId); } catch (err) {
-      logger.warn(`[voice-queue] broadcastQueue Redis error: ${err.message}`);
-    }
+  try {
+    q = await queue.getQueue(roomId);
+  } catch (err) {
+    logger.warn(`[voice-queue] broadcastQueue getQueue error: ${err.message}`);
   }
   io.to(`voice:${roomId}`).emit('voice:queue_updated', {
     roomId,
@@ -174,7 +179,8 @@ async function raiseHand(req, res, next) {
         lastName:  req.user.lastName,
         avatarUrl: req.user.avatarUrl,
         raised:    true,
-        position
+        position,
+        handRaisedAt: new Date().toISOString(), // FIX: include server timestamp so clients sort FIFO correctly
       });
     }
 
@@ -305,8 +311,6 @@ async function approveNext(req, res, next) {
     return _promoteUser(req, res, nextUser, roomId, room);
   } catch (error) { next(error); }
 }
-
-// ─── APPROVE SPECIFIC USER ────────────────────────────────────────────────────
 /**
  * POST /voice/:id/queue/approve/:userId
  *
@@ -484,6 +488,7 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       assignedSeat = seat;
 
       // Assign seat using raw SQL (Prisma client not regenerated with seatNumber yet)
+      // DEF-002: MODERATOR is exempt from allMuted; AUDIENCE→SPEAKER respects it.
       if (txIsMod) {
         await tx.$executeRaw`
           UPDATE voice_participants
@@ -492,9 +497,11 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
           WHERE roomId = ${roomId} AND userId = ${userId}
         `;
       } else {
+        // DEF-002: queue promotions are always AUDIENCE→SPEAKER; respect allMuted.
+        const promoteAllMuted = Boolean(room.allMuted);
         await tx.$executeRaw`
           UPDATE voice_participants
-          SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = 0,
+          SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = ${promoteAllMuted ? 1 : 0},
               handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
           WHERE roomId = ${roomId} AND userId = ${userId}
         `;
@@ -520,6 +527,7 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       return successResponse(res, {
         userId,
         role: 'SPEAKER',
+        seatNumber: null,
         firstName: userMeta.firstName,
         lastName: userMeta.lastName,
         alreadyOnStage: true,
@@ -587,7 +595,9 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
         })),
         stageCount: stageRows.length,
       });
-    } catch { /* non-fatal */ }
+    } catch (stageErr) {
+      logger.warn(`[_promoteUser] voice:stage_state broadcast failed: ${stageErr.message}`);
+    }
   }
 
   await broadcastQueue(roomId);
@@ -602,9 +612,10 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
 
   return successResponse(res, {
     userId,
-    role: 'SPEAKER',
-    firstName: userMeta.firstName,
-    lastName:  userMeta.lastName
+    role:       isMod ? VOICE_ROLES.MODERATOR : 'SPEAKER',
+    seatNumber: assignedSeat,
+    firstName:  userMeta.firstName,
+    lastName:   userMeta.lastName,
   }, `${userMeta.firstName} promoted to speaker`);
 }
 
@@ -692,9 +703,12 @@ async function getQueueHandler(req, res, next) {
 
     if (isHost) {
       // Full queue for host/moderator
+      // FIX: was wrapped in isRedisReady() guard — returned [] when Redis was down,
+      // causing navigate-back to silently show an empty queue. Now always calls
+      // queue.getQueue() which handles Redis-unavailable via DB fallback internally.
       let q = [];
-      if (isRedisReady()) {
-        try { q = await queue.getQueue(roomId); } catch (err) { /* Redis unavailable */ }
+      try { q = await queue.getQueue(roomId); } catch (err) {
+        logger.warn(`[voice-queue:getQueueHandler] getQueue failed: ${err.message}`);
       }
       return successResponse(res, { queue: q, queueLength: q.length });
     } else {
@@ -728,6 +742,7 @@ async function getQueueHandler(req, res, next) {
 }
 
 module.exports = {
+  broadcastQueue,  // FIX: was missing — voice.controller.js requires this for grabMic queuing paths
   raiseHand,
   cancelHand,
   approveNext,

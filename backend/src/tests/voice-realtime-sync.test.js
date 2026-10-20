@@ -1104,19 +1104,19 @@ describe('BUG-004: voice-queue _promoteUser — full-room snapshot with user nam
 describe('BUG-005: Web onStageState — stale-seat sweep for absent participants', () => {
   test('onStageState has a snapshotIds set for the sweep', () => {
     const stageIdx = hookSrc.indexOf('const onStageState');
-    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 3000);
+    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 4500); // window enlarged for dev-mode log additions
     expect(handlerBlock).toMatch(/snapshotIds/);
   });
 
   test('stale-seat sweep only fires when snapshot has content (length > 0 guard)', () => {
     const stageIdx = hookSrc.indexOf('const onStageState');
-    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 3000);
+    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 4500); // window enlarged for dev-mode log additions
     expect(handlerBlock).toMatch(/stageParticipants\.length\s*>\s*0/);
   });
 
   test('stale-seat sweep clears seatNumber to null for absent participants', () => {
     const stageIdx = hookSrc.indexOf('const onStageState');
-    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 3000);
+    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 4500); // window enlarged for dev-mode log additions
     // Sweep exists and sets seatNumber: null
     expect(handlerBlock).toMatch(/snapshotIds/);
     expect(handlerBlock).toMatch(/seatNumber.*null/);

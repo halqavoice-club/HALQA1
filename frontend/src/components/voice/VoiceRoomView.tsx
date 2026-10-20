@@ -545,6 +545,39 @@ export function VoiceRoomView({ onLeave }: Props) {
     return () => disconnect()
   }, [roomId]) // eslint-disable-line
 
+  // P0-2 FIX: Re-call POST /join on every mount when already an active participant.
+  // On navigate-back, VoiceRoomView mounts with activeRoom already set in the store.
+  // Without this, the backend reconnect path (which re-broadcasts voice:user_joined
+  // with seatNumber) never runs, so other clients don't see us re-appear on stage.
+  // Safety: only fires when myParticipant.isActive is true (i.e. user is already in
+  // the room). Does not fire on first join (myParticipant is null until POST /join
+  // returns and the store is populated).
+  // hasRejoined ref prevents double-fire in React StrictMode double-invoke.
+  const hasRejoinedRef = useRef(false)
+  useEffect(() => {
+    if (!roomId) return
+    if (hasRejoinedRef.current) return
+    // Only rejoin if we already have an active participant record in this room.
+    // myParticipant is derived from activeRoom.participants — populated on first join.
+    if (!myParticipant || !myParticipant.isActive) return
+    hasRejoinedRef.current = true
+    api.post(`/voice/${roomId}/join`)
+      .then((r: { data: { data: any } }) => {
+        const updated = r.data?.data
+        if (updated) {
+          // Update the store participant with fresh data from the server
+          // (seatNumber, role, isMuted may have changed since last visit)
+          useVoiceStore.getState().updateParticipant(updated.userId ?? updated.id, {
+            role:       updated.role,
+            isMuted:    updated.isMuted,
+            seatNumber: updated.seatNumber ?? null,
+            isActive:   true,
+          })
+        }
+      })
+      .catch(() => { /* non-fatal — participant already active; socket events sync state */ })
+  }, [roomId]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Fetch initial FIFO queue state when entering room
   useEffect(() => {
     if (!roomId) return
@@ -554,6 +587,64 @@ export function VoiceRoomView({ onLeave }: Props) {
         if (Array.isArray(q)) useVoiceStore.getState().setSpeakerQueue(q)
       })
       .catch(() => {})
+  }, [roomId]) // eslint-disable-line
+
+  // ── Periodic stage-state refresh — safety net for missed socket events ────
+  // Navigate-back works because onReconnect calls GET /stage-state, which
+  // re-hydrates ALL participant data (handRaised, role, presence) from DB.
+  // Staying on screen relies on socket events — a dropped voice:user_joined
+  // or voice:hand_raised permanently hides that person until reconnect.
+  // This 30-second interval closes the gap: missed events self-heal within 30s.
+  useEffect(() => {
+    if (!roomId) return
+    const interval = setInterval(() => {
+      api.get(`/voice/${roomId}/stage-state`)
+        .then((r: any) => {
+          const data = r.data?.data
+          if (!data?.stageParticipants?.length) return
+          const store = useVoiceStore.getState()
+          const currentIds = new Set(
+            (store.activeRoom?.participants ?? []).map((p: any) => p.userId)
+          )
+          // Update existing participants' state (handRaised, seatNumber, role)
+          data.stageParticipants.forEach((sp: any) => {
+            store.updateParticipant(sp.userId, {
+              role:             sp.role,
+              isMuted:          Boolean(sp.isMuted),
+              seatNumber:       sp.seatNumber != null ? Number(sp.seatNumber) : null,
+              handRaised:       Boolean(sp.handRaised),
+              isPinned:         Boolean(sp.isPinned),
+              mutedByModerator: Boolean(sp.mutedByModerator),
+            })
+          })
+          // Add any participant the host missed due to a dropped voice:user_joined
+          data.stageParticipants.forEach((sp: any) => {
+            if (!currentIds.has(sp.userId)) {
+              store.addParticipant({
+                id:               sp.userId,
+                userId:           sp.userId,
+                role:             sp.role,
+                isMuted:          Boolean(sp.isMuted),
+                mutedByModerator: Boolean(sp.mutedByModerator),
+                handRaised:       Boolean(sp.handRaised),
+                handRaisedAt:     null,
+                joinedAt:         sp.joinedAt ?? new Date().toISOString(),
+                isActive:         true,
+                isPinned:         Boolean(sp.isPinned),
+                seatNumber:       sp.seatNumber != null ? Number(sp.seatNumber) : null,
+                user: {
+                  id:        sp.userId,
+                  firstName: sp.firstName ?? '',
+                  lastName:  sp.lastName  ?? '',
+                  avatarUrl: sp.avatarUrl ?? null,
+                },
+              })
+            }
+          })
+        })
+        .catch(() => {}) // non-fatal — socket events are primary
+    }, 30_000) // every 30 seconds
+    return () => clearInterval(interval)
   }, [roomId]) // eslint-disable-line
 
   // ── Live member count socket updates ──────────────────────────────────────
@@ -728,6 +819,10 @@ export function VoiceRoomView({ onLeave }: Props) {
     disconnect()
     // Notify backend (marks participant inactive, room stays LIVE)
     try { await api.post(`/voice/${roomId}/leave`) } catch {}
+    // Emit voice:leave_room so the socket is removed from the Socket.IO room
+    // immediately — this is the authoritative leave signal for clean exit.
+    const socket = getSocket()
+    if (socket && roomId) socket.emit('voice:leave_room', roomId)
     onLeave()
   }
 

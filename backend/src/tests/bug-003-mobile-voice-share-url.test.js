@@ -316,9 +316,11 @@ describe('BUG-003 — Mobile Voice Club Share URL', () => {
       expect(fn).toMatch(/409/);
     });
 
-    test('leaveRoom() auto-sleep grace period is intact', () => {
+    test('leaveRoom() auto-sleep is scheduled via BullMQ queue service', () => {
+      // BullMQ-based sleep: leaveRoom() calls scheduleRoomSleep() from queue.service.
+      // The 5-min delay is configured inside queue.service.js (not inline in the controller).
       const fn = extractFunction(voiceSrc, 'leaveRoom');
-      expect(fn).toMatch(/AUTO_SLEEP_GRACE_MS|5.*60.*1000/);
+      expect(fn).toMatch(/scheduleRoomSleep/);
     });
 
     test('voice controller has no share URL logic', () => {

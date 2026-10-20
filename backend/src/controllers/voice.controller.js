@@ -620,14 +620,38 @@ async function joinRoom(req, res, next) {
               err.statusCode = 403;
               throw err;
             }
-            // Reconnect path — restore to active audience state
+            // Reconnect path — restore participant to active state.
+            // CRITICAL FIX: preserve seatNumber and isMuted for on-stage roles.
+            // The previous code unconditionally set isMuted=true and cleared
+            // seatNumber=NULL, which dropped every returning SPEAKER/HOST/MOD
+            // from the stage into the audience on navigate-back.
+            // Now: on-stage participants (role != AUDIENCE AND seatNumber != null)
+            // keep their seat and mute state. Audience participants get the
+            // standard reset (muted, no seat).
+            const wasOnStage = (
+              existing.role === 'HOST' ||
+              existing.role === 'MODERATOR' ||
+              existing.role === 'SPEAKER'
+            );
+
+            // Read existing seatNumber (raw SQL, Prisma client may not have column)
+            const [existingSeatRow] = await tx.$queryRaw`
+              SELECT seatNumber FROM voice_participants
+              WHERE roomId = ${roomId} AND userId = ${userId} LIMIT 1
+            `;
+            const hadSeat = existingSeatRow?.seatNumber != null;
+            const isOnStage = wasOnStage && hadSeat;
+
             participant = await tx.voiceParticipant.update({
               where: { roomId_userId: { roomId, userId } },
               data: {
                 isActive:     true,
-                joinedAt:     new Date(),
+                // Preserve joinedAt for stage reconnects so sort order is stable
+                ...(isOnStage ? {} : { joinedAt: new Date() }),
                 leftAt:       null,
-                isMuted:      true,
+                // Preserve isMuted for on-stage participants — their mute state
+                // was set deliberately. Audience reconnects are always muted.
+                isMuted:      isOnStage ? existing.isMuted : true,
                 handRaised:   false,
                 handRaisedAt: null,
               },
@@ -635,11 +659,15 @@ async function joinRoom(req, res, next) {
                 user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } }
               }
             });
-            // Clear seatNumber on re-join — they are in audience until they grab a seat
-            await tx.$executeRaw`
-              UPDATE voice_participants SET seatNumber = NULL
-              WHERE roomId = ${roomId} AND userId = ${userId}
-            `;
+
+            // Only clear seatNumber for AUDIENCE reconnects.
+            // On-stage participants keep their seat — it is still reserved in DB.
+            if (!isOnStage) {
+              await tx.$executeRaw`
+                UPDATE voice_participants SET seatNumber = NULL
+                WHERE roomId = ${roomId} AND userId = ${userId}
+              `;
+            }
           } else {
             // New join — create participant
             const role = room.hostId === userId ? VOICE_ROLES.HOST : VOICE_ROLES.AUDIENCE;
@@ -805,6 +833,9 @@ async function joinRoom(req, res, next) {
         isPinned:         participant.isPinned ?? false,
         seatNumber:       joinSeatNumber,
         joinedAt:         participant.joinedAt?.toISOString?.() ?? new Date().toISOString(),
+        // PHASE 6 / DEF-001: include room-wide mute policy so joining clients
+        // know immediately whether allMuted is active without a separate fetch.
+        allMuted:         Boolean(updatedRoom?.allMuted ?? false),
       });
 
       // FIX-JOIN-STAGE: Send the current authoritative room snapshot directly to
@@ -821,23 +852,36 @@ async function joinRoom(req, res, next) {
           ORDER BY vp.role ASC, vp.joinedAt ASC
         `;
         if (stageRows.length > 0) {
+          const mappedStageRows = stageRows.map(r => ({
+            userId:           r.userId,
+            role:             r.role,
+            isMuted:          Boolean(r.isMuted),
+            seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
+            isPinned:         Boolean(r.isPinned),
+            handRaised:       Boolean(r.handRaised),
+            mutedByModerator: Boolean(r.mutedByModerator),
+            joinedAt:         r.joinedAt,
+            firstName:        r.firstName ?? null,
+            lastName:         r.lastName ?? null,
+            avatarUrl:        r.avatarUrl ?? null,
+          }));
+          // Personal snapshot for the joining user.
           io.to(`user:${userId}`).emit('voice:stage_state', {
             roomId,
-            stageParticipants: stageRows.map(r => ({
-              userId:           r.userId,
-              role:             r.role,
-              isMuted:          Boolean(r.isMuted),
-              seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
-              isPinned:         Boolean(r.isPinned),
-              handRaised:       Boolean(r.handRaised),
-              mutedByModerator: Boolean(r.mutedByModerator),
-              joinedAt:         r.joinedAt,
-              firstName:        r.firstName ?? null,
-              lastName:         r.lastName ?? null,
-              avatarUrl:        r.avatarUrl ?? null,
-            })),
+            stageParticipants: mappedStageRows,
             stageCount: stageRows.length,
           });
+          // BUG-1 FIX: Also broadcast the snapshot room-wide so existing clients
+          // pick up the new joiner even if they missed voice:user_joined (e.g. the
+          // addParticipant null-guard silently dropped it). Guard at < 100 on-stage
+          // participants to avoid O(N²) snapshot traffic on large rooms.
+          if (stageRows.length < 100) {
+            io.to(`voice:${roomId}`).emit('voice:stage_state', {
+              roomId,
+              stageParticipants: mappedStageRows,
+              stageCount: stageRows.length,
+            });
+          }
         }
       } catch { /* non-fatal */ }
     }
@@ -996,7 +1040,11 @@ async function endRoom(req, res, next) {
     // Mark all participants inactive
     await prisma.voiceParticipant.updateMany({
       where: { roomId, isActive: true },
-      data: { isActive: false, leftAt: endedAt }
+      // FIX: seatNumber must be cleared with isActive=false. The @@unique([roomId, seatNumber])
+      // constraint applies to all rows including inactive ones. Without clearing seatNumber here,
+      // participants archived by endRoom retain their seatNumber, which could block seat
+      // reuse if the room is ever re-activated (permanent room design).
+      data: { isActive: false, leftAt: endedAt, seatNumber: null }
     });
 
     await prisma.voiceRoom.update({
@@ -1152,6 +1200,27 @@ async function toggleMute(req, res, next) {
       });
     }
 
+    // DEF-005 FIX: Enforce SFU publish permission for moderator individual mute/unmute.
+    // Self-mute does not need SFU enforcement (participant controls their own mic client-side).
+    // Moderator action: revoke (muting) or restore (unmuting) canPublish on the SFU.
+    // DB update and socket event have already fired above regardless of SFU outcome.
+    if (subjectId !== callerId) {
+      // canPublish=false when muting, canPublish=true when unmuting
+      const canPublish = !newMuted;
+      const sfuTag = newMuted ? '[voice:mod-mute]' : '[voice:mod-unmute]';
+      let sfuEnforced = false;
+      try {
+        // sfuRevokePublish internally swallows errors after logging — we wrap it
+        // in try/catch at this level to detect whether the API call succeeded.
+        await sfuRevokePublish(roomId, subjectId, canPublish, sfuTag);
+        sfuEnforced = true;
+      } catch (sfuErr) {
+        // sfuRevokePublish already logs internally; this catch only fires if the
+        // helper itself throws unexpectedly (e.g. before the internal try/catch).
+        logger.warn(`${sfuTag} SFU enforcement failed for ${subjectId} in ${roomId}: ${sfuErr.message}`);
+      }
+      return successResponse(res, { isMuted: newMuted, sfuEnforced });
+    }
     return successResponse(res, { isMuted: newMuted });
   } catch (error) { next(error); }
 }
@@ -1225,7 +1294,7 @@ async function promoteParticipant(req, res, next) {
     if (role === VOICE_ROLES.SPEAKER) {
       const room = await prisma.voiceRoom.findUnique({
         where: { id: roomId },
-        select: { micLocked: true, maxSpeakers: true }
+        select: { micLocked: true, maxSpeakers: true, allMuted: true }  // DEF-002: include allMuted
       });
       if (room?.micLocked) {
         return errorResponse(res, 'The mic is locked — unlock to promote speakers', 403);
@@ -1276,7 +1345,10 @@ async function promoteParticipant(req, res, next) {
             SELECT COUNT(*) as cnt FROM voice_participants
             WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
           `.then(rows => Number(rows[0]?.cnt ?? 0));
-          const maxSpk = (await tx.voiceRoom.findUnique({ where: { id: roomId }, select: { maxSpeakers: true } }))?.maxSpeakers || 12;
+          // DEF-002: read allMuted inside transaction so the check is atomic with the write.
+          const txRoom = (await tx.voiceRoom.findUnique({ where: { id: roomId }, select: { maxSpeakers: true, allMuted: true } }));
+          const maxSpk = txRoom?.maxSpeakers || 12;
+          const roomAllMuted = Boolean(txRoom?.allMuted);
           if (stageCnt >= maxSpk) {
             const err = new Error('All seats are full');
             err.statusCode = 400; throw err;
@@ -1296,9 +1368,12 @@ async function promoteParticipant(req, res, next) {
           }
           // Capture the assigned seat INSIDE the transaction so the broadcast always has it
           assignedSeatNumber = seat;
+          // DEF-002: SPEAKER promotion respects room-wide mute policy.
+          // HOST and MODERATOR are exempt (isMuted stays 0), but this path only
+          // ever promotes to SPEAKER so allMuted always applies here.
           await tx.$executeRaw`
             UPDATE voice_participants
-            SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = 0,
+            SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = ${roomAllMuted ? 1 : 0},
                 handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
             WHERE roomId = ${roomId} AND userId = ${targetUserId}
           `;
@@ -1386,38 +1461,38 @@ async function promoteParticipant(req, res, next) {
         try { await autoPromoteNext(roomId, io); } catch {}
       }
 
-      // Authoritative stage snapshot — clients reconcile from this after any
-      // promotion to prevent stale seat positions on slow connections.
-      if (role === VOICE_ROLES.SPEAKER && assignedSeatNumber != null) {
-        try {
-          const stageRows = await prisma.$queryRaw`
-            SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
-                   vp.handRaised, vp.mutedByModerator, vp.joinedAt,
-                   u.firstName, u.lastName, u.avatarUrl
-            FROM voice_participants vp
-            LEFT JOIN users u ON u.id = vp.userId
-            WHERE vp.roomId = ${roomId} AND vp.isActive = 1
-            ORDER BY vp.role ASC, vp.joinedAt ASC
-          `;
-          io.to(`voice:${roomId}`).emit('voice:stage_state', {
-            roomId,
-            stageParticipants: stageRows.map(r => ({
-              userId:           r.userId,
-              role:             r.role,
-              isMuted:          Boolean(r.isMuted),
-              seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
-              isPinned:         Boolean(r.isPinned),
-              handRaised:       Boolean(r.handRaised),
-              mutedByModerator: Boolean(r.mutedByModerator),
-              joinedAt:         r.joinedAt,
-              firstName:        r.firstName ?? null,
-              lastName:         r.lastName ?? null,
-              avatarUrl:        r.avatarUrl ?? null,
-            })),
-            stageCount: stageRows.length,
-          });
-        } catch { /* non-fatal */ }
-      }
+      // BUG-2 FIX: Authoritative stage snapshot — emit for ALL role changes
+      // (promotion AND demotion), not just SPEAKER promotion. This ensures the
+      // stale-seat sweep in onStageState fires on AUDIENCE demotion, clearing
+      // the vacated slot on every connected client without requiring a refresh.
+      try {
+        const stageRows = await prisma.$queryRaw`
+          SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
+                 vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+                 u.firstName, u.lastName, u.avatarUrl
+          FROM voice_participants vp
+          LEFT JOIN users u ON u.id = vp.userId
+          WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+          ORDER BY vp.role ASC, vp.joinedAt ASC
+        `;
+        io.to(`voice:${roomId}`).emit('voice:stage_state', {
+          roomId,
+          stageParticipants: stageRows.map(r => ({
+            userId:           r.userId,
+            role:             r.role,
+            isMuted:          Boolean(r.isMuted),
+            seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
+            isPinned:         Boolean(r.isPinned),
+            handRaised:       Boolean(r.handRaised),
+            mutedByModerator: Boolean(r.mutedByModerator),
+            joinedAt:         r.joinedAt,
+            firstName:        r.firstName ?? null,
+            lastName:         r.lastName ?? null,
+            avatarUrl:        r.avatarUrl ?? null,
+          })),
+          stageCount: stageRows.length,
+        });
+      } catch { /* non-fatal */ }
     }
 
     // Remove from queue if they were in it (e.g. direct promotion bypassing FIFO)
@@ -1978,7 +2053,7 @@ async function grabMic(req, res, next) {
     // ── 1. Validate room ──────────────────────────────────────────────────
     const room = await prisma.voiceRoom.findUnique({
       where: { id: roomId },
-      select: { status: true, deletedAt: true, isOpenMic: true, micLocked: true, maxSpeakers: true, hostId: true }
+      select: { status: true, deletedAt: true, isOpenMic: true, micLocked: true, maxSpeakers: true, hostId: true, allMuted: true }  // DEF-002: include allMuted
     });
     if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
     if (room.status === 'ENDED') return errorResponse(res, 'This room has been archived', 400);
@@ -2070,9 +2145,15 @@ async function grabMic(req, res, next) {
           lastName:  req.user.lastName,
           avatarUrl: req.user.avatarUrl,
           position,
+          handRaisedAt: new Date().toISOString(), // FIX: server timestamp for FIFO order
         });
         io0.to(`user:${userId}`).emit('voice:queue_position', { roomId, position });
       }
+      // FIX: broadcastQueue was missing from grabMic's open-mic-OFF path.
+      // Without it, voice:queue_updated is never emitted when users join the
+      // queue via grabMic, so speakerQueue store is never updated.
+      const { broadcastQueue: bq } = require('../controllers/voice-queue.controller');
+      await bq(roomId).catch(err => logger.warn(`[grabMic] broadcastQueue failed: ${err.message}`));
       return successResponse(res, { queued: true, role: 'AUDIENCE', position }, `You are #${position} in the queue`);
     }
 
@@ -2105,9 +2186,9 @@ async function grabMic(req, res, next) {
           return;
         }
 
-        // Re-check micLocked inside tx
+        // Re-check micLocked and allMuted inside tx (DEF-002: atomic with write)
         const [rm] = await tx.$queryRaw`
-          SELECT micLocked, maxSpeakers FROM voice_rooms WHERE id = ${roomId} LIMIT 1
+          SELECT micLocked, maxSpeakers, allMuted FROM voice_rooms WHERE id = ${roomId} LIMIT 1
         `;
         if (rm?.micLocked && !isPrivileged) {
           const e = new Error('The mic is locked'); e.statusCode = 403; throw e;
@@ -2140,9 +2221,13 @@ async function grabMic(req, res, next) {
         updatedRole = newRole;
         assignedSeat = seat;
 
+        // DEF-002: HOST/MOD are exempt from allMuted (isPrivileged=true means isMuted stays 0).
+        // AUDIENCE→SPEAKER promotion respects the room-wide mute policy.
+        const grabAllMuted = Boolean(rm?.allMuted);
+
         // Assign seat atomically
         if (MODERATOR_ROLES.includes(curr.role)) {
-          // HOST/MOD: stay same role, go on stage (unmuted)
+          // HOST/MOD: stay same role, go on stage (unmuted — exempt from allMuted)
           await tx.$executeRaw`
             UPDATE voice_participants
             SET seatNumber = ${seat}, isMuted = 0, mutedByModerator = 0,
@@ -2150,10 +2235,10 @@ async function grabMic(req, res, next) {
             WHERE roomId = ${roomId} AND userId = ${userId}
           `;
         } else {
-          // AUDIENCE → SPEAKER
+          // AUDIENCE → SPEAKER: respect allMuted policy
           await tx.$executeRaw`
             UPDATE voice_participants
-            SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = 0, mutedByModerator = 0,
+            SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = ${grabAllMuted ? 1 : 0}, mutedByModerator = 0,
                 handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
             WHERE roomId = ${roomId} AND userId = ${userId}
           `;
@@ -2179,8 +2264,18 @@ async function grabMic(req, res, next) {
         if (io) {
           io.to(`voice:${roomId}`).emit('voice:hand_raised', {
             roomId, userId, raised: true,
-            firstName: req.user.firstName, lastName: req.user.lastName, avatarUrl: req.user.avatarUrl
+            firstName: req.user.firstName, lastName: req.user.lastName, avatarUrl: req.user.avatarUrl,
+            handRaisedAt: new Date().toISOString(), // FIX: server timestamp for FIFO order
           });
+        }
+        // FIX: broadcastQueue was missing from grabMic's stage-full path.
+        // Without it, voice:queue_updated is never emitted when users are queued
+        // because the stage is full, so speakerQueue store is never updated.
+        try {
+          const { broadcastQueue: bq2 } = require('../controllers/voice-queue.controller');
+          await bq2(roomId);
+        } catch (bqErr) {
+          logger.warn(`[grabMic:stage-full] broadcastQueue failed: ${bqErr.message}`);
         }
         return successResponse(res, { queued: true, role: participant.role }, 'Stage is full — you have been added to the queue');
       }
@@ -2248,7 +2343,7 @@ async function grabMic(req, res, next) {
             userId:           r.userId,
             role:             r.role,
             isMuted:          Boolean(r.isMuted),
-            seatNumber:       Number(r.seatNumber),
+            seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
             isPinned:         Boolean(r.isPinned),
             handRaised:       Boolean(r.handRaised),
             mutedByModerator: Boolean(r.mutedByModerator),
@@ -2288,8 +2383,17 @@ async function dropMic(req, res, next) {
     const isPrivileged = MODERATOR_ROLES.includes(participant.role);
     const isSpeaker = participant.role === VOICE_ROLES.SPEAKER;
 
-    if (!isPrivileged && !isSpeaker) {
-      return errorResponse(res, 'Only speakers, hosts, and moderators can drop the mic', 400);
+    // SEAT-BASED GUARD FIX: also allow drop-mic when seatNumber IS NOT NULL.
+    // The role-only check fails if role was transiently set to AUDIENCE (e.g.
+    // during the non-atomic window of a concurrent removeModerator call) while
+    // the participant still holds a seat. Anyone with a seat is "on stage" and
+    // must be able to voluntarily release it.
+    // participant.seatNumber is already available from the findUnique above —
+    // no second DB round-trip needed.
+    const hasSeat = participant.seatNumber != null;
+
+    if (!isPrivileged && !isSpeaker && !hasSeat) {
+      return errorResponse(res, 'You are not currently on stage', 400);
     }
 
     if (isPrivileged) {
@@ -2362,7 +2466,7 @@ async function dropMic(req, res, next) {
             userId:           r.userId,
             role:             r.role,
             isMuted:          Boolean(r.isMuted),
-            seatNumber:       Number(r.seatNumber),
+            seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
             isPinned:         Boolean(r.isPinned),
             handRaised:       Boolean(r.handRaised),
             mutedByModerator: Boolean(r.mutedByModerator),
@@ -2617,7 +2721,7 @@ async function getStageState(req, res, next) {
         userId:           r.userId,
         role:             r.role,
         isMuted:          Boolean(r.isMuted),
-        seatNumber:       Number(r.seatNumber),
+        seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
         isPinned:         Boolean(r.isPinned),
         handRaised:       Boolean(r.handRaised),
         mutedByModerator: Boolean(r.mutedByModerator),

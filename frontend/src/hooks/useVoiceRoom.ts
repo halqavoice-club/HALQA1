@@ -95,6 +95,16 @@ export function useVoiceRoom(roomId: string | null) {
           if (r.data?.data) onStageState(r.data.data)
         })
         .catch(() => { /* non-fatal — socket events will catch up */ })
+      // FIX: also re-fetch the speaker queue so speakerQueue store is current
+      // after reconnect. stage-state re-hydrates handRaised flags (fixes handQueue)
+      // but speakerQueue is only updated by voice:queue_updated socket events,
+      // which are missed during disconnect.
+      api.get(`/voice/${roomId}/queue`)
+        .then((r: { data: { data: { queue: typeof setSpeakerQueue extends (q: infer Q) => void ? Q : never } } }) => {
+          const q = r.data?.data?.queue
+          if (Array.isArray(q)) setSpeakerQueue(q)
+        })
+        .catch(() => { /* non-fatal */ })
     }
     socket.on('connect', onReconnect)
 
@@ -124,16 +134,35 @@ export function useVoiceRoom(roomId: string | null) {
       roomId: string; userId: string
       firstName: string; lastName: string
       avatarUrl: string | null; role: string
+      handRaised?: boolean
+      handRaisedAt?: string
+      isMuted?: boolean
+      mutedByModerator?: boolean
+      isPinned?: boolean
+      seatNumber?: number | null
+      joinedAt?: string
     }) => {
       if (data.roomId !== roomId) return
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[voice-debug] voice:user_joined received', {
+          userId: data.userId,
+          firstName: data.firstName,
+          storeCount: useVoiceStore.getState().activeRoom?.participants.length ?? 0,
+          activeRoomId: useVoiceStore.getState().activeRoom?.id,
+          roomIdMatch: data.roomId === roomId,
+        })
+      }
       addParticipant({
         id: data.userId, userId: data.userId,
-        role: asRole(data.role), isMuted: true,
-        mutedByModerator: false,
-        handRaised: false, handRaisedAt: null,
-        joinedAt: new Date().toISOString(), isActive: true,
-        isPinned: false,
-        seatNumber: null,
+        role: asRole(data.role),
+        isMuted: data.isMuted ?? true,
+        mutedByModerator: data.mutedByModerator ?? false,
+        handRaised: data.handRaised ?? false,
+        handRaisedAt: data.handRaisedAt ?? (data.handRaised ? new Date().toISOString() : null),
+        joinedAt: data.joinedAt ?? new Date().toISOString(),
+        isActive: true,
+        isPinned: data.isPinned ?? false,
+        seatNumber: data.seatNumber ?? null,
         user: { id: data.userId, firstName: data.firstName, lastName: data.lastName, avatarUrl: data.avatarUrl }
       })
     }
@@ -151,18 +180,97 @@ export function useVoiceRoom(roomId: string | null) {
       // isMuted=true + seatNumber=null = dropped to audience
       if (data.isMuted && data.seatNumber === null) update.seatNumber = null
       updateParticipant(data.userId, update)
+      // FIX: MODERATOR queue approval emits voice:mute_changed (not voice:role_changed).
+      // If the moderator being promoted is not yet in the store, updateParticipant is a
+      // no-op. Detect this case and upsert a minimal entry so their seat appears.
+      if (data.seatNumber != null && data.isMuted === false) {
+        const alreadyInStore = useVoiceStore.getState().activeRoom?.participants.some(
+          p => p.userId === data.userId
+        )
+        if (!alreadyInStore) {
+          addParticipant({
+            id:               data.userId,
+            userId:           data.userId,
+            role:             VOICE_ROLES.MODERATOR,
+            isMuted:          false,
+            mutedByModerator: false,
+            handRaised:       false,
+            handRaisedAt:     null,
+            joinedAt:         new Date().toISOString(),
+            isActive:         true,
+            isPinned:         false,
+            seatNumber:       data.seatNumber,
+            user: { id: data.userId, firstName: '', lastName: '', avatarUrl: null },
+          })
+        }
+      }
     }
 
     const onHandRaised = (data: {
       roomId: string; userId: string; raised: boolean
-      firstName: string; lastName: string
+      firstName: string; lastName: string; avatarUrl?: string | null
+      handRaisedAt?: string | null  // FIX: server timestamp for correct FIFO sort order
     }) => {
       if (data.roomId !== roomId) return
-      updateParticipant(data.userId, {
-        handRaised: data.raised,
-        handRaisedAt: data.raised ? new Date().toISOString() : null
-      })
-      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      if (process.env.NODE_ENV === 'development') {
+        const storeCount = useVoiceStore.getState().activeRoom?.participants.length ?? 0
+        const foundInStore = !!useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === data.userId)
+        console.log('[voice-debug] voice:hand_raised received', {
+          userId: data.userId, raised: data.raised,
+          foundInStore, storeParticipantCount: storeCount,
+        })
+      }
+
+      // FIX (GAP-003): use server-provided handRaisedAt so the host's Hands panel
+      // sorts queue entries in true FIFO order regardless of client clock skew or
+      // event delivery delay. Fall back to local clock only when server doesn't send it.
+      const handRaisedAt = data.raised
+        ? (data.handRaisedAt ?? new Date().toISOString())
+        : null
+
+      // Check if this participant is already in the store.
+      // updateParticipant silently no-ops for unknown userIds — if this user
+      // just joined and voice:user_joined hasn't been processed yet (or was
+      // dropped), the hand-raised flag would never be set and the host's
+      // "Hands" queue panel (which reads participants.filter(p=>p.handRaised))
+      // would never show them. Upsert a minimal AUDIENCE entry using the profile
+      // data that raiseHand already includes in the voice:hand_raised payload.
+      const existing = useVoiceStore.getState().activeRoom?.participants.find(
+        p => p.userId === data.userId
+      )
+      if (existing) {
+        updateParticipant(data.userId, {
+          handRaised: data.raised,
+          handRaisedAt,
+        })
+      } else if (data.raised) {
+        // Participant not yet in the store — add them so the host's Hands panel shows them.
+        // The subsequent voice:stage_state snapshot will fill in full details.
+        addParticipant({
+          id:               data.userId,
+          userId:           data.userId,
+          role:             VOICE_ROLES.AUDIENCE,
+          isMuted:          true,
+          mutedByModerator: false,
+          handRaised:       true,
+          handRaisedAt,
+          joinedAt:         new Date().toISOString(),
+          isActive:         true,
+          isPinned:         false,
+          seatNumber:       null,
+          user: {
+            id:        data.userId,
+            firstName: data.firstName,
+            lastName:  data.lastName,
+            avatarUrl: data.avatarUrl ?? null,
+          },
+        })
+      } else {
+        // raised=false for unknown user — nothing to update
+      }
+
+      // Read myRole from store to avoid stale-closure on activeRoom
+      const myRole = useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === user?.id)?.role
       if (canModerate(myRole) && data.raised && data.userId !== user?.id) {
         toast({
           title: `✋ ${data.firstName} ${data.lastName} raised their hand`,
@@ -226,7 +334,9 @@ export function useVoiceRoom(roomId: string | null) {
     }) => {
       if (data.roomId !== roomId) return
       updateParticipant(data.userId, { role: VOICE_ROLES.MODERATOR, isMuted: false })
-      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      // Read myRole from store directly to avoid the stale-closure problem
+      // (activeRoom is captured at effect-mount time and does not reflect later participant changes).
+      const myRole = useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === user?.id)?.role
       if (myRole === VOICE_ROLES.HOST) {
         toast({ title: `🛡️ ${data.firstName} ${data.lastName} is now a moderator` })
       }
@@ -339,9 +449,11 @@ export function useVoiceRoom(roomId: string | null) {
 
     const onSlotFreed = (data: { roomId: string; speakerCount: number; maxSpeakers: number }) => {
       if (data.roomId !== roomId) return
-      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      // Read from store to avoid stale-closure on activeRoom
+      const liveRoom = useVoiceStore.getState().activeRoom
+      const myRole = liveRoom?.participants.find(p => p.userId === user?.id)?.role
       if (canModerate(myRole)) {
-        const queue = activeRoom?.participants.filter(p => p.handRaised && p.role === VOICE_ROLES.AUDIENCE) || []
+        const queue = liveRoom?.participants.filter(p => p.handRaised && p.role === VOICE_ROLES.AUDIENCE) || []
         if (queue.length > 0) {
           toast({ title: `🎙️ Speaker slot freed — ${queue.length} hand${queue.length > 1 ? 's' : ''} waiting` })
         }
@@ -369,7 +481,9 @@ export function useVoiceRoom(roomId: string | null) {
       if (data.roomId !== roomId) return
       // Update roles in store
       if (data.passerRole !== VOICE_ROLES.HOST) {
-        updateParticipant(data.passerId, { role: VOICE_ROLES.AUDIENCE, isMuted: true })
+        // SEAT FIX: also clear seatNumber for the passer so their seat slot
+        // empties immediately without waiting for voice:role_changed to arrive.
+        updateParticipant(data.passerId, { role: VOICE_ROLES.AUDIENCE, isMuted: true, seatNumber: null })
       }
       updateParticipant(data.targetId, {
         role: VOICE_ROLES.SPEAKER, isMuted: false,
@@ -425,6 +539,12 @@ export function useVoiceRoom(roomId: string | null) {
       }
     }
 
+    // DEF-001: room-wide mute policy changed — persist in store so all UI reflects it
+    const onRoomPolicyChanged = (data: { roomId: string; allMuted: boolean }) => {
+      if (data.roomId !== roomId) return
+      updateRoom({ allMuted: data.allMuted })
+    }
+
     const onSeatLockChanged = (data: { roomId: string; seatIndex: number; locked: boolean; lockedSeats: number[]; changedBy: string }) => {
       if (data.roomId !== roomId) return
       updateRoom({ lockedSeats: data.lockedSeats })
@@ -436,7 +556,8 @@ export function useVoiceRoom(roomId: string | null) {
     // ── Membership events ──────────────────────────────────────────────────────
     const onJoinRequest = (d: { roomId: string; userId: string; firstName: string; lastName: string }) => {
       if (d.roomId !== roomId) return
-      const myRole = activeRoom?.participants.find(p => p.userId === user?.id)?.role
+      // Read from store to avoid stale-closure on activeRoom
+      const myRole = useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === user?.id)?.role
       if (canModerate(myRole)) {
         toast({ title: `✋ ${d.firstName} ${d.lastName} wants to join the room`, description: 'Check Member Requests to approve' })
       }
@@ -533,6 +654,15 @@ export function useVoiceRoom(roomId: string | null) {
       stageCount: number
     }) => {
       if (data.roomId !== roomId) return
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[voice-debug] voice:stage_state received', { participantsCount: data.stageParticipants.length })
+      }
+      // P1 FIX (ordering): Capture store state BEFORE the updateParticipant loop so the
+      // upsert-pass below uses the original participant list, not the post-mutation version.
+      // updateParticipant only maps over existing entries — if a userId is absent from the
+      // store it silently no-ops. Reading currentParticipants before the loop ensures the
+      // upsert-pass correctly identifies which participants are genuinely new.
+      const currentParticipants = useVoiceStore.getState().activeRoom?.participants ?? []
       // Apply authoritative seat state for every stage participant
       data.stageParticipants.forEach(sp => {
         updateParticipant(sp.userId, {
@@ -544,10 +674,9 @@ export function useVoiceRoom(roomId: string | null) {
           seatNumber: sp.seatNumber,
         })
       })
-      // P1 FIX: Upsert pass — add any stage participant whose userId is not
+      // Upsert pass — add any stage participant whose userId is not
       // already in the store. This covers participants missed due to the initial
       // join race (voice:user_joined arrived before listener was registered).
-      const currentParticipants = useVoiceStore.getState().activeRoom?.participants ?? []
       data.stageParticipants.forEach(sp => {
         const alreadyInStore = currentParticipants.some(p => p.userId === sp.userId)
         if (!alreadyInStore) {
@@ -597,7 +726,32 @@ export function useVoiceRoom(roomId: string | null) {
       queueLength: number
     }) => {
       if (data.roomId !== roomId) return
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[voice-debug] voice:queue_updated received', { queueLength: data.queue.length })
+      }
+      // FIX (GAP-004): guard against an empty-array snapshot overwriting a
+      // non-empty queue. This can happen when broadcastQueue fires during a
+      // transient Redis re-hydration window where getQueue() returns [] before
+      // the ZSET is repopulated from DB. If queueLength says there ARE entries
+      // but the array is empty, skip — the next broadcast will have real data.
+      if (data.queue.length === 0 && data.queueLength > 0) return
       setSpeakerQueue(data.queue)
+      // FIX (GAP-007): cross-validate handRaised flags from the authoritative
+      // queue snapshot. If voice:hand_raised was dropped during a network blip
+      // but voice:queue_updated arrived, ensure those participants are marked
+      // handRaised=true in the store so the host's Hands panel shows them.
+      if (data.queue.length > 0) {
+        const queueUserIds = new Set(data.queue.map(u => u.userId))
+        const storeParticipants = useVoiceStore.getState().activeRoom?.participants ?? []
+        storeParticipants.forEach(p => {
+          if (queueUserIds.has(p.userId) && !p.handRaised) {
+            updateParticipant(p.userId, {
+              handRaised: true,
+              handRaisedAt: data.queue.find(u => u.userId === p.userId)?.raisedAt ?? new Date().toISOString(),
+            })
+          }
+        })
+      }
     }
 
     const onQueueRejected = (data: { roomId: string; message: string }) => {
@@ -742,6 +896,7 @@ export function useVoiceRoom(roomId: string | null) {
     socket.on('voice:mic_offer_cancelled',onMicOfferCancelled)
     socket.on('voice:open_mic_changed',   onOpenMicChanged)
     socket.on('voice:mic_lock_changed',   onMicLockChanged)
+    socket.on('voice:room_policy_changed',onRoomPolicyChanged)  // DEF-001
     socket.on('voice:seat_lock_changed',  onSeatLockChanged)
     socket.on('voice:join_request',       onJoinRequest)
     socket.on('voice:join_approved',      onJoinApproved)
@@ -779,21 +934,77 @@ export function useVoiceRoom(roomId: string | null) {
     socket.on('gift:received',            onGiftReceived)
     socket.on('voice:gift_all',           onGiftAll)
 
-    // P0-A FIX: Drain any voice:stage_state events that arrived during the
-    // race window between POST /join completing and this useEffect registering
-    // all listeners. The early listener in page.tsx buffered them in the store.
-    useVoiceStore.getState().drainSyncEvents().forEach(payload => onStageState(payload))
+    // ── Dev-mode diagnostic: log mount context ────────────────────────────
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[voice-debug] useVoiceRoom mounted', {
+        roomId,
+        socketId: socket.id,
+        connected: socket.connected,
+      })
+    }
+
+    // ── Drain pre-mount buffers ───────────────────────────────────────────
+    // Events that arrived during the race window between POST /join completing
+    // and this useEffect registering all listeners are buffered by the early
+    // handlers in page.tsx. Drain them now so nothing is silently dropped.
+    //
+    // IMPORTANT: deactivateEarlyBuffer() MUST be called before the drain so
+    // that any events arriving in the sub-ms window between drain and the end
+    // of this effect are handled by the listeners registered above — not pushed
+    // back into the buffers and processed a second time.
+    useVoiceStore.getState().deactivateEarlyBuffer()
+    const bufferedUserJoined  = useVoiceStore.getState().drainUserJoinedEvents()
+    const bufferedStageEvents = useVoiceStore.getState().drainSyncEvents()
+    const bufferedQueueEvents = useVoiceStore.getState().drainQueueUpdatedEvents()
+
+    if (process.env.NODE_ENV === 'development') {
+      console.log(
+        '[voice-debug] drain on mount: user_joined=%d stage_state=%d queue_updated=%d',
+        bufferedUserJoined.length, bufferedStageEvents.length, bufferedQueueEvents.length,
+      )
+    }
+
+    // Drain voice:user_joined BEFORE voice:stage_state so that if the same
+    // userId appears in both, the stage_state upsert-pass (which skips existing
+    // participants) correctly skips the already-added entry rather than creating
+    // a duplicate.
+    bufferedUserJoined.forEach(payload => onUserJoined(payload))
+    bufferedStageEvents.forEach(payload => onStageState(payload))
+    // Apply only the latest queue snapshot (snapshots supersede each other).
+    if (bufferedQueueEvents.length > 0) {
+      onQueueUpdated(bufferedQueueEvents[bufferedQueueEvents.length - 1])
+    }
 
     // STEP-3 FIX: Emit voice:join_room AFTER all socket.on() listeners are registered.
     // Previously this was the first statement in the effect (before any socket.on calls),
     // so voice:stage_state / voice:user_joined events that arrived in the same microtask
     // burst were silently dropped. Now all handlers are in place before the server
     // starts delivering room events to this socket.
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[voice-debug] emitting voice:join_room', roomId)
+    }
     socket.emit('voice:join_room', roomId)
+
+    // P0-1 FIX: Re-hydrate stage state and queue on every mount.
+    // Covers navigate-back where the socket stays connected and the
+    // 'connect' event (used by onReconnect) never fires again.
+    // The emit above re-subscribes the socket to voice:{roomId}.
+    // These two fetches ensure the Zustand store reflects server truth
+    // for participants and the FIFO queue after returning from another page.
+    api.get(`/voice/${roomId}/stage-state`)
+      .then((r: { data: { data: Parameters<typeof onStageState>[0] } }) => {
+        if (r.data?.data) onStageState(r.data.data)
+      })
+      .catch(() => { /* non-fatal — socket events will catch up */ })
+    api.get(`/voice/${roomId}/queue`)
+      .then((r: { data: { data: { queue: Parameters<typeof setSpeakerQueue>[0] } } }) => {
+        const q = r.data?.data?.queue
+        if (Array.isArray(q)) setSpeakerQueue(q)
+      })
+      .catch(() => { /* non-fatal */ })
 
     return () => {
       socket.off('connect', onReconnect)
-      socket.emit('voice:leave_room', roomId)
       socket.off('voice:user_joined',        onUserJoined)
       socket.off('voice:user_left',          onUserLeft)
       socket.off('voice:mute_changed',       onMuteChanged)
@@ -822,6 +1033,7 @@ export function useVoiceRoom(roomId: string | null) {
       socket.off('voice:mic_offer_cancelled',onMicOfferCancelled)
       socket.off('voice:open_mic_changed',   onOpenMicChanged)
       socket.off('voice:mic_lock_changed',   onMicLockChanged)
+      socket.off('voice:room_policy_changed',onRoomPolicyChanged)  // DEF-001
       socket.off('voice:seat_lock_changed',  onSeatLockChanged)
     // (membership cleanup)
       socket.off('voice:join_request',       onJoinRequest)
@@ -926,9 +1138,37 @@ export function useVoiceRoom(roomId: string | null) {
 
   const promoteUser = useCallback(async (targetUserId: string, role: 'SPEAKER' | 'AUDIENCE') => {
     if (!roomId) return
+    // Snapshot previous state for rollback on error
+    const prevState = useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === targetUserId)
+    // OPTIMISTIC UPDATE: apply the role change immediately so the actor's stage
+    // grid clears the seat without waiting for the socket round-trip.
+    // Mirrors the BUG-011 FIX already applied to dropMic(). Without this, the
+    // actor (host/mod) sees the user occupying the seat for 60–500ms after the
+    // action — the "ghost seat" bug.
+    if (role === 'AUDIENCE' && prevState) {
+      useVoiceStore.getState().updateParticipant(targetUserId, {
+        role: 'AUDIENCE',
+        isMuted: true,
+        seatNumber: null,
+        handRaised: false,
+        handRaisedAt: null,
+        mutedByModerator: false,
+      })
+    }
     try {
       await api.patch(`/voice/${roomId}/promote`, { targetUserId, role })
     } catch (e: any) {
+      // Rollback the optimistic update on failure
+      if (prevState) {
+        useVoiceStore.getState().updateParticipant(targetUserId, {
+          role: prevState.role,
+          isMuted: prevState.isMuted,
+          seatNumber: prevState.seatNumber,
+          handRaised: prevState.handRaised,
+          handRaisedAt: prevState.handRaisedAt,
+          mutedByModerator: prevState.mutedByModerator,
+        })
+      }
       toast({ title: e?.response?.data?.message || 'Failed to update role', variant: 'destructive' })
     }
   }, [roomId]) // eslint-disable-line
@@ -939,7 +1179,70 @@ export function useVoiceRoom(roomId: string | null) {
   const approveQueueUser = useCallback(async (targetUserId: string) => {
     if (!roomId) return
     try {
-      await api.post(`/voice/${roomId}/queue/approve/${targetUserId}`)
+      const res = await api.post(`/voice/${roomId}/queue/approve/${targetUserId}`)
+      const approved = res.data?.data ?? {}
+      const assignedSeat: number | null = approved.seatNumber != null ? Number(approved.seatNumber) : null
+      const assignedRole = (approved.role ?? 'SPEAKER') as VoiceParticipant['role']
+
+      const store = useVoiceStore.getState()
+      const inStore = store.activeRoom?.participants.some(p => p.userId === targetUserId)
+
+      if (assignedSeat != null && !inStore) {
+        // The approved user is not yet in the approver's store (they may have joined
+        // after the approver, or their voice:user_joined was buffered/dropped).
+        // Add them now using the HTTP response data so their seat renders immediately
+        // without waiting for the socket round-trip.
+        store.addParticipant({
+          id:               targetUserId,
+          userId:           targetUserId,
+          role:             assignedRole,
+          isMuted:          false,
+          mutedByModerator: false,
+          handRaised:       false,
+          handRaisedAt:     null,
+          joinedAt:         new Date().toISOString(),
+          isActive:         true,
+          isPinned:         false,
+          seatNumber:       assignedSeat,
+          user: {
+            id:        targetUserId,
+            firstName: approved.firstName ?? '',
+            lastName:  approved.lastName  ?? '',
+            avatarUrl: null, // filled in by subsequent voice:stage_state snapshot
+          },
+        })
+      } else if (assignedSeat != null) {
+        // User is already in the store — update their seat and role directly.
+        store.updateParticipant(targetUserId, {
+          role:         assignedRole,
+          isMuted:      false,
+          seatNumber:   assignedSeat,
+          handRaised:   false,
+          handRaisedAt: null,
+        })
+      } else {
+        // No seatNumber in response (e.g. ALREADY_ON_STAGE path) — just clear hand badge.
+        // Trigger a stage-state re-fetch as fallback so the grid reconciles.
+        store.updateParticipant(targetUserId, { handRaised: false, handRaisedAt: null })
+        api.get(`/voice/${roomId}/stage-state`)
+          .then((r: any) => {
+            const data = r.data?.data
+            if (!data) return
+            // Apply the snapshot directly to the store
+            const storeSnapshot = useVoiceStore.getState()
+            data.stageParticipants?.forEach((sp: any) => {
+              storeSnapshot.updateParticipant(sp.userId, {
+                role:             sp.role,
+                isMuted:          Boolean(sp.isMuted),
+                seatNumber:       sp.seatNumber != null ? Number(sp.seatNumber) : null,
+                handRaised:       Boolean(sp.handRaised),
+                isPinned:         Boolean(sp.isPinned),
+                mutedByModerator: Boolean(sp.mutedByModerator),
+              })
+            })
+          })
+          .catch(() => {})
+      }
     } catch (e: any) {
       toast({ title: e?.response?.data?.message || 'Failed to approve speaker', variant: 'destructive' })
     }
@@ -947,6 +1250,12 @@ export function useVoiceRoom(roomId: string | null) {
 
   const kickUser = useCallback(async (targetUserId: string) => {
     if (!roomId) return
+    // OPTIMISTIC UPDATE: remove the participant immediately so the actor's grid
+    // clears without waiting for the socket round-trip.
+    // The subsequent voice:user_left event will call removeParticipant again
+    // (idempotent — filter on non-matching userId is a no-op).
+    // On error the participant is re-added via the next voice:stage_state snapshot.
+    useVoiceStore.getState().removeParticipant(targetUserId)
     try {
       await api.delete(`/voice/${roomId}/kick/${targetUserId}`)
     } catch {
@@ -987,6 +1296,15 @@ export function useVoiceRoom(roomId: string | null) {
     if (!roomId) return
     try {
       await api.patch(`/voice/${roomId}/mute-all`)
+      // Optimistic update: mute all SPEAKER and MODERATOR participants in the local store.
+      // The socket voice:mute_changed events will arrive shortly and reconcile any discrepancy.
+      const myId = useAuthStore.getState().user?.id
+      const participants = useVoiceStore.getState().activeRoom?.participants ?? []
+      participants.forEach(p => {
+        if (p.userId !== myId && (p.role === VOICE_ROLES.SPEAKER || p.role === VOICE_ROLES.MODERATOR) && !p.isMuted) {
+          useVoiceStore.getState().updateParticipant(p.userId, { isMuted: true, mutedByModerator: true })
+        }
+      })
       toast({ title: '🔇 All speakers muted' })
     } catch {
       toast({ title: 'Failed to mute all', variant: 'destructive' })
@@ -997,6 +1315,14 @@ export function useVoiceRoom(roomId: string | null) {
     if (!roomId) return
     try {
       await api.patch(`/voice/${roomId}/unmute-all`)
+      // Optimistic update: unmute all SPEAKER and MODERATOR participants in the local store.
+      const myId = useAuthStore.getState().user?.id
+      const participants = useVoiceStore.getState().activeRoom?.participants ?? []
+      participants.forEach(p => {
+        if (p.userId !== myId && (p.role === VOICE_ROLES.SPEAKER || p.role === VOICE_ROLES.MODERATOR) && p.isMuted) {
+          useVoiceStore.getState().updateParticipant(p.userId, { isMuted: false, mutedByModerator: false })
+        }
+      })
       toast({ title: '🎙️ All speakers unmuted' })
     } catch {
       toast({ title: 'Failed to unmute all', variant: 'destructive' })
@@ -1014,9 +1340,29 @@ export function useVoiceRoom(roomId: string | null) {
 
   const removeModerator = useCallback(async (targetUserId: string) => {
     if (!roomId) return
+    // Snapshot previous state for rollback on error
+    const prevState = useVoiceStore.getState().activeRoom?.participants.find(p => p.userId === targetUserId)
+    // OPTIMISTIC UPDATE: clear the moderator's seat immediately so the actor's
+    // stage grid reflects the demotion without waiting for the socket round-trip.
+    // Mirrors the BUG-011 FIX applied to dropMic() and the new fix for promoteUser().
+    if (prevState) {
+      useVoiceStore.getState().updateParticipant(targetUserId, {
+        role: 'AUDIENCE' as const,
+        isMuted: true,
+        seatNumber: null,
+      })
+    }
     try {
       await api.delete(`/voice/${roomId}/moderator/${targetUserId}`)
     } catch (e: any) {
+      // Rollback on error
+      if (prevState) {
+        useVoiceStore.getState().updateParticipant(targetUserId, {
+          role: prevState.role,
+          isMuted: prevState.isMuted,
+          seatNumber: prevState.seatNumber,
+        })
+      }
       toast({ title: e?.response?.data?.message || 'Failed to remove moderator', variant: 'destructive' })
     }
   }, [roomId]) // eslint-disable-line
@@ -1132,6 +1478,9 @@ export function useVoiceRoom(roomId: string | null) {
         locked !== undefined ? { locked } : {}
       )
       const state = res.data.data?.micLocked
+      // Optimistic update: reflect the new micLocked state immediately in the store
+      // so the host's own UI updates without waiting for the socket event.
+      useVoiceStore.getState().updateRoom({ micLocked: state })
       toast({ title: state ? '🔒 Mic Locked' : '🔓 Mic Unlocked' })
     } catch (e: any) {
       toast({ title: e?.response?.data?.message || 'Failed to toggle Mic Lock', variant: 'destructive' })
@@ -1194,7 +1543,16 @@ export function useVoiceRoom(roomId: string | null) {
 
   // Drop mic — HOST/MOD go to audience (keep role, just muted); SPEAKER → AUDIENCE
   const dropMic = useCallback(async () => {
-    if (!roomId || !myParticipant) return
+    if (!roomId || !user?.id) return
+    // Pre-flight: read live store state (avoid stale closure on myParticipant)
+    const liveParticipant = useVoiceStore.getState().activeRoom?.participants
+      .find(p => p.userId === user.id)
+    const isOnStage = liveParticipant?.seatNumber != null ||
+      liveParticipant?.role === VOICE_ROLES.HOST ||
+      liveParticipant?.role === VOICE_ROLES.MODERATOR ||
+      liveParticipant?.role === VOICE_ROLES.SPEAKER
+    if (!isOnStage) return  // already audience — no-op, don't call API
+    if (!myParticipant) return
     try {
       // Optimistic update — immediately reflect the change in the UI
       // HOST/MOD: set isMuted=true (they stay HOST/MOD but move to audience section)
@@ -1215,11 +1573,14 @@ export function useVoiceRoom(roomId: string | null) {
       await api.post(`/voice/${roomId}/drop-mic`)
       toast({ title: '⬇️ Mic ended', description: 'You are now in the audience.' })
     } catch (e: any) {
-      // Rollback optimistic update on error
+      // Rollback optimistic update on error — restore role, isMuted, AND seatNumber.
+      // Without seatNumber the user appears stranded in the audience section on their
+      // own screen while the DB still has their seat (ghost-audience on error path).
       if (myParticipant) {
         useVoiceStore.getState().updateParticipant(myParticipant.userId, {
-          role: myParticipant.role,
-          isMuted: myParticipant.isMuted,
+          role:       myParticipant.role,
+          isMuted:    myParticipant.isMuted,
+          seatNumber: myParticipant.seatNumber,
         })
       }
       toast({ title: e?.response?.data?.message || 'Failed to end mic', variant: 'destructive' })

@@ -8,8 +8,9 @@ import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
   ActivityIndicator, Alert, Image, Modal, ScrollView,
   Animated, Dimensions, TextInput, Platform,
-  BackHandler} from 'react-native';
+  BackHandler, AppState, AppStateStatus} from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
 import { showMessage } from 'react-native-flash-message';
@@ -1055,7 +1056,7 @@ export default function VoiceRoomScreen() {
   const queryClient = useQueryClient();
 
   // ── Voice store — shared with tab bar for active-room badge ──────────────
-  const { setActiveRoom, updateActiveRoom, clearActiveRoom, setQueuePosition, clearQueuePosition, setSpeaking } = useVoiceStore();
+  const { setActiveRoom, updateActiveRoom, clearActiveRoom, setQueuePosition, clearQueuePosition, setSpeaking, activeRoom: storeActiveRoom } = useVoiceStore();
 
   const [isJoined,       setIsJoined]       = useState(false);
   const [showHostControls, setShowHostControls] = useState(false);
@@ -1315,8 +1316,10 @@ export default function VoiceRoomScreen() {
       }));
       if (d.userId === user?.id) {
         if (lk.connected) {
+          // DEF-004: only honour server-enforced MUTE (isMuted === true).
+          // Do NOT auto-enable the mic when the server sends isMuted === false —
+          // the user must tap the mic button explicitly to speak.
           if (d.isMuted) lk.disableMic().catch(() => {});
-          else lk.enableMic().catch(() => {});
         }
       }
     };
@@ -1365,8 +1368,35 @@ export default function VoiceRoomScreen() {
     };
 
     // Hand raised/lowered
-    const onHandRaised = (d: { userId: string; raised: boolean }) => {
-      setParticipants(prev => prev.map(p => p.id === d.userId ? { ...p, handRaised: d.raised } : p));
+    // P2 FIX: Use profile data from payload to upsert a minimal AUDIENCE entry if
+    // the participant is not already in the local list. This covers the case where
+    // voice:user_joined was missed — without this the host's queue UI shows no avatar.
+    const onHandRaised = (d: { userId: string; raised: boolean; firstName?: string; lastName?: string; avatarUrl?: string | null }) => {
+      setParticipants(prev => {
+        const exists = prev.find(p => p.id === d.userId);
+        if (exists) {
+          return prev.map(p => p.id === d.userId ? { ...p, handRaised: d.raised } : p);
+        }
+        // Participant not in local state — upsert as AUDIENCE with handRaised
+        // (profile data is included in voice:hand_raised payload from raiseHand controller)
+        if (d.raised && d.firstName) {
+          return [...prev, {
+            id:               d.userId,
+            name:             `${d.firstName} ${d.lastName ?? ''}`.trim(),
+            avatar:           d.avatarUrl ?? undefined,
+            role:             'AUDIENCE' as const,
+            isMuted:          true,
+            isSpeaking:       false,
+            handRaised:       true,
+            mutedByModerator: false,
+            isActive:         true,
+            seatNumber:       null,
+            isPinned:         false,
+            _joinedAt:        new Date().toISOString(),
+          }];
+        }
+        return prev;
+      });
     };
 
     // BUG-002 FIX: Consolidated voice:moderator_removed handler.
@@ -1419,6 +1449,15 @@ export default function VoiceRoomScreen() {
         old ? { ...old, micLocked: d.micLocked } : old
       );
       showMessage({ message: d.micLocked ? '🔒 Mic locked by host' : '🔓 Mic unlocked', type: 'info' });
+    };
+
+    // DEF-001: room-wide mute policy changed — persist in store and query cache
+    const onRoomPolicyChanged = (d: { roomId: string; allMuted: boolean }) => {
+      if (d.roomId !== id) return;
+      updateActiveRoom({ allMuted: d.allMuted });
+      queryClient.setQueryData<any>(['voice-room', id], (old: any) =>
+        old ? { ...old, allMuted: d.allMuted } : old
+      );
     };
 
     // Seat lock changed (individual seat)
@@ -1564,6 +1603,7 @@ export default function VoiceRoomScreen() {
     socket.on('voice:room_ended',     onRoomEnded);
     socket.on('voice:open_mic_changed', onOpenMicChanged);
     socket.on('voice:mic_lock_changed', onMicLockChanged);
+    socket.on('voice:room_policy_changed', onRoomPolicyChanged);  // DEF-001
     socket.on('voice:seat_lock_changed', onSeatLockChanged);
     socket.on('voice:room_updated',      onRoomUpdated);
     socket.on('voice:join_request',      (d: any) => { if (d.roomId !== id) return; showMessage({ message: `✋ ${d.firstName ?? ''} ${d.lastName ?? ''} wants to join the room`, type: 'info' }); });
@@ -1632,7 +1672,21 @@ export default function VoiceRoomScreen() {
     socket.on('voice:queue_position',    (d: any) => { if (d.roomId !== id) return; setQueuePosition(d.position ?? 0); });
     // Queue resolved (promoted or rejected) — clear position
     socket.on('voice:queue_rejected',    (d: any) => { if (d.roomId !== id) return; clearQueuePosition(); showMessage({ message: d.message ?? 'Your request was declined', type: 'warning' }); });
-    socket.on('voice:promoted_to_speaker', (d: any) => { if (d.roomId !== id) return; clearQueuePosition(); showMessage({ message: '🎙️ You\'re on stage!', type: 'success' }); });
+    socket.on('voice:promoted_to_speaker', (d: any) => {
+      if (d.roomId !== id) return;
+      clearQueuePosition();
+      showMessage({ message: '🎙️ You\'re on stage!', type: 'success' });
+      // Update local participants so the promoted user sees their own seat immediately
+      // without waiting for voice:role_changed (which fires first in the server sequence
+      // but may arrive slightly after on mobile due to connection ordering).
+      if (d.seatNumber != null) {
+        setParticipants(prev => prev.map(p =>
+          p.id === user?.id
+            ? { ...p, role: 'SPEAKER' as const, isMuted: false, seatNumber: Number(d.seatNumber), handRaised: false }
+            : p
+        ));
+      }
+    });
     socket.on('voice:member_joined',       onMemberJoined);
     socket.on('voice:member_left',         onMemberLeft);
     socket.on('voice:room_level_upgraded', onRoomLevelUpgraded);
@@ -1767,6 +1821,7 @@ export default function VoiceRoomScreen() {
       socket.off('voice:room_ended',       onRoomEnded);
       socket.off('voice:open_mic_changed', onOpenMicChanged);
       socket.off('voice:mic_lock_changed', onMicLockChanged);
+      socket.off('voice:room_policy_changed', onRoomPolicyChanged);  // DEF-001
       socket.off('voice:seat_lock_changed', onSeatLockChanged);
       socket.off('voice:room_updated',      onRoomUpdated);
       socket.off('voice:join_request');
@@ -1852,6 +1907,7 @@ export default function VoiceRoomScreen() {
           hostId:          roomData?.hostId ?? room.host?.id ?? '',
           isOpenMic:       roomData?.isOpenMic ?? false,
           micLocked:       roomData?.micLocked ?? false,
+          allMuted:        roomData?.allMuted ?? false,   // DEF-001
           lockedSeats:     Array.isArray(roomData?.lockedSeats) ? roomData.lockedSeats : [],
           commentsEnabled: roomData?.commentsEnabled ?? true,
           slowMode:        roomData?.slowMode ?? false,
@@ -1987,6 +2043,55 @@ export default function VoiceRoomScreen() {
     ]);
   }, [id, router, clearActiveRoom, clearQueuePosition]);
 
+  // P0-3 FIX: Auto-rejoin on screen focus when returning from a tab switch.
+  // On tab switch, expo-router unmounts this screen. On return, isJoined resets
+  // to false (useState initial value). We detect the "was in room" state via the
+  // Zustand activeRoom store — if storeActiveRoom.id === id, the user was previously
+  // joined and never explicitly left (handleLeave was not called, which calls clearActiveRoom).
+  // useFocusEffect fires on every focus event, including tab-switch return.
+  // useCallback(fn, []) is the required pattern from @react-navigation/native docs.
+  useFocusEffect(
+    useCallback(() => {
+      // Only auto-rejoin if:
+      // 1. Not already joined (remounted after tab switch)
+      // 2. Was previously in this room (store still has activeRoom for this id)
+      // 3. Not currently connecting (prevent double-fire)
+      if (!isJoined && storeActiveRoom?.id === id && !isConnecting) {
+        // Silent auto-rejoin — user just switched tabs, no confirmation needed
+        handleJoin();
+      }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id, isJoined, isConnecting])
+  );
+
+  // P0-4 FIX: Re-emit voice:join_room + re-hydrate stage state on app foreground.
+  // useLiveKitAudio reconnects LiveKit on foreground but does NOT re-subscribe
+  // the socket to voice:{id}. This effect fills that gap.
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      const prev = appStateRef.current;
+      appStateRef.current = nextState;
+      if (
+        (prev === 'background' || prev === 'inactive') &&
+        nextState === 'active' &&
+        hasJoinedRef.current
+      ) {
+        // Re-join the socket room after foregrounding.
+        // Socket may have reconnected transparently — re-subscribing is idempotent.
+        const socket = getSocket();
+        if (socket) {
+          socket.emit('voice:join_room', id);
+        }
+        // Re-hydrate stage state — participant list may be stale after background.
+        api.get(`/voice/${id}/stage-state`)
+          .then((r: any) => { if (r.data?.data) applyStageSnapshot(r.data.data); })
+          .catch(() => { /* non-fatal */ });
+      }
+    });
+    return () => sub.remove();
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // MOB-004: Android hardware back button — intercept when inside a live room.
   // Without this, pressing the Android back button navigates away silently,
   // leaving the user as an active participant in the DB and keeping the
@@ -2002,12 +2107,7 @@ export default function VoiceRoomScreen() {
   }, [isJoined, handleLeave]);
 
   const toggleMic = useCallback(async () => {
-    // LOCAL-ONLY mic toggle for HOST/MOD on stage.
-    // Does NOT call backend and does NOT update participants.isMuted.
-    // This keeps HOST/MOD visible on stage (amOnStage depends on !isMuted in participants).
-    // "End Mic" button is the only action that sets isMuted=true in DB → moves to audience.
-    // For SPEAKERs, this also only toggles LiveKit (they stay SPEAKER until demoted).
-    // GUARD: if the participant was muted by a moderator, they cannot self-unmute locally.
+    // GUARD: if the participant was muted by a moderator, they cannot self-unmute.
     const me = participants.find(p => p.id === user?.id);
     if (me?.mutedByModerator && me?.isMuted) {
       showMessage({ message: '🔒 You were muted by a moderator', type: 'warning' });
@@ -2015,10 +2115,19 @@ export default function VoiceRoomScreen() {
     }
     if (lk.connected) {
       const currentMuted = me?.isMuted ?? true;
+      const newMuted = !currentMuted;
       if (currentMuted) await lk.enableMic();
       else await lk.disableMic();
+      // DEF-006: sync mute state to backend so participants list and server state
+      // stay consistent. Best-effort — LiveKit track toggle is NOT rolled back on failure.
+      try {
+        await api.patch(`/voice/${id}/mute`, { isMuted: newMuted });
+      } catch {
+        // Non-fatal: local LiveKit toggle already applied; server will reconcile
+        // on the next voice:mute_changed socket event or stage-state pull.
+      }
     }
-  }, [participants, user?.id]);
+  }, [participants, user?.id, id]);
 
   const toggleHand = useCallback(async () => {
     if (room?.micLocked) { showMessage({ message: '🔒 Mic is locked by the host', type: 'warning' }); return; }
@@ -2865,6 +2974,35 @@ export default function VoiceRoomScreen() {
                     </Text>
                   </TouchableOpacity>
                 )
+              ) : myParticipant?.role === 'SPEAKER' && amOnStage ? (
+                /* SPEAKER on stage — "End Mic" / leave stage button.
+                   SPEAKERs are not HOST/MOD so amHostOrMod is false, but they
+                   hold a seat and must be able to voluntarily return to audience. */
+                <TouchableOpacity
+                  style={[mobStyles.ctrlBtn, { backgroundColor: '#fffbeb', borderWidth: 1.5, borderColor: '#fde68a' }]}
+                  onPress={async () => {
+                    const prevSeatNumber = myParticipant?.seatNumber;
+                    // Optimistic update — move SPEAKER to audience immediately
+                    setParticipants(prev => prev.map(p =>
+                      p.id === user?.id ? { ...p, isMuted: true, seatNumber: null, role: 'AUDIENCE' } : p
+                    ));
+                    if (lk.connected) await lk.disableMic();
+                    try {
+                      await api.post(`/voice/${id}/drop-mic`);
+                      showMessage({ message: '⬇ Left the stage', type: 'info' });
+                    } catch (e: any) {
+                      // Rollback optimistic update on error
+                      setParticipants(prev => prev.map(p =>
+                        p.id === user?.id ? { ...p, isMuted: false, seatNumber: prevSeatNumber, role: 'SPEAKER' } : p
+                      ));
+                      if (lk.connected) await lk.enableMic();
+                      showMessage({ message: e?.response?.data?.message ?? 'Failed to leave stage', type: 'danger' });
+                    }
+                  }}
+                >
+                  <Text style={{ fontSize: 20 }}>🎤</Text>
+                  <Text style={[mobStyles.ctrlLabel, { color: '#d97706' }]}>End Mic</Text>
+                </TouchableOpacity>
               ) : (
                 /* Normal user — context-aware:
                    Free Stage ON + seat available → grab mic instantly (no approval)

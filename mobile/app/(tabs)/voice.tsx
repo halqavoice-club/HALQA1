@@ -230,6 +230,7 @@ export default function VoiceClubScreen() {
         hostId:          room.host?.id ?? '',
         isOpenMic:       room.isOpenMic ?? false,
         micLocked:       false,
+        allMuted:        false,   // DEF-001: initialise; voice:room_policy_changed keeps it current
         lockedSeats:     [],
         commentsEnabled: true,
         slowMode:        false,
@@ -294,6 +295,7 @@ export default function VoiceClubScreen() {
         hostId:          info.targetRoom.host?.id ?? '',
         isOpenMic:       info.targetRoom.isOpenMic ?? false,
         micLocked:       false,
+        allMuted:        false,   // DEF-001: initialise; voice:room_policy_changed keeps it current
         lockedSeats:     [],
         commentsEnabled: true,
         slowMode:        false,

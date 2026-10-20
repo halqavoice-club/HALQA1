@@ -32,9 +32,9 @@ export function initSocket(token: string): Socket {
     transports: ['polling', 'websocket'],
     upgrade: true,
     reconnection: true,
-    reconnectionAttempts: 10,
+    reconnectionAttempts: Infinity,  // keep retrying indefinitely — backend may restart
     reconnectionDelay: 1000,
-    reconnectionDelayMax: 30_000,
+    reconnectionDelayMax: 10_000,    // cap at 10s so reconnect is prompt after a restart
     randomizationFactor: 0.5,
     timeout: 20_000,
     forceNew: false,

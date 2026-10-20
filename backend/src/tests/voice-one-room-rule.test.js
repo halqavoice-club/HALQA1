@@ -139,10 +139,10 @@ describe('Phase 6 — Same-room reconnect is allowed (not rejected)', () => {
 
   test('existing participant is upserted (reconnect path)', () => {
     expect(joinFn).toMatch(/existing.*voiceParticipant|Upsert participant/);
-    // Window extended to 1400 chars to accommodate the wasKicked guard block
-    // inserted between the "Upsert participant" comment and the isActive:true
-    // update statement (PH24C-003 fix added ~800 chars of kicked-user logic).
-    const upsertBlock = joinFn.match(/Upsert participant[\s\S]{0,1400}/)?.[0] ?? '';
+    // Window extended to 2500 chars to accommodate the wasKicked guard block
+    // (PH24C-003, ~800 chars) AND the stage-preservation block that reads
+    // seatNumber via tx.$queryRaw before the update (stage-drop fix, ~600 chars).
+    const upsertBlock = joinFn.match(/Upsert participant[\s\S]{0,2500}/)?.[0] ?? '';
     expect(upsertBlock).toMatch(/isActive.*true/);
   });
 });
