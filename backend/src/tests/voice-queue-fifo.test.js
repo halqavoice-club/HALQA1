@@ -59,14 +59,14 @@ describe('grabMic — MODERATOR no longer bypasses capacity', () => {
     expect(fn).toMatch(/const isHost\s*=/);
   });
 
-  test('grabMic capacity check — stage full triggers STAGE_FULL for all roles', () => {
-    // In the new seatNumber system, everyone (including HOST) waits when stage is full
-    expect(fn).toMatch(/STAGE_FULL/);
-    expect(fn).toMatch(/Stage is full|added to the queue/i);
+  test('grabMic capacity check — no eligible seat queues all roles (NO_ELIGIBLE_SEAT)', () => {
+    // Speakers (and HOST when no free seat) enqueue when no unlocked eligible seat remains
+    expect(fn).toMatch(/NO_ELIGIBLE_SEAT/);
+    expect(fn).toMatch(/No eligible speaker seat|added to the queue/i);
   });
 
-  test('grabMic STAGE_FULL path applies to MODERATOR (not bypassed)', () => {
-    expect(fn).toMatch(/STAGE_FULL/);
+  test('grabMic NO_ELIGIBLE_SEAT path applies to MODERATOR (not bypassed)', () => {
+    expect(fn).toMatch(/NO_ELIGIBLE_SEAT/);
   });
 });
 
@@ -474,15 +474,14 @@ describe('MODERATOR approval: Free Stage OFF requires queue + approveUser endpoi
     path.join(__dirname, '../controllers/voice.controller.js'), 'utf8'
   );
 
-  test('grabMic queues MODERATOR when isOpenMic=false (non-HOST must queue)', () => {
+  test('grabMic queues MODERATOR when isOpenMic=false — FIX-002: now uses !isPrivileged so MOD bypasses queue', () => {
     const fnStart = voiceSrc.indexOf('async function grabMic');
     const fnEnd   = voiceSrc.indexOf('async function dropMic', fnStart);
     const fn = voiceSrc.slice(fnStart, fnEnd);
-    // Step 5: open-mic OFF path — condition must use !isHost (not !isPrivileged)
-    // so MODERATOR is queued when isOpenMic=false
-    expect(fn).toMatch(/!isHost.*isOpenMic|isOpenMic.*!isHost/);
-    // Must NOT use !isPrivileged which would bypass for MODERATOR
-    expect(fn).not.toMatch(/!isPrivileged.*!isOpenMic/);
+    // FIX-002: open-mic OFF path now uses !isPrivileged (HOST and MOD bypass the queue)
+    expect(fn).toMatch(/!isPrivileged.*!room\.isOpenMic|!room\.isOpenMic.*!isPrivileged/);
+    // Must NOT use !isHost-only check (that was the pre-FIX-002 behavior)
+    expect(fn).not.toMatch(/!isHost\s*&&\s*!room\.isOpenMic/);
   });
 
   test('approveUser endpoint handles MODERATOR via _promoteUser', () => {

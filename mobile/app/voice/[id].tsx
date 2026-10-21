@@ -2146,14 +2146,22 @@ export default function VoiceRoomScreen() {
     if (room?.micLocked) { showMessage({ message: '🔒 Mic is locked by the host', type: 'warning' }); return; }
     try {
       const res = await api.post(`/voice/${id}/grab-mic`);
-      const { queued, position } = res.data.data ?? {};
+      const { queued, position, queueReason } = res.data.data ?? {};
       if (queued) {
         setHandRaised(true);
         setParticipants(prev => prev.map(p =>
           p.id === user?.id ? { ...p, handRaised: true } : p
         ));
+        const detail =
+          queueReason === 'OPEN_MIC_OFF'
+            ? 'Free Stage is off — waiting for host approval'
+            : queueReason === 'NO_ELIGIBLE_SEAT'
+              ? 'No open speaker seat (Seat 1 is host-only; a seat may be locked)'
+              : queueReason === 'SEAT_RACE'
+                ? 'Seat just taken — you\'re in the queue'
+                : 'waiting for a seat';
         showMessage({
-          message: `✋ You're #${position ?? '?'} in the queue — waiting for a seat`,
+          message: `✋ You're #${position ?? '?'} in the queue — ${detail}`,
           type: 'info',
         });
       } else {
@@ -2320,11 +2328,17 @@ export default function VoiceRoomScreen() {
 
   const handleToggleOpenMic = useCallback(async () => {
     const currentOpenMic = room?.isOpenMic ?? false;
+    const next = !currentOpenMic;
     try {
-      await api.patch(`/voice/${id}/open-mic`, { enabled: !currentOpenMic });
-      showMessage({ message: !currentOpenMic ? '🎤 Open Mic enabled' : '🎤 Open Mic disabled', type: 'info' });
+      await api.patch(`/voice/${id}/open-mic`, { enabled: next });
+      // Persist immediately so Free Stage CTA does not wait on socket echo.
+      queryClient.setQueryData<any>(['voice-room', id], (old: any) =>
+        old ? { ...old, isOpenMic: next } : old
+      );
+      updateActiveRoom({ isOpenMic: next });
+      showMessage({ message: next ? '🎤 Open Mic enabled' : '🎤 Open Mic disabled', type: 'info' });
     } catch (e: any) { showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' }); }
-  }, [id, room?.isOpenMic]);
+  }, [id, room?.isOpenMic, queryClient, updateActiveRoom]);
 
   // NEW: save room settings (title / topic / privacy)
   const handleSaveRoomSettings = useCallback(async () => {
@@ -2366,11 +2380,15 @@ export default function VoiceRoomScreen() {
       return;
     }
     const isLocked = lockedSeats.includes(seatIndex);
+    const maxSp = (room as any)?.maxSpeakers ?? 12;
+    const lockingOnlySpeakerSeat = !isLocked && seatIndex >= 1 && maxSp <= 2;
     Alert.alert(
       isLocked ? `🔓 Unlock Seat ${seatIndex + 1}` : `🔒 Lock Seat ${seatIndex + 1}`,
       isLocked
         ? `Allow speakers to occupy seat ${seatIndex + 1}?`
-        : `Prevent anyone from taking seat ${seatIndex + 1}?`,
+        : lockingOnlySpeakerSeat
+          ? 'Speakers cannot use Seat 1. Locking this seat may block all speaker joins.'
+          : `Prevent anyone from taking seat ${seatIndex + 1}?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -2391,7 +2409,7 @@ export default function VoiceRoomScreen() {
         },
       ]
     );
-  }, [id, lockedSeats, room?.micLocked, myRole]);
+  }, [id, lockedSeats, room?.micLocked, room, myRole]);
 
 
   const ROOM_LEVEL_CAPACITY: Record<number, number> = { 1:500,2:1000,3:2000,4:3500,5:5000,6:8000,7:12000,8:18000,9:25000,10:50000 };

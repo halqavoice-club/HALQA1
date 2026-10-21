@@ -34,6 +34,9 @@ const MAX_SPEAKERS = 12;
 
 function roomCacheKey(roomId) { return `voice:room:${roomId}`; }
 
+// FIX-001: convert Json? lockedSeats (0-based array) to a 1-based Set for seat-loop checks
+function buildLockedSet(raw) { const a = Array.isArray(raw) ? raw : (typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return []; } })() : []); return new Set(a.map(s => s + 1)); }
+
 async function safeDeleteCache(key) {
   try {
     await deleteCache(key);
@@ -304,7 +307,8 @@ async function approveNext(req, res, next) {
         userId:    waiting.userId,
         firstName: waiting.user.firstName,
         lastName:  waiting.user.lastName,
-        avatarUrl: waiting.user.avatarUrl
+        avatarUrl: waiting.user.avatarUrl,
+        raisedAt:  waiting.handRaisedAt ? waiting.handRaisedAt.toISOString() : undefined,
       };
     }
 
@@ -380,7 +384,8 @@ async function approveUser(req, res, next) {
       userId:    targetUserId,
       firstName: targetParticipant.user.firstName,
       lastName:  targetParticipant.user.lastName,
-      avatarUrl: targetParticipant.user.avatarUrl
+      avatarUrl: targetParticipant.user.avatarUrl,
+      raisedAt:  targetParticipant.handRaisedAt ? targetParticipant.handRaisedAt.toISOString() : undefined,
     };
 
     return _promoteUser(req, res, meta, roomId, room);
@@ -421,15 +426,13 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
 
   const isMod = userRow.role === 'MODERATOR';
   let preSeat = null;
-  for (let s = 1; s <= fullLimit; s++) {
+  for (let s = 1, ls = buildLockedSet(room?.lockedSeats); s <= fullLimit; s++) {
     if (occupiedSetPre.has(s)) continue;
+    if (ls.has(s)) continue;
     if (s === 1 && !isMod) continue; // SPEAKER cannot take Seat 1
     preSeat = s; break;
   }
-  if (preSeat === null) {
-    return errorResponse(res, `All ${fullLimit} stage seats are occupied — wait for a slot to open`, 400);
-  }
-
+  // FIX-001: fall through to tx if no pre-tx seat (tx re-enqueues on reject)
   let assignedSeat = preSeat;
 
   try {
@@ -476,13 +479,25 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       `;
       const occupiedSetTx = new Set(occupiedTx.map(r => Number(r.seatNumber)));
       const txIsMod = current.role === 'MODERATOR';
+      // FIX-001: re-read lockedSeats inside the transaction so a concurrent toggleSeatLock()
+      // is visible to this promotion. This is a non-locking read (Prisma default isolation,
+      // REPEATABLE READ on MySQL); a lock toggle racing in the same tiny window can still be
+      // missed — closing that fully would need SELECT ... FOR UPDATE on the room row, a
+      // larger change. See FIX-001 report (known concurrency limitation).
+      const txLockRoom = await tx.voiceRoom.findUnique({ where: { id: roomId }, select: { lockedSeats: true } });
+      const lockedSet = buildLockedSet(txLockRoom?.lockedSeats); // FIX-001: locked seats (in-tx re-read)
       let seat = null;
       for (let s = 1; s <= fullLimit; s++) {
         if (occupiedSetTx.has(s)) continue;
+        if (lockedSet.has(s)) continue; // FIX-001: skip locked seats
         if (s === 1 && !txIsMod) continue;
         seat = s; break;
       }
       if (seat === null) {
+        // FIX-001: no unlocked seat — requeue the user with their ORIGINAL FIFO score
+        // (raisedAt) instead of enqueue() which would stamp Date.now() and send them to
+        // the back of the queue. The user was already popped/dequeued by the caller.
+        try { await queue.requeue(roomId, { userId, firstName: userMeta.firstName, lastName: userMeta.lastName, avatarUrl: userMeta.avatarUrl, raisedAt: userMeta.raisedAt }); } catch {}
         const err = new Error('All seats just filled — please wait'); err.statusCode = 400; throw err;
       }
       assignedSeat = seat;
@@ -542,6 +557,9 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       (txErr.message && (txErr.message.includes('Duplicate entry') || txErr.message.includes('voice_participants_roomId_seatNumber_key')));
     if (isDupSeat) {
       logger.warn(`[_promoteUser] Seat race for userId=${userId} room=${roomId} — concurrent seat assignment. Returning 409.`);
+      // FIX-001: requeue the dequeued user with their original FIFO score so they don't
+      // vanish from the queue after a lost seat race. The user was already popped/dequeued.
+      try { await queue.requeue(roomId, { userId, firstName: userMeta.firstName, lastName: userMeta.lastName, avatarUrl: userMeta.avatarUrl, raisedAt: userMeta.raisedAt }); } catch {}
       return errorResponse(res, 'Seat was just taken by another user — please try again', 409);
     }
     throw txErr;
@@ -566,6 +584,15 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       seatNumber: assignedSeat,
       message: `You've been approved as a speaker at Seat ${assignedSeat}!`
     });
+
+    // GAP-D1 FIX: Restore SFU canPublish for the newly promoted speaker.
+    // Without this, a participant whose canPublish was previously revoked (e.g. by micLocked
+    // or a prior mute) cannot publish audio until they request a new token (up to 1h gap).
+    // Best-effort — matches the pattern used in unmuteAll() P3a fix.
+    try {
+      const { sfuRevokePublish } = require('../utils/livekitService');
+      sfuRevokePublish(roomId, userId, true, '[voice:promote]').catch(() => {});
+    } catch {}
 
     // BUG-004 FIX: Add LEFT JOIN users so profile fields are included in the snapshot.
     // Audience was already included (no seatNumber filter) from a previous partial fix.

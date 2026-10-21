@@ -554,9 +554,9 @@ describe('grabMic — seatNumber-based seat authority (no eviction)', () => {
     expect(fn).toMatch(/voice:role_changed[\s\S]{0,200}seatNumber/);
   });
 
-  test('grabMic handles full stage by queuing (STAGE_FULL), including HOST', () => {
+  test('grabMic handles full stage by queuing (NO_ELIGIBLE_SEAT), including HOST', () => {
     // HOST no longer bypasses capacity — it goes into queue like everyone else
-    expect(fn).toMatch(/STAGE_FULL/);
-    expect(fn).toMatch(/Stage is full.*added to the queue|added to the queue/i);
+    expect(fn).toMatch(/NO_ELIGIBLE_SEAT/);
+    expect(fn).toMatch(/No eligible speaker seat|added to the queue/i);
   });
 });

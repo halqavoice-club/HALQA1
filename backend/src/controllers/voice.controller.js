@@ -1346,7 +1346,7 @@ async function promoteParticipant(req, res, next) {
             WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
           `.then(rows => Number(rows[0]?.cnt ?? 0));
           // DEF-002: read allMuted inside transaction so the check is atomic with the write.
-          const txRoom = (await tx.voiceRoom.findUnique({ where: { id: roomId }, select: { maxSpeakers: true, allMuted: true } }));
+          const txRoom = (await tx.voiceRoom.findUnique({ where: { id: roomId }, select: { maxSpeakers: true, allMuted: true, lockedSeats: true } }));
           const maxSpk = txRoom?.maxSpeakers || 12;
           const roomAllMuted = Boolean(txRoom?.allMuted);
           if (stageCnt >= maxSpk) {
@@ -1359,9 +1359,15 @@ async function promoteParticipant(req, res, next) {
             WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
           `;
           const occupiedSet = new Set(occupied.map(r => Number(r.seatNumber)));
+          // FIX-001: locked seats block new occupants (lockedSeats stored as 0-based indices → 1-based)
+          let _lockedSeats = txRoom?.lockedSeats;
+          if (typeof _lockedSeats === 'string') { try { _lockedSeats = JSON.parse(_lockedSeats); } catch { _lockedSeats = []; } }
+          const lockedSet = new Set((Array.isArray(_lockedSeats) ? _lockedSeats : []).map(s => s + 1));
           let seat = null;
           for (let s = 2; s <= maxSpk; s++) { // SPEAKER starts at Seat 2
-            if (!occupiedSet.has(s)) { seat = s; break; }
+            if (occupiedSet.has(s)) continue;
+            if (lockedSet.has(s)) continue; // FIX-001: skip locked seats
+            seat = s; break;
           }
           if (seat === null) {
             const err = new Error('All seats are full'); err.statusCode = 400; throw err;
@@ -2110,10 +2116,12 @@ async function grabMic(req, res, next) {
       }, 'Already on stage');
     }
 
-    // ── 5. Open-mic OFF path (non-HOST participants must queue) ────────────
-    if (!isHost && !room.isOpenMic) {
+    // ── 5. Open-mic OFF path (non-HOST/MOD participants must queue) ──────────
+    // FIX-002: MODERATOR is privileged — they bypass the open-mic gate like HOST.
+    // A MOD should be able to take a seat regardless of isOpenMic state.
+    if (!isPrivileged && !room.isOpenMic) {
       if (participant.handRaised) {
-        return successResponse(res, { queued: true, role: participant.role }, 'Already in the queue');
+        return successResponse(res, { queued: true, role: participant.role, queueReason: 'OPEN_MIC_OFF' }, 'Already in the queue');
       }
       // Enqueue the user
       const { enqueue: enq } = require('../utils/voiceQueue');
@@ -2154,7 +2162,7 @@ async function grabMic(req, res, next) {
       // queue via grabMic, so speakerQueue store is never updated.
       const { broadcastQueue: bq } = require('../controllers/voice-queue.controller');
       await bq(roomId).catch(err => logger.warn(`[grabMic] broadcastQueue failed: ${err.message}`));
-      return successResponse(res, { queued: true, role: 'AUDIENCE', position }, `You are #${position} in the queue`);
+      return successResponse(res, { queued: true, role: 'AUDIENCE', position, queueReason: 'OPEN_MIC_OFF' }, `You are #${position} in the queue`);
     }
 
     // ── 6. Atomic seat assignment ──────────────────────────────────────────
@@ -2165,7 +2173,9 @@ async function grabMic(req, res, next) {
     const cap = room.maxSpeakers || 12;
 
     let assignedSeat = null;
+    let grabAllMuted = false; // GAP-E2 FIX: declared in outer scope so it's accessible after the transaction
     let updatedRole = participant.role;
+    let lastQueueDetail = null; // NO_ELIGIBLE_SEAT diagnostics for client toast
 
     try {
       await prisma.$transaction(async (tx) => {
@@ -2186,12 +2196,18 @@ async function grabMic(req, res, next) {
           return;
         }
 
-        // Re-check micLocked and allMuted inside tx (DEF-002: atomic with write)
+        // Re-check micLocked, isOpenMic, and allMuted inside tx (DEF-002 + open-mic race)
         const [rm] = await tx.$queryRaw`
-          SELECT micLocked, maxSpeakers, allMuted FROM voice_rooms WHERE id = ${roomId} LIMIT 1
+          SELECT micLocked, isOpenMic, maxSpeakers, allMuted, lockedSeats FROM voice_rooms WHERE id = ${roomId} LIMIT 1
         `;
         if (rm?.micLocked && !isPrivileged) {
           const e = new Error('The mic is locked'); e.statusCode = 403; throw e;
+        }
+        // Host may have turned Free Stage OFF after the outer read — re-queue as OPEN_MIC_OFF.
+        // Only enforce when the column is present (MySQL tinyint 0/1 or boolean). Missing
+        // field must not force-queue (outer gate already passed; keeps mocks/compat safe).
+        if (!isPrivileged && rm != null && rm.isOpenMic != null && !Number(rm.isOpenMic)) {
+          const e = new Error('OPEN_MIC_OFF'); e.statusCode = 0; throw e;
         }
 
         // Find lowest available seat inside transaction (authoritative)
@@ -2202,18 +2218,31 @@ async function grabMic(req, res, next) {
         const occupiedSet = new Set(occupiedRows.map(r => Number(r.seatNumber)));
         const maxSp = Number(rm?.maxSpeakers ?? cap);
 
+        // FIX-001: locked seats block new occupants (lockedSeats stored as 0-based indices → 1-based)
+        let _lockedSeats = rm?.lockedSeats;
+        if (typeof _lockedSeats === 'string') { try { _lockedSeats = JSON.parse(_lockedSeats); } catch { _lockedSeats = []; } }
+        const lockedArr = Array.isArray(_lockedSeats) ? _lockedSeats : [];
+        const lockedSet = new Set(lockedArr.map(s => s + 1));
+
         // Find lowest free seat respecting Seat 1 eligibility
         let seat = null;
+        const canTakeSeat1 = MODERATOR_ROLES.includes(curr.role) || curr.role === 'HOST';
         for (let s = 1; s <= maxSp; s++) {
           if (occupiedSet.has(s)) continue;
-          if (s === 1 && !MODERATOR_ROLES.includes(curr.role) && curr.role !== 'HOST') continue; // Seat 1 = HOST/MOD only
+          if (lockedSet.has(s)) continue; // FIX-001: skip locked seats
+          if (s === 1 && !canTakeSeat1) continue; // Seat 1 = HOST/MOD only
           seat = s;
           break;
         }
 
         if (seat === null) {
-          // Stage is full — enqueue, even HOST must wait
-          const e = new Error('STAGE_FULL'); e.statusCode = 0; throw e;
+          // No SPEAKER-eligible unlocked seat (may still look "empty" if only Seat 1 is free).
+          lastQueueDetail = {
+            lockedSeats: lockedArr,
+            occupiedSeats: [...occupiedSet],
+            seat1Reserved: !canTakeSeat1 && !occupiedSet.has(1),
+          };
+          const e = new Error('NO_ELIGIBLE_SEAT'); e.statusCode = 0; throw e;
         }
 
         // Determine final role
@@ -2223,8 +2252,7 @@ async function grabMic(req, res, next) {
 
         // DEF-002: HOST/MOD are exempt from allMuted (isPrivileged=true means isMuted stays 0).
         // AUDIENCE→SPEAKER promotion respects the room-wide mute policy.
-        const grabAllMuted = Boolean(rm?.allMuted);
-
+        grabAllMuted = Boolean(rm?.allMuted); // GAP-E2: assign to outer-scope var (accessible after tx)
         // Assign seat atomically
         if (MODERATOR_ROLES.includes(curr.role)) {
           // HOST/MOD: stay same role, go on stage (unmuted — exempt from allMuted)
@@ -2246,12 +2274,14 @@ async function grabMic(req, res, next) {
       });
     } catch (txErr) {
       if (txErr.statusCode === 0) {
-        // Stage full — enqueue
+        // OPEN_MIC_OFF (in-tx) or NO_ELIGIBLE_SEAT — enqueue (HTTP 200 contract)
+        const queueReason = txErr.message === 'OPEN_MIC_OFF' ? 'OPEN_MIC_OFF' : 'NO_ELIGIBLE_SEAT';
         const { enqueue: enq } = require('../utils/voiceQueue');
         const { isRedisReady } = require('../utils/redis');
+        let position = 1;
         if (isRedisReady()) {
           try {
-            await enq(roomId, { id: userId, firstName: req.user.firstName, lastName: req.user.lastName, avatarUrl: req.user.avatarUrl });
+            position = await enq(roomId, { id: userId, firstName: req.user.firstName, lastName: req.user.lastName, avatarUrl: req.user.avatarUrl });
           } catch {}
         }
         await prisma.$executeRaw`
@@ -2277,7 +2307,16 @@ async function grabMic(req, res, next) {
         } catch (bqErr) {
           logger.warn(`[grabMic:stage-full] broadcastQueue failed: ${bqErr.message}`);
         }
-        return successResponse(res, { queued: true, role: participant.role }, 'Stage is full — you have been added to the queue');
+        const msg = queueReason === 'OPEN_MIC_OFF'
+          ? 'Free Stage is off — you have been added to the queue'
+          : 'No eligible speaker seat — you have been added to the queue';
+        return successResponse(res, {
+          queued: true,
+          role: participant.role,
+          position,
+          queueReason,
+          ...(lastQueueDetail ? { queueDetail: lastQueueDetail } : {}),
+        }, msg);
       }
       if (txErr.statusCode) return errorResponse(res, txErr.message, txErr.statusCode);
 
@@ -2300,7 +2339,7 @@ async function grabMic(req, res, next) {
           `;
           await safeDeleteCache(roomCacheKey(roomId));
         } catch { /* non-fatal */ }
-        return successResponse(res, { queued: true, role: participant.role }, 'Stage seat was just taken — added to queue');
+        return successResponse(res, { queued: true, role: participant.role, queueReason: 'SEAT_RACE' }, 'Stage seat was just taken — added to queue');
       }
 
       throw txErr;
@@ -2323,7 +2362,9 @@ async function grabMic(req, res, next) {
         roomId, userId, role: updatedRole, seatNumber: assignedSeat
       });
       io.to(`voice:${roomId}`).emit('voice:mute_changed', {
-        roomId, userId, isMuted: false
+        // GAP-E2 FIX: emit actual isMuted value — when allMuted=true, new SPEAKER is muted.
+        // grabAllMuted is set inside the transaction; the ternary safely defaults to false.
+        roomId, userId, isMuted: Boolean(grabAllMuted) && !isPrivileged
       });
 
       // Authoritative stage state broadcast — clients reconcile from this

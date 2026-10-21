@@ -13,7 +13,7 @@
  * Returns the promoted user's userId, or null if queue was empty.
  */
 
-const { popNext, getQueue } = require('./voiceQueue');
+const { popNext, getQueue, requeue } = require('./voiceQueue');
 const { deleteCache, isRedisReady } = require('./redis');
 const logger = require('./logger');
 
@@ -25,7 +25,7 @@ async function autoPromoteNext(roomId, io) {
   // Check if there's room for another speaker
   const room = await prisma.voiceRoom.findUnique({
     where: { id: roomId },
-    select: { maxSpeakers: true, status: true, micLocked: true, allMuted: true }  // DEF-002: include allMuted
+    select: { maxSpeakers: true, status: true, micLocked: true, allMuted: true, lockedSeats: true }  // DEF-002 + FIX-001: include allMuted + lockedSeats
   });
   if (!room || room.status === 'ENDED') return null;
 
@@ -136,18 +136,34 @@ async function autoPromoteNext(roomId, io) {
   const occupiedSet = new Set(occupiedRows.map(r => Number(r.seatNumber)));
   const maxSp = room.maxSpeakers || 12;
 
+  // FIX-001: locked seats block new occupants (lockedSeats stored as 0-based indices → 1-based)
+  let _lockedSeats = room?.lockedSeats;
+  if (typeof _lockedSeats === 'string') { try { _lockedSeats = JSON.parse(_lockedSeats); } catch { _lockedSeats = []; } }
+  const lockedSet = new Set((Array.isArray(_lockedSeats) ? _lockedSeats : []).map(s => s + 1));
+
   // SPEAKER gets Seats 2–12; MODERATOR can also get Seat 1 if empty (first available)
   let promotedSeat = null;
   for (let s = 1; s <= maxSp; s++) {
     if (occupiedSet.has(s)) continue;
+    if (lockedSet.has(s)) continue; // FIX-001: skip locked seats
     if (s === 1 && !isMod) continue; // SPEAKER cannot take Seat 1
     promotedSeat = s;
     break;
   }
 
   if (promotedSeat === null) {
-    // No seat available (race condition) — try next in queue
-    return autoPromoteNext(roomId, io);
+    // FIX-001: no unlocked seat available (all free seats locked, or rare race) — do NOT recurse.
+    // Recursing would pop+drop every remaining queued user because locked seats stay locked.
+    // Instead, restore the just-popped user to the queue with their ORIGINAL FIFO score so they
+    // don't lose their place. Their DB handRaised flag remains regardless, so even if Redis is
+    // unavailable (requeue is then a safe no-op) the getQueue DB fallback / re-hydration still
+    // lists them. Callers ignore the return value; returning null signals "no promotion happened".
+    try {
+      if (next && next.userId) {
+        await requeue(roomId, { userId: next.userId, firstName: next.firstName, lastName: next.lastName, avatarUrl: next.avatarUrl, raisedAt: next.raisedAt });
+      }
+    } catch { /* non-fatal — DB handRaised is the durable fallback */ }
+    return null;
   }
 
   // PH24C-004 FIX: Wrap seat assignment in try/catch to handle concurrent seat collision.

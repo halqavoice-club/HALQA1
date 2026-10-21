@@ -572,8 +572,8 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
       .mockResolvedValueOnce([{
         role: 'AUDIENCE', isMuted: 1, seatNumber: null, isActive: 1,
       }])
-      // inside tx: [rm] room re-read (allMuted=1 as MySQL tinyint)
-      .mockResolvedValueOnce([{ micLocked: 0, maxSpeakers: 12, allMuted: 1 }])
+      // inside tx: [rm] room re-read (allMuted=1 as MySQL tinyint; isOpenMic stays ON)
+      .mockResolvedValueOnce([{ micLocked: 0, isOpenMic: 1, maxSpeakers: 12, allMuted: 1 }])
       // inside tx: occupiedRows (only seat 1 is occupied by HOST — but HOST is host-id not this user)
       .mockResolvedValueOnce([{ seatNumber: 1 }]); // seat 1 occupied → AUDIENCE gets seat 2
 
