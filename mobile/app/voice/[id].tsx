@@ -1080,6 +1080,9 @@ export default function VoiceRoomScreen() {
   // Used to guard socket.emit('voice:join_room') and onReconnect so neither
   // fires before the user has actually joined via the API.
   const hasJoinedRef = useRef(false);
+  // F-006b: guards voice:leave_room cleanup so it only fires on intentional leave or room change
+  const intentionalLeaveRef = useRef(false)
+  const prevRoomIdRef = useRef<string | null>(null)
 
   // ── Mic pass state ──────────────────────────────────────────────────────────
   const [showMicPassOffer,    setShowMicPassOffer]    = useState(false);
@@ -1192,14 +1195,15 @@ export default function VoiceRoomScreen() {
   }) => {
     if (d.roomId !== id) return;
     setParticipants(prev => {
-      const updated = [...prev];
-      // Clear seatNumbers for participants not in stage (stage_state is authoritative)
+      // FIX-L002: Remove participants absent from the authoritative snapshot.
+      // Previously only seatNumber was cleared; audience members with seatNumber=null
+      // were never removed (DEFECT-B2). Filter the array to remove absent entries.
+      // Guard: d.stageParticipants.length > 0 prevents an empty snapshot from
+      // blanking the entire participant list (matches web behaviour).
       const inStageIds = new Set(d.stageParticipants.map(sp => sp.userId));
-      for (let i = 0; i < updated.length; i++) {
-        if (!inStageIds.has(updated[i].id)) {
-          updated[i] = { ...updated[i], seatNumber: null };
-        }
-      }
+      const updated = d.stageParticipants.length > 0
+        ? prev.filter(p => inStageIds.has(p.id))
+        : [...prev];
       // Update matching participants
       const matchedIds = new Set<string>();
       d.stageParticipants.forEach(sp => {
@@ -1245,6 +1249,10 @@ export default function VoiceRoomScreen() {
   // taps Join. The isJoined guard is replaced by hasJoinedRef so listeners are
   // registered early while the guarded emit/reconnect still require a completed join.
   useEffect(() => {
+    // F-006b: track room changes to distinguish navigation-to-new-room from dep re-runs
+    const isRoomChange = prevRoomIdRef.current !== null && prevRoomIdRef.current !== id;
+    prevRoomIdRef.current = id;
+
     if (!user) return;
     const socket = getSocket();
     if (!socket) return;
@@ -1516,7 +1524,8 @@ export default function VoiceRoomScreen() {
     };
 
     // Participant left — remove from list
-    const onUserLeft = (d: { userId: string }) => {
+    const onUserLeft = (d: { roomId: string; userId: string }) => {
+      if (d.roomId !== id) return; // FIX-L001: ignore events from other rooms
       setParticipants(prev => prev.filter(p => p.id !== d.userId));
     };
 
@@ -1810,7 +1819,12 @@ export default function VoiceRoomScreen() {
     socket.on('voice:stage_state', applyStageSnapshot);
 
     return () => {
-      socket.emit('voice:leave_room', id);
+      // F-006b: only emit leave when the user actually left or navigated to a different room.
+      // Strict Mode double-invoke and reconnect dep-changes must NOT fire this emit.
+      if (intentionalLeaveRef.current || isRoomChange) {
+        socket.emit('voice:leave_room', id);
+      }
+      intentionalLeaveRef.current = false;
       // PH24C-005: remove the reconnect handler so it doesn't fire after unmount
       socket.off('connect', onReconnect);
       socket.off('voice:gift_sent',    onGift);
@@ -2034,6 +2048,7 @@ export default function VoiceRoomScreen() {
     Alert.alert('Leave Room', 'Are you sure you want to leave?', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Leave', style: 'destructive', onPress: async () => {
+        intentionalLeaveRef.current = true
         try { await api.post(`/voice/${id}/leave`); } catch {}
         lk.disconnect();
         clearActiveRoom();
@@ -2266,6 +2281,7 @@ export default function VoiceRoomScreen() {
     Alert.alert('End Room', 'End the room for everyone?', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'End', style: 'destructive', onPress: async () => {
+        intentionalLeaveRef.current = true
         try { await api.patch(`/voice/${id}/end`); } catch {}
         lk.disconnect();
         clearActiveRoom();

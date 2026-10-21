@@ -1124,10 +1124,12 @@ describe('BUG-005: Web onStageState — stale-seat sweep for absent participants
     expect(handlerBlock).toMatch(/updateParticipant/);
   });
 
-  test('stale-seat sweep does NOT remove participants from store', () => {
+  test('FIX-L002: stale-seat sweep now removes absent participants via removeParticipant', () => {
     const stageIdx = hookSrc.indexOf('const onStageState');
-    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 3000);
-    expect(handlerBlock).not.toMatch(/removeParticipant/);
+    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 5000);
+    // FIX-L002 changed the sweep from clearing seatNumber to fully removing
+    // participants absent from the authoritative snapshot via removeParticipant.
+    expect(handlerBlock).toMatch(/removeParticipant/);
   });
 
   test('stale-seat sweep does NOT change participant role (only seatNumber cleared)', () => {
@@ -1140,12 +1142,14 @@ describe('BUG-005: Web onStageState — stale-seat sweep for absent participants
     expect(updateCall.slice(0, 200)).not.toMatch(/role.*AUDIENCE/);
   });
 
-  test('mobile applyStageSnapshot sweeps stale seatNumbers (pre-existing baseline)', () => {
+  test('FIX-L002: mobile applyStageSnapshot removes absent participants via filter', () => {
     expect(mobileSrc).toMatch(/inStageIds/);
-    // Mobile clears seatNumber for participants not in inStageIds
-    expect(mobileSrc).toMatch(/seatNumber: null/);
-    // And uses !inStageIds.has() to identify them
-    expect(mobileSrc).toMatch(/!inStageIds\.has/);
+    // FIX-L002 changed mobile applyStageSnapshot from clearing seatNumber for
+    // absent participants to filtering them out of state entirely.
+    const applyIdx = mobileSrc.indexOf('const applyStageSnapshot');
+    expect(applyIdx).toBeGreaterThan(-1);
+    const applySnippet = mobileSrc.slice(applyIdx, applyIdx + 1500);
+    expect(applySnippet).toMatch(/\.filter\s*\(\s*p\s*=>\s*inStageIds\.has\s*\(\s*p\.id\s*\)\s*\)/);
   });
 });
 
@@ -1367,13 +1371,13 @@ describe('S25 — F-009: voice:speaker_pinned has matching cleanup', () => {
   });
 
   test('voice:speaker_pinned is removed with socket.off in cleanup', () => {
-    expect(hookSrc).toMatch(/socket\.off\('voice:speaker_pinned'\)/);
+    expect(hookSrc).toMatch(/socket\.off\('voice:speaker_pinned',\s*onSpeakerPinned\)/);
   });
 
   test('socket.off for voice:speaker_pinned appears after the return () => { cleanup marker', () => {
     // Verify the off() is inside the cleanup block, not before it
     const returnCleanupIdx = hookSrc.lastIndexOf('return () => {');
-    const offIdx = hookSrc.lastIndexOf("socket.off('voice:speaker_pinned')");
+    const offIdx = hookSrc.lastIndexOf("socket.off('voice:speaker_pinned', onSpeakerPinned)");
     expect(returnCleanupIdx).toBeGreaterThan(-1);
     expect(offIdx).toBeGreaterThan(returnCleanupIdx);
   });

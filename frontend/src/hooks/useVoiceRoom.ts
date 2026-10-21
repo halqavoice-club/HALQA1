@@ -95,6 +95,7 @@ export function useVoiceRoom(roomId: string | null) {
         setSocketReady(true)
       } else if (retries >= MAX_RETRIES) {
         clearInterval(timer)
+        console.warn('[useVoiceRoom] Socket not available after 10s — voice room listeners not registered for room', roomId)
       }
     }, 500)
     return () => clearInterval(timer)
@@ -667,13 +668,14 @@ export function useVoiceRoom(roomId: string | null) {
     // P1 FIX: Extended type includes optional profile fields from the enriched
     // backend query (LEFT JOIN users). onStageState now upserts participants
     // absent from the store so a buffered snapshot can backfill missed joins.
-    // BUG-005 FIX: Stale-seat sweep — clear seatNumber for any store participant
-    // whose userId is absent from a verified full-room snapshot. This corrects
-    // ghost stage slots left behind when a voice:role_changed or voice:mute_changed
-    // event was dropped during a network blip. Only runs when the snapshot has
-    // content (stageParticipants.length > 0) so an empty or malformed payload
-    // cannot accidentally clear all seats. Does not remove participants from the
-    // store or change their role — only seatNumber is cleared to null.
+    // BUG-005 FIX / FIX-L002: Full reconciliation sweep — any store participant
+    // whose userId is absent from a verified full-room snapshot has already left
+    // and is removed from the store entirely via removeParticipant (not merely
+    // demoted to a null seat). This corrects ghost stage slots AND departed
+    // audience members left behind when a voice:role_changed / voice:mute_changed
+    // / voice:user_left event was dropped during a network blip. Only runs when
+    // the snapshot has content (stageParticipants.length > 0) so an empty or
+    // malformed payload cannot accidentally wipe the entire participant list.
     const onStageState = (data: {
       roomId: string
       stageParticipants: Array<{
@@ -732,19 +734,22 @@ export function useVoiceRoom(roomId: string | null) {
           })
         }
       })
-      // BUG-005 FIX: Stale-seat sweep.
-      // A full-room snapshot guarantees all active participants are included.
-      // Any participant in the store with a non-null seatNumber who is NOT in
-      // the snapshot has already dropped their seat on the server — clear it.
-      // Guard: only sweep when snapshot has participants (prevents clearing all
-      // seats if a malformed empty snapshot ever arrives).
+      // FIX-L002: Full reconciliation sweep.
+      // The snapshot is authoritative for all active participants. Any participant
+      // in the store who is NOT in the snapshot has already left — remove them
+      // entirely via removeParticipant (not just clear their seat).
+      // Previously only participants with seatNumber != null were swept (DEFECT-B2):
+      // audience members with seatNumber=null were never cleaned up.
+      // Guard: only sweep when snapshot is non-empty (prevents a malformed empty
+      // snapshot from blanking the entire participant list).
       if (data.stageParticipants.length > 0) {
         const snapshotIds = new Set(data.stageParticipants.map(sp => sp.userId))
         const storeParticipants = useVoiceStore.getState().activeRoom?.participants ?? []
         storeParticipants.forEach(p => {
-          if (p.seatNumber != null && !snapshotIds.has(p.userId)) {
-            // Participant has a stale seat not reflected in the authoritative snapshot
-            updateParticipant(p.userId, { seatNumber: null })
+          if (!snapshotIds.has(p.userId)) {
+            // FIX-L002: participant absent from authoritative snapshot — remove entirely.
+            // removeParticipant filters by userId (idempotent).
+            removeParticipant(p.userId)
           }
         })
       }
@@ -953,10 +958,11 @@ export function useVoiceRoom(roomId: string | null) {
     socket.on('voice:status_changed',     onStatusChanged)
     socket.on('voice:room_updated',       onRoomUpdated)
     socket.on('voice:gift_sent',          onGiftSent)
-    socket.on('voice:speaker_pinned',     (d: { roomId: string; userId: string; isPinned: boolean }) => {
+    const onSpeakerPinned = (d: { roomId: string; userId: string; isPinned: boolean }) => {
       if (d.roomId !== roomId) return
       updateParticipant(d.userId, { isPinned: d.isPinned })
-    })
+    }
+    socket.on('voice:speaker_pinned',     onSpeakerPinned)
     socket.on('voice:premium_gift',       onGiftSent)   // BUG FIX: premium gifts use a separate channel
     // BUG FIX: server emits 'gift:received' on the private user:{id} socket room,
     // NOT 'voice:gift_received' on the voice room. The socket already joins user:{userId}
@@ -1056,7 +1062,7 @@ export function useVoiceRoom(roomId: string | null) {
       socket.off('voice:kicked',             onKicked)
       socket.off('voice:banned',             onBanned)  // FIX: cleanup added with handler above
       // voice:host_changed was never emitted — removed; ownership handled by voice:admin_transferred above
-      socket.off('voice:speaker_pinned')                 // F-009 FIX: cleanup was missing
+      socket.off('voice:speaker_pinned', onSpeakerPinned) // F-009 FIX: named handler reference
       socket.off('voice:speaker_slot_freed', onSlotFreed)
       socket.off('voice:mic_offer',          onMicOffer)
       socket.off('voice:mic_passed',         onMicPassed)

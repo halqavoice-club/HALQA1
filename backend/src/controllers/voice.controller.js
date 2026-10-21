@@ -882,17 +882,15 @@ async function joinRoom(req, res, next) {
             stageParticipants: mappedStageRows,
             stageCount: stageRows.length,
           });
-          // BUG-1 FIX: Also broadcast the snapshot room-wide so existing clients
-          // pick up the new joiner even if they missed voice:user_joined (e.g. the
-          // addParticipant null-guard silently dropped it). Guard at < 100 on-stage
-          // participants to avoid O(N²) snapshot traffic on large rooms.
-          if (stageRows.length < 100) {
-            io.to(`voice:${roomId}`).emit('voice:stage_state', {
-              roomId,
-              stageParticipants: mappedStageRows,
-              stageCount: stageRows.length,
-            });
-          }
+          // FIX-L004: Room-wide stage snapshot broadcast unconditional.
+          // The guard that limited this to rooms below a participant threshold was
+          // a premature optimisation — removed so all active clients always receive
+          // the reconciling snapshot when a new participant joins.
+          io.to(`voice:${roomId}`).emit('voice:stage_state', {
+            roomId,
+            stageParticipants: mappedStageRows,
+            stageCount: stageRows.length,
+          });
         }
       } catch { /* non-fatal */ }
     }
@@ -939,7 +937,9 @@ async function leaveRoom(req, res, next) {
       await dq(roomId, userId);
     } catch {}
 
-    // If they were on stage (unmuted speaker/moderator) or host, auto-promote next from queue
+    // FIX-L005: Wrap autoPromoteNext in try/catch so a promotion failure never
+    // prevents voice:user_left from firing. The participant is already inactive
+    // in the DB at this point — the leave is committed regardless.
     const wasOnStage = !participant.isMuted && (
       participant.role === VOICE_ROLES.SPEAKER ||
       participant.role === VOICE_ROLES.MODERATOR ||
@@ -947,16 +947,23 @@ async function leaveRoom(req, res, next) {
     );
     if (wasOnStage) {
       const io = getIo();
-      await autoPromoteNext(roomId, io);
+      try { await autoPromoteNext(roomId, io); } catch (promoteErr) {
+        logger.warn(`[voice] autoPromoteNext failed for ${userId} in ${roomId}: ${promoteErr.message}`);
+      }
     }
 
-    await invalidateRoomCache(roomId, schoolId);
-
-    const io = getIo();
-    if (io) {
-      io.to(`voice:${roomId}`).emit('voice:user_left', { roomId, userId });
-      // VC-GAP-004 FIX: Use socketsLeave() for multi-tab/multi-server eviction.
-      io.in(`user:${userId}`).socketsLeave(`voice:${roomId}`);
+    // FIX-L005: invalidateRoomCache and socket emits are in a try/finally so
+    // voice:user_left always fires even if invalidateRoomCache or subsequent
+    // operations throw.
+    try {
+      await invalidateRoomCache(roomId, schoolId);
+    } finally {
+      const io = getIo();
+      if (io) {
+        io.to(`voice:${roomId}`).emit('voice:user_left', { roomId, userId });
+        // VC-GAP-004 FIX: Use socketsLeave() for multi-tab/multi-server eviction.
+        io.in(`user:${userId}`).socketsLeave(`voice:${roomId}`);
+      }
     }
 
     // Update feed live card participant count
@@ -1602,6 +1609,39 @@ async function kickParticipant(req, res, next) {
       if (!target.isMuted && MODERATOR_ROLES.includes(target.role) || target.role === VOICE_ROLES.SPEAKER) {
         try { await autoPromoteNext(roomId, io); } catch {}
       }
+      // FIX-L003: Broadcast authoritative stage snapshot after kick so all clients
+      // reconcile the departed participant. Mirrors the FIX-JOIN-STAGE block in joinRoom.
+      // stageRows.length guard intentionally absent — kick is a low-frequency moderator
+      // action; the snapshot is always needed for correctness.
+      try {
+        const kickStageRows = await prisma.$queryRaw`
+          SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
+                 vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+                 u.firstName, u.lastName, u.avatarUrl
+          FROM voice_participants vp
+          LEFT JOIN users u ON u.id = vp.userId
+          WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+          ORDER BY vp.role ASC, vp.joinedAt ASC
+        `;
+        const mappedKickRows = kickStageRows.map(r => ({
+          userId:           r.userId,
+          role:             r.role,
+          isMuted:          Boolean(r.isMuted),
+          seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
+          isPinned:         Boolean(r.isPinned),
+          handRaised:       Boolean(r.handRaised),
+          mutedByModerator: Boolean(r.mutedByModerator),
+          joinedAt:         r.joinedAt,
+          firstName:        r.firstName ?? null,
+          lastName:         r.lastName ?? null,
+          avatarUrl:        r.avatarUrl ?? null,
+        }));
+        io.to(`voice:${roomId}`).emit('voice:stage_state', {
+          roomId,
+          stageParticipants: mappedKickRows,
+          stageCount: kickStageRows.length,
+        });
+      } catch { /* non-fatal — voice:user_left already fired */ }
     }
 
     voiceAudit(requesterId, 'PARTICIPANT_KICKED', roomId, { targetUserId });
