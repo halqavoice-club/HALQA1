@@ -1484,6 +1484,9 @@ export default function VoiceRoomScreen() {
 
     // New participant joined — add to list
     const onUserJoined = (d: any) => {
+      // F-006 FIX: Guard against cross-room events. Without this guard, a user
+      // staying on Room A's screen would see participants joining Room B.
+      if (d.roomId !== id) return;
       // SEAT SYNC FIX: Deterministic sort key — role asc then joinedAt asc
       const PARTICIPANT_ROLE_ORDER: Record<string, number> = { HOST: 0, MODERATOR: 1, SPEAKER: 2, AUDIENCE: 3 };
       const newP = {

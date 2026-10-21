@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useCallback } from 'react'
+import { useEffect, useCallback, useState } from 'react'
 import { useVoiceStore, VoiceParticipant, VoiceMessage } from '@/store/voice.store'
 import { getSocket } from '@/lib/socket'
 import { useAuthStore } from '@/store/auth.store'
@@ -51,6 +51,11 @@ export function useVoiceRoom(roomId: string | null) {
     addGiftEvent, setGiftLeaderboard, setWallet
   } = useVoiceStore()
 
+  // F-005: tracks whether the socket singleton is available yet.
+  // Flipped to true by a polling effect when getSocket() returns non-null,
+  // which triggers the main listener effect to re-run and register handlers.
+  const [socketReady, setSocketReady] = useState(() => getSocket() !== null)
+
   // ── beforeunload: call leave API so the server marks participant inactive
   //    even if the user closes the tab / refreshes / navigates away hard.
   useEffect(() => {
@@ -74,9 +79,35 @@ export function useVoiceRoom(roomId: string | null) {
   }, [roomId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Socket event listeners ──────────────────────────────────────────────────
+  // F-005 FIX part 1: When socket is null at mount, poll until it's ready.
+  // This covers the rare case where initSocket() hasn't been called yet when
+  // the voice room page mounts. Setting socketReady=true triggers the main
+  // listener effect below to re-run and register all handlers.
+  useEffect(() => {
+    if (socketReady) return // already have a socket — nothing to wait for
+    if (!roomId) return
+    let retries = 0
+    const MAX_RETRIES = 20 // 10 seconds at 500ms intervals
+    const timer = setInterval(() => {
+      retries++
+      if (getSocket() !== null) {
+        clearInterval(timer)
+        setSocketReady(true)
+      } else if (retries >= MAX_RETRIES) {
+        clearInterval(timer)
+      }
+    }, 500)
+    return () => clearInterval(timer)
+  }, [roomId, socketReady])
+
+  // ── Socket event listeners ──────────────────────────────────────────────────
   useEffect(() => {
     if (!roomId) return
-    const socket = getSocket()
+    let socket = getSocket()
+
+    // F-005 FIX part 2: If socket is still null after the polling effect ran,
+    // bail — the polling effect will set socketReady=true once available,
+    // which will re-trigger this effect via the dep array below.
     if (!socket) return
 
     // ── Re-join the socket room after a reconnect ─────────────────────────
@@ -1025,6 +1056,7 @@ export function useVoiceRoom(roomId: string | null) {
       socket.off('voice:kicked',             onKicked)
       socket.off('voice:banned',             onBanned)  // FIX: cleanup added with handler above
       // voice:host_changed was never emitted — removed; ownership handled by voice:admin_transferred above
+      socket.off('voice:speaker_pinned')                 // F-009 FIX: cleanup was missing
       socket.off('voice:speaker_slot_freed', onSlotFreed)
       socket.off('voice:mic_offer',          onMicOffer)
       socket.off('voice:mic_passed',         onMicPassed)
@@ -1059,7 +1091,7 @@ export function useVoiceRoom(roomId: string | null) {
       socket.off('gift:received',            onGiftReceived)
       socket.off('voice:gift_all',           onGiftAll)
     }
-  }, [roomId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [roomId, socketReady]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load chat history on enter
   useEffect(() => {

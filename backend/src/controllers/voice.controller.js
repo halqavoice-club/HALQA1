@@ -448,6 +448,13 @@ async function createRoom(req, res, next) {
 
     const io = getIo();
     if (io) {
+      // F-004 FIX: socketsJoin the host into voice:{roomId} immediately after
+      // createRoom commits. Without this, the host's socket is not in the room
+      // channel and misses all room-wide events until the client emits
+      // voice:join_room (which can be rate-limited or silently refused).
+      // Same pattern as joinRoom's socketsJoin — awaited for Redis adapter safety.
+      await io.in(`user:${hostId}`).socketsJoin(`voice:${roomId}`);
+
       // Broadcast to all lobby watchers (voice:lobby covers ALL users including
       // MEMBER users with no school). Also send to school room for school-scoped users.
       io.to('voice:lobby').emit('voice:room_created', updatedRoom);
@@ -763,8 +770,11 @@ async function joinRoom(req, res, next) {
     // These run OUTSIDE the transaction so they do not hold the InnoDB row lock.
 
     // BE-005: Previously this was 3 separate sequential calls.
-    // syncRoomStatus() already calls invalidateRoomCache internally.
+    // syncRoomStatus() calls invalidateRoomCache internally, but ONLY when
+    // transitioning IDLE/SCHEDULED→LIVE. F-001 FIX: always invalidate so that
+    // already-LIVE rooms don't serve a 60s-stale cached roster to new joiners.
     await syncRoomStatus(roomId, schoolId);
+    await invalidateRoomCache(roomId, schoolId);
 
     // Cancel any pending room-sleep job — someone joined during the grace period
     // and the room should stay LIVE. Fire-and-forget, non-fatal.
@@ -777,13 +787,14 @@ async function joinRoom(req, res, next) {
     const activeCount = updatedRoom?._count?.participants ?? 0;
     broadcastLiveUpdate('voice_room', roomId, activeCount);
 
-    // RT-FIX-1: Add the joining user's socket to the room BEFORE broadcasting
-    // voice:user_joined. Previously socketsJoin() was called AFTER the emit,
-    // so the joining user's own socket could miss room-wide events that fired
-    // immediately after join (e.g. queue_updated, stage_state).
+    // RT-FIX-1 / F-003 FIX: Await socketsJoin BEFORE any emit so that the
+    // joining user's socket is inside voice:{roomId} before member_joined,
+    // user_joined, and stage_state are broadcast. With a Redis adapter,
+    // socketsJoin is async; without await the emit can race ahead and the
+    // joiner's own socket misses room-wide events fired in the same tick.
     const io = getIo();
     if (io) {
-      io.in(`user:${userId}`).socketsJoin(`voice:${roomId}`);
+      await io.in(`user:${userId}`).socketsJoin(`voice:${roomId}`);
     }
 
     // FIX-MEMBER-JOIN: Emit voice:member_joined AFTER socketsJoin so the joining

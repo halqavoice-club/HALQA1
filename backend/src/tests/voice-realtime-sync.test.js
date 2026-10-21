@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 /**
  * Voice Club — Real-Time Synchronization Regression Tests
  *
@@ -1207,5 +1207,255 @@ describe('BUG-011: Web dropMic — optimistic update clears seatNumber immediate
     // Strip comments first to avoid matching comment text
     const codeOnly = hostModBranch.replace(/\/\/[^\n]*/g, '');
     expect(codeOnly).not.toMatch(/role.*AUDIENCE/);
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// S20 — F-001: joinRoom always invalidates cache even when room is LIVE
+// ═══════════════════════════════════════════════════════════════════════
+describe('S20 — F-001: joinRoom always invalidates room cache', () => {
+  test('invalidateRoomCache is called in joinRoom post-transaction block', () => {
+    const fn = extractFn(src, 'joinRoom', 'leaveRoom');
+    // F-001 FIX: invalidateRoomCache must be called unconditionally after the
+    // transaction, not only inside syncRoomStatus (which skips it for LIVE rooms).
+    expect(fn).toMatch(/invalidateRoomCache/);
+  });
+
+  test('invalidateRoomCache call in joinRoom is outside syncRoomStatus', () => {
+    const fn = extractFn(src, 'joinRoom', 'leaveRoom');
+    // The call to invalidateRoomCache must appear AFTER syncRoomStatus in the
+    // post-transaction block — not just inside syncRoomStatus itself.
+    const syncIdx      = fn.indexOf('syncRoomStatus(');
+    const invalidateIdx = fn.indexOf('invalidateRoomCache(', syncIdx);
+    expect(syncIdx).toBeGreaterThan(-1);
+    expect(invalidateIdx).toBeGreaterThan(syncIdx);
+  });
+
+  test('invalidateRoomCache is imported at top of controller', () => {
+    expect(src).toMatch(/require\(['"]\.\.\/utils\/voiceRoomCache['"]\)/);
+    expect(src).toMatch(/invalidateRoomCache/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// S21 — F-003: socketsJoin is awaited before emits in joinRoom
+// ═══════════════════════════════════════════════════════════════════════
+describe('S21 — F-003: socketsJoin awaited before voice:user_joined and voice:stage_state', () => {
+  test('await socketsJoin appears before voice:user_joined in joinRoom', () => {
+    const fn = extractFn(src, 'joinRoom', 'leaveRoom');
+    const awaitSockIdx    = fn.indexOf('await io');
+    const userJoinedIdx   = fn.indexOf("emit('voice:user_joined'");
+    expect(awaitSockIdx).toBeGreaterThan(-1);
+    expect(awaitSockIdx).toBeLessThan(userJoinedIdx);
+  });
+
+  test('await socketsJoin appears before voice:stage_state in joinRoom', () => {
+    const fn = extractFn(src, 'joinRoom', 'leaveRoom');
+    const awaitSockIdx  = fn.indexOf('await io');
+    const stageStateIdx = fn.indexOf("emit('voice:stage_state'");
+    expect(awaitSockIdx).toBeGreaterThan(-1);
+    expect(awaitSockIdx).toBeLessThan(stageStateIdx);
+  });
+
+  test('await socketsJoin appears before voice:member_joined in joinRoom', () => {
+    const fn = extractFn(src, 'joinRoom', 'leaveRoom');
+    const awaitSockIdx    = fn.indexOf('await io');
+    const memberJoinedIdx = fn.indexOf("emit('voice:member_joined'");
+    expect(awaitSockIdx).toBeGreaterThan(-1);
+    expect(awaitSockIdx).toBeLessThan(memberJoinedIdx);
+  });
+
+  test('socketsJoin call uses await keyword (not fire-and-forget)', () => {
+    const fn = extractFn(src, 'joinRoom', 'leaveRoom');
+    // The await must precede io.in(...).socketsJoin on the same logical expression.
+    expect(fn).toMatch(/await\s+io\.in\(`user:\$\{userId\}`\)\.socketsJoin\(`voice:\$\{roomId\}`\)/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// S22 — F-004: createRoom socketsJoins the host
+// ═══════════════════════════════════════════════════════════════════════
+describe('S22 — F-004: createRoom socketsJoin host into voice room', () => {
+  test('createRoom calls socketsJoin in post-transaction block', () => {
+    const fn = extractFn(src, 'createRoom', 'joinRoom');
+    expect(fn).toMatch(/socketsJoin/);
+  });
+
+  test('createRoom socketsJoin targets voice:{roomId}', () => {
+    const fn = extractFn(src, 'createRoom', 'joinRoom');
+    expect(fn).toMatch(/socketsJoin\(`voice:\$\{roomId\}`\)/);
+  });
+
+  test('createRoom socketsJoin uses await keyword', () => {
+    const fn = extractFn(src, 'createRoom', 'joinRoom');
+    expect(fn).toMatch(/await\s+io\.in\(`user:\$\{hostId\}`\)\.socketsJoin/);
+  });
+
+  test('createRoom socketsJoin happens before voice:room_created emit', () => {
+    const fn = extractFn(src, 'createRoom', 'joinRoom');
+    const socketsJoinIdx = fn.indexOf('socketsJoin');
+    const roomCreatedIdx = fn.indexOf("emit('voice:room_created'");
+    expect(socketsJoinIdx).toBeGreaterThan(-1);
+    expect(roomCreatedIdx).toBeGreaterThan(-1);
+    expect(socketsJoinIdx).toBeLessThan(roomCreatedIdx);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// S23 — F-006: mobile onUserJoined has roomId guard
+// ═══════════════════════════════════════════════════════════════════════
+describe('S23 — F-006: mobile onUserJoined ignores wrong roomId', () => {
+  test('mobile onUserJoined has roomId guard', () => {
+    if (!mobileSrc) { return; }
+    const idx = mobileSrc.indexOf('const onUserJoined = (d: any) => {');
+    expect(idx).toBeGreaterThan(-1);
+    // Guard must appear early in the handler — within 300 chars
+    const handler = mobileSrc.slice(idx, idx + 300);
+    expect(handler).toMatch(/d\.roomId !== id/);
+  });
+
+  test('mobile onUserJoined guard precedes any state mutation', () => {
+    if (!mobileSrc) { return; }
+    const idx = mobileSrc.indexOf('const onUserJoined = (d: any) => {');
+    // Use 1200 chars — the guard + comment block + newP construction puts
+    // setParticipants at roughly offset 900 from the function start.
+    const handler = mobileSrc.slice(idx, idx + 1200);
+    const guardIdx       = handler.indexOf('d.roomId !== id');
+    const setParticipants = handler.indexOf('setParticipants');
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(setParticipants).toBeGreaterThan(-1);
+    expect(guardIdx).toBeLessThan(setParticipants);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// S24 — F-005: web hook retries when socket is null at mount
+// ═══════════════════════════════════════════════════════════════════════
+describe('S24 — F-005: web useVoiceRoom retries when socket null at mount', () => {
+  test('hook imports useState', () => {
+    expect(hookSrc).toMatch(/useState/);
+  });
+
+  test('hook has socketReady state variable', () => {
+    expect(hookSrc).toMatch(/socketReady/);
+  });
+
+  test('main listener effect dep array includes socketReady', () => {
+    // The main socket listener useEffect must depend on socketReady so it
+    // re-runs when the polling effect flips it from false to true.
+    expect(hookSrc).toMatch(/\[roomId,\s*socketReady\]/);
+  });
+
+  test('hook polls for socket when null', () => {
+    // Should have a setInterval-based polling loop that calls setSocketReady(true)
+    expect(hookSrc).toMatch(/setSocketReady\(true\)/);
+    expect(hookSrc).toMatch(/setInterval/);
+  });
+
+  test('polling effect dep array includes roomId and socketReady', () => {
+    expect(hookSrc).toMatch(/\[roomId,\s*socketReady\]/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// S25 — F-009: voice:speaker_pinned cleanup is present
+// ═══════════════════════════════════════════════════════════════════════
+describe('S25 — F-009: voice:speaker_pinned has matching cleanup', () => {
+  test('voice:speaker_pinned is registered with socket.on', () => {
+    expect(hookSrc).toMatch(/socket\.on\('voice:speaker_pinned'/);
+  });
+
+  test('voice:speaker_pinned is removed with socket.off in cleanup', () => {
+    expect(hookSrc).toMatch(/socket\.off\('voice:speaker_pinned'\)/);
+  });
+
+  test('socket.off for voice:speaker_pinned appears after the return () => { cleanup marker', () => {
+    // Verify the off() is inside the cleanup block, not before it
+    const returnCleanupIdx = hookSrc.lastIndexOf('return () => {');
+    const offIdx = hookSrc.lastIndexOf("socket.off('voice:speaker_pinned')");
+    expect(returnCleanupIdx).toBeGreaterThan(-1);
+    expect(offIdx).toBeGreaterThan(returnCleanupIdx);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// S26 — addParticipant from voice:user_joined while store is mounted
+// ═══════════════════════════════════════════════════════════════════════
+describe('S26 — addParticipant handles voice:user_joined while already mounted', () => {
+  test('addParticipant while activeRoom is non-null adds participant', () => {
+    const s = makeStore();
+    s.setActiveRoom(makeRoom([makeP('host', 'HOST', { seatNumber: 1, isMuted: false })]));
+    // Simulate voice:user_joined for a new audience member
+    s.addParticipant(makeP('newuser', 'AUDIENCE', { seatNumber: null }));
+    const participants = s.getActiveParticipants();
+    expect(participants).toHaveLength(2);
+    expect(s.getParticipant('newuser')).toBeTruthy();
+    expect(s.getParticipant('newuser').role).toBe('AUDIENCE');
+  });
+
+  test('addParticipant while activeRoom is null is a no-op (null guard)', () => {
+    const s = makeStore();
+    // activeRoom is null — addParticipant must silently do nothing
+    s.addParticipant(makeP('newuser', 'AUDIENCE'));
+    expect(s.get().activeRoom).toBeNull();
+  });
+
+  test('addParticipant duplicate userId updates rather than duplicates', () => {
+    const s = makeStore();
+    s.setActiveRoom(makeRoom([makeP('a', 'AUDIENCE', { isActive: false })]));
+    s.addParticipant(makeP('a', 'AUDIENCE', { isActive: true, seatNumber: null }));
+    expect(s.get().activeRoom.participants).toHaveLength(1);
+    expect(s.get().activeRoom.participants[0].isActive).toBe(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// S27 — Snapshot after newer incremental event does not drop new joiner
+// ═══════════════════════════════════════════════════════════════════════
+describe('S27 — stage_state snapshot does not drop newer joiners', () => {
+  // This tests the F-008 concern: an older stage_state snapshot must not
+  // erase a participant that arrived via a newer voice:user_joined event.
+  // Our onStageState only clears seatNumber for absent participants — it
+  // does NOT remove participants from the list entirely. So a stale snapshot
+  // cannot drop a newly-joined audience member.
+
+  test('onStageState only clears seatNumber for absent participants — does not remove them', () => {
+    const s = makeStore();
+    // host + newUser are both active in the room
+    s.setActiveRoom(makeRoom([
+      makeP('host', 'HOST', { seatNumber: 1, isMuted: false }),
+      makeP('newuser', 'AUDIENCE', { seatNumber: null }),
+    ]));
+    // Older stage_state only includes host (newuser joined after snapshot was taken)
+    s.onStageState({
+      roomId: 'room-1',
+      stageCount: 1,
+      stageParticipants: [
+        { userId: 'host', role: 'HOST', isMuted: false, seatNumber: 1,
+          isPinned: false, handRaised: false, mutedByModerator: false },
+      ],
+    });
+    // newuser must still be in the list — only their seatNumber is cleared (already null)
+    expect(s.get().activeRoom.participants).toHaveLength(2);
+    expect(s.getParticipant('newuser')).toBeTruthy();
+  });
+
+  test('newer addParticipant after stale snapshot survives correctly', () => {
+    const s = makeStore();
+    s.setActiveRoom(makeRoom([makeP('host', 'HOST', { seatNumber: 1, isMuted: false })]));
+    // Stale snapshot arrives first
+    s.onStageState({
+      roomId: 'room-1',
+      stageCount: 1,
+      stageParticipants: [
+        { userId: 'host', role: 'HOST', isMuted: false, seatNumber: 1,
+          isPinned: false, handRaised: false, mutedByModerator: false },
+      ],
+    });
+    // Then newer voice:user_joined arrives for the new participant
+    s.addParticipant(makeP('newuser', 'AUDIENCE', { seatNumber: null }));
+    expect(s.getActiveParticipants()).toHaveLength(2);
+    expect(s.getParticipant('newuser')).toBeTruthy();
   });
 });
