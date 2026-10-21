@@ -55,6 +55,49 @@ async function enqueue(roomId, user) {
   }
 }
 
+// ─── requeue ──────────────────────────────────────────────────────────────────
+/**
+ * Re-add a user to the FIFO queue with their ORIGINAL raisedAt score.
+ *
+ * Used when a promotion fails after the caller already popped/dequeued the user
+ * (P2002 duplicate-seat race, or every free seat is locked). Unlike enqueue() —
+ * which stamps Date.now() and sends the user to the back of the queue — requeue()
+ * restores the user to their original FIFO position so they don't lose priority.
+ *
+ * The caller is responsible for having removed the user first (via popNext() or
+ * dequeue()); requeue() re-inserts them. Safe — no-op if Redis is unavailable
+ * (the DB handRaised flag is the durable fallback and remains untouched).
+ *
+ * @param {string} roomId
+ * @param {{ userId: string, firstName?: string, lastName?: string, avatarUrl?: string|null, raisedAt?: string }} userMeta
+ */
+async function requeue(roomId, userMeta) {
+  if (!isRedisReady()) {
+    logger.warn('[voiceQueue] Redis unavailable — requeue skipped (DB handRaised is fallback)');
+    return;
+  }
+  try {
+    const redis  = getRedis();
+    const userId = userMeta.userId;
+    const score  = userMeta.raisedAt ? new Date(userMeta.raisedAt).getTime() : Date.now();
+    const meta   = JSON.stringify({
+      userId,
+      firstName: userMeta.firstName,
+      lastName:  userMeta.lastName,
+      avatarUrl:  userMeta.avatarUrl ?? null,
+      raisedAt:   userMeta.raisedAt ?? new Date(score).toISOString(),
+    });
+    // 'NX' matches enqueue()/getQueue() re-hydration: only add the member (the
+    // caller already removed it), preserving the original score on re-insert.
+    await redis.zadd(zsetKey(roomId), 'NX', score, userId);
+    await redis.hset(metaKey(roomId), userId, meta);
+    await redis.expire(zsetKey(roomId), QUEUE_TTL);
+    await redis.expire(metaKey(roomId), QUEUE_TTL);
+  } catch (err) {
+    logger.warn(`[voiceQueue] requeue failed: ${err.message}`);
+  }
+}
+
 // ─── dequeue ──────────────────────────────────────────────────────────────────
 /**
  * Remove a specific user from the queue. Safe — no-op if Redis unavailable.
@@ -245,6 +288,7 @@ async function clearQueue(roomId) {
 
 module.exports = {
   enqueue,
+  requeue,
   dequeue,
   peekNext,
   popNext,

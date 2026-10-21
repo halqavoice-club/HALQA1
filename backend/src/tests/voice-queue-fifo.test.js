@@ -59,14 +59,14 @@ describe('grabMic — MODERATOR no longer bypasses capacity', () => {
     expect(fn).toMatch(/const isHost\s*=/);
   });
 
-  test('grabMic capacity check — stage full triggers STAGE_FULL for all roles', () => {
-    // In the new seatNumber system, everyone (including HOST) waits when stage is full
-    expect(fn).toMatch(/STAGE_FULL/);
-    expect(fn).toMatch(/Stage is full|added to the queue/i);
+  test('grabMic capacity check — no eligible seat queues all roles (NO_ELIGIBLE_SEAT)', () => {
+    // Speakers (and HOST when no free seat) enqueue when no unlocked eligible seat remains
+    expect(fn).toMatch(/NO_ELIGIBLE_SEAT/);
+    expect(fn).toMatch(/No eligible speaker seat|added to the queue/i);
   });
 
-  test('grabMic STAGE_FULL path applies to MODERATOR (not bypassed)', () => {
-    expect(fn).toMatch(/STAGE_FULL/);
+  test('grabMic NO_ELIGIBLE_SEAT path applies to MODERATOR (not bypassed)', () => {
+    expect(fn).toMatch(/NO_ELIGIBLE_SEAT/);
   });
 });
 

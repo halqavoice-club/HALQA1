@@ -13,7 +13,7 @@
  * Returns the promoted user's userId, or null if queue was empty.
  */
 
-const { popNext, getQueue } = require('./voiceQueue');
+const { popNext, getQueue, requeue } = require('./voiceQueue');
 const { deleteCache, isRedisReady } = require('./redis');
 const logger = require('./logger');
 
@@ -154,11 +154,15 @@ async function autoPromoteNext(roomId, io) {
   if (promotedSeat === null) {
     // FIX-001: no unlocked seat available (all free seats locked, or rare race) — do NOT recurse.
     // Recursing would pop+drop every remaining queued user because locked seats stay locked.
-    // Return null so the caller stops; the just-popped user is dropped from the Redis queue
-    // (their DB handRaised flag remains, so getQueue DB fallback / re-hydration still lists them).
-    // Callers ignore the return value and do not know the popped user's identity, so they
-    // cannot re-enqueue — this matches the existing race-condition behavior and is strictly
-    // better than draining the whole queue. See FIX-001 final report (known limitation).
+    // Instead, restore the just-popped user to the queue with their ORIGINAL FIFO score so they
+    // don't lose their place. Their DB handRaised flag remains regardless, so even if Redis is
+    // unavailable (requeue is then a safe no-op) the getQueue DB fallback / re-hydration still
+    // lists them. Callers ignore the return value; returning null signals "no promotion happened".
+    try {
+      if (next && next.userId) {
+        await requeue(roomId, { userId: next.userId, firstName: next.firstName, lastName: next.lastName, avatarUrl: next.avatarUrl, raisedAt: next.raisedAt });
+      }
+    } catch { /* non-fatal — DB handRaised is the durable fallback */ }
     return null;
   }
 

@@ -52,6 +52,7 @@ jest.mock('../utils/voiceRoomCache', () => ({
 
 jest.mock('../utils/voiceQueue', () => ({
   enqueue:   jest.fn().mockResolvedValue(1),
+  requeue:   jest.fn().mockResolvedValue(undefined),
   dequeue:   jest.fn().mockResolvedValue(undefined),
   getQueue:  jest.fn().mockResolvedValue([]),
   isInQueue: jest.fn().mockResolvedValue(false),
@@ -139,7 +140,7 @@ const next = jest.fn();
 
 // ─── Shared fixtures ─────────────────────────────────────────────────────────
 const prisma     = require('../utils/prisma');
-const { enqueue } = require('../utils/voiceQueue');
+const { enqueue, requeue, popNext } = require('../utils/voiceQueue');
 const { getIo }   = require('../sockets');
 const { getCache, deleteCache } = require('../utils/redis');
 
@@ -180,9 +181,9 @@ describe('FIX-001 — grabMic() seat-lock enforcement [MOCKED]', () => {
       }])
       // tx: curr
       .mockResolvedValueOnce([{ role:'AUDIENCE', isMuted:1, seatNumber:null, isActive:1 }])
-      // tx: rm (room re-read)
+      // tx: rm (room re-read) — include isOpenMic so in-tx Free Stage check stays ON
       .mockResolvedValueOnce([{
-        micLocked:0, maxSpeakers,
+        micLocked:0, isOpenMic:1, maxSpeakers,
         allMuted:0,
         lockedSeats: typeof lockedSeatsRaw === 'string'
           ? lockedSeatsRaw
@@ -209,7 +210,7 @@ describe('FIX-001 — grabMic() seat-lock enforcement [MOCKED]', () => {
     expect(res.body.data.seatNumber).toBe(3);
   });
 
-  test('T2: ALL seats locked → 200 with queued=true (STAGE_FULL path)', async () => {
+  test('T2: ALL seats locked → 200 with queued=true (NO_ELIGIBLE_SEAT)', async () => {
     // maxSpeakers=2. Seat 1 occupied, seat 2 locked. No free unlocked seat.
     setupGrabMic({ lockedSeatsRaw: [1], occupiedSeats: [1], maxSpeakers: 2 });
 
@@ -221,6 +222,46 @@ describe('FIX-001 — grabMic() seat-lock enforcement [MOCKED]', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.body.data.queued).toBe(true);
+    expect(res.body.data.queueReason).toBe('NO_ELIGIBLE_SEAT');
+  });
+
+  test('T2b: open-mic OFF → 200 queued with queueReason OPEN_MIC_OFF', async () => {
+    prisma.voiceRoom.findUnique.mockResolvedValue({
+      id:'room-1', status:'LIVE', deletedAt:null,
+      isOpenMic:false, micLocked:false, maxSpeakers:4, hostId:'host', allMuted:false,
+    });
+    prisma.$queryRaw.mockResolvedValueOnce([{
+      id:'p1', roomId:'room-1', userId:'user-1',
+      role:'AUDIENCE', isMuted:1, seatNumber:null, isActive:1,
+      wasKicked:0, isBanned:0, handRaised:0, handRaisedAt:null,
+      isPinned:0, mutedByModerator:0,
+    }]);
+
+    const res = makeRes();
+    await voiceCtrl.grabMic(
+      makeReq({ params:{ id:'room-1' }, user:{ id:'user-1', firstName:'A', lastName:'B' }}),
+      res, next
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.queued).toBe(true);
+    expect(res.body.data.queueReason).toBe('OPEN_MIC_OFF');
+  });
+
+  test('T2c: Seat 1 empty (reserved) + Seat 2 locked → NO_ELIGIBLE_SEAT', async () => {
+    // Looks like a free stage: Seat 1 empty. Speakers cannot take Seat 1; Seat 2 locked.
+    setupGrabMic({ lockedSeatsRaw: [1], occupiedSeats: [], maxSpeakers: 2 });
+
+    const res = makeRes();
+    await voiceCtrl.grabMic(
+      makeReq({ params:{ id:'room-1' }, user:{ id:'user-1', firstName:'A', lastName:'B' }}),
+      res, next
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.data.queued).toBe(true);
+    expect(res.body.data.queueReason).toBe('NO_ELIGIBLE_SEAT');
+    expect(res.body.data.queueDetail?.seat1Reserved).toBe(true);
   });
 
   test('T9: isOpenMic=true + locked seat — locked seat is still skipped', async () => {
@@ -422,7 +463,7 @@ describe('FIX-001 — _promoteUser() queue approval seat-lock enforcement [MOCKE
     expect(promotionCall.slice(1)[0]).toBe(3);
   });
 
-  test('T6: ALL seats locked → returns 400 and enqueue called', async () => {
+  test('T6: ALL seats locked → returns 400 and requeue called with original raisedAt (FIFO preserved)', async () => {
     const room = {
       id:'room-1', status:'LIVE', deletedAt:null,
       micLocked:false, maxSpeakers:2, allMuted:false,
@@ -437,7 +478,46 @@ describe('FIX-001 — _promoteUser() queue approval seat-lock enforcement [MOCKE
     );
 
     expect(res.statusCode).toBe(400);
-    expect(enqueue).toHaveBeenCalled();
+    // FIX-001 (T-FIFO): requeue() — not enqueue() — so the user keeps their original FIFO
+    // score instead of being stamped with Date.now() and sent to the back of the queue.
+    expect(requeue).toHaveBeenCalledWith('room-1', expect.objectContaining({
+      userId: 'user-1',
+      raisedAt: expect.any(String),
+    }));
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  // T-P2002: _promoteUser P2002 duplicate-seat race → 409 AND requeue restores the user
+  // (covers the original user-reported "Seat was just taken by another user" defect).
+  test('T-P2002: _promoteUser P2002 duplicate seat → returns 409 AND requeue called with original raisedAt', async () => {
+    const room = {
+      id:'room-1', status:'LIVE', deletedAt:null,
+      micLocked:false, maxSpeakers:4, allMuted:false,
+      lockedSeats:[], // a free seat exists (seat 2) → $executeRaw runs and throws P2002
+    };
+    setupApproveNextMocks({ room, occupiedSeats:[1] });
+
+    // Seat-assignment $executeRaw throws a P2002-style duplicate-seat error (two concurrent
+    // promotions racing for the same seat, caught by the (roomId, seatNumber) unique key).
+    const p2002 = Object.assign(
+      new Error("Duplicate entry for key 'voice_participants_roomId_seatNumber_key'"),
+      { code: 'P2002' }
+    );
+    prisma.$executeRaw.mockRejectedValueOnce(p2002);
+
+    const res = makeRes();
+    await queueCtrl.approveNext(
+      makeReq({ params:{ id:'room-1' }, user:{ id:'host', firstName:'H', lastName:'H' }}),
+      res, next
+    );
+
+    expect(res.statusCode).toBe(409);
+    expect(res.body.message).toMatch(/Seat was just taken/i);
+    // FIX-001: the dequeued user is restored to the queue with their original FIFO score
+    expect(requeue).toHaveBeenCalledWith('room-1', expect.objectContaining({
+      userId: 'user-1',
+      raisedAt: expect.any(String),
+    }));
   });
 });
 
@@ -450,6 +530,79 @@ describe('FIX-001 — _promoteUser() queue approval seat-lock enforcement [MOCKE
 //   5. voiceParticipant.findUnique → participant record
 //   6. $queryRaw occupiedRows      → seat 1 occupied
 //   FIX-001: lockedSet built → only seat 2 free but locked → return null
+
+// ─── approveUser() carries raisedAt into _promoteUser ────────────────────────
+// approveUser call chain (Redis off):
+//   1. voiceParticipant.findUnique → myParticipant (HOST)
+//   2. voiceParticipant.findUnique → inQueue DB fallback (handRaised=true)
+//   3. voiceRoom.findUnique        → room
+//   4. $queryRaw countSpeakers      → [{cnt:0}]
+//   5. voiceParticipant.findUnique → targetParticipant (with user + handRaisedAt)
+//   _promoteUser:
+//   6. $queryRaw seatedCnt          → [{cnt:0}]
+//   7. $queryRaw occupiedPre        → [{seatNumber:1}]
+//   8. voiceParticipant.findUnique  → userRow
+//   inside tx:
+//     9a. voiceParticipant.findUnique → current
+//     9b. $queryRaw seatRow          → [{seatNumber:null}]
+//     9c. $queryRaw occupiedTx       → [{seatNumber:1}]
+//     9d. voiceRoom.findUnique       → room (in-tx lockedSeats re-read)
+//     10. seat === null → requeue + throw 400
+describe('FIX-001 — approveUser() carries raisedAt into _promoteUser [MOCKED]', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    freshIo();
+    prisma.$transaction.mockImplementation(async (fn) => fn(prisma));
+    prisma.$executeRaw.mockResolvedValue(0);
+    prisma.voiceParticipant.update.mockResolvedValue({});
+    enqueue.mockResolvedValue(1);
+  });
+
+  test('T-APPROVE: approveUser meta includes raisedAt from targetParticipant.handRaisedAt', async () => {
+    const raisedDate = new Date('2026-06-01T12:00:00.000Z');
+    prisma.voiceParticipant.findUnique
+      .mockResolvedValueOnce({ userId:'host', isActive:true, role:'HOST' })           // 1. myParticipant
+      .mockResolvedValueOnce({ userId:'user-1', isActive:true, handRaised:true })     // 2. inQueue fallback
+      .mockResolvedValueOnce({                                                        // 5. targetParticipant
+        userId:'user-1', isActive:true, role:'AUDIENCE', handRaised:true,
+        handRaisedAt: raisedDate,
+        user:{ id:'user-1', firstName:'A', lastName:'B', avatarUrl:null },
+      })
+      .mockResolvedValueOnce({ role:'AUDIENCE', isMuted:true, isActive:true })         // 8. userRow
+      .mockResolvedValueOnce({ role:'AUDIENCE', isActive:true, isMuted:true });        // 9a. tx current
+
+    // maxSpeakers=2, seat 2 locked, seat 1 occupied → null seat → requeue + 400
+    const room = {
+      id:'room-1', status:'LIVE', deletedAt:null,
+      micLocked:false, maxSpeakers:2, allMuted:false,
+      lockedSeats:[1],
+    };
+    prisma.voiceRoom.findUnique.mockResolvedValue(room);
+
+    prisma.$queryRaw
+      .mockResolvedValueOnce([{ cnt:0 }])              // 4. countSpeakers
+      .mockResolvedValueOnce([{ cnt:0 }])              // 6. seatedCnt
+      .mockResolvedValueOnce([{ seatNumber:1 }])        // 7. occupiedPre
+      .mockResolvedValueOnce([{ seatNumber:null }])     // 9b. seatRow
+      .mockResolvedValueOnce([{ seatNumber:1 }]);      // 9c. occupiedTx
+    prisma.$queryRaw.mockResolvedValue([]);
+
+    const res = makeRes();
+    await queueCtrl.approveUser(
+      makeReq({ params:{ id:'room-1', userId:'user-1' }, user:{ id:'host', firstName:'H', lastName:'H' }}),
+      res, next
+    );
+
+    // null-seat path → 400
+    expect(res.statusCode).toBe(400);
+    // approveUser carried raisedAt from targetParticipant.handRaisedAt into _promoteUser,
+    // and _promoteUser requeued the user with that original FIFO score.
+    expect(requeue).toHaveBeenCalledWith('room-1', expect.objectContaining({
+      userId: 'user-1',
+      raisedAt: raisedDate.toISOString(),
+    }));
+  });
+});
 
 describe('FIX-001 — autoPromoteNext() seat-lock enforcement [MOCKED]', () => {
   beforeEach(() => {
@@ -493,6 +646,50 @@ describe('FIX-001 — autoPromoteNext() seat-lock enforcement [MOCKED]', () => {
     expect(result).toBeNull();
     // Should NOT have attempted to assign a seat
     expect(prisma.$executeRaw.mock.calls.length).toBe(0);
+  });
+
+  // T-AUTO: autoPromoteNext all-locked → requeue the popped user with original raisedAt
+  // (product decision 2: do NOT drop the user). Uses the Redis-on path so popNext returns
+  // real queue meta including raisedAt; the requeue mock then observes the FIFO score.
+  test('T-AUTO: autoPromoteNext all-locked → requeue called with original raisedAt before returning null', async () => {
+    const autoPromote = jest.requireActual('../utils/autoPromote');
+    const { isRedisReady } = require('../utils/redis');
+
+    // Redis ON for this one call so popNext returns real queue meta with raisedAt
+    isRedisReady.mockReturnValueOnce(true);
+    popNext.mockResolvedValueOnce({
+      userId: 'queued-user', firstName: 'Q', lastName: 'U', avatarUrl: null,
+      raisedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    // maxSpeakers=2: seat 1 occupied by host, seat 2 locked (index 1)
+    prisma.voiceRoom.findUnique.mockResolvedValue({
+      id:'room-1', status:'LIVE', micLocked:false, maxSpeakers:2, allMuted:false,
+      lockedSeats:[1],
+    });
+
+    // speakerCount
+    prisma.$queryRaw.mockResolvedValueOnce([{ cnt:0 }]);
+    // occupiedRows: seat 1 occupied
+    prisma.$queryRaw.mockResolvedValueOnce([{ seatNumber:1 }]);
+    prisma.$queryRaw.mockResolvedValue([]);
+
+    // participant record (still active, eligible, not seated, not kicked)
+    prisma.voiceParticipant.findUnique.mockResolvedValue({
+      userId:'queued-user', role:'AUDIENCE', isActive:true, isMuted:true,
+      handRaised:true, seatNumber:null, wasKicked:false,
+    });
+
+    const result = await autoPromote.autoPromoteNext('room-1', null);
+
+    // No free unlocked seat → null (no promotion), but the user is NOT dropped
+    expect(result).toBeNull();
+    expect(prisma.$executeRaw.mock.calls.length).toBe(0);
+    // FIX-001: the popped user is requeued with their ORIGINAL FIFO score
+    expect(requeue).toHaveBeenCalledWith('room-1', expect.objectContaining({
+      userId: 'queued-user',
+      raisedAt: '2026-01-01T00:00:00.000Z',
+    }));
   });
 });
 
