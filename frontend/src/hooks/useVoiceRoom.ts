@@ -1465,6 +1465,9 @@ export function useVoiceRoom(roomId: string | null) {
         enabled !== undefined ? { enabled } : {}
       )
       const state = res.data.data?.isOpenMic
+      // Persist immediately so Raise-hand vs Go Live UI does not wait on socket echo
+      // (parity with toggleMicLock).
+      useVoiceStore.getState().updateRoom({ isOpenMic: Boolean(state) })
       toast({ title: state ? '🎙️ Open Mic ON' : '🔒 Open Mic OFF' })
     } catch (e: any) {
       toast({ title: e?.response?.data?.message || 'Failed to toggle Open Mic', variant: 'destructive' })
@@ -1508,13 +1511,19 @@ export function useVoiceRoom(roomId: string | null) {
     }
     try {
       const res = await api.post(`/voice/${roomId}/grab-mic`)
-      const { queued, position, role, seatNumber, isMuted } = res.data.data ?? {}
+      const { queued, position, role, seatNumber, queueReason } = res.data.data ?? {}
       if (queued) {
-        // Queued because open-mic is off or stage is full
-        const activeRoom = useVoiceStore.getState().activeRoom
-        const reason = activeRoom?.isOpenMic === false
-          ? 'Raise Hand is on — the host will approve you when ready.'
-          : 'You\'ll be promoted automatically when a slot opens.'
+        // Prefer server queueReason — do not infer from possibly stale isOpenMic.
+        const reason =
+          queueReason === 'OPEN_MIC_OFF'
+            ? 'Free Stage is off — the host will approve you when ready.'
+            : queueReason === 'NO_ELIGIBLE_SEAT'
+              ? 'No open speaker seat (Seat 1 is host-only; a seat may be locked).'
+              : queueReason === 'SEAT_RACE'
+                ? 'That seat was just taken — you\'re in the queue.'
+                : useVoiceStore.getState().activeRoom?.isOpenMic === false
+                  ? 'Raise Hand is on — the host will approve you when ready.'
+                  : 'You\'ll be promoted automatically when a slot opens.'
         toast({
           title: `✋ You're #${position ?? '?'} in the queue`,
           description: reason,

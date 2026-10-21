@@ -1371,8 +1371,17 @@ export function VoiceRoomView({ onLeave }: Props) {
               amModerating={amModerating}
               onLockToggle={(seatIdx) => {
                 const isSeatLocked = (activeRoom.lockedSeats ?? []).includes(i)
-                const action = isSeatLocked ? 'unlock' : 'lock'
-                if (window.confirm(`${isSeatLocked ? '🔓 Unlock' : '🔒 Lock'} Seat ${seatIdx}?\n\n${isSeatLocked ? 'This seat can be occupied again.' : 'Nobody can take this seat until you unlock it.'}`)) {
+                // Seat 1 is host/mod only — locking the only remaining SPEAKER-eligible
+                // seat (common when maxSpeakers=2 and locking Seat 2) blocks all speakers.
+                const maxSp = activeRoom?.maxSpeakers ?? MAX_SPEAKERS
+                const lockingOnlySpeakerSeat =
+                  !isSeatLocked && seatIdx >= 2 && maxSp <= 2
+                const lockBody = isSeatLocked
+                  ? 'This seat can be occupied again.'
+                  : lockingOnlySpeakerSeat
+                    ? 'Speakers cannot use Seat 1. Locking this seat may block all speaker joins.'
+                    : 'Nobody can take this seat until you unlock it.'
+                if (window.confirm(`${isSeatLocked ? '🔓 Unlock' : '🔒 Lock'} Seat ${seatIdx}?\n\n${lockBody}`)) {
                   toggleSeatLock(i)
                 }
               }}
