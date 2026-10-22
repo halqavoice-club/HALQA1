@@ -70,4 +70,26 @@ async function getNextStageVersion(roomId) {
   }
 }
 
-module.exports = { roomCacheKey, invalidateRoomCache, getNextStageVersion };
+/**
+ * Get the current monotonic state version for a room's stage WITHOUT incrementing.
+ * Use this for read-only access (e.g. HTTP GET endpoints) where incrementing via
+ * INCR would mutate the counter and skew version ordering for concurrent mutations.
+ *
+ * Non-fatal: returns 0 if Redis is unavailable or the key does not exist, so
+ * callers treat the snapshot as unversioned and fall back to safe update-only behaviour.
+ *
+ * @param {string} roomId
+ * @returns {Promise<number>} current version integer >= 1, or 0 if unset/unavailable
+ */
+async function getCurrentStageVersion(roomId) {
+  try {
+    if (!isRedisReady()) return 0;
+    const val = await getRedis().get(`voice:stateVersion:${roomId}`);
+    return Number(val) || 0;
+  } catch (err) {
+    logger.warn(`[voiceRoomCache] getCurrentStageVersion failed for room ${roomId}: ${err.message}`);
+    return 0;
+  }
+}
+
+module.exports = { roomCacheKey, invalidateRoomCache, getNextStageVersion, getCurrentStageVersion };

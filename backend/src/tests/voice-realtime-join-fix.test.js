@@ -275,16 +275,38 @@ describe('F-009 — voice:speaker_pinned cleanup matches registration', () => {
   });
 
   test('voice:speaker_pinned is removed with socket.off in cleanup', () => {
-    expect(hookSrc).toMatch(/socket\.off\('voice:speaker_pinned'\)/);
+    expect(hookSrc).toMatch(/socket\.off\('voice:speaker_pinned',\s*onSpeakerPinned\)/);
   });
 
   test('socket.off for voice:speaker_pinned is inside the cleanup return block', () => {
-    // The last occurrence of socket.off('voice:speaker_pinned') must appear
+    // The last occurrence of socket.off('voice:speaker_pinned', onSpeakerPinned) must appear
     // after the last return () => { marker (i.e. inside the cleanup function).
     const lastReturnIdx  = hookSrc.lastIndexOf('return () => {');
-    const lastOffIdx     = hookSrc.lastIndexOf("socket.off('voice:speaker_pinned')");
+    const lastOffIdx     = hookSrc.lastIndexOf("socket.off('voice:speaker_pinned', onSpeakerPinned)");
     expect(lastReturnIdx).toBeGreaterThan(-1);
     expect(lastOffIdx).toBeGreaterThan(lastReturnIdx);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// F-006b — mobile voice:leave_room cleanup is guarded by intentionalLeaveRef
+// ═══════════════════════════════════════════════════════════════════════
+describe('F-006b — mobile voice:leave_room cleanup is gated on intentionalLeaveRef', () => {
+  test('mobile source contains intentionalLeaveRef ref', () => {
+    if (!mobileSrc) { expect(mobileSrc).toBeDefined(); return; }
+    expect(mobileSrc).toMatch(/intentionalLeaveRef/);
+  });
+
+  test('voice:leave_room emit in cleanup is inside an if guard containing intentionalLeaveRef', () => {
+    if (!mobileSrc) return;
+    // Find the cleanup return block — the last `return () => {` before the dep array `}, [id])`
+    const cleanupIdx = mobileSrc.lastIndexOf('return () => {');
+    expect(cleanupIdx).toBeGreaterThan(-1);
+    const leaveEmitIdx = mobileSrc.indexOf("emit('voice:leave_room'", cleanupIdx);
+    expect(leaveEmitIdx).toBeGreaterThan(cleanupIdx);
+    // The emit must not appear at the very start of the cleanup — it must be inside an if block
+    const cleanupSnippet = mobileSrc.slice(cleanupIdx, leaveEmitIdx + 50);
+    expect(cleanupSnippet).toMatch(/if\s*\(.*intentionalLeaveRef/);
   });
 });
 

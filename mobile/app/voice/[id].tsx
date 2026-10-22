@@ -1366,6 +1366,10 @@ export default function VoiceRoomScreen() {
             id:               d.userId,
             name:             'Loading...',  // applyStageSnapshot will fill real name
             avatar:           undefined,
+            // NOTE: The only backend code path that emits voice:mute_changed with
+            // seatNumber != null AND isMuted === false is _promoteUser for a MODERATOR.
+            // If a future path breaks this invariant, this upsert will insert the wrong role.
+            // Consider adding role to the mute_changed payload to make this explicit.
             role:             'MODERATOR',
             isMuted:          false,
             isSpeaking:       false,

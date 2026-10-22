@@ -176,8 +176,8 @@ describe('6 · useVoiceRoom.ts — onStageState profile fill pass (GAP-W2)', () 
     expect(code).toMatch(/Placeholder has blank name[\s\S]{0,300}updateParticipant\(sp\.userId,\s*\{\s*user:/);
   });
 
-  test('profile fill checks for empty firstName and lastName', () => {
-    expect(code).toMatch(/!inStore\.user\?\.firstName\s*&&\s*!inStore\.user\?\.lastName/);
+  test('profile fill uses OR-based per-field needsFill check', () => {
+    expect(code).toMatch(/needsFill\s*=\s*!inStore(\?\.user)?\?\.firstName\s*\|\|\s*!inStore(\?\.user)?\?\.lastName/);
   });
 });
 
@@ -275,5 +275,33 @@ describe('11 · mobile [id].tsx — voice:mic_grabbed handler (GAP-M2)', () => {
 
   test('socket.off voice:mic_grabbed is in cleanup', () => {
     expect(code).toMatch(/socket\.off\(\s*['"]voice:mic_grabbed['"]/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. voice.controller.js — getStageState HTTP response includes stateVersion
+// ---------------------------------------------------------------------------
+describe('12 · voice.controller.js — getStageState returns stateVersion (CORRECTION-1)', () => {
+  let code;
+  beforeAll(() => { code = src('nurul yaqin class ms/backend/src/controllers/voice.controller.js'); });
+
+  test('getStageState function body includes stateVersion after stageRows query', () => {
+    // Extract a window of text starting from "async function getStageState"
+    const start = code.indexOf('async function getStageState');
+    expect(start).toBeGreaterThan(-1);
+    const snippet = code.slice(start, start + 2000);
+    expect(snippet).toMatch(/stateVersion/);
+  });
+
+  test('getStageState uses getCurrentStageVersion (not getNextStageVersion)', () => {
+    const start = code.indexOf('async function getStageState');
+    expect(start).toBeGreaterThan(-1);
+    const snippet = code.slice(start, start + 2000);
+    expect(snippet).toMatch(/getCurrentStageVersion/);
+    expect(snippet).not.toMatch(/getNextStageVersion/);
+  });
+
+  test('getCurrentStageVersion is imported from voiceRoomCache', () => {
+    expect(code).toMatch(/getCurrentStageVersion[\s\S]*?require[\s\S]*?voiceRoomCache/);
   });
 });

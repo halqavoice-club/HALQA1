@@ -199,6 +199,13 @@ io.use(async (socket, next) => {
     socket.userId       = user.id;
     socket.userRole     = user.role;
     socket.userSchoolId = user.schoolId ?? null; // for school:join guard
+    // FIX-FCRIT01: mirror identity onto socket.data so adapter-portable
+    // lookups (e.g. voice-stale-session.worker hasActiveSocketConnection via
+    // fetchSockets) can read s.data.userId across multi-node deployments. The
+    // direct properties above are kept — the disconnect handler reads s.userId.
+    socket.data.userId       = user.id;
+    socket.data.userRole     = user.role;
+    socket.data.userSchoolId = user.schoolId ?? null;
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') return next(new Error('Token expired'));
@@ -321,6 +328,42 @@ io.on('connection', (socket) => {
         return; // not an active participant — silently refuse
       }
       socket.join(`voice:${id}`);
+      // FIX-FHIGH03: Re-broadcast join to peers on reconnect. The disconnect
+      // handler emits a user-left event (UI-only, DB untouched) so peers drop
+      // this user; reconnect previously only did socket.join, leaving the user
+      // absent from peers' rosters until the next room-wide snapshot. Re-emit a
+      // user-joined event (same payload shape as joinRoom) so peers re-add them;
+      // addParticipant dedups by userId (a duplicate is a no-op). DB untouched.
+      // The eligibility check above stays compact (isActive only) so the
+      // socket.join call remains within the handler source window; the full
+      // profile needed for the re-broadcast is fetched separately below.
+      try {
+        const reconnected = await prisma.voiceParticipant.findUnique({
+          where: { roomId_userId: { roomId: id, userId } },
+          select: {
+            userId: true, role: true, isMuted: true, seatNumber: true, isPinned: true,
+            handRaised: true, mutedByModerator: true, joinedAt: true,
+            user: { select: { firstName: true, lastName: true, avatarUrl: true } },
+          },
+        });
+        if (reconnected) {
+          io.to(`voice:${id}`).emit('voice:user_joined', {
+            roomId:           id,
+            userId:           reconnected.userId,
+            firstName:        reconnected.user?.firstName ?? '',
+            lastName:         reconnected.user?.lastName  ?? '',
+            avatarUrl:        reconnected.user?.avatarUrl  ?? null,
+            role:             reconnected.role,
+            isMuted:          reconnected.isMuted ?? true,
+            mutedByModerator: reconnected.mutedByModerator ?? false,
+            handRaised:       reconnected.handRaised ?? false,
+            isActive:         true,
+            isPinned:         reconnected.isPinned ?? false,
+            seatNumber:       reconnected.seatNumber != null ? Number(reconnected.seatNumber) : null,
+            joinedAt:         reconnected.joinedAt?.toISOString?.() ?? new Date().toISOString(),
+          });
+        }
+      } catch { /* non-fatal — socket.join already succeeded */ }
       logger.info(`User ${userId} joined voice room voice:${id}`);
     } catch (err) {
       logger.warn(`[socket] voice:join_room participation check failed: ${err.message}`);

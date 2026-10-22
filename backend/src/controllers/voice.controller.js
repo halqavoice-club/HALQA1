@@ -5,7 +5,7 @@ const prisma  = require('../utils/prisma');
 const { setCache, getCache, deleteCache, isRedisReady } = require('../utils/redis');
 const { saveFile, deleteFile } = require('../utils/storage');
 // Shared cache helpers — also used by voice-room-sleep.worker.js (avoids circular dep)
-const { invalidateRoomCache, getNextStageVersion } = require('../utils/voiceRoomCache');
+const { invalidateRoomCache, getNextStageVersion, getCurrentStageVersion } = require('../utils/voiceRoomCache');
 
 // ── Audit helper — fire-and-forget, never throws ──────────────────────────────
 async function voiceAudit(actorId, action, entityId, meta = {}) {
@@ -877,6 +877,11 @@ async function joinRoom(req, res, next) {
             avatarUrl:        r.avatarUrl ?? null,
           }));
           // Personal snapshot for the joining user.
+          // STATEVERSION NOTE: Both the personal and room-wide snapshots share the same
+          // joinStateVersion. A client with a higher version (from a concurrent mutation)
+          // will treat this join snapshot as stale and fall back to the seat-only sweep.
+          // This is intentional F-008-safe behavior — the client's existing state from the
+          // concurrent mutation is more recent and must not be overwritten by this snapshot.
           const joinStateVersion = await getNextStageVersion(roomId).catch(() => 0);
           io.to(`user:${userId}`).emit('voice:stage_state', {
             roomId,
@@ -2883,6 +2888,8 @@ async function getStageState(req, res, next) {
       ORDER BY vp.role ASC, vp.joinedAt ASC
     `;
 
+    const stateVersion = await getCurrentStageVersion(roomId);
+
     return successResponse(res, {
       roomId,
       stageParticipants: stageRows.map(r => ({
@@ -2899,6 +2906,7 @@ async function getStageState(req, res, next) {
         avatarUrl:        r.avatarUrl ?? null,
       })),
       stageCount: stageRows.length,
+      stateVersion,
     }, 'Stage state');
   } catch (error) {
     next(error);

@@ -601,6 +601,16 @@ export function VoiceRoomView({ onLeave }: Props) {
       api.get(`/voice/${roomId}/stage-state`)
         .then((r: any) => {
           const data = r.data?.data
+          // FIX-LOW09 NOTE: This guard bails on an empty snapshot to avoid the
+          // transient-empty-snapshot hazard (backend Redis re-hydration window can
+          // return [] before the ZSET is repopulated). A departed user will not be
+          // removed from the local store during that poll cycle — they will be
+          // removed on the next 30s cycle once the snapshot is non-empty again.
+          // Changing this to run the removal pass on empty snapshots risks wiping
+          // all peers' tiles; keeping the guard is the safer tradeoff.
+          // The limitation: if a participant leaves exactly as the snapshot transiently
+          // empties, their tile may persist for up to 60s (two poll cycles). This is
+          // acceptable given the alternative is a UX-breaking blank stage.
           if (!data?.stageParticipants?.length) return
           const store = useVoiceStore.getState()
           const currentIds = new Set(
@@ -639,6 +649,16 @@ export function VoiceRoomView({ onLeave }: Props) {
                   avatarUrl: sp.avatarUrl ?? null,
                 },
               })
+            }
+          })
+          // FIX-L002-revised: Remove departed participants. This HTTP poll fetches
+          // directly from the DB (isActive=1) so it is authoritative — unlike
+          // voice:stage_state socket events which can arrive stale/out-of-order.
+          // Any store participant NOT in this snapshot has left the room.
+          const snapshotIds = new Set(data.stageParticipants.map((sp: any) => sp.userId))
+          ;(store.activeRoom?.participants ?? []).forEach((p: any) => {
+            if (!snapshotIds.has(p.userId)) {
+              store.removeParticipant(p.userId)
             }
           })
         })

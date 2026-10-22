@@ -847,14 +847,17 @@ export function useVoiceRoom(roomId: string | null) {
         if (sp.firstName || sp.lastName || sp.avatarUrl) {
           const inStore = useVoiceStore.getState().activeRoom?.participants
             .find(p => p.userId === sp.userId)
-          if (inStore && (!inStore.user?.firstName && !inStore.user?.lastName)) {
+          // Check each field independently so a user with firstName set but empty
+          // lastName still gets lastName filled (OR-based per-field check).
+          const needsFill = !inStore?.user?.firstName || !inStore?.user?.lastName || !inStore?.user?.avatarUrl
+          if (inStore && needsFill) {
             // Placeholder has blank name — fill from the authoritative snapshot
             updateParticipant(sp.userId, {
               user: {
                 id:        sp.userId,
-                firstName: sp.firstName ?? '',
-                lastName:  sp.lastName  ?? '',
-                avatarUrl: sp.avatarUrl ?? null,
+                firstName: sp.firstName ?? inStore.user?.firstName ?? '',
+                lastName:  sp.lastName  ?? inStore.user?.lastName  ?? '',
+                avatarUrl: sp.avatarUrl ?? inStore.user?.avatarUrl ?? null,
               }
             })
           }
