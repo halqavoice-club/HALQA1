@@ -27,6 +27,9 @@ const { VOICE_ROLES } = require('../middleware/voiceRole.middleware');
 const logger = require('../utils/logger');
 // PH17-003 FIX: SFU capability revocation on demotion/mute
 const { sfuEvict, sfuRevokePublish } = require('../utils/livekitService');
+// G6 FIX: include stateVersion in voice:stage_state so clients can apply
+// version-ordered removal (onStageState isVersionedAndFresh branch).
+const { getNextStageVersion } = require('../utils/voiceRoomCache');
 
 // ── Audit helper (fire-and-forget, never throws) ──────────────────────────────
 async function _rolesAudit(actorId, action, roomId, meta = {}) {
@@ -191,6 +194,7 @@ async function removeModerator(req, res, next) {
           WHERE vp.roomId = ${roomId} AND vp.isActive = 1
           ORDER BY vp.role ASC, vp.joinedAt ASC
         `;
+        const rolesStateVersion = await getNextStageVersion(roomId).catch(() => 0);
         io.to(`voice:${roomId}`).emit('voice:stage_state', {
           roomId,
           stageParticipants: stageRows.map(r => ({
@@ -207,6 +211,7 @@ async function removeModerator(req, res, next) {
             avatarUrl:        r.avatarUrl ?? null,
           })),
           stageCount: stageRows.length,
+          stateVersion: rolesStateVersion,
         });
       } catch { /* non-fatal */ }
     }

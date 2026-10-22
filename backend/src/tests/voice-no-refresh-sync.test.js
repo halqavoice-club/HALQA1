@@ -509,11 +509,11 @@ describe('T8 — Reconnect restores authenticated room subscription', () => {
   });
 
   test('web onReconnect re-emits voice:join_room', () => {
-    // onReconnect must include a voice:join_room emit
+    // G2: onReconnect now calls emitJoinRoomAck which wraps the emit with an ack callback
     const reconnectIdx = hookSrc.indexOf('onReconnect');
     expect(reconnectIdx).toBeGreaterThan(-1);
     const snippet = hookSrc.slice(reconnectIdx, reconnectIdx + 500);
-    expect(snippet).toMatch(/voice:join_room/);
+    expect(snippet).toMatch(/emitJoinRoomAck/);
   });
 
   test('web useEffect drains stage-state buffer on reconnect (global hook check)', () => {
@@ -545,7 +545,7 @@ describe('T8 — Reconnect restores authenticated room subscription', () => {
     const firstIdx = appSrc.indexOf("voice:join_room");
     const handlerIdx = appSrc.indexOf("voice:join_room", firstIdx + 1);
     expect(handlerIdx).toBeGreaterThan(-1);
-    const snippet = appSrc.slice(handlerIdx, handlerIdx + 800);
+    const snippet = appSrc.slice(handlerIdx, handlerIdx + 1500);
     expect(snippet).toMatch(/socketsJoin|socket\.join/);
   });
 });
@@ -610,7 +610,7 @@ describe('T10 — Unauthorized room subscriptions and joins remain rejected', ()
     const firstIdx = appSrc.indexOf('voice:join_room');
     const handlerIdx = appSrc.indexOf('voice:join_room', firstIdx + 1);
     expect(handlerIdx).toBeGreaterThan(-1);
-    const snippet = appSrc.slice(handlerIdx, handlerIdx + 1200);
+    const snippet = appSrc.slice(handlerIdx, handlerIdx + 1500);
     expect(snippet).toMatch(/isActive/);
   });
 

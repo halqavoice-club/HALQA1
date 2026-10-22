@@ -1305,6 +1305,7 @@ model VoiceParticipant {
   @@index([isActive])
   @@index([roomId, isActive, role])        // active speakers query
   @@index([roomId, isActive, handRaised, handRaisedAt])  // hand queue
+  @@index([roomId, isActive, seatNumber])  // G7: hot seat-count query (grabMic/promoteParticipant COUNT WHERE isActive=1 AND seatNumber IS NOT NULL)
   @@map("voice_participants")
 }
 

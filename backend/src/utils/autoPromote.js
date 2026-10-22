@@ -15,6 +15,7 @@
 
 const { popNext, getQueue, requeue } = require('./voiceQueue');
 const { deleteCache, isRedisReady } = require('./redis');
+const { getNextStageVersion } = require('./voiceRoomCache');
 const logger = require('./logger');
 
 const roomCacheKey = (roomId) => `voice:room:${roomId}`;
@@ -278,6 +279,7 @@ async function autoPromoteNext(roomId, io) {
           avatarUrl:        r.avatarUrl  ?? null,
         })),
         stageCount: stageRows.length,
+        stateVersion: await getNextStageVersion(roomId).catch(() => 0),
       });
     } catch { /* non-fatal */ }
   }

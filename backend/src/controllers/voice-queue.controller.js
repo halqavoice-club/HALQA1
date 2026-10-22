@@ -27,6 +27,7 @@ const { getIo } = require('../sockets');
 const { VOICE_ROLES, MODERATOR_ROLES } = require('../middleware/voiceRole.middleware');
 const logger = require('../utils/logger');
 const { notify } = require('../services/notification.service');
+const { getNextStageVersion } = require('../utils/voiceRoomCache');
 
 const MAX_SPEAKERS = 12;
 
@@ -621,6 +622,7 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
           avatarUrl:        r.avatarUrl  ?? null,
         })),
         stageCount: stageRows.length,
+        stateVersion: await getNextStageVersion(roomId).catch(() => 0),
       });
     } catch (stageErr) {
       logger.warn(`[_promoteUser] voice:stage_state broadcast failed: ${stageErr.message}`);
