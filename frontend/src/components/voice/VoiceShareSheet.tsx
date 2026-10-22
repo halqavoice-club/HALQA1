@@ -356,7 +356,7 @@ export function VoiceShareSheet({ roomId, roomTitle, onClose }: Props) {
             {/* Community */}
             {tab === 'community' && (
               filteredCommunities.length === 0 ? (
-                <p style={{ textAlign: 'center', color: '#94a3b8', fontSize: 13, padding: 24 }}>
+                <p style={{ textAlign: 'center', color: '#64748b', fontSize: 13, padding: 24 }}>
                   {myCommunities.length === 0 ? 'You are not a member of any communities' : 'No communities found'}
                 </p>
               ) : (
@@ -410,7 +410,7 @@ export function VoiceShareSheet({ roomId, roomTitle, onClose }: Props) {
                 >
                   📋 Copy Link
                 </button>
-                <p style={{ textAlign: 'center', color: '#94a3b8', fontSize: 11, marginTop: 8 }}>
+                <p style={{ textAlign: 'center', color: '#64748b', fontSize: 11, marginTop: 8 }}>
                   Anyone with this link can join the room
                 </p>
               </div>

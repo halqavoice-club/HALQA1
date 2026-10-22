@@ -374,7 +374,7 @@ function MembersTab({ roomId, myRole }: { roomId: string; myRole: string }) {
 
       {/* Member list */}
       {members.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>
+        <div style={{ textAlign: 'center', padding: 40, color: '#64748b' }}>
           <p style={{ fontSize: 32 }}>👥</p>
           <p style={{ fontSize: 14, fontWeight: 600, color: '#64748b' }}>No members yet</p>
           <p style={{ fontSize: 12 }}>Be the first to join this room permanently</p>
@@ -466,7 +466,7 @@ function DetailsTab({ room, roomId, onOpenSettings }: { room: any; roomId: strin
 }
 function EventsTab({ roomId }: { roomId: string }) {
   return (
-    <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>
+    <div style={{ padding: 40, textAlign: 'center', color: '#64748b' }}>
       <p style={{ fontSize: 32 }}>📅</p>
       <p style={{ fontSize: 14, fontWeight: 600, color: '#64748b' }}>No events yet</p>
       <p style={{ fontSize: 12 }}>Room events and announcements will appear here</p>
