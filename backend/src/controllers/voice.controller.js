@@ -5,7 +5,7 @@ const prisma  = require('../utils/prisma');
 const { setCache, getCache, deleteCache, isRedisReady } = require('../utils/redis');
 const { saveFile, deleteFile } = require('../utils/storage');
 // Shared cache helpers — also used by voice-room-sleep.worker.js (avoids circular dep)
-const { invalidateRoomCache } = require('../utils/voiceRoomCache');
+const { invalidateRoomCache, getNextStageVersion } = require('../utils/voiceRoomCache');
 
 // ── Audit helper — fire-and-forget, never throws ──────────────────────────────
 async function voiceAudit(actorId, action, entityId, meta = {}) {
@@ -877,10 +877,12 @@ async function joinRoom(req, res, next) {
             avatarUrl:        r.avatarUrl ?? null,
           }));
           // Personal snapshot for the joining user.
+          const joinStateVersion = await getNextStageVersion(roomId).catch(() => 0);
           io.to(`user:${userId}`).emit('voice:stage_state', {
             roomId,
             stageParticipants: mappedStageRows,
             stageCount: stageRows.length,
+            stateVersion: joinStateVersion,
           });
           // FIX-L004: Room-wide stage snapshot broadcast unconditional.
           // The guard that limited this to rooms below a participant threshold was
@@ -890,6 +892,7 @@ async function joinRoom(req, res, next) {
             roomId,
             stageParticipants: mappedStageRows,
             stageCount: stageRows.length,
+            stateVersion: joinStateVersion,
           });
         }
       } catch { /* non-fatal */ }
@@ -963,6 +966,41 @@ async function leaveRoom(req, res, next) {
         io.to(`voice:${roomId}`).emit('voice:user_left', { roomId, userId });
         // VC-GAP-004 FIX: Use socketsLeave() for multi-tab/multi-server eviction.
         io.in(`user:${userId}`).socketsLeave(`voice:${roomId}`);
+        // FIX-FMED05: Broadcast authoritative stage snapshot after leave so all
+        // clients reconcile the departed participant even if voice:user_left was
+        // dropped. Mirrors the FIX-L003 stage_state emit in kickParticipant (same
+        // SQL, same payload mapping, same non-fatal try/catch). Kept inside the
+        // finally's if(io) so it inherits FIX-L005's "always fires" guarantee.
+        try {
+          const leaveStageRows = await prisma.$queryRaw`
+            SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
+                   vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+                   u.firstName, u.lastName, u.avatarUrl
+            FROM voice_participants vp
+            LEFT JOIN users u ON u.id = vp.userId
+            WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+            ORDER BY vp.role ASC, vp.joinedAt ASC
+          `;
+          const mappedLeaveRows = leaveStageRows.map(r => ({
+            userId:           r.userId,
+            role:             r.role,
+            isMuted:          Boolean(r.isMuted),
+            seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
+            isPinned:         Boolean(r.isPinned),
+            handRaised:       Boolean(r.handRaised),
+            mutedByModerator: Boolean(r.mutedByModerator),
+            joinedAt:         r.joinedAt,
+            firstName:        r.firstName ?? null,
+            lastName:         r.lastName ?? null,
+            avatarUrl:        r.avatarUrl ?? null,
+          }));
+          io.to(`voice:${roomId}`).emit('voice:stage_state', {
+            roomId,
+            stageParticipants: mappedLeaveRows,
+            stageCount: leaveStageRows.length,
+            stateVersion: await getNextStageVersion(roomId).catch(() => 0),
+          });
+        } catch { /* non-fatal — voice:user_left already fired */ }
       }
     }
 
@@ -1515,6 +1553,7 @@ async function promoteParticipant(req, res, next) {
             avatarUrl:        r.avatarUrl ?? null,
           })),
           stageCount: stageRows.length,
+          stateVersion: await getNextStageVersion(roomId).catch(() => 0),
         });
       } catch { /* non-fatal */ }
     }
@@ -1640,6 +1679,7 @@ async function kickParticipant(req, res, next) {
           roomId,
           stageParticipants: mappedKickRows,
           stageCount: kickStageRows.length,
+          stateVersion: await getNextStageVersion(roomId).catch(() => 0),
         });
       } catch { /* non-fatal — voice:user_left already fired */ }
     }
@@ -1717,6 +1757,40 @@ async function banParticipant(req, res, next) {
       io.to(`user:${targetUserId}`).emit('voice:banned', { roomId, reason });
       io.to(`voice:${roomId}`).emit('voice:banned', { roomId, userId: targetUserId });
       io.in(`user:${targetUserId}`).socketsLeave(`voice:${roomId}`);
+      // FIX-FMED05: Broadcast authoritative stage snapshot after ban so all
+      // clients reconcile the departed participant even if voice:banned was
+      // dropped. Mirrors the FIX-L003 stage_state emit in kickParticipant (same
+      // SQL, same payload mapping, same non-fatal try/catch).
+      try {
+        const banStageRows = await prisma.$queryRaw`
+          SELECT vp.userId, vp.role, vp.isMuted, vp.seatNumber, vp.isPinned,
+                 vp.handRaised, vp.mutedByModerator, vp.joinedAt,
+                 u.firstName, u.lastName, u.avatarUrl
+          FROM voice_participants vp
+          LEFT JOIN users u ON u.id = vp.userId
+          WHERE vp.roomId = ${roomId} AND vp.isActive = 1
+          ORDER BY vp.role ASC, vp.joinedAt ASC
+        `;
+        const mappedBanRows = banStageRows.map(r => ({
+          userId:           r.userId,
+          role:             r.role,
+          isMuted:          Boolean(r.isMuted),
+          seatNumber:       r.seatNumber != null ? Number(r.seatNumber) : null,
+          isPinned:         Boolean(r.isPinned),
+          handRaised:       Boolean(r.handRaised),
+          mutedByModerator: Boolean(r.mutedByModerator),
+          joinedAt:         r.joinedAt,
+          firstName:        r.firstName ?? null,
+          lastName:         r.lastName ?? null,
+          avatarUrl:        r.avatarUrl ?? null,
+        }));
+        io.to(`voice:${roomId}`).emit('voice:stage_state', {
+          roomId,
+          stageParticipants: mappedBanRows,
+          stageCount: banStageRows.length,
+          stateVersion: await getNextStageVersion(roomId).catch(() => 0),
+        });
+      } catch { /* non-fatal — voice:banned already fired */ }
     }
 
     voiceAudit(requesterId, 'PARTICIPANT_BANNED', roomId, { targetUserId, reason });
@@ -2445,6 +2519,7 @@ async function grabMic(req, res, next) {
             avatarUrl:        r.avatarUrl ?? null,
           })),
           stageCount: stageRows.length,
+          stateVersion: await getNextStageVersion(roomId).catch(() => 0),
         });
       } catch (stageErr) {
         logger.warn(`[grabMic] voice:stage_state broadcast failed: ${stageErr.message}`);
@@ -2568,6 +2643,7 @@ async function dropMic(req, res, next) {
             avatarUrl:        r.avatarUrl ?? null,
           })),
           stageCount: stageRows.length,
+          stateVersion: await getNextStageVersion(roomId).catch(() => 0),
         });
       } catch { /* non-fatal */ }
 

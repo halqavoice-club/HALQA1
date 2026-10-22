@@ -11,7 +11,7 @@
  * invalidation logic stay in one place.
  */
 
-const { deleteCache, deleteCachePattern } = require('./redis');
+const { deleteCache, deleteCachePattern, getRedis, isRedisReady } = require('./redis');
 const logger = require('./logger');
 
 /** Cache key for a single room's cached object. */
@@ -43,4 +43,31 @@ async function invalidateRoomCache(roomId, schoolId) {
   }
 }
 
-module.exports = { roomCacheKey, invalidateRoomCache };
+/**
+ * Get the next monotonic state version for a room's stage.
+ * Uses Redis INCR so every mutation in every server instance increments a
+ * shared counter, guaranteeing that any client can compare incoming
+ * stateVersion values and discard stale snapshots.
+ *
+ * Non-fatal: if Redis is unavailable the function returns 0 so callers
+ * treat the snapshot as unversioned and fall back to safe update-only behaviour.
+ *
+ * @param {string} roomId
+ * @returns {Promise<number>} monotonic integer >= 1, or 0 on Redis failure
+ */
+async function getNextStageVersion(roomId) {
+  try {
+    if (!isRedisReady()) return 0;
+    const redis = getRedis();
+    const key = `voice:stateVersion:${roomId}`;
+    const version = await redis.incr(key);
+    // Expire after 24h so keys don't accumulate indefinitely for idle rooms
+    await redis.expire(key, 86400);
+    return Number(version);
+  } catch (err) {
+    logger.warn(`[voiceRoomCache] getNextStageVersion failed for room ${roomId}: ${err.message}`);
+    return 0;
+  }
+}
+
+module.exports = { roomCacheKey, invalidateRoomCache, getNextStageVersion };

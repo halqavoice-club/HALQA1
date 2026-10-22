@@ -48,7 +48,8 @@ export function useVoiceRoom(roomId: string | null) {
     setSpeaking, addReaction,
     setPendingMicOffer, clearPendingMicOffer,
     setSpeakerQueue,
-    addGiftEvent, setGiftLeaderboard, setWallet
+    addGiftEvent, setGiftLeaderboard, setWallet,
+    setStageVersion,
   } = useVoiceStore()
 
   // F-005: tracks whether the socket singleton is available yet.
@@ -87,17 +88,29 @@ export function useVoiceRoom(roomId: string | null) {
     if (socketReady) return // already have a socket — nothing to wait for
     if (!roomId) return
     let retries = 0
+    let warned = false
     const MAX_RETRIES = 20 // 10 seconds at 500ms intervals
-    const timer = setInterval(() => {
+    let timer: ReturnType<typeof setInterval>
+    const poll = () => {
       retries++
       if (getSocket() !== null) {
         clearInterval(timer)
         setSocketReady(true)
       } else if (retries >= MAX_RETRIES) {
-        clearInterval(timer)
-        console.warn('[useVoiceRoom] Socket not available after 10s — voice room listeners not registered for room', roomId)
+        // FIX-FMED04: Do NOT permanently give up after 10s. The socket singleton
+        // may become available later (slow auth, deferred init). Re-arm the poll
+        // at a slower 2000ms cadence and keep checking until it appears, so the
+        // main listener effect eventually registers all voice:* handlers. Warn
+        // once (guarded by `warned`) instead of spamming every slow poll.
+        if (!warned) {
+          warned = true
+          console.warn('[useVoiceRoom] Socket not available after 10s — slowing poll to 2s; voice room listeners will register once the socket appears for room', roomId)
+          clearInterval(timer)
+          timer = setInterval(poll, 2000)
+        }
       }
-    }, 500)
+    }
+    timer = setInterval(poll, 500)
     return () => clearInterval(timer)
   }, [roomId, socketReady])
 
@@ -328,6 +341,33 @@ export function useVoiceRoom(roomId: string | null) {
         update.isMuted = false
       }
       updateParticipant(data.userId, update)
+      // STORE-FIX-002: If the promoted user is not in the store yet (their
+      // voice:user_joined was missed), updateParticipant above is a silent no-op.
+      // Upsert a minimal placeholder so the seat grid shows them immediately —
+      // the subsequent voice:stage_state will fill in full profile fields.
+      // Only applies on SPEAKER promotion with a seatNumber (the approval path).
+      if (data.role === VOICE_ROLES.SPEAKER && data.seatNumber != null) {
+        const inStore = useVoiceStore.getState().activeRoom?.participants.some(
+          p => p.userId === data.userId
+        )
+        if (!inStore) {
+          addParticipant({
+            id:               data.userId,
+            userId:           data.userId,
+            role:             VOICE_ROLES.SPEAKER,
+            isMuted:          false,
+            mutedByModerator: false,
+            handRaised:       false,
+            handRaisedAt:     null,
+            joinedAt:         new Date().toISOString(),
+            isActive:         true,
+            isPinned:         false,
+            seatNumber:       data.seatNumber,
+            // Profile fields unknown at this point — stage_state will fill them in
+            user: { id: data.userId, firstName: '', lastName: '', avatarUrl: null },
+          })
+        }
+      }
       if (data.userId === user?.id && data.role === VOICE_ROLES.SPEAKER) {
         toast({ title: `🎙️ You're on stage at Seat ${data.seatNumber}!` })
       }
@@ -644,6 +684,30 @@ export function useVoiceRoom(roomId: string | null) {
         handRaisedAt: null,
         seatNumber:  data.seatNumber ?? null,  // ← apply the assigned seat so avatar appears in grid
       })
+      // GAP-W3 FIX: upsert if not in store — updateParticipant is a silent no-op
+      // when the participant is absent (e.g. voice:user_joined was dropped).
+      const inStore = useVoiceStore.getState().activeRoom?.participants.some(p => p.userId === data.userId)
+      if (!inStore && data.seatNumber != null) {
+        addParticipant({
+          id:               data.userId,
+          userId:           data.userId,
+          role:             VOICE_ROLES.SPEAKER,
+          isMuted:          false,
+          mutedByModerator: false,
+          handRaised:       false,
+          handRaisedAt:     null,
+          joinedAt:         new Date().toISOString(),
+          isActive:         true,
+          isPinned:         false,
+          seatNumber:       data.seatNumber,
+          user: {
+            id:        data.userId,
+            firstName: data.firstName ?? '',
+            lastName:  data.lastName  ?? '',
+            avatarUrl: data.avatarUrl ?? null,
+          },
+        })
+      }
       if (data.userId !== user?.id) {
         toast({ title: `🎙️ ${data.firstName} ${data.lastName} grabbed the mic` })
       }
@@ -661,6 +725,34 @@ export function useVoiceRoom(roomId: string | null) {
       })
     }
 
+    // ── STATE VERSION ORDERING LIMITATION (architectural note) ───────────────
+    // voice:stage_state socket events can arrive out of order. A snapshot emitted
+    // at T1 may be delivered at T3, after a snapshot from T2 has already been
+    // applied. If the T1 snapshot is stale (does not include a user who joined at
+    // T2), applying it would incorrectly clear that user's seat.
+    //
+    // CURRENT MITIGATION: onStageState does NOT call removeParticipant. It only
+    // calls updateParticipant (seat/role/mute sync) and addParticipant (upsert for
+    // missed joins). Departed-participant removal is delegated to the 30s HTTP poll
+    // in VoiceRoomView.tsx, which fetches directly from the DB and is authoritative
+    // (not subject to socket-delivery ordering). See FIX-L002 regression note in
+    // voice-leave-removal-fix.test.js for the test that pins this behavior.
+    //
+    // KNOWN GAP: Between two 30s poll cycles, a departed participant's tile may
+    // linger up to 30s. This is the intentional tradeoff — the alternative
+    // (removeParticipant in onStageState) was reverted because it caused F-008
+    // (newer joiners incorrectly removed by a stale snapshot). Any future state-
+    // versioning scheme (e.g. monotonic sequence numbers on each stage_state emit
+    // so clients can discard older-than-last-applied snapshots) would allow safe
+    // removeParticipant here. Until then: onStageState = update-only; 30s poll = removal.
+    //
+    // KNOWN LIMITATION (F-LOW-07): No monotonic stateVersion/sequence number on voice:stage_state events.
+    // The current approach (seatNumber-only sweep + 30s HTTP poll as authoritative reconciler) is safe enough
+    // for the current scale, but cannot prove a snapshot is newer than currently-applied state.
+    // A full fix requires: stateVersion counter in DB (incremented on every mutation), emitted in every
+    // stage_state event, clients discard if incoming version <= their current version.
+    // Deferred to a dedicated PR after this fix branch ships. See voice-stateversion-architectural-note.md.
+    // ─────────────────────────────────────────────────────────────────────────
     // ATOMIC STAGE STATE: After HOST priority eviction, the backend sends a
     // full authoritative stage snapshot. Apply it to reconcile any stale state
     // caused by out-of-order individual role_changed / mute_changed events.
@@ -685,17 +777,29 @@ export function useVoiceRoom(roomId: string | null) {
         firstName?: string | null; lastName?: string | null; avatarUrl?: string | null
       }>
       stageCount: number
+      stateVersion?: number
     }) => {
       if (data.roomId !== roomId) return
       if (process.env.NODE_ENV === 'development') {
-        console.log('[voice-debug] voice:stage_state received', { participantsCount: data.stageParticipants.length })
+        console.log('[voice-debug] voice:stage_state received', {
+          participantsCount: data.stageParticipants.length,
+          stateVersion: data.stateVersion ?? 0,
+        })
       }
+
+      // GAP-W1/W4 FIX: Determine whether this snapshot is versioned and fresh.
+      // Only a versioned snapshot (stateVersion > 0) that is strictly newer than
+      // the last applied version may safely call removeParticipant for absent
+      // participants. Unversioned or stale snapshots fall back to seat-only sweep
+      // to avoid the F-008 regression (stale snapshot removes newer joiners).
+      const incomingVersion = data.stateVersion ?? 0
+      const currentVersion = useVoiceStore.getState().stageVersion
+      const isVersionedAndFresh = incomingVersion > 0 && incomingVersion > currentVersion
+
       // P1 FIX (ordering): Capture store state BEFORE the updateParticipant loop so the
       // upsert-pass below uses the original participant list, not the post-mutation version.
-      // updateParticipant only maps over existing entries — if a userId is absent from the
-      // store it silently no-ops. Reading currentParticipants before the loop ensures the
-      // upsert-pass correctly identifies which participants are genuinely new.
       const currentParticipants = useVoiceStore.getState().activeRoom?.participants ?? []
+
       // Apply authoritative seat state for every stage participant
       data.stageParticipants.forEach(sp => {
         updateParticipant(sp.userId, {
@@ -707,9 +811,9 @@ export function useVoiceRoom(roomId: string | null) {
           seatNumber: sp.seatNumber,
         })
       })
-      // Upsert pass — add any stage participant whose userId is not
-      // already in the store. This covers participants missed due to the initial
-      // join race (voice:user_joined arrived before listener was registered).
+
+      // Upsert pass — add any stage participant whose userId is not already in
+      // the store. Covers participants missed due to dropped voice:user_joined.
       data.stageParticipants.forEach(sp => {
         const alreadyInStore = currentParticipants.some(p => p.userId === sp.userId)
         if (!alreadyInStore) {
@@ -734,24 +838,58 @@ export function useVoiceRoom(roomId: string | null) {
           })
         }
       })
-      // FIX-L002: Full reconciliation sweep.
-      // The snapshot is authoritative for all active participants. Any participant
-      // in the store who is NOT in the snapshot has already left — remove them
-      // entirely via removeParticipant (not just clear their seat).
-      // Previously only participants with seatNumber != null were swept (DEFECT-B2):
-      // audience members with seatNumber=null were never cleaned up.
-      // Guard: only sweep when snapshot is non-empty (prevents a malformed empty
-      // snapshot from blanking the entire participant list).
+
+      // GAP-W2 FIX: Profile fill — participants added as placeholders by STORE-FIX-002
+      // (blank name/avatar) will be skipped by the upsert-pass above (already in store).
+      // Fill their profile fields from the authoritative snapshot so names appear
+      // immediately without waiting for the 30s HTTP poll.
+      data.stageParticipants.forEach(sp => {
+        if (sp.firstName || sp.lastName || sp.avatarUrl) {
+          const inStore = useVoiceStore.getState().activeRoom?.participants
+            .find(p => p.userId === sp.userId)
+          if (inStore && (!inStore.user?.firstName && !inStore.user?.lastName)) {
+            // Placeholder has blank name — fill from the authoritative snapshot
+            updateParticipant(sp.userId, {
+              user: {
+                id:        sp.userId,
+                firstName: sp.firstName ?? '',
+                lastName:  sp.lastName  ?? '',
+                avatarUrl: sp.avatarUrl ?? null,
+              }
+            })
+          }
+        }
+      })
+
+      // Advance stored version before the sweep so subsequent stale snapshots
+      // are correctly identified as outdated.
+      if (isVersionedAndFresh) {
+        setStageVersion(incomingVersion)
+      }
+
       if (data.stageParticipants.length > 0) {
         const snapshotIds = new Set(data.stageParticipants.map(sp => sp.userId))
         const storeParticipants = useVoiceStore.getState().activeRoom?.participants ?? []
-        storeParticipants.forEach(p => {
-          if (!snapshotIds.has(p.userId)) {
-            // FIX-L002: participant absent from authoritative snapshot — remove entirely.
-            // removeParticipant filters by userId (idempotent).
-            removeParticipant(p.userId)
-          }
-        })
+
+        if (isVersionedAndFresh) {
+          // GAP-W1/W4 FIX: Fresh versioned snapshot — safe to remove departed
+          // participants entirely. F-008 is prevented by the version guard above:
+          // a stale snapshot (version <= currentVersion) never reaches this branch.
+          storeParticipants.forEach(p => {
+            if (!snapshotIds.has(p.userId)) {
+              removeParticipant(p.userId)
+            }
+          })
+        } else {
+          // Fallback (unversioned or stale): seat-only sweep — clear seatNumber for
+          // absent participants but do NOT remove them. Departed-participant removal
+          // falls back to the 30s HTTP poll in VoiceRoomView.tsx (authoritative DB read).
+          storeParticipants.forEach(p => {
+            if (p.seatNumber != null && !snapshotIds.has(p.userId)) {
+              updateParticipant(p.userId, { seatNumber: null })
+            }
+          })
+        }
       }
     }
 

@@ -1124,12 +1124,19 @@ describe('BUG-005: Web onStageState — stale-seat sweep for absent participants
     expect(handlerBlock).toMatch(/updateParticipant/);
   });
 
-  test('FIX-L002: stale-seat sweep now removes absent participants via removeParticipant', () => {
+  test('stale-seat sweep uses seatNumber-only clear (NOT removeParticipant) to avoid stale-snapshot regression', () => {
     const stageIdx = hookSrc.indexOf('const onStageState');
-    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 5000);
-    // FIX-L002 changed the sweep from clearing seatNumber to fully removing
-    // participants absent from the authoritative snapshot via removeParticipant.
-    expect(handlerBlock).toMatch(/removeParticipant/);
+    const handlerBlock = hookSrc.slice(stageIdx, stageIdx + 6000);
+    // GAP-W1/W4 FIX (updated): onStageState now has two branches:
+    //  1. isVersionedAndFresh branch — safe to call removeParticipant (F-008 prevented by version guard)
+    //  2. Fallback (stale/unversioned) branch — seatNumber-only sweep, NO removeParticipant
+    // This test verifies the fallback branch still uses seatNumber:null (not removeParticipant).
+    expect(handlerBlock).toMatch(/seatNumber.*null/);
+    expect(handlerBlock).toMatch(/updateParticipant/);
+    // The fallback/else branch must appear and must use seatNumber:null sweep
+    expect(handlerBlock).toMatch(/Fallback[\s\S]{0,400}seatNumber:\s*null/);
+    // The isVersionedAndFresh condition must gate the removeParticipant call
+    expect(handlerBlock).toMatch(/isVersionedAndFresh[\s\S]{0,400}removeParticipant/);
   });
 
   test('stale-seat sweep does NOT change participant role (only seatNumber cleared)', () => {
@@ -1142,14 +1149,19 @@ describe('BUG-005: Web onStageState — stale-seat sweep for absent participants
     expect(updateCall.slice(0, 200)).not.toMatch(/role.*AUDIENCE/);
   });
 
-  test('FIX-L002: mobile applyStageSnapshot removes absent participants via filter', () => {
+  test('FIX-L002-revised: mobile applyStageSnapshot clears seatNumber only (NOT filter) to avoid stale-snapshot regression', () => {
     expect(mobileSrc).toMatch(/inStageIds/);
-    // FIX-L002 changed mobile applyStageSnapshot from clearing seatNumber for
-    // absent participants to filtering them out of state entirely.
+    // L002-revised: mobile applyStageSnapshot clears seatNumber for absent
+    // stage participants (NOT filtering them out) because stale voice:stage_state
+    // socket events can arrive out of order and would incorrectly remove newer
+    // joiners (F-008). Departed-participant removal happens on navigate-away/return.
     const applyIdx = mobileSrc.indexOf('const applyStageSnapshot');
     expect(applyIdx).toBeGreaterThan(-1);
     const applySnippet = mobileSrc.slice(applyIdx, applyIdx + 1500);
-    expect(applySnippet).toMatch(/\.filter\s*\(\s*p\s*=>\s*inStageIds\.has\s*\(\s*p\.id\s*\)\s*\)/);
+    // Must clear seatNumber for absent stage participants
+    expect(applySnippet).toMatch(/seatNumber.*null/);
+    // Must NOT filter out participants (stale-snapshot safe)
+    expect(applySnippet).not.toMatch(/\.filter\s*\(\s*p\s*=>\s*inStageIds\.has\s*\(\s*p\.id\s*\)\s*\)/);
   });
 });
 

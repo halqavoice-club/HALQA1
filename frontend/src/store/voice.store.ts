@@ -236,6 +236,11 @@ interface VoiceState {
   }>
   setGiftLeaderboard: (lb: VoiceState['giftLeaderboard']) => void
 
+  // Monotonic state version — incremented by backend on every stage mutation.
+  // Used by onStageState to safely call removeParticipant (GAP-W1/W4 fix).
+  stageVersion: number
+  setStageVersion: (v: number) => void
+
   // Reset all room-scoped state (call on unmount of voice room page)
   resetRoom: () => void
 
@@ -317,6 +322,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
       pendingSyncEvents: [],
       pendingUserJoinedEvents: [],
       pendingQueueUpdatedEvents: [],
+      stageVersion: 0,  // GAP-W1/W4: reset version counter on room exit
     }),
   }),
 
@@ -327,32 +333,46 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   },
 
   updateParticipant: (userId, updates) => {
-    const room = get().activeRoom
-    if (!room) return
-    set({
-      activeRoom: {
-        ...room,
-        participants: room.participants.map(p =>
-          p.userId === userId ? { ...p, ...updates } : p
-        )
+    // STORE-FIX-001: Use functional set(state => ...) so Zustand always reads the
+    // latest committed state at the moment it processes the update. The previous
+    // get().activeRoom read was captured at call time — when two rapid socket events
+    // (voice:role_changed + voice:mute_changed) arrived in the same tick, the second
+    // one read a stale snapshot and overwrote the first one's seatNumber update.
+    // This was the root cause of "seat departure not visible immediately" on staying
+    // clients: the seat only cleared when the subsequent voice:stage_state arrived
+    // (~50–150ms later). The functional form serialises back-to-back updates correctly.
+    set(state => {
+      const room = state.activeRoom
+      if (!room) return state
+      return {
+        activeRoom: {
+          ...room,
+          participants: room.participants.map(p =>
+            p.userId === userId ? { ...p, ...updates } : p
+          )
+        }
       }
     })
   },
 
   addParticipant: (participant) => {
-    const room = get().activeRoom
-    if (!room) return
-    const exists = room.participants.some(p => p.userId === participant.userId)
-    if (exists) {
-      set({
-        activeRoom: {
-          ...room,
-          participants: room.participants.map(p =>
-            p.userId === participant.userId ? { ...p, ...participant, isActive: true } : p
-          )
+    // STORE-FIX-001: Functional set for the same reason — addParticipant can race
+    // with updateParticipant when a voice:user_joined and voice:stage_state upsert
+    // arrive in the same microtask burst.
+    set(state => {
+      const room = state.activeRoom
+      if (!room) return state
+      const exists = room.participants.some(p => p.userId === participant.userId)
+      if (exists) {
+        return {
+          activeRoom: {
+            ...room,
+            participants: room.participants.map(p =>
+              p.userId === participant.userId ? { ...p, ...participant, isActive: true } : p
+            )
+          }
         }
-      })
-    } else {
+      }
       // SEAT SYNC FIX: Insert in deterministic sorted position (role asc, joinedAt asc)
       // instead of appending to end, so all clients see the same seat layout
       // immediately without waiting for a full room state resync.
@@ -362,21 +382,25 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         if (roleDiff !== 0) return roleDiff
         return (a.joinedAt ?? '').localeCompare(b.joinedAt ?? '')
       })
-      set({ activeRoom: { ...room, participants: newList } })
-    }
+      return { activeRoom: { ...room, participants: newList } }
+    })
   },
 
   removeParticipant: (userId) => {
-    const room = get().activeRoom
-    if (!room) return
+    // STORE-FIX-001: Functional set — removeParticipant can race with updateParticipant
+    // when voice:user_left and voice:stage_state arrive together.
     // STEP-5 FIX: Remove participant entirely (aligned with mobile behavior).
     // Previously this marked isActive:false and kept the entry; mobile filtered
     // it out entirely. Using filter on both platforms ensures clean state and
     // avoids stale inactive entries accumulating on long sessions.
-    set({
-      activeRoom: {
-        ...room,
-        participants: room.participants.filter(p => p.userId !== userId)
+    set(state => {
+      const room = state.activeRoom
+      if (!room) return state
+      return {
+        activeRoom: {
+          ...room,
+          participants: room.participants.filter(p => p.userId !== userId)
+        }
       }
     })
   },
@@ -474,6 +498,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     pendingUserJoinedEvents: [],
     pendingQueueUpdatedEvents: [],
     earlyBufferActive: true,  // re-arm for next room join
+    stageVersion: 0,          // GAP-W1/W4: reset version counter
   }),
 
   // ─── Pre-join sync buffer ─────────────────────────────────────────────────
@@ -481,9 +506,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   // useVoiceRoom listener mount are buffered here (max 5, oldest discarded).
   // useVoiceRoom drains this buffer after registering all listeners.
   pendingSyncEvents: [],
-  pushSyncEvent: (e) => set(s => ({
-    pendingSyncEvents: [...s.pendingSyncEvents.slice(-4), e],
-  })),
+  pushSyncEvent: (e) => set(s => {
+    // Stop buffering once useVoiceRoom has taken over (mirrors pushUserJoinedEvent
+    // and pushQueueUpdatedEvent). Events arriving after deactivateEarlyBuffer()
+    // are handled by useVoiceRoom's own registered listener directly.
+    if (!s.earlyBufferActive) return s
+    return { pendingSyncEvents: [...s.pendingSyncEvents.slice(-4), e] }
+  }),
   drainSyncEvents: () => {
     const events = get().pendingSyncEvents
     set({ pendingSyncEvents: [] })
@@ -528,6 +557,13 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   // instead of being buffered and processed twice.
   earlyBufferActive: true,
   deactivateEarlyBuffer: () => set({ earlyBufferActive: false }),
+
+  // ─── Stage version (GAP-W1/W4) ───────────────────────────────────────────
+  // Monotonic integer from the backend Redis INCR counter. Allows onStageState
+  // to safely call removeParticipant for absent participants only when the
+  // incoming snapshot is confirmed newer than the last applied one.
+  stageVersion: 0,
+  setStageVersion: (v) => set({ stageVersion: v }),
 
   // ─── LiveKit disconnect ref ───────────────────────────────────────────────
   // VoiceRoomView registers its disconnect() here so that any page (e.g. the

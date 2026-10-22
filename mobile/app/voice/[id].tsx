@@ -1195,15 +1195,20 @@ export default function VoiceRoomScreen() {
   }) => {
     if (d.roomId !== id) return;
     setParticipants(prev => {
-      // FIX-L002: Remove participants absent from the authoritative snapshot.
-      // Previously only seatNumber was cleared; audience members with seatNumber=null
-      // were never removed (DEFECT-B2). Filter the array to remove absent entries.
-      // Guard: d.stageParticipants.length > 0 prevents an empty snapshot from
-      // blanking the entire participant list (matches web behaviour).
+      // Stale-seat sweep — clear seatNumber for participants absent from the
+      // snapshot. We do NOT remove participants here because voice:stage_state
+      // socket events can arrive out of order / delayed; a stale snapshot from
+      // before a newer join would incorrectly remove the newer joiner (F-008).
+      // Departed-participant removal happens on navigate-away/return (handleJoin
+      // sets participants from the fresh POST /join response).
       const inStageIds = new Set(d.stageParticipants.map(sp => sp.userId));
-      const updated = d.stageParticipants.length > 0
-        ? prev.filter(p => inStageIds.has(p.id))
-        : [...prev];
+      const updated = [...prev];
+      // Clear stale seats for absent stage participants
+      updated.forEach((p, i) => {
+        if (p.seatNumber != null && !inStageIds.has(p.id)) {
+          updated[i] = { ...updated[i], seatNumber: null };
+        }
+      });
       // Update matching participants
       const matchedIds = new Set<string>();
       d.stageParticipants.forEach(sp => {
@@ -1243,6 +1248,34 @@ export default function VoiceRoomScreen() {
       return updated;
     });
   }, [id]);
+
+  // ── Periodic stage-state refresh — departed-participant safety net ──────
+  // FIX-FHIGH02: Mobile parity with web's 30s poll (VoiceRoomView.tsx). A
+  // dropped voice:user_left / voice:banned (or a briefly-disconnected peer)
+  // would otherwise leave a ghost participant on a continuously-watched mobile
+  // screen indefinitely. Every 30s we pull the authoritative snapshot
+  // (isActive=1, direct DB read), apply it (upsert + seatNumber clear via
+  // applyStageSnapshot — which deliberately does NOT remove), then remove any
+  // local participant absent from the snapshot. The removal is guarded by a
+  // non-empty snapshot so a malformed empty payload never wipes the list, and
+  // only runs once the user has joined. Reuses applyStageSnapshot (no dup).
+  useEffect(() => {
+    if (!id) return;
+    const interval = setInterval(() => {
+      if (!hasJoinedRef.current) return; // only poll once HTTP join has completed
+      api.get(`/voice/${id}/stage-state`)
+        .then((r: any) => {
+          const data = r.data?.data;
+          if (!data?.stageParticipants?.length) return; // empty-snapshot guard — never wipe
+          applyStageSnapshot(data); // upsert + clear stale seats (does NOT remove)
+          // Remove departed participants: keep only those present in the snapshot
+          const snapshotIds = new Set(data.stageParticipants.map((sp: any) => sp.userId));
+          setParticipants(prev => prev.filter(p => snapshotIds.has(p.id)));
+        })
+        .catch(() => { /* non-fatal — socket events are primary */ });
+    }, 30_000); // every 30 seconds
+    return () => clearInterval(interval);
+  }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Socket: real-time events
   // FEAT-002: effect now runs on mount with [id, user] deps — before the user
@@ -1314,14 +1347,38 @@ export default function VoiceRoomScreen() {
     // ── Real-time events ─────────────────────────────────────────────────────
 
     // Mute state changed for a participant (also carries seatNumber when dropping mic)
-    const onMuteChanged = (d: { userId: string; isMuted: boolean; mutedByModerator?: boolean; seatNumber?: number | null }) => {
-      setParticipants(prev => prev.map(p => {
-        if (p.id !== d.userId) return p;
-        const u: Participant = { ...p, isMuted: d.isMuted };
-        if (d.mutedByModerator !== undefined) u.mutedByModerator = d.mutedByModerator;
-        if (d.seatNumber !== undefined) u.seatNumber = d.seatNumber ?? null;
-        return u;
-      }));
+    const onMuteChanged = (d: { roomId?: string; userId: string; isMuted: boolean; mutedByModerator?: boolean; seatNumber?: number | null }) => {
+      // GAP-M3 FIX: guard against events from other rooms
+      if (d.roomId && d.roomId !== id) return;
+      setParticipants(prev => {
+        const updated = prev.map(p => {
+          if (p.id !== d.userId) return p;
+          const u: Participant = { ...p, isMuted: d.isMuted };
+          if (d.mutedByModerator !== undefined) u.mutedByModerator = d.mutedByModerator;
+          if (d.seatNumber !== undefined) u.seatNumber = d.seatNumber ?? null;
+          return u;
+        });
+        // GAP-M1 FIX: upsert if not in prev — prev.map() silently no-ops for unknown ids.
+        // Only upsert on MODERATOR approval path: isMuted===false + seatNumber set.
+        const wasFound = prev.some(p => p.id === d.userId);
+        if (!wasFound && d.seatNumber != null && d.isMuted === false) {
+          updated.push({
+            id:               d.userId,
+            name:             'Loading...',  // applyStageSnapshot will fill real name
+            avatar:           undefined,
+            role:             'MODERATOR',
+            isMuted:          false,
+            isSpeaking:       false,
+            handRaised:       false,
+            mutedByModerator: false,
+            isActive:         true,
+            seatNumber:       Number(d.seatNumber),
+            isPinned:         false,
+            _joinedAt:        new Date().toISOString(),
+          });
+        }
+        return updated;
+      });
       if (d.userId === user?.id) {
         if (lk.connected) {
           // DEF-004: only honour server-enforced MUTE (isMuted === true).
@@ -1336,7 +1393,9 @@ export default function VoiceRoomScreen() {
     // Used for both voice:role_changed (room-wide) and voice:your_role_changed (personal).
     // voice:your_role_changed may not include userId in older server versions;
     // fall back to user?.id so the promoted user's own seat always appears.
-    const onRoleChanged = (d: { userId?: string; role: string; seatNumber?: number | null }) => {
+    const onRoleChanged = (d: { roomId?: string; userId?: string; role: string; seatNumber?: number | null }) => {
+      // GAP-M3 FIX: guard against events from other rooms
+      if (d.roomId && d.roomId !== id) return;
       const targetId = d.userId ?? user?.id;
       if (!targetId) return;
       setParticipants(prev => {
@@ -1348,6 +1407,25 @@ export default function VoiceRoomScreen() {
           else if (d.role === 'SPEAKER' && d.seatNumber != null) u.isMuted = false;
           return u;
         });
+        // GAP-M1 FIX: upsert if not in prev — prev.map() silently no-ops for unknown ids.
+        // Only upsert on SPEAKER promotion with a seatNumber (the approval path).
+        const wasFound = prev.some(p => p.id === targetId);
+        if (!wasFound && d.role === 'SPEAKER' && d.seatNumber != null) {
+          updated.push({
+            id:               targetId,
+            name:             'Loading...',  // applyStageSnapshot will fill real name
+            avatar:           undefined,
+            role:             'SPEAKER',
+            isMuted:          false,
+            isSpeaking:       false,
+            handRaised:       false,
+            mutedByModerator: false,
+            isActive:         true,
+            seatNumber:       Number(d.seatNumber),
+            isPinned:         false,
+            _joinedAt:        new Date().toISOString(),
+          });
+        }
         return updated;
       });
       queryClient.invalidateQueries({ queryKey: ['voice-room', id] });
@@ -1586,6 +1664,43 @@ export default function VoiceRoomScreen() {
     // means mic-pass offers silently never arrived on mobile.
     socket.on('voice:mic_offer',    onMicPassOffer);
     socket.on('voice:mic_passed',   onMicPassResult);
+
+    // GAP-M2 FIX: voice:mic_grabbed handler — was entirely missing on mobile.
+    // When a user grabs the mic directly (open-mic path), the seat must appear
+    // immediately. If the participant is not in local state, upsert a placeholder
+    // so the seat grid renders without waiting for applyStageSnapshot.
+    socket.on('voice:mic_grabbed', (d: {
+      roomId: string; userId: string; firstName: string; lastName: string;
+      avatarUrl?: string | null; seatNumber?: number | null;
+    }) => {
+      if (d.roomId !== id) return;
+      setParticipants(prev => {
+        const updated = prev.map(p =>
+          p.id === d.userId
+            ? { ...p, role: 'SPEAKER' as const, isMuted: false, seatNumber: d.seatNumber != null ? Number(d.seatNumber) : p.seatNumber, handRaised: false }
+            : p
+        );
+        // Upsert if not found
+        const wasFound = prev.some(p => p.id === d.userId);
+        if (!wasFound && d.seatNumber != null) {
+          updated.push({
+            id:               d.userId,
+            name:             `${d.firstName ?? ''} ${d.lastName ?? ''}`.trim() || 'User',
+            avatar:           d.avatarUrl ?? undefined,
+            role:             'SPEAKER',
+            isMuted:          false,
+            isSpeaking:       false,
+            handRaised:       false,
+            mutedByModerator: false,
+            isActive:         true,
+            seatNumber:       Number(d.seatNumber),
+            isPinned:         false,
+            _joinedAt:        new Date().toISOString(),
+          });
+        }
+        return updated;
+      });
+    });
     // mic_declined: recipient said no — notify the passer
     socket.on('voice:mic_declined', (d: { roomId: string; targetName?: string }) => {
       if (d.roomId !== id) return;
@@ -1856,6 +1971,7 @@ export default function VoiceRoomScreen() {
       socket.off('voice:user_left',        onUserLeft);
       socket.off('voice:mic_offer',           onMicPassOffer);
       socket.off('voice:mic_passed',          onMicPassResult);
+      socket.off('voice:mic_grabbed');   // GAP-M2 FIX: cleanup for newly-added handler
       socket.off('pk:room:started');
       socket.off('pk:room:ended');
       socket.off('voice:mic_declined');
@@ -2085,6 +2201,12 @@ export default function VoiceRoomScreen() {
   // P0-4 FIX: Re-emit voice:join_room + re-hydrate stage state on app foreground.
   // useLiveKitAudio reconnects LiveKit on foreground but does NOT re-subscribe
   // the socket to voice:{id}. This effect fills that gap.
+  //
+  // FIX-P2A: If the user's DB session expired during background (403) OR the
+  // user is absent from stageParticipants (evicted by the 90-min stale-session
+  // worker while backgrounded), silently re-POST /join before re-fetching state.
+  // Only the minimal re-join is performed here — no LiveKit reconnect, no full
+  // handleJoin flow — so the UI does not flicker.
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   useEffect(() => {
     const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
@@ -2101,10 +2223,40 @@ export default function VoiceRoomScreen() {
         if (socket) {
           socket.emit('voice:join_room', id);
         }
-        // Re-hydrate stage state — participant list may be stale after background.
-        api.get(`/voice/${id}/stage-state`)
-          .then((r: any) => { if (r.data?.data) applyStageSnapshot(r.data.data); })
-          .catch(() => { /* non-fatal */ });
+        // FIX-P2A: Fetch stage-state; if 403 or user absent → re-POST /join first.
+        const doForegroundSync = async () => {
+          try {
+            const r: any = await api.get(`/voice/${id}/stage-state`);
+            const data = r.data?.data;
+            if (!data) return;
+            // Check if calling user is present in the snapshot
+            const myId = user?.id;
+            const userPresent = myId
+              ? (data.stageParticipants ?? []).some((p: any) => p.userId === myId)
+              : true; // can't check without id — assume present
+            if (userPresent) {
+              applyStageSnapshot(data);
+            } else {
+              // User evicted during background — silently re-join
+              console.warn('[FIX-P2A] User absent from stage snapshot after foreground — re-joining');
+              try { await api.post(`/voice/${id}/join`); } catch { /* non-fatal */ }
+              const r2: any = await api.get(`/voice/${id}/stage-state`);
+              if (r2.data?.data) applyStageSnapshot(r2.data.data);
+            }
+          } catch (err: any) {
+            if (err?.response?.status === 403) {
+              // Session expired — silently re-join
+              console.warn('[FIX-P2A] 403 on stage-state after foreground — re-joining');
+              try {
+                await api.post(`/voice/${id}/join`);
+                const r2: any = await api.get(`/voice/${id}/stage-state`);
+                if (r2.data?.data) applyStageSnapshot(r2.data.data);
+              } catch { /* non-fatal — socket events will catch up */ }
+            }
+            // Other errors: non-fatal, socket events are primary
+          }
+        };
+        doForegroundSync();
       }
     });
     return () => sub.remove();

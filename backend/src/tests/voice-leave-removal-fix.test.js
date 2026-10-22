@@ -49,44 +49,71 @@ describe('FIX-L001 — mobile onUserLeft roomId guard', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// FIX-L002 web — onStageState sweep uses removeParticipant for absent entries
+// FIX-L002 web — onStageState sweep clears seatNumber only (NOT removeParticipant)
+// Stale voice:stage_state events can arrive out of order; removeParticipant
+// would incorrectly remove newer joiners (F-008 regression).
+// Departed-participant removal is handled by the 30s HTTP poll in VoiceRoomView.tsx.
 // ═══════════════════════════════════════════════════════════════════════
-describe('FIX-L002 web — onStageState sweep calls removeParticipant', () => {
-  test('onStageState sweep calls removeParticipant for participants absent from snapshot', () => {
+describe('FIX-L002 web — onStageState sweep clears seatNumber only (stale-snapshot safe)', () => {
+  test('onStageState sweep clears seatNumber for absent stage participants', () => {
     const stageStateIdx = hookSrc.indexOf('const onStageState');
     expect(stageStateIdx).toBeGreaterThan(-1);
-    // Use 5000 chars — the sweep block sits ~3800 chars into the function
-    const sweepSnippet = hookSrc.slice(stageStateIdx, stageStateIdx + 5000);
-    expect(sweepSnippet).toMatch(/removeParticipant\s*\(/);
+    const sweepSnippet = hookSrc.slice(stageStateIdx, stageStateIdx + 6000);
+    // Must have the seatNumber-null sweep pattern (in the fallback else-branch)
+    expect(sweepSnippet).toMatch(/p\.seatNumber\s*!=\s*null\s*&&\s*!snapshotIds\.has/);
+    // Must call updateParticipant (in the fallback branch)
+    expect(sweepSnippet).toMatch(/updateParticipant/);
   });
 
-  test('onStageState sweep no longer uses only seatNumber-null updateParticipant for absent entries', () => {
-    // The old pattern was: if (p.seatNumber != null && !snapshotIds.has(p.userId)) updateParticipant(...)
-    // After fix, that specific conditional no longer exists — replaced by removeParticipant.
+  test('onStageState stale/fallback branch uses seatNumber-only sweep (avoids stale-snapshot regression)', () => {
+    // GAP-W1/W4 FIX: onStageState now has TWO branches:
+    //  1. isVersionedAndFresh — safe to call removeParticipant (F-008 prevented by version guard)
+    //  2. Fallback (stale/unversioned) — seatNumber:null only, NO removeParticipant
+    // This test verifies the fallback branch is present and uses seatNumber:null.
     const stageStateIdx = hookSrc.indexOf('const onStageState');
-    const sweepSnippet = hookSrc.slice(stageStateIdx, stageStateIdx + 5000);
-    expect(sweepSnippet).not.toMatch(/p\.seatNumber\s*!=\s*null\s*&&\s*!snapshotIds\.has/);
+    const sweepSnippet = hookSrc.slice(stageStateIdx, stageStateIdx + 6000);
+    // Fallback branch must exist and clear seatNumber
+    expect(sweepSnippet).toMatch(/Fallback[\s\S]{0,400}seatNumber:\s*null/);
+    // removeParticipant must be gated by isVersionedAndFresh (not called unconditionally)
+    expect(sweepSnippet).toMatch(/isVersionedAndFresh[\s\S]{0,400}removeParticipant/);
   });
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// FIX-L002 mobile — applyStageSnapshot removes participants absent from snapshot
+// FIX-L002 mobile — applyStageSnapshot clears seatNumber only (stale-snapshot safe)
+// Same rationale as web: stale socket events must not remove newer joiners.
 // ═══════════════════════════════════════════════════════════════════════
-describe('FIX-L002 mobile — applyStageSnapshot removes absent participants', () => {
-  test('applyStageSnapshot filters out participants absent from snapshot', () => {
+describe('FIX-L002 mobile — applyStageSnapshot clears seatNumber only (stale-snapshot safe)', () => {
+  test('applyStageSnapshot clears seatNumber for absent stage participants', () => {
     const applyIdx = mobileSrc.indexOf('const applyStageSnapshot');
     expect(applyIdx).toBeGreaterThan(-1);
     const applySnippet = mobileSrc.slice(applyIdx, applyIdx + 1500);
-    // Must use .filter(p => inStageIds.has(p.id)) or equivalent
-    expect(applySnippet).toMatch(/\.filter\s*\(\s*p\s*=>\s*inStageIds\.has\s*\(\s*p\.id\s*\)\s*\)/);
+    // Must clear seatNumber for absent stage participants
+    expect(applySnippet).toMatch(/seatNumber.*null/);
   });
 
-  test('applyStageSnapshot does not still use the seatNumber-only clear pattern', () => {
+  test('applyStageSnapshot does NOT filter out participants (avoids stale-snapshot regression)', () => {
     const applyIdx = mobileSrc.indexOf('const applyStageSnapshot');
     const applySnippet = mobileSrc.slice(applyIdx, applyIdx + 1500);
-    // Old pattern: updated[i] = { ...updated[i], seatNumber: null }
-    // After fix this loop is replaced by a filter — old pattern must be gone
-    expect(applySnippet).not.toMatch(/updated\[i\]\s*=\s*\{[^}]*seatNumber:\s*null\s*\}/);
+    // Must NOT use .filter to remove absent participants (stale-snapshot safe)
+    expect(applySnippet).not.toMatch(/\.filter\s*\(\s*p\s*=>\s*inStageIds\.has\s*\(\s*p\.id\s*\)\s*\)/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// FIX-L002-revised — 30s HTTP poll in VoiceRoomView.tsx removes departed participants
+// This is the authoritative reconciliation path (direct DB fetch, not stale socket event)
+// ═══════════════════════════════════════════════════════════════════════
+describe('FIX-L002-revised — VoiceRoomView 30s poll removes departed participants', () => {
+  const VRV_PATH = path.join(__dirname, '../../../frontend/src/components/voice/VoiceRoomView.tsx');
+  const vrvSrc = fs.existsSync(VRV_PATH) ? fs.readFileSync(VRV_PATH, 'utf8') : '';
+
+  test('30s poll calls removeParticipant for participants absent from DB snapshot', () => {
+    expect(vrvSrc).toBeTruthy();
+    // The poll must call store.removeParticipant for departed participants
+    expect(vrvSrc).toMatch(/removeParticipant/);
+    // The removal must be guarded by the snapshot having content
+    expect(vrvSrc).toMatch(/snapshotIds/);
   });
 });
 
