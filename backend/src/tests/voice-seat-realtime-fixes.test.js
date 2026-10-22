@@ -14,11 +14,12 @@
 const fs   = require('fs');
 const path = require('path');
 
-// Resolve paths relative to the monorepo root
-const ROOT = path.resolve(__dirname, '..', '..', '..', '..');
-
+// Resolve paths relative to this test file (__dirname = backend/src/tests).
+// Uses __dirname-relative paths (same pattern as every other voice test file)
+// so this works both locally and in CI (GitHub Actions checks out at repo root,
+// not inside a parent 'nurul yaqin class ms' folder).
 function src(relPath) {
-  return fs.readFileSync(path.join(ROOT, relPath), 'utf8');
+  return fs.readFileSync(path.join(__dirname, relPath), 'utf8');
 }
 
 // ---------------------------------------------------------------------------
@@ -26,7 +27,7 @@ function src(relPath) {
 // ---------------------------------------------------------------------------
 describe('1 · voice.controller.js — joinRoom voice:stage_state stateVersion (GAP-W1/W4)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/backend/src/controllers/voice.controller.js'); });
+  beforeAll(() => { code = src('../controllers/voice.controller.js'); });
 
   test('imports getNextStageVersion from voiceRoomCache', () => {
     expect(code).toMatch(/getNextStageVersion[\s\S]*?require[\s\S]*?voiceRoomCache/);
@@ -73,7 +74,7 @@ describe('1 · voice.controller.js — joinRoom voice:stage_state stateVersion (
 // ---------------------------------------------------------------------------
 describe('2 · voice-queue.controller.js — _promoteUser stateVersion (GAP-W1/W4)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/backend/src/controllers/voice-queue.controller.js'); });
+  beforeAll(() => { code = src('../controllers/voice-queue.controller.js'); });
 
   test('imports getNextStageVersion from voiceRoomCache', () => {
     expect(code).toMatch(/getNextStageVersion[\s\S]*?require[\s\S]*?voiceRoomCache/);
@@ -89,7 +90,7 @@ describe('2 · voice-queue.controller.js — _promoteUser stateVersion (GAP-W1/W
 // ---------------------------------------------------------------------------
 describe('3 · autoPromote.js — stage_state stateVersion (GAP-W1/W4)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/backend/src/utils/autoPromote.js'); });
+  beforeAll(() => { code = src('../utils/autoPromote.js'); });
 
   test('imports getNextStageVersion from voiceRoomCache', () => {
     expect(code).toMatch(/getNextStageVersion[\s\S]*?require[\s\S]*?voiceRoomCache/);
@@ -105,7 +106,7 @@ describe('3 · autoPromote.js — stage_state stateVersion (GAP-W1/W4)', () => {
 // ---------------------------------------------------------------------------
 describe('4 · voice.store.ts — stageVersion field (GAP-W1/W4)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/frontend/src/store/voice.store.ts'); });
+  beforeAll(() => { code = src('../../../frontend/src/store/voice.store.ts'); });
 
   test('VoiceState interface declares stageVersion: number', () => {
     expect(code).toMatch(/stageVersion:\s*number/);
@@ -129,7 +130,7 @@ describe('4 · voice.store.ts — stageVersion field (GAP-W1/W4)', () => {
 // ---------------------------------------------------------------------------
 describe('5 · useVoiceRoom.ts — onStageState stateVersion guard (GAP-W1/W4)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/frontend/src/hooks/useVoiceRoom.ts'); });
+  beforeAll(() => { code = src('../../../frontend/src/hooks/useVoiceRoom.ts'); });
 
   test('destructures setStageVersion from useVoiceStore', () => {
     expect(code).toMatch(/setStageVersion/);
@@ -166,7 +167,7 @@ describe('5 · useVoiceRoom.ts — onStageState stateVersion guard (GAP-W1/W4)',
 // ---------------------------------------------------------------------------
 describe('6 · useVoiceRoom.ts — onStageState profile fill pass (GAP-W2)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/frontend/src/hooks/useVoiceRoom.ts'); });
+  beforeAll(() => { code = src('../../../frontend/src/hooks/useVoiceRoom.ts'); });
 
   test('GAP-W2 comment is present in onStageState', () => {
     expect(code).toMatch(/GAP-W2/);
@@ -186,7 +187,7 @@ describe('6 · useVoiceRoom.ts — onStageState profile fill pass (GAP-W2)', () 
 // ---------------------------------------------------------------------------
 describe('7 · useVoiceRoom.ts — onMicGrabbed upsert guard (GAP-W3)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/frontend/src/hooks/useVoiceRoom.ts'); });
+  beforeAll(() => { code = src('../../../frontend/src/hooks/useVoiceRoom.ts'); });
 
   test('GAP-W3 comment is present', () => {
     expect(code).toMatch(/GAP-W3/);
@@ -208,7 +209,7 @@ describe('7 · useVoiceRoom.ts — onMicGrabbed upsert guard (GAP-W3)', () => {
 // ---------------------------------------------------------------------------
 describe('8 · mobile [id].tsx — onRoleChanged wasFound upsert (GAP-M1)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/mobile/app/voice/[id].tsx'); });
+  beforeAll(() => { code = src('../../../mobile/app/voice/[id].tsx'); });
 
   test('GAP-M1 FIX comment is present in onRoleChanged', () => {
     // Search within onRoleChanged context
@@ -230,7 +231,7 @@ describe('8 · mobile [id].tsx — onRoleChanged wasFound upsert (GAP-M1)', () =
 // ---------------------------------------------------------------------------
 describe('9 · mobile [id].tsx — onRoleChanged roomId guard (GAP-M3)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/mobile/app/voice/[id].tsx'); });
+  beforeAll(() => { code = src('../../../mobile/app/voice/[id].tsx'); });
 
   test('GAP-M3 FIX comment in onRoleChanged', () => {
     expect(code).toMatch(/GAP-M3[\s\S]{0,200}onRoleChanged|onRoleChanged[\s\S]{0,200}GAP-M3/);
@@ -247,7 +248,7 @@ describe('9 · mobile [id].tsx — onRoleChanged roomId guard (GAP-M3)', () => {
 // ---------------------------------------------------------------------------
 describe('10 · mobile [id].tsx — onMuteChanged roomId guard (GAP-M3)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/mobile/app/voice/[id].tsx'); });
+  beforeAll(() => { code = src('../../../mobile/app/voice/[id].tsx'); });
 
   test('onMuteChanged has d.roomId guard', () => {
     expect(code).toMatch(/onMuteChanged[\s\S]{0,400}d\.roomId\s*&&\s*d\.roomId\s*!==\s*id/);
@@ -259,7 +260,7 @@ describe('10 · mobile [id].tsx — onMuteChanged roomId guard (GAP-M3)', () => 
 // ---------------------------------------------------------------------------
 describe('11 · mobile [id].tsx — voice:mic_grabbed handler (GAP-M2)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/mobile/app/voice/[id].tsx'); });
+  beforeAll(() => { code = src('../../../mobile/app/voice/[id].tsx'); });
 
   test('GAP-M2 FIX comment present', () => {
     expect(code).toMatch(/GAP-M2/);
@@ -283,7 +284,7 @@ describe('11 · mobile [id].tsx — voice:mic_grabbed handler (GAP-M2)', () => {
 // ---------------------------------------------------------------------------
 describe('12 · voice.controller.js — getStageState returns stateVersion (CORRECTION-1)', () => {
   let code;
-  beforeAll(() => { code = src('nurul yaqin class ms/backend/src/controllers/voice.controller.js'); });
+  beforeAll(() => { code = src('../controllers/voice.controller.js'); });
 
   test('getStageState function body includes stateVersion after stageRows query', () => {
     // Extract a window of text starting from "async function getStageState"
