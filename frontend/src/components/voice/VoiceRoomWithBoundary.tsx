@@ -17,8 +17,23 @@
  */
 
 import React from 'react'
-import { VoiceRoomView } from './VoiceRoomView'
+import dynamic from 'next/dynamic'
 import { Mic, RefreshCw, LogOut } from 'lucide-react'
+
+const VoiceRoomViewDynamic = dynamic(
+  () => import('./VoiceRoomView').then(m => ({ default: m.VoiceRoomView })),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="min-h-screen bg-[#eef0f8] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <Mic className="w-10 h-10 text-purple-400 animate-pulse" />
+          <p className="text-sm text-gray-500 font-medium">Loading voice room…</p>
+        </div>
+      </div>
+    ),
+  }
+)
 
 interface Props { onLeave?: () => void }
 interface State { hasError: boolean; error?: Error }
@@ -80,7 +95,7 @@ class VoiceRoomErrorBoundary extends React.Component<Props, State> {
       )
     }
 
-    return <VoiceRoomView onLeave={this.props.onLeave ?? (() => {})} />
+    return <VoiceRoomViewDynamic onLeave={this.props.onLeave ?? (() => {})} />
   }
 }
 

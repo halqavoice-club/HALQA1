@@ -80,7 +80,7 @@ function AvatarCircle({
 
       <div className="vc-avatar-img">
         {src
-          ? <img src={src} alt={firstName} />
+          ? <img src={src} alt={`${firstName} ${lastName}`} />
           : <span className="vc-initials">{initials}</span>
         }
       </div>
@@ -869,7 +869,7 @@ export function VoiceRoomView({ onLeave }: Props) {
   }
 
   return (
-    <div className="vc-root">
+    <div className="vc-root" role="region" aria-label="Voice Room">
 
       {/* Mic pass offer modal (shown to receiver) */}
       {roomId && <MicPassModal roomId={roomId} />}
@@ -1121,7 +1121,7 @@ export function VoiceRoomView({ onLeave }: Props) {
             <span className="vc-header-emoji">{activeRoom.coverEmoji ?? '🎙️'}</span>
           )}
           <div className="vc-header-text">
-            <h2 className="vc-title">{activeRoom.title}</h2>
+            <h1 className="vc-title">{activeRoom.title}</h1>
             {/* "● Live Room" subtitle — matches target design */}
             <div className="vc-live-subtitle">
               <span className="vc-live-subtitle-dot" />
@@ -1131,7 +1131,7 @@ export function VoiceRoomView({ onLeave }: Props) {
         </div>
         <div className="vc-header-right">
           {isDisconnected && !micError && (
-            <button className="vc-reconnect-btn" onClick={() => connect()} title="Reconnect audio">🔄</button>
+            <button className="vc-reconnect-btn" onClick={() => connect()} title="Reconnect audio" aria-label="Reconnect audio">🔄</button>
           )}
           <span className={cn(
             'vc-conn-dot',
@@ -1156,7 +1156,7 @@ export function VoiceRoomView({ onLeave }: Props) {
             background: '#f5f3ff', color: '#5b21b6', border: '1px solid #ddd6fe', flexShrink: 0 }}>
             Lv{activeRoom.roomLevel ?? 1}
           </span>
-          <button className="vc-settings-btn" onClick={() => setShowDotMenu(v => !v)} title="Room options">⋮</button>
+          <button className="vc-settings-btn" onClick={() => setShowDotMenu(v => !v)} title="Room options" aria-label="Room options">⋮</button>
         </div>
       </div>
 
@@ -1438,7 +1438,7 @@ export function VoiceRoomView({ onLeave }: Props) {
             className="vc-participant-search-input"
           />
           {participantSearch && (
-            <button onClick={() => setParticipantSearch('')} className="vc-participant-search-clear">✕</button>
+            <button onClick={() => setParticipantSearch('')} className="vc-participant-search-clear" aria-label="Clear search">✕</button>
           )}
         </div>
       )}
@@ -1487,7 +1487,7 @@ export function VoiceRoomView({ onLeave }: Props) {
                   ✋ Hands {handQueue.length > 0 && <span className="vc-tab-badge">{handQueue.length}</span>}
                 </button>
               )}
-              <button className="vc-drawer-close" onClick={() => { if (isChatOpen) toggleChat(); if (isHandQueueOpen) toggleHandQueue() }}>✕</button>
+              <button className="vc-drawer-close" onClick={() => { if (isChatOpen) toggleChat(); if (isHandQueueOpen) toggleHandQueue() }} aria-label="Close">✕</button>
             </div>
 
             {isChatOpen && (
@@ -1512,6 +1512,7 @@ export function VoiceRoomView({ onLeave }: Props) {
                         <button
                           className="vc-msg-delete"
                           title="Delete message"
+                          aria-label="Delete message"
                           onClick={async () => {
                             try { await api.delete(`/voice/${roomId}/messages/${msg.id}`) } catch {}
                           }}
