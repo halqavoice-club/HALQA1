@@ -359,7 +359,8 @@ describe('8. Source audit: Socket.IO liveclass:join_room participation gate', ()
 
   test('8.1 liveclass:join_room checks active participant in DB', () => {
     if (!app_src) return;
-    const start = app_src.indexOf('liveclass:join_room');
+    // Use socket.on('liveclass:join_room' to find the actual handler (not the comment reference)
+    const start = app_src.indexOf("socket.on('liveclass:join_room'");
     const fn = app_src.slice(start, start + 1200);
     // Must reference participant lookup (either findFirst or the model name)
     expect(fn).toMatch(/liveClassParticipant|participant/);
@@ -368,7 +369,8 @@ describe('8. Source audit: Socket.IO liveclass:join_room participation gate', ()
 
   test('8.2 Unauthenticated user cannot join socket room', () => {
     if (!app_src) return;
-    const start = app_src.indexOf('liveclass:join_room');
+    // Use socket.on('liveclass:join_room' to find the actual handler (not the comment reference)
+    const start = app_src.indexOf("socket.on('liveclass:join_room'");
     const fn = app_src.slice(start, start + 500);
     expect(fn).toMatch(/userId/);
   });

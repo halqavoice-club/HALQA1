@@ -67,7 +67,6 @@ const ROOM_CACHE_TTL = 60; // seconds (Phase 14: 60s - better for poor networks)
 function roomCacheKey(roomId)  { return `voice:room:${roomId}`; }
 // roomListCacheKey is defined below with full signature (BE-008)
 
-async function getRoomWithParticipants(roomId) {
 async function getRoomWithParticipants(roomId, opts = {}) {
   // Try cache first — on Redis error, fall through to DB.
   // G4: pass { bypassCache: true } to skip the cache (used by the auto-join GET
