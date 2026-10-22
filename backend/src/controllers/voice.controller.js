@@ -68,12 +68,17 @@ function roomCacheKey(roomId)  { return `voice:room:${roomId}`; }
 // roomListCacheKey is defined below with full signature (BE-008)
 
 async function getRoomWithParticipants(roomId) {
-  // Try cache first — on Redis error, fall through to DB
-  try {
-    const cached = await getCache(roomCacheKey(roomId));
-    if (cached) return cached;
-  } catch (err) {
-    logger.error(`[voice] Cache GET failed for room ${roomId}: ${err.message}`);
+async function getRoomWithParticipants(roomId, opts = {}) {
+  // Try cache first — on Redis error, fall through to DB.
+  // G4: pass { bypassCache: true } to skip the cache (used by the auto-join GET
+  // so the participant-presence check always reads current DB state).
+  if (!opts.bypassCache) {
+    try {
+      const cached = await getCache(roomCacheKey(roomId));
+      if (cached) return cached;
+    } catch (err) {
+      logger.error(`[voice] Cache GET failed for room ${roomId}: ${err.message}`);
+    }
   }
 
   const room = await prisma.voiceRoom.findUnique({
@@ -275,7 +280,14 @@ async function listRooms(req, res, next) {
 async function getRoom(req, res, next) {
   try {
     const { id } = req.params;
-    const room = await getRoomWithParticipants(id);
+    // G4 FIX: ?fresh=1 bypasses the 60s Redis cache so the auto-join decision
+    // in page.tsx reads the current participant list (not a stale snapshot).
+    // Without this, a user who joined ≤60s ago may be absent from the cached
+    // roster, causing the page to route through POST /join unnecessarily.
+    const bypassCache = req.query.fresh === '1';
+    const room = bypassCache
+      ? await getRoomWithParticipants(id, { bypassCache: true })
+      : await getRoomWithParticipants(id);
     if (!room) return errorResponse(res, 'Room not found', 404);
 
     // Privacy check for non-public rooms

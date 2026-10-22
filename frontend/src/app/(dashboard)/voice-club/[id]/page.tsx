@@ -108,7 +108,10 @@ export default function VoiceRoomPage() {
   // Load room info
   useEffect(() => {
     if (!id) return
-    api.get(`/voice/${id}`)
+    // G4 FIX: ?fresh=1 bypasses the 60s Redis cache so the auto-join participant-
+    // presence check reads current DB state. Without this, a user who joined ≤60s
+    // ago may be absent from the cached roster and trigger an unnecessary POST /join.
+    api.get(`/voice/${id}?fresh=1`)
       .then(r => setRoom(r.data.data))
       .catch(e => setError(e?.response?.data?.message || 'Room not found'))
       .finally(() => setLoading(false))
