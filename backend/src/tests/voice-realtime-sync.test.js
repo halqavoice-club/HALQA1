@@ -500,7 +500,9 @@ describe('S10 — Reconnect: authoritative state restored', () => {
 
   test('web re-emits voice:join_room on socket reconnect', () => {
     expect(hookSrc).toMatch(/socket\.on\('connect',\s*onReconnect\)/);
-    expect(hookSrc).toMatch(/socket\.emit\('voice:join_room'/);
+    // G2: onReconnect now calls emitJoinRoomAck which wraps the emit with an ack callback
+    expect(hookSrc).toMatch(/emitJoinRoomAck/);
+    expect(hookSrc).toMatch(/sock\.emit\('voice:join_room'/); // helper function emits with ack
   });
 });
 

@@ -125,6 +125,30 @@ export function useVoiceRoom(roomId: string | null) {
     if (!socket) return
 
     // ── Re-join the socket room after a reconnect ─────────────────────────
+    // G2 FIX: emitJoinRoomAck wraps socket.emit('voice:join_room') with an ack
+    // callback so the client can detect refused/rate-limited joins and retry
+    // instead of silently going deaf to all room events.
+    let joinRetries = 0
+    const emitJoinRoomAck = (sock: typeof socket, rid: string) => {
+      sock.emit('voice:join_room', rid, (response: any) => {
+        if (response?.ok) {
+          joinRetries = 0
+          if (process.env.NODE_ENV === 'development') {
+            console.log('[voice-debug] joined voice socket room', rid)
+          }
+          return
+        }
+        console.warn('[voice] voice:join_room ack failed:', response?.reason)
+        // Retry on rate_limited or transient errors (max 3, 2s backoff)
+        if ((response?.reason === 'rate_limited' || response?.reason === 'error') && joinRetries < 3) {
+          joinRetries++
+          setTimeout(() => {
+            const s = getSocket()
+            if (s?.connected) emitJoinRoomAck(s, rid)
+          }, 2000)
+        }
+      })
+    }
     // When the socket disconnects and reconnects (e.g. token refresh, network
     // blip), the socket no longer belongs to the voice:${roomId} Socket.IO room.
     // Re-emitting voice:join_room re-registers it so all room broadcasts
@@ -132,7 +156,7 @@ export function useVoiceRoom(roomId: string | null) {
     // STEP-4 FIX: Also re-fetch the full participant list so anyone who
     // joined or left while the socket was down is reflected immediately.
     const onReconnect = () => {
-      socket.emit('voice:join_room', roomId)
+      emitJoinRoomAck(socket, roomId)
       // Re-hydrate full participant list (audience + stage) after reconnect.
       // getStageState now returns ALL active participants — not just on-stage.
       api.get(`/voice/${roomId}/stage-state`)
@@ -1161,7 +1185,7 @@ export function useVoiceRoom(roomId: string | null) {
     if (process.env.NODE_ENV === 'development') {
       console.log('[voice-debug] emitting voice:join_room', roomId)
     }
-    socket.emit('voice:join_room', roomId)
+    emitJoinRoomAck(socket, roomId)
 
     // P0-1 FIX: Re-hydrate stage state and queue on every mount.
     // Covers navigate-back where the socket stays connected and the

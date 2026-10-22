@@ -92,7 +92,7 @@ describe('FIX-FHIGH03 — voice:join_room re-broadcasts voice:user_joined after 
     // compact isActive-only eligibility check so socket.join stays within the
     // pre-existing 800-char T8 window, then fetches the full profile for the
     // re-broadcast in a second query — which lengthens the handler beyond 2000.
-    const handler = appSrc.slice(handlerIdx, handlerIdx + 2500);
+    const handler = appSrc.slice(handlerIdx, handlerIdx + 3000);
     const joinIdx = handler.indexOf('socket.join(');
     const emitIdx = handler.indexOf("'voice:user_joined'");
     expect(joinIdx).toBeGreaterThan(-1);

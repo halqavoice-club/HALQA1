@@ -1083,6 +1083,26 @@ export default function VoiceRoomScreen() {
   // F-006b: guards voice:leave_room cleanup so it only fires on intentional leave or room change
   const intentionalLeaveRef = useRef(false)
   const prevRoomIdRef = useRef<string | null>(null)
+  // G2 FIX: emitJoinRoomAck wraps socket.emit('voice:join_room') with an ack
+  // callback so the client can detect refused/rate-limited joins and retry
+  // instead of silently going deaf to all room events.
+  const joinRetriesRef = useRef(0)
+  const emitJoinRoomAck = (sock: any, rid: string) => {
+    sock.emit('voice:join_room', rid, (response: any) => {
+      if (response?.ok) {
+        joinRetriesRef.current = 0
+        return
+      }
+      console.warn('[voice] voice:join_room ack failed:', response?.reason)
+      if ((response?.reason === 'rate_limited' || response?.reason === 'error') && joinRetriesRef.current < 3) {
+        joinRetriesRef.current++
+        setTimeout(() => {
+          const s = getSocket()
+          if (s?.connected) emitJoinRoomAck(s, rid)
+        }, 2000)
+      }
+    })
+  }
 
   // ── Mic pass state ──────────────────────────────────────────────────────────
   const [showMicPassOffer,    setShowMicPassOffer]    = useState(false);
@@ -1291,7 +1311,7 @@ export default function VoiceRoomScreen() {
     if (!socket) return;
 
     // FEAT-002: only emit voice:join_room after HTTP join has completed
-    if (hasJoinedRef.current) socket.emit('voice:join_room', id);
+    if (hasJoinedRef.current) emitJoinRoomAck(socket, id);
 
     // PH24C-005 FIX: Re-join the socket room after a reconnect.
     // When the socket disconnects and reconnects (network blip, token refresh,
@@ -1302,7 +1322,7 @@ export default function VoiceRoomScreen() {
     const onReconnect = () => {
       // FEAT-002: do not re-join socket room before HTTP join completes
       if (!hasJoinedRef.current) return;
-      socket.emit('voice:join_room', id);
+      emitJoinRoomAck(socket, id);
       // Re-fetch room state so participant list and roles reflect server truth
       // after a disconnect (stale data risk while socket was down).
       queryClient.invalidateQueries({ queryKey: ['voice-room', id] });
@@ -2028,7 +2048,7 @@ export default function VoiceRoomScreen() {
       hasJoinedRef.current = true;
       // FEAT-002: register socket room now that HTTP join succeeded
       const sockNow = getSocket();
-      if (sockNow?.connected) sockNow.emit('voice:join_room', id);
+      if (sockNow?.connected) emitJoinRoomAck(sockNow, id);
 
       // Store in shared voice store so the tab bar shows the "IN ROOM" badge
       const roomData = res.data.data;
@@ -2225,7 +2245,7 @@ export default function VoiceRoomScreen() {
         // Socket may have reconnected transparently — re-subscribing is idempotent.
         const socket = getSocket();
         if (socket) {
-          socket.emit('voice:join_room', id);
+          emitJoinRoomAck(socket, id);
         }
         // FIX-P2A: Fetch stage-state; if 403 or user absent → re-POST /join first.
         const doForegroundSync = async () => {

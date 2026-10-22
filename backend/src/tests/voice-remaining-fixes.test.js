@@ -19,12 +19,14 @@ const STORE_PATH  = path.join(__dirname, '../../../frontend/src/store/voice.stor
 const VRV_PATH    = path.join(__dirname, '../../../frontend/src/components/voice/VoiceRoomView.tsx');
 const HOOK_PATH   = path.join(__dirname, '../../../frontend/src/hooks/useVoiceRoom.ts');
 const NOTE_PATH   = path.join(__dirname, '../../../.agents/tasks/voice-stateversion-architectural-note.md');
+const APP_JS      = path.join(__dirname, '../app.js');
 
 const mobileSrc = fs.existsSync(MOBILE_PATH) ? fs.readFileSync(MOBILE_PATH, 'utf8') : '';
 const storeSrc  = fs.existsSync(STORE_PATH)  ? fs.readFileSync(STORE_PATH,  'utf8') : '';
 const vrvSrc    = fs.existsSync(VRV_PATH)    ? fs.readFileSync(VRV_PATH,    'utf8') : '';
 const hookSrc   = fs.existsSync(HOOK_PATH)   ? fs.readFileSync(HOOK_PATH,   'utf8') : '';
 const noteSrc   = fs.existsSync(NOTE_PATH)   ? fs.readFileSync(NOTE_PATH,   'utf8') : '';
+const appSrc    = fs.existsSync(APP_JS)      ? fs.readFileSync(APP_JS,      'utf8') : '';
 
 // ═══════════════════════════════════════════════════════════════════════
 // FIX-P2A — AppState active handler re-POSTs /join when user absent or 403
@@ -124,5 +126,107 @@ describe('FIX-STATEVERSION-DOC — stateVersion ordering limitation is documente
 
   test('architectural note document recommends deferring to a dedicated PR', () => {
     expect(noteSrc).toMatch(/[Dd]efer/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// G2 — Socket.IO ack on voice:join_room so client detects refused/rate-limited joins
+// ═══════════════════════════════════════════════════════════════════════
+describe('G2 — Backend voice:join_room handler calls ack callback', () => {
+  // Extract the handler block (second occurrence of 'voice:join_room' is the socket.on handler)
+  const firstIdx  = appSrc.indexOf('voice:join_room');
+  const handlerIdx = appSrc.indexOf('voice:join_room', firstIdx + 1);
+  const handler = handlerIdx > -1 ? appSrc.slice(handlerIdx, handlerIdx + 4000) : '';
+
+  test('handler signature includes ack parameter', () => {
+    expect(handler).toMatch(/async\s*\(\s*roomId\s*,\s*ack\s*\)/);
+  });
+
+  test('handler has a reply helper that calls ack', () => {
+    expect(handler).toMatch(/typeof ack\s*===\s*['"]function['"]/);
+  });
+
+  test('handler replies ok:false rate_limited on rate limit', () => {
+    const rlIdx = handler.indexOf('socketAllow');
+    expect(rlIdx).toBeGreaterThan(-1);
+    const rlSnippet = handler.slice(rlIdx, rlIdx + 300);
+    expect(rlSnippet).toMatch(/rate_limited/);
+  });
+
+  test('handler replies ok:false not_active when participant not active', () => {
+    expect(handler).toMatch(/not_active/);
+  });
+
+  test('handler replies ok:true on success', () => {
+    expect(handler).toMatch(/ok:\s*true/);
+  });
+
+  test('handler replies ok:false error in catch block', () => {
+    expect(handler).toMatch(/ok:\s*false.*reason:\s*['"]error['"]/);
+  });
+});
+
+describe('G2 — Web useVoiceRoom.ts emitJoinRoomAck with ack + retry', () => {
+  test('hook source defines emitJoinRoomAck function', () => {
+    expect(hookSrc).toMatch(/const emitJoinRoomAck/);
+  });
+
+  test('emitJoinRoomAck passes an ack callback as second arg to sock.emit', () => {
+    expect(hookSrc).toMatch(/sock\.emit\(\s*['"]voice:join_room['"]\s*,\s*rid\s*,\s*\(/);
+  });
+
+  test('emitJoinRoomAck retries on rate_limited (max 3, 2s backoff)', () => {
+    expect(hookSrc).toMatch(/rate_limited/);
+    expect(hookSrc).toMatch(/joinRetries\s*<\s*3/);
+    expect(hookSrc).toMatch(/2000/);
+  });
+
+  test('main emit uses emitJoinRoomAck (not bare socket.emit)', () => {
+    // The main emit (after listeners are registered) should call emitJoinRoomAck
+    const emitIdx = hookSrc.indexOf('emitJoinRoomAck(socket, roomId)');
+    expect(emitIdx).toBeGreaterThan(-1);
+  });
+
+  test('onReconnect uses emitJoinRoomAck', () => {
+    const reconnectIdx = hookSrc.indexOf('onReconnect');
+    expect(reconnectIdx).toBeGreaterThan(-1);
+    const snippet = hookSrc.slice(reconnectIdx, reconnectIdx + 200);
+    expect(snippet).toMatch(/emitJoinRoomAck/);
+  });
+});
+
+describe('G2 — Mobile [id].tsx emitJoinRoomAck with ack + retry', () => {
+  test('mobile source defines emitJoinRoomAck function', () => {
+    expect(mobileSrc).toMatch(/const emitJoinRoomAck/);
+  });
+
+  test('mobile emitJoinRoomAck passes an ack callback to sock.emit', () => {
+    expect(mobileSrc).toMatch(/sock\.emit\(\s*['"]voice:join_room['"]\s*,\s*rid\s*,\s*\(/);
+  });
+
+  test('mobile has joinRetriesRef for retry counting', () => {
+    expect(mobileSrc).toMatch(/joinRetriesRef/);
+  });
+
+  test('mobile retries on rate_limited (max 3, 2s backoff)', () => {
+    expect(mobileSrc).toMatch(/rate_limited/);
+    expect(mobileSrc).toMatch(/joinRetriesRef\.current\s*<\s*3/);
+    expect(mobileSrc).toMatch(/2000/);
+  });
+
+  test('mobile has no remaining bare socket.emit voice:join_room calls', () => {
+    // All socket.emit('voice:join_room') calls should now go through emitJoinRoomAck.
+    // Check that there are no bare socket.emit('voice:join_room', id) calls remaining
+    // (emitJoinRoomAck uses sock.emit internally, which is fine).
+    const matches = mobileSrc.match(/socket\.emit\(\s*['"]voice:join_room['"]\s*,/g);
+    expect(matches).toBeNull();
+  });
+
+  test('mobile all 4 join locations use emitJoinRoomAck', () => {
+    // Count occurrences of emitJoinRoomAck( calls — should be at least 4
+    // (listener effect, onReconnect, handleJoin success, AppState foreground)
+    const matches = mobileSrc.match(/emitJoinRoomAck\(/g);
+    expect(matches).toBeTruthy();
+    expect(matches.length).toBeGreaterThanOrEqual(4);
   });
 });
