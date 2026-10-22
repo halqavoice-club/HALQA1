@@ -18,7 +18,7 @@ const MOBILE_PATH = path.join(__dirname, '../../../mobile/app/voice/[id].tsx');
 const STORE_PATH  = path.join(__dirname, '../../../frontend/src/store/voice.store.ts');
 const VRV_PATH    = path.join(__dirname, '../../../frontend/src/components/voice/VoiceRoomView.tsx');
 const HOOK_PATH   = path.join(__dirname, '../../../frontend/src/hooks/useVoiceRoom.ts');
-const NOTE_PATH   = path.join(__dirname, '../../../.agents/tasks/voice-stateversion-architectural-note.md');
+const NOTE_PATH   = path.join(__dirname, '../../../docs/voice-stateversion-architectural-note.md');
 const APP_JS      = path.join(__dirname, '../app.js');
 
 const mobileSrc = fs.existsSync(MOBILE_PATH) ? fs.readFileSync(MOBILE_PATH, 'utf8') : '';
