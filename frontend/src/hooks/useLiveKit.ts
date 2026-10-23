@@ -388,25 +388,32 @@ export function useLiveKit(roomId: string | null): LiveKitState {
   // the local participant's audio publish bitrate to the appropriate tier.
   // qualityToAudioBitrate: excellent=96k, good=64k, fair=32k, poor/offline=16k.
   //
-  // NOTE: setTrackPublishDefaults was introduced in livekit-client ≥ 2.8.
-  // The installed version (2.5.4) does not have this method. The try-catch
-  // below prevents a TypeError from propagating and unmounting the voice room.
-  // Bitrate adaptation is best-effort on 2.5.4 — the ConnectionQualityChanged
-  // indicator and all other low-bandwidth features are unaffected.
-  // Upgrade to livekit-client ≥ 2.8 to enable full in-session bitrate adaptation.
+  // Uses RTCRtpSender.setParameters() via LocalTrack.sender getter (confirmed
+  // present as a public getter in livekit-client 2.5.4 — see LocalTrack.d.ts
+  // line 10: `get sender(): RTCRtpSender | undefined`).
+  // This modifies the in-flight encoder parameters of the active mic track,
+  // which is the correct mechanism for runtime bitrate adaptation in 2.5.4.
   useEffect(() => {
     const room = roomRef.current
     if (!room || room.state !== ConnectionState.Connected) return
     const newBitrate = qualityToAudioBitrate(quality)
+    // Find the local mic publication and access its RTCRtpSender
+    // LocalTrack.sender is available in livekit-client 2.5.4 (see LocalTrack.d.ts)
     try {
-      room.localParticipant.setTrackPublishDefaults({
-        audioPreset: { maxBitrate: newBitrate },
+      let micPub: any = null
+      room.localParticipant.audioTrackPublications.forEach((pub) => {
+        if (pub.source === Track.Source.Microphone) micPub = pub
       })
+      const track = micPub?.track as any
+      const sender: RTCRtpSender | undefined = track?.sender
+      if (!sender) return
+      const params = sender.getParameters()
+      if (params.encodings?.length) {
+        params.encodings[0].maxBitrate = newBitrate
+        sender.setParameters(params).catch(() => {})
+      }
     } catch (e) {
-      // setTrackPublishDefaults is not available in livekit-client 2.5.4.
-      // Log a warning so the incompatibility is visible; do not throw.
-      // Upgrade to livekit-client ≥ 2.8 to enable full in-session bitrate adaptation.
-      console.warn('[useLiveKit] setTrackPublishDefaults unavailable (requires livekit-client ≥ 2.8):', e)
+      console.debug('[useLiveKit] RTCRtpSender.setParameters unavailable:', e)
     }
   }, [quality]) // eslint-disable-line react-hooks/exhaustive-deps
 
