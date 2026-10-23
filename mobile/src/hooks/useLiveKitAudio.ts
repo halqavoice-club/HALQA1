@@ -80,17 +80,21 @@ export function useLiveKitAudio(): LiveKitAudioState {
   const isConnectingRef     = useRef<boolean>(false);
   const appStateRef         = useRef<AppStateStatus>(AppState.currentState);
 
-  // Phase 2: auto-adapt bitrate when quality changes while connected
+  // Phase 2: auto-adapt bitrate when quality changes while connected.
+  // Re-publishes the mic track with updated publish options so the bitrate
+  // change takes effect on the current connection (not just future publishes).
+  // setMicrophoneEnabled(true, opts) re-negotiates the existing track with
+  // the new audioBitrate/dtx/red settings — the correct LiveKit RN API for
+  // runtime adaptation. setTrackSubscriptionPermissions is a receiver-side
+  // permission API and has no effect on local publish quality.
   useEffect(() => {
     if (!roomRef.current || !connected) return;
-    const bitrate = qualityToAudioBitrate(quality);
     try {
-      // Set audio publish options dynamically
       const opts = buildPublishOptions(quality);
-      roomRef.current.localParticipant?.setTrackSubscriptionPermissions?.(true);
-      // LiveKit RN: use setMicrophoneEnabled to restart with new options
-      // Only applies to future publishes — current track keeps old bitrate
-      // This is the safest way without disconnecting
+      const lp = roomRef.current.localParticipant;
+      if (lp && lp.isMicrophoneEnabled) {
+        lp.setMicrophoneEnabled(true, opts).catch(() => {});
+      }
     } catch { /* non-fatal */ }
   }, [quality, connected]);
 

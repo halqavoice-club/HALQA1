@@ -26,6 +26,7 @@ import { useNetworkQuality, qualityToPollInterval } from '@/hooks/useNetworkQual
 import MicPassModal, { type MicPassUser } from '@/components/voice/MicPassModal';
 import { MemberManagementPanel } from '@/components/voice/MemberManagementPanel';
 import { useVoiceStore } from '@/store/voice.store';
+import { useLowDataMode, useLowData } from '@/store/lowDataMode.store';
 import { GiftLeaderboard, type LeaderEntry } from '@/components/voice/GiftLeaderboard';
 import { RoomSettingsSheet } from '@/components/voice/RoomSettingsSheet';
 import { LiveVideoGrid, type VideoSpeaker } from '@/components/live-class/LiveVideoGrid';
@@ -909,15 +910,24 @@ function LeaderboardPanel({ visible, roomId, onClose }: {
   );
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function getInitials(name: string): string {
+  const parts = name.trim().split(/\s+/);
+  return ((parts[0]?.[0] ?? '') + (parts[1]?.[0] ?? '')).toUpperCase() || '?';
+}
+
 // ─── Participant Tile ─────────────────────────────────────────────────────────
-function ParticipantTile({ participant, queuePosition }: { participant: Participant; queuePosition?: number }) {
+function ParticipantTile({ participant, queuePosition, isLowData = false }: { participant: Participant; queuePosition?: number; isLowData?: boolean }) {
   const roleColor = participant.role === 'HOST' ? '#f59e0b'
     : participant.role === 'MODERATOR' ? '#10b981'
     : participant.role === 'SPEAKER'   ? '#6366f1' : '#6b7280';
   return (
     <View style={[styles.tile, participant.isSpeaking && styles.tileSpeaking]}>
       <View style={styles.tileAvatarWrap}>
-        <Image source={{ uri: avatarUrl(participant.avatar, participant.name) }} style={styles.tileAvatar} />
+        {isLowData
+          ? <View style={[styles.tileAvatar, styles.avatarPlaceholder]}><Text style={styles.avatarInitials}>{getInitials(participant.name)}</Text></View>
+          : <Image source={{ uri: avatarUrl(participant.avatar, participant.name) }} style={styles.tileAvatar} />
+        }
         {participant.isSpeaking && <View style={styles.speakingRing} />}
         {participant.handRaised && <View style={styles.handBadge}><Text style={{ fontSize: 12 }}>✋</Text></View>}
         {/* Queue position badge for audience waiting */}
@@ -1061,7 +1071,10 @@ export default function VoiceRoomScreen() {
   const [isJoined,       setIsJoined]       = useState(false);
   const [showHostControls, setShowHostControls] = useState(false);
   // Phase 1+12: adaptive poll interval based on network quality
-  const { quality: netQuality } = useNetworkQuality();
+  const { quality: netQuality, lowDataMode: netLowDataMode } = useNetworkQuality();
+  // LowDataMode store — auto-enable from network quality, user preference persisted
+  const { setAutoEnabled } = useLowDataMode();
+  const isLowData = useLowData();
   // LiveKit real audio (native builds only — degrades gracefully in Expo Go)
   const lk = useLiveKitAudio();
   const [isConnecting,   setIsConnecting]   = useState(false);
@@ -2134,6 +2147,18 @@ export default function VoiceRoomScreen() {
             if (!token) throw new Error('No token in response');
             return token;
           };
+          // iOS audio session: allowsRecordingIOS must be true before connecting
+          // so the microphone is accessible. Without this, iOS silently blocks
+          // mic access when the ringer switch is off or the session is in playback mode.
+          try {
+            await ExpoAudio.setAudioModeAsync({
+              allowsRecordingIOS: true,
+              playsInSilentModeIOS: true,
+              staysActiveInBackground: true,
+              shouldDuckAndroid: false,
+              playThroughEarpieceAndroid: false,
+            });
+          } catch { /* non-fatal — Expo Go / Android ignores unsupported keys */ }
           await lk.connect(livekitUrl, lkToken, true /* start muted */, id, tokenFetcher);
         }
       } catch { /* non-fatal — audio not available in Expo Go */ }
@@ -2197,6 +2222,8 @@ export default function VoiceRoomScreen() {
         intentionalLeaveRef.current = true
         try { await api.post(`/voice/${id}/leave`); } catch {}
         lk.disconnect();
+        // Restore iOS audio session to non-recording mode after leaving the room.
+        try { await ExpoAudio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true, staysActiveInBackground: false }); } catch {}
         clearActiveRoom();
         clearQueuePosition();
         // FEAT-002: reset join ref so onReconnect won't re-register after leave
@@ -2206,6 +2233,12 @@ export default function VoiceRoomScreen() {
       }},
     ]);
   }, [id, router, clearActiveRoom, clearQueuePosition]);
+
+  // Sync network-quality low-data signal to the LowDataMode store.
+  // setAutoEnabled is a no-op when the user has set an explicit preference.
+  useEffect(() => {
+    setAutoEnabled(netLowDataMode);
+  }, [netLowDataMode, setAutoEnabled]);
 
   // P0-3 FIX: Auto-rejoin on screen focus when returning from a tab switch.
   // On tab switch, expo-router unmounts this screen. On return, isJoined resets
@@ -3894,7 +3927,10 @@ export default function VoiceRoomScreen() {
               const roleColor = p.role === 'HOST' ? '#f59e0b' : p.role === 'MODERATOR' ? '#10b981' : p.role === 'SPEAKER' ? '#6366f1' : '#6b7280';
               return (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#1e1e3a', borderRadius: 12, padding: 10 }}>
-                  <Image source={{ uri: avatarUrl(p.avatar, p.name) }} style={{ width: 36, height: 36, borderRadius: 18 }} />
+                  {isLowData
+                    ? <View style={[styles.avatarPlaceholder, { width: 36, height: 36, borderRadius: 18 }]}><Text style={styles.avatarInitials}>{getInitials(p.name)}</Text></View>
+                    : <Image source={{ uri: avatarUrl(p.avatar, p.name) }} style={{ width: 36, height: 36, borderRadius: 18 }} />
+                  }
                   <View style={{ flex: 1 }}>
                     <Text style={{ color: '#e5e7eb', fontSize: 14, fontWeight: '600' }}>{p.name}{isMe ? ' (you)' : ''}</Text>
                     <Text style={{ color: roleColor, fontSize: 11, fontWeight: '700' }}>{p.role}{p.handRaised ? ' · ✋' : ''}</Text>
@@ -4516,6 +4552,9 @@ const styles = StyleSheet.create({
   tileSpeaking:     { borderWidth: 2, borderColor: '#4f46e5' },
   tileAvatarWrap:   { position: 'relative', marginBottom: 6 },
   tileAvatar:       { width: 52, height: 52, borderRadius: 26, backgroundColor: '#374151' },
+  // Low-data mode: initials placeholder replaces avatar Image to save bandwidth
+  avatarPlaceholder:{ alignItems: 'center', justifyContent: 'center', backgroundColor: '#374151' },
+  avatarInitials:   { color: '#e5e7eb', fontSize: 16, fontWeight: '700' },
   speakingRing:     { position: 'absolute', top: -4, left: -4, right: -4, bottom: -4, borderRadius: 30, borderWidth: 2, borderColor: '#4f46e5' },
   handBadge:        { position: 'absolute', bottom: -4, right: -4, backgroundColor: '#fff', borderRadius: 8, padding: 2 },
   tileName:         { color: '#e5e7eb', fontSize: 11, fontWeight: '600', textAlign: 'center' },
