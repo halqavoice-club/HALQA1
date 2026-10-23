@@ -2158,7 +2158,7 @@ export default function VoiceRoomScreen() {
               shouldDuckAndroid: false,
               playThroughEarpieceAndroid: false,
             });
-          } catch { /* non-fatal — Expo Go / Android ignores unsupported keys */ }
+          } catch { /* audio-mode setup failed — Expo Go / Android ignores unsupported keys */ }
           await lk.connect(livekitUrl, lkToken, true /* start muted */, id, tokenFetcher);
         }
       } catch { /* non-fatal — audio not available in Expo Go */ }
