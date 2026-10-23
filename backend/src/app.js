@@ -147,6 +147,15 @@ const io = new Server(httpServer, {
   perMessageDeflate: {
     threshold: 1024,
   },
+  // LB-CHANGE-002: Tuned ping settings for high-latency rural/mobile links.
+  // Default pingTimeout (20 000 ms) is too tight for 200–500 ms RTT rural 3G —
+  // a single delayed ping can trigger a false disconnect and force a reconnect.
+  // pingTimeout: 60 000 — gives 60 s for a pong response before declaring dead.
+  // pingInterval: 25 000 — unchanged from Socket.IO default; 25 s keepalive is
+  // appropriate and avoids excessive keepalive traffic on metered connections.
+  // Total zombie-detection window: 85 s (was 45 s).
+  pingTimeout:  60000,
+  pingInterval: 25000,
 });
 
 // Make io globally available for controllers

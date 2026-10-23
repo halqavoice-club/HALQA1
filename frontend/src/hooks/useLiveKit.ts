@@ -21,16 +21,20 @@ import {
   RemoteParticipant,
   RemoteTrackPublication,
   ConnectionState,
+  ConnectionQuality,
   DisconnectReason,
   type RemoteAudioTrack,
 } from 'livekit-client'
 import api from '@/lib/api'
 import { useVoiceStore } from '@/store/voice.store'
 import { getSocket } from '@/lib/socket'
+import { useNetworkQuality, qualityToAudioBitrate } from '@/hooks/useNetworkQuality'
 
 export interface LiveKitState {
   room: Room | null
   connectionState: ConnectionState
+  // LB-P1-1: self connection quality from LiveKit RoomEvent.ConnectionQualityChanged
+  connectionQuality: ConnectionQuality
   isMicEnabled: boolean
   activeSpeakers: Set<string>
   connect: () => Promise<void>
@@ -90,15 +94,19 @@ function detachAllAudio() {
 export function useLiveKit(roomId: string | null): LiveKitState {
   const { setSpeaking } = useVoiceStore()
 
+  // LB-CHANGE-001: network quality drives audio bitrate adaptation (mirrors mobile Phase 2)
+  const { quality } = useNetworkQuality()
+
   const roomRef           = useRef<Room | null>(null)
   const reconnectTimer    = useRef<ReturnType<typeof setTimeout> | null>(null)
   const reconnectAttempts = useRef(0)
   const isUnmounted       = useRef(false)
   const isConnecting      = useRef(false)
 
-  const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Disconnected)
-  const [isMicEnabled, setIsMicEnabled]       = useState(false)
-  const [activeSpeakers, setActiveSpeakers]   = useState<Set<string>>(new Set())
+  const [connectionState,   setConnectionState]   = useState<ConnectionState>(ConnectionState.Disconnected)
+  const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>(ConnectionQuality.Unknown)
+  const [isMicEnabled, setIsMicEnabled]           = useState(false)
+  const [activeSpeakers, setActiveSpeakers]       = useState<Set<string>>(new Set())
   const activeSpeakersRef = useRef<Set<string>>(new Set())
 
   const clearReconnectTimer = useCallback(() => {
@@ -178,6 +186,17 @@ export function useLiveKit(roomId: string | null): LiveKitState {
         if (state === ConnectionState.Connected) {
           reconnectAttempts.current = 0
           clearReconnectTimer()
+        }
+      })
+
+      // LB-P1-3: track local participant's connection quality from the SFU.
+      // Used by VoiceRoomView to show a minimal quality indicator in the header.
+      room.on(RoomEvent.ConnectionQualityChanged, (qual: ConnectionQuality, participant) => {
+        if (isUnmounted.current) return
+        // Only track our own quality (local participant identity may not be set yet at
+        // subscribe time, so also accept when participant matches the local participant)
+        if (participant === room.localParticipant) {
+          setConnectionQuality(qual)
         }
       })
 
@@ -363,6 +382,24 @@ export function useLiveKit(roomId: string | null): LiveKitState {
     setIsMicEnabled(next)
   }, [])
 
+  // ── LB-CHANGE-001: Adaptive audio bitrate based on network quality ────────
+  // Mirrors mobile useLiveKitAudio.ts Phase 2 pattern.
+  // When the measured network quality changes and the room is connected, update
+  // the local participant's audio publish bitrate to the appropriate tier.
+  // qualityToAudioBitrate: excellent=96k, good=64k, fair=32k, poor/offline=16k.
+  // setTrackPublishDefaults is non-destructive — updates future publish settings
+  // without affecting established tracks or subscribers. If the room is not yet
+  // connected, this is a no-op (the initial connect() already uses 96k and the
+  // effect will fire again when quality changes while connected).
+  useEffect(() => {
+    const room = roomRef.current
+    if (!room || room.state !== ConnectionState.Connected) return
+    const newBitrate = qualityToAudioBitrate(quality)
+    room.localParticipant.setTrackPublishDefaults({
+      audioPreset: { maxBitrate: newBitrate },
+    })
+  }, [quality]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Volume control ─────────────────────────────────────────────────────────
   useEffect(() => {
     const handler = (e: Event) => {
@@ -448,6 +485,7 @@ export function useLiveKit(roomId: string | null): LiveKitState {
   return {
     room: roomRef.current,
     connectionState,
+    connectionQuality,
     isMicEnabled,
     activeSpeakers,
     connect,

@@ -12,7 +12,7 @@ import { useThemeStore } from '@/store/theme.store'
 import { getAvatarUrl, getFileUrl } from '@/lib/avatar'
 import api from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { ConnectionState } from 'livekit-client'
+import { ConnectionState, ConnectionQuality } from 'livekit-client'
 import './voice-room.css'
 import './voice-room-dark.css'
 import './mic-emoji.css'
@@ -370,6 +370,7 @@ export function VoiceRoomView({ onLeave }: Props) {
 
   const {
     connectionState,
+    connectionQuality,
     isMicEnabled,
     activeSpeakers,
     connect,
@@ -389,6 +390,9 @@ export function VoiceRoomView({ onLeave }: Props) {
   const [volume, setVolume] = useState(100)
 
   // Phase 1+9: Network quality -> Low Data Mode auto-toggle
+  // Note: useNetworkQuality() is now also called inside useLiveKit (for bitrate
+  // adaptation). The two calls are independent — React deduplicates event
+  // listeners within the same component tree via the hook's own effect cleanup.
   const netQuality     = useNetworkQuality()
   const { setAutoEnabled } = useLowDataMode()
   const isLowData      = useLowData()
@@ -1132,6 +1136,19 @@ export function VoiceRoomView({ onLeave }: Props) {
         <div className="vc-header-right">
           {isDisconnected && !micError && (
             <button className="vc-reconnect-btn" onClick={() => connect()} title="Reconnect audio" aria-label="Reconnect audio">🔄</button>
+          )}
+          {/* LB-P1-3: minimal connection quality indicator — only shown while connected
+              and when quality is degraded (poor/lost). Non-intrusive: hidden on good/excellent. */}
+          {isConnected && (connectionQuality === ConnectionQuality.Poor || connectionQuality === ConnectionQuality.Lost) && (
+            <span
+              className="vc-conn-quality-warn"
+              title={connectionQuality === ConnectionQuality.Lost ? 'Connection lost' : 'Poor connection — audio may be degraded'}
+              aria-label={connectionQuality === ConnectionQuality.Lost ? 'Connection lost' : 'Poor connection'}
+              role="status"
+              style={{ fontSize: 13, lineHeight: 1, cursor: 'default', flexShrink: 0 }}
+            >
+              {connectionQuality === ConnectionQuality.Lost ? '❌' : '⚠️'}
+            </span>
           )}
           <span className={cn(
             'vc-conn-dot',
