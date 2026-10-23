@@ -3,6 +3,7 @@
 import { create } from 'zustand'
 import { persist, createJSONStorage } from 'zustand/middleware'
 import api from '@/lib/api'
+import { updateSocketToken } from '@/lib/socket'
 
 // Lazy import to avoid circular dependency — queryClient is set up in providers.tsx
 // We use a getter so the import resolves at call time, not module load time.
@@ -175,10 +176,7 @@ export const useAuthStore = create<AuthState>()(
           // FE-001: new token goes to memory only
           setMemoryToken(accessToken)
           // FE-010: keep socket auth token in sync so reconnections use fresh token
-          try {
-            const { updateSocketToken } = require('@/lib/socket')
-            updateSocketToken(accessToken)
-          } catch {}
+          updateSocketToken(accessToken)
         } catch {
           setMemoryToken(null)
           set({ user: null, isAuthenticated: false })
@@ -199,10 +197,7 @@ export const useAuthStore = create<AuthState>()(
         // FE-001: keep token out of Zustand state — store in memory only
         setMemoryToken(token)
         // FE-010: keep socket auth token in sync
-        try {
-          const { updateSocketToken } = require('@/lib/socket')
-          updateSocketToken(token)
-        } catch {}
+        updateSocketToken(token)
       }
     }),
     {

@@ -159,8 +159,24 @@ function createRedisClient(name) {
       logger.error(`[redis:${name}] ❌ ${err.message}`);
     }
   });
-  client.on('close',        ()    => logger.warn(`[redis:${name}] 🔌 Connection closed`));
-  client.on('end',          ()    => logger.warn(`[redis:${name}] 🛑 No more retries`));
+  client.on('close', () => logger.warn(`[redis:${name}] 🔌 Connection closed`));
+  client.once('end', () => {
+    // ioredis emits 'end' when retryStrategy returns null (maxAttempts exhausted).
+    // The client is now permanently disconnected. Log as error (not warn) because
+    // this is fatal for production — all cache reads/writes will throw immediately
+    // (enableOfflineQueue:false). Null out the module-level reference so getRedis()
+    // throws a clear "not connected" error rather than silently returning a dead client.
+    logger.error(
+      `[redis:${name}] FATAL: Connection permanently closed after exhausting retries. ` +
+      'Restart the process to reconnect.'
+    );
+    if (name === 'cache') {
+      cacheClient = null;
+    }
+    if (process.env.NODE_ENV === 'production') {
+      process.exit(1);
+    }
+  });
 
   return client;
 }
@@ -403,14 +419,17 @@ async function disconnectRedis() {
   // Then stop the timer to prevent future callbacks
   stopRedisPing();
 
-  // Set cacheClient to null as additional guard
-  cacheClient = null;
-
-  for (const [name, client] of [
+  // Capture all 3 client references BEFORE nulling any of them.
+  // Nulling cacheClient before the loop causes the ['cache', cacheClient] tuple
+  // to capture null, leaving the ioredis instance unclosed (DISC-001).
+  const toClose = [
     ['pub',   pubClient],
     ['sub',   subClient],
     ['cache', cacheClient],
-  ]) {
+  ];
+  pubClient = subClient = cacheClient = null;
+
+  for (const [name, client] of toClose) {
     if (client) {
       try {
         await client.quit();
@@ -420,7 +439,6 @@ async function disconnectRedis() {
       }
     }
   }
-  pubClient = subClient = null;
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────────

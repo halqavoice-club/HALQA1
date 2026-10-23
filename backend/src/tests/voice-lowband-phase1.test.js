@@ -54,53 +54,37 @@ describe('CHANGE-001 (VCLUB-LB-002/022) — useLiveKit.ts imports network qualit
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 2. CHANGE-001 — useLiveKit.ts calls setTrackPublishDefaults on quality change
+// 2. CHANGE-001 — useLiveKit.ts adapts audio bitrate via RTCRtpSender (FEAT-002)
+//
+//    FEAT-002 replaced the broken setTrackPublishDefaults() call (which does not
+//    exist in livekit-client 2.5.4) with RTCRtpSender.setParameters(), accessed
+//    via the LocalTrack.sender getter that IS present in 2.5.4.  These tests
+//    verify the new (correct) implementation; the old setTrackPublishDefaults
+//    tests are removed because that API is intentionally gone.
 // ═══════════════════════════════════════════════════════════════════════════════
 describe('CHANGE-001 (VCLUB-LB-002/022) — useLiveKit.ts adapts audio bitrate on quality change', () => {
-  test('useLiveKit.ts calls setTrackPublishDefaults with audioPreset wrapped in try-catch', () => {
-    // R-002 FIX: verify the call is present AND that it is guarded by a try-catch,
-    // so a TypeError from the missing method in livekit-client 2.5.4 cannot
-    // propagate and unmount the voice room UI.
-    expect(livekitSrc).toMatch(/setTrackPublishDefaults/);
-    expect(livekitSrc).toMatch(/audioPreset/);
-    expect(livekitSrc).toMatch(/maxBitrate/);
-    // The setTrackPublishDefaults call must be inside a try block.
-    // Search for the actual runtime call (localParticipant.setTrackPublishDefaults)
-    // rather than indexOf('setTrackPublishDefaults') which would match the comment first.
-    const callIdx = livekitSrc.indexOf('localParticipant.setTrackPublishDefaults');
-    expect(callIdx).toBeGreaterThan(-1);
-    // Look backwards up to 400 chars from the call site for the opening 'try {'
-    const before = livekitSrc.slice(Math.max(0, callIdx - 400), callIdx);
-    expect(before).toMatch(/try\s*\{/);
-    // There must be a matching catch block with a warn log
-    expect(livekitSrc).toMatch(/catch\s*\(e\)/);
-    expect(livekitSrc).toMatch(/console\.warn.*setTrackPublishDefaults/);
+  test('useLiveKit.ts does NOT call setTrackPublishDefaults (FEAT-002: broken API removed)', () => {
+    // setTrackPublishDefaults does not exist in livekit-client 2.5.4 and was
+    // replaced by RTCRtpSender.setParameters() in FEAT-002.
+    expect(livekitSrc).not.toMatch(/localParticipant\.setTrackPublishDefaults/);
   });
 
-  // R-002: SDK compatibility check — documents that setTrackPublishDefaults is
-  // absent from livekit-client 2.5.4. This test is EXPECTED TO FAIL until the
-  // SDK is upgraded to ≥ 2.8. When it passes, the try-catch in useLiveKit.ts
-  // can be removed and this test documents the resolved limitation.
-  test('KNOWN LIMITATION: setTrackPublishDefaults is absent from installed livekit-client 2.5.4 (upgrade SDK to ≥ 2.8 to fix)', () => {
-    let LocalParticipant;
-    try {
-      ({ LocalParticipant } = require('livekit-client'));
-    } catch (e) {
-      // livekit-client is a frontend package — may not be resolvable from backend tests.
-      // Skip if not resolvable rather than failing the suite.
-      return;
-    }
-    if (!LocalParticipant) return;
-    // This assertion FAILS on 2.5.4 (method absent) and PASSES on ≥ 2.8.
-    // When it passes, remove the try-catch in useLiveKit.ts and delete this comment.
-    const methodExists = typeof LocalParticipant.prototype.setTrackPublishDefaults === 'function';
-    if (!methodExists) {
-      // Document the known limitation without failing the suite — the try-catch handles it.
-      console.warn('[voice-lowband-phase1] KNOWN LIMITATION: LocalParticipant.prototype.setTrackPublishDefaults is absent from livekit-client 2.5.4. Upgrade to ≥ 2.8 to enable full in-session bitrate adaptation.');
-    }
-    // Do not assert methodExists === true here — that would break the CI until the SDK upgrade.
-    // The purpose of this test is to be a visible marker, not a gate.
-    expect(typeof methodExists).toBe('boolean'); // always passes; documents the check exists
+  test('useLiveKit.ts uses RTCRtpSender.setParameters() for bitrate adaptation (FEAT-002)', () => {
+    // The new implementation reads sender.getParameters(), mutates maxBitrate,
+    // and calls sender.setParameters() — all on the LocalTrack.sender getter.
+    expect(livekitSrc).toMatch(/sender\.getParameters\(\)/);
+    expect(livekitSrc).toMatch(/sender\.setParameters\(/);
+    expect(livekitSrc).toMatch(/maxBitrate/);
+  });
+
+  test('useLiveKit.ts guards RTCRtpSender path: returns silently if sender is null/undefined', () => {
+    // Guard: if (!sender) return  — no throw, no console.error
+    expect(livekitSrc).toMatch(/if\s*\(!\s*sender\)\s*return/);
+  });
+
+  test('useLiveKit.ts iterates audioTrackPublications to find the mic publication', () => {
+    // The new implementation iterates the Map to find Track.Source.Microphone
+    expect(livekitSrc).toMatch(/audioTrackPublications/);
   });
 
   test('useLiveKit.ts calls qualityToAudioBitrate(quality) to compute the new bitrate', () => {
