@@ -40,7 +40,9 @@ describe('FIX-P2A — AppState foreground handler re-joins on 403 or user absenc
 
   test('AppState active handler checks for 403 status and calls api.post join', () => {
     // The handler must POST /join when it catches a 403 from the stage-state GET.
-    const appStateIdx = mobileSrc.indexOf('appStateRef');
+    // Anchor on AppState.addEventListener (not appStateRef — appStateRef was moved
+    // earlier in the file as part of R-003 fix so indexOf would find the wrong position).
+    const appStateIdx = mobileSrc.indexOf('AppState.addEventListener');
     expect(appStateIdx).toBeGreaterThan(-1);
     // Look within a 3000 char window covering the whole AppState useEffect
     const handlerSnippet = mobileSrc.slice(appStateIdx, appStateIdx + 3000);
@@ -49,7 +51,8 @@ describe('FIX-P2A — AppState foreground handler re-joins on 403 or user absenc
   });
 
   test('AppState active handler checks for user absence in stageParticipants and calls api.post join', () => {
-    const appStateIdx = mobileSrc.indexOf('appStateRef');
+    // Anchor on AppState.addEventListener for the same reason as above.
+    const appStateIdx = mobileSrc.indexOf('AppState.addEventListener');
     const handlerSnippet = mobileSrc.slice(appStateIdx, appStateIdx + 3000);
     // Must check whether the user's own userId appears in stageParticipants
     expect(handlerSnippet).toMatch(/stageParticipants/);
@@ -57,7 +60,8 @@ describe('FIX-P2A — AppState foreground handler re-joins on 403 or user absenc
   });
 
   test('AppState active handler does NOT call handleJoin (avoids full-rejoin side effects)', () => {
-    const appStateIdx = mobileSrc.indexOf('appStateRef');
+    // Anchor on AppState.addEventListener for the same reason as above.
+    const appStateIdx = mobileSrc.indexOf('AppState.addEventListener');
     const handlerSnippet = mobileSrc.slice(appStateIdx, appStateIdx + 3000);
     // Calling handleJoin would re-run LiveKit setup, full state hydration, etc.
     // The fix must only POST /join + re-fetch stage-state, not the full flow.

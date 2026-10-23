@@ -1083,6 +1083,11 @@ export default function VoiceRoomScreen() {
   // F-006b: guards voice:leave_room cleanup so it only fires on intentional leave or room change
   const intentionalLeaveRef = useRef(false)
   const prevRoomIdRef = useRef<string | null>(null)
+  // R-003 FIX: AppState ref used to gate the 30s authoritative poll — prevents
+  // background data/battery drain on rural metered connections. Declared here
+  // (before the poll effect at ~line 1284) so it is in scope for the poll guard.
+  // Also referenced by the AppState change handler further below.
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState)
   // G2 FIX: emitJoinRoomAck wraps socket.emit('voice:join_room') with an ack
   // callback so the client can detect refused/rate-limited joins and retry
   // instead of silently going deaf to all room events.
@@ -1283,6 +1288,7 @@ export default function VoiceRoomScreen() {
     if (!id) return;
     const interval = setInterval(() => {
       if (!hasJoinedRef.current) return; // only poll once HTTP join has completed
+      if (appStateRef.current !== 'active') return; // R-003 FIX: skip poll when app is backgrounded
       api.get(`/voice/${id}/stage-state`)
         .then((r: any) => {
           const data = r.data?.data;
@@ -2231,7 +2237,8 @@ export default function VoiceRoomScreen() {
   // worker while backgrounded), silently re-POST /join before re-fetching state.
   // Only the minimal re-join is performed here — no LiveKit reconnect, no full
   // handleJoin flow — so the UI does not flicker.
-  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  // (appStateRef is declared above near the other refs so it is also available
+  //  for the 30s poll AppState gate — no second declaration needed here.)
   useEffect(() => {
     const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
       const prev = appStateRef.current;

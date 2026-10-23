@@ -387,17 +387,27 @@ export function useLiveKit(roomId: string | null): LiveKitState {
   // When the measured network quality changes and the room is connected, update
   // the local participant's audio publish bitrate to the appropriate tier.
   // qualityToAudioBitrate: excellent=96k, good=64k, fair=32k, poor/offline=16k.
-  // setTrackPublishDefaults is non-destructive — updates future publish settings
-  // without affecting established tracks or subscribers. If the room is not yet
-  // connected, this is a no-op (the initial connect() already uses 96k and the
-  // effect will fire again when quality changes while connected).
+  //
+  // NOTE: setTrackPublishDefaults was introduced in livekit-client ≥ 2.8.
+  // The installed version (2.5.4) does not have this method. The try-catch
+  // below prevents a TypeError from propagating and unmounting the voice room.
+  // Bitrate adaptation is best-effort on 2.5.4 — the ConnectionQualityChanged
+  // indicator and all other low-bandwidth features are unaffected.
+  // Upgrade to livekit-client ≥ 2.8 to enable full in-session bitrate adaptation.
   useEffect(() => {
     const room = roomRef.current
     if (!room || room.state !== ConnectionState.Connected) return
     const newBitrate = qualityToAudioBitrate(quality)
-    room.localParticipant.setTrackPublishDefaults({
-      audioPreset: { maxBitrate: newBitrate },
-    })
+    try {
+      room.localParticipant.setTrackPublishDefaults({
+        audioPreset: { maxBitrate: newBitrate },
+      })
+    } catch (e) {
+      // setTrackPublishDefaults is not available in livekit-client 2.5.4.
+      // Log a warning so the incompatibility is visible; do not throw.
+      // Upgrade to livekit-client ≥ 2.8 to enable full in-session bitrate adaptation.
+      console.warn('[useLiveKit] setTrackPublishDefaults unavailable (requires livekit-client ≥ 2.8):', e)
+    }
   }, [quality]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Volume control ─────────────────────────────────────────────────────────
