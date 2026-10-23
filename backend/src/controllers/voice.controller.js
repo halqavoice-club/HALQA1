@@ -971,6 +971,14 @@ async function leaveRoom(req, res, next) {
       }
     }
 
+    // VCLUB-LB-026 FIX: Evict user from LiveKit SFU on voluntary leave.
+    // Without this, a user who leaves voluntarily keeps a valid SFU connection
+    // for up to 1 h (token TTL), causing DB/SFU state divergence. Fire-and-forget
+    // so the leave HTTP response is never delayed by an SFU call failure.
+    sfuEvict(roomId, userId, '[voice:leave]').catch(err => {
+      logger.warn(`[voice:leave] sfuEvict failed: ${err?.message || err}`);
+    });
+
     // FIX-L005: invalidateRoomCache and socket emits are in a try/finally so
     // voice:user_left always fires even if invalidateRoomCache or subsequent
     // operations throw.

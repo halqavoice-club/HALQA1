@@ -511,3 +511,91 @@ describe('P0-4 — voiceQueue.requeue() uses original raisedAt score (not Date.n
     expect(requeueFn).toMatch(/userMeta\.raisedAt\s*\?/);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VCLUB-LB-026 — sfuEvict called on voluntary leaveRoom
+//
+// When a user voluntarily leaves a voice room the backend must terminate their
+// LiveKit SFU connection. Without this, the user's 1-hour token allows them to
+// remain connected to the SFU even though they are inactive in the DB.
+//
+// Strategy: source-grep against voice.controller.js (same pattern as the rest
+// of this suite). No running server required.
+// ═══════════════════════════════════════════════════════════════════════════════
+describe('VCLUB-LB-026 — sfuEvict is called on voluntary leaveRoom', () => {
+
+  // Extract the leaveRoom function body from the controller source
+  function getLeaveRoomBody() {
+    const start = voiceCtrlSrc.indexOf('async function leaveRoom');
+    expect(start).toBeGreaterThan(-1);
+    // The next top-level async function after leaveRoom is endRoom
+    const next = voiceCtrlSrc.indexOf('\nasync function ', start + 1);
+    return next > start ? voiceCtrlSrc.slice(start, next) : voiceCtrlSrc.slice(start);
+  }
+
+  test('leaveRoom body contains sfuEvict call (VCLUB-LB-026)', () => {
+    const body = getLeaveRoomBody();
+    expect(body).toMatch(/sfuEvict\s*\(/);
+  });
+
+  test('sfuEvict is called with roomId, userId, and [voice:leave] tag', () => {
+    const body = getLeaveRoomBody();
+    // Must pass the correct positional arguments
+    expect(body).toMatch(/sfuEvict\s*\(\s*roomId\s*,\s*userId\s*,\s*'\[voice:leave\]'\s*\)/);
+  });
+
+  test('sfuEvict call is fire-and-forget (uses .catch, does not await)', () => {
+    const body = getLeaveRoomBody();
+    // Must NOT be awaited — fire-and-forget so leave response is never blocked
+    const awaitedIdx = body.indexOf('await sfuEvict');
+    expect(awaitedIdx).toBe(-1);
+    // Must chain .catch() for non-fatal error handling
+    expect(body).toMatch(/sfuEvict\s*\(.*\)\.catch\s*\(/);
+  });
+
+  test('sfuEvict failure does not suppress the leave response (catch logs only)', () => {
+    const body = getLeaveRoomBody();
+    // The .catch handler must contain a logger.warn call (not rethrow, not return error)
+    const catchIdx = body.indexOf("sfuEvict(roomId, userId, '[voice:leave]').catch");
+    expect(catchIdx).toBeGreaterThan(-1);
+    const catchBlock = body.slice(catchIdx, catchIdx + 200);
+    expect(catchBlock).toMatch(/logger\.warn/);
+  });
+
+  test('sfuEvict call is placed BEFORE the invalidateRoomCache/socket-emit block', () => {
+    const body = getLeaveRoomBody();
+    const sfuIdx          = body.indexOf("sfuEvict(roomId, userId, '[voice:leave]')");
+    const invalidateIdx   = body.indexOf('invalidateRoomCache');
+    // Search for the actual emit call, not the comment that mentions voice:user_left
+    const userLeftIdx     = body.indexOf("emit('voice:user_left'");
+    expect(sfuIdx).toBeGreaterThan(-1);
+    expect(invalidateIdx).toBeGreaterThan(-1);
+    expect(userLeftIdx).toBeGreaterThan(-1);
+    // sfuEvict must appear before both invalidateRoomCache and the socket emit
+    expect(sfuIdx).toBeLessThan(invalidateIdx);
+    expect(sfuIdx).toBeLessThan(userLeftIdx);
+  });
+
+  test('sfuEvict call is placed AFTER the prisma.voiceParticipant.update (DB write)', () => {
+    const body = getLeaveRoomBody();
+    const dbUpdateIdx = body.indexOf('prisma.voiceParticipant.update');
+    const sfuIdx      = body.indexOf("sfuEvict(roomId, userId, '[voice:leave]')");
+    expect(dbUpdateIdx).toBeGreaterThan(-1);
+    expect(sfuIdx).toBeGreaterThan(-1);
+    // sfuEvict must come after the DB update — SFU state follows DB truth
+    expect(sfuIdx).toBeGreaterThan(dbUpdateIdx);
+  });
+
+  test('sfuEvict is imported from livekitService (VCLUB-LB-026 uses existing import)', () => {
+    // sfuEvict must be imported at the top of the file — no new import needed
+    expect(voiceCtrlSrc).toMatch(/require\s*\(\s*['"]\.\.\/utils\/livekitService['"]\s*\)/);
+    // The destructuring must include sfuEvict
+    const requireIdx = voiceCtrlSrc.indexOf("require('../utils/livekitService')");
+    expect(requireIdx).toBeGreaterThan(-1);
+    const requireLine = voiceCtrlSrc.slice(
+      voiceCtrlSrc.lastIndexOf('\n', requireIdx) + 1,
+      voiceCtrlSrc.indexOf('\n', requireIdx)
+    );
+    expect(requireLine).toMatch(/sfuEvict/);
+  });
+});
