@@ -43,7 +43,7 @@ function generateDeviceFingerprint(req) {
  *   - maxPerUser: Maximum requests per user across all devices (default: 500)
  *   - message: Custom error message
  */
-function createDeviceRateLimiter(options = {}) {
+function normalizeDeviceLimiterOptions(options = {}) {
   const {
     windowMs = 15 * 60 * 1000, // 15 minutes
     max = isDev ? 10000 : 100,
@@ -52,9 +52,12 @@ function createDeviceRateLimiter(options = {}) {
     skipIfAuthenticated = false
   } = options;
 
-  // Redis-based rate limiter
-  if (isRedisReady()) {
-    return async (req, res, next) => {
+  return { windowMs, max, maxPerUser, message, skipIfAuthenticated };
+}
+
+function createRedisDeviceRateLimiter(config) {
+  const { windowMs, max, maxPerUser, message, skipIfAuthenticated } = config;
+  return async (req, res, next) => {
       try {
         const deviceFingerprint = generateDeviceFingerprint(req);
         const userId = req.user?.id;
@@ -118,11 +121,11 @@ function createDeviceRateLimiter(options = {}) {
         // On Redis error, allow request to proceed (fail-open)
         next();
       }
-    };
-  }
+  };
+}
 
-  // Fallback to in-memory rate limiter
-  logger.warn('[deviceRateLimiter] Redis unavailable, using in-memory limiter');
+function createMemoryDeviceRateLimiter(config) {
+  const { windowMs, max, message } = config;
   return rateLimit({
     windowMs,
     max,
@@ -133,60 +136,65 @@ function createDeviceRateLimiter(options = {}) {
   });
 }
 
+function createDeviceRateLimiter(options = {}) {
+  const config = normalizeDeviceLimiterOptions(options);
+  if (isRedisReady()) return createRedisDeviceRateLimiter(config);
+
+  logger.warn('[deviceRateLimiter] Redis unavailable, using in-memory limiter');
+  return createMemoryDeviceRateLimiter(config);
+}
+
+function createCachedDeviceRateLimiter(name, options) {
+  const config = normalizeDeviceLimiterOptions(options);
+  const memoryLimiter = createMemoryDeviceRateLimiter(config);
+  let selectedLimiter = null;
+
+  return (req, res, next) => {
+    if (!selectedLimiter) {
+      logger.debug(`[deviceRateLimiter] Lazy-initializing ${name} instance`);
+      if (isRedisReady()) {
+        selectedLimiter = createRedisDeviceRateLimiter(config);
+      } else {
+        logger.warn('[deviceRateLimiter] Redis unavailable, using in-memory limiter');
+        selectedLimiter = memoryLimiter;
+      }
+    }
+    return selectedLimiter(req, res, next);
+  };
+}
+
 /**
  * Pre-configured device rate limiters.
  *
- * Each export is a lazy-proxy middleware function. The real limiter instance
- * is created on the first HTTP request (not at module-load time), ensuring
- * that isRedisReady() is evaluated after connectRedis() has resolved.
+ * Each export pre-constructs its independent in-memory store, then selects and
+ * caches Redis or memory on the first request. This preserves first-request
+ * backend selection without constructing express-rate-limit during a request.
  */
 
-let _strictDeviceLimiter = null;
-let _moderateDeviceLimiter = null;
-let _lenientDeviceLimiter = null;
-
 // Strict device limiter for sensitive operations
-const strictDeviceLimiter = (req, res, next) => {
-  if (!_strictDeviceLimiter) {
-    logger.debug('[deviceRateLimiter] Lazy-initializing strictDeviceLimiter instance');
-    _strictDeviceLimiter = createDeviceRateLimiter({
+const strictDeviceLimiter = createCachedDeviceRateLimiter('strictDeviceLimiter', {
       windowMs: 15 * 60 * 1000,
       max: isDev ? 1000 : 3,
       maxPerUser: isDev ? 5000 : 10,
       message: 'Too many sensitive operations from this device'
-    });
-  }
-  return _strictDeviceLimiter(req, res, next);
-};
+});
 
 // Moderate device limiter for regular operations
-const moderateDeviceLimiter = (req, res, next) => {
-  if (!_moderateDeviceLimiter) {
-    logger.debug('[deviceRateLimiter] Lazy-initializing moderateDeviceLimiter instance');
-    _moderateDeviceLimiter = createDeviceRateLimiter({
+const moderateDeviceLimiter = createCachedDeviceRateLimiter('moderateDeviceLimiter', {
       windowMs: 15 * 60 * 1000,
       max: isDev ? 5000 : 50,
       maxPerUser: isDev ? 25000 : 200,
       message: 'Rate limit exceeded for this device'
-    });
-  }
-  return _moderateDeviceLimiter(req, res, next);
-};
+});
 
 // Lenient device limiter for read operations
-const lenientDeviceLimiter = (req, res, next) => {
-  if (!_lenientDeviceLimiter) {
-    logger.debug('[deviceRateLimiter] Lazy-initializing lenientDeviceLimiter instance');
-    _lenientDeviceLimiter = createDeviceRateLimiter({
+const lenientDeviceLimiter = createCachedDeviceRateLimiter('lenientDeviceLimiter', {
       windowMs: 15 * 60 * 1000,
       max: isDev ? 10000 : 200,
       maxPerUser: isDev ? 50000 : 1000,
       message: 'Too many read requests from this device',
       skipIfAuthenticated: true // Skip for authenticated users on read operations
-    });
-  }
-  return _lenientDeviceLimiter(req, res, next);
-};
+});
 
 module.exports = {
   createDeviceRateLimiter,

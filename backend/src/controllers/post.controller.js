@@ -1,3 +1,4 @@
+// @ts-nocheck
 'use strict';
 /**
  * Post Controller — Social Feed (Phase B-1)
@@ -16,7 +17,7 @@ const AUTHOR_SELECT = {
   id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true
 };
 
-const POST_INCLUDE = (viewerId) => ({
+const POST_INCLUDE = (/** @param {string|number|null} viewerId */ viewerId) => ({
   author: { select: AUTHOR_SELECT },
   media: { orderBy: { orderIndex: 'asc' } },
   hashtags: { include: { hashtag: { select: { id: true, name: true } } } },

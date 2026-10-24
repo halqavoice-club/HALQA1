@@ -44,7 +44,7 @@ jobs:
         working-directory: backend
 
       - name: Run unit tests (all unit tests, excluding integration)
-        run: npm run test:unit -- --ci --reporters=default
+        run: npm run test:unit
         working-directory: backend
         env:
           NODE_ENV: test
@@ -635,7 +635,7 @@ jobs:
       # G1 — Feed / Social
       - name: G1 -- Feed / Social
         if: contains(needs.classify.outputs.groups, 'G1')
-        run: npm run test:group:social -- --ci --reporters=default
+        run: npm run test:group:social
         working-directory: backend
         env:
           NODE_ENV: test
@@ -650,7 +650,7 @@ jobs:
       # G2 — Voice Club
       - name: G2 -- Voice Club
         if: contains(needs.classify.outputs.groups, 'G2')
-        run: npm run test:group:voice -- --ci --reporters=default
+        run: npm run test:group:voice
         working-directory: backend
         env:
           NODE_ENV: test
@@ -665,7 +665,7 @@ jobs:
       # G3 — School Live Classes
       - name: G3 -- School Live Classes
         if: contains(needs.classify.outputs.groups, 'G3')
-        run: npm run test:group:live-class -- --ci --reporters=default
+        run: npm run test:group:live-class
         working-directory: backend
         env:
           NODE_ENV: test
@@ -680,7 +680,7 @@ jobs:
       # G4 — Authentication / Authorization
       - name: G4 -- Auth / Authorization
         if: contains(needs.classify.outputs.groups, 'G4')
-        run: npm run test:group:auth -- --ci --reporters=default
+        run: npm run test:group:auth
         working-directory: backend
         env:
           NODE_ENV: test
@@ -695,7 +695,7 @@ jobs:
       # G5 — Shared Realtime
       - name: G5 -- Shared Realtime
         if: contains(needs.classify.outputs.groups, 'G5')
-        run: npm run test:group:realtime -- --ci --reporters=default
+        run: npm run test:group:realtime
         working-directory: backend
         env:
           NODE_ENV: test

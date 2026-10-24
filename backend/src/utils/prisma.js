@@ -144,13 +144,4 @@ if (IS_DEV) {
   });
 }
 
-// ─── Graceful shutdown ────────────────────────────────────────────────────────
-const shutdown = async () => {
-  await prisma.$disconnect();
-  logger.info('Prisma disconnected');
-};
-
-process.once('SIGINT',  shutdown);
-process.once('SIGTERM', shutdown);
-
 module.exports = prisma;

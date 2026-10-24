@@ -99,7 +99,6 @@ const health = require('./utils/health');
 const tracing = require('./utils/tracing');
 const alerting = require('./utils/alerting');
 const featureFlags = require('./utils/featureFlags');
-const leaderElection = require('./utils/leaderElection');
 const openapi = require('./utils/openapi');
 const graphqlServer = require('./graphql/server');
 
@@ -798,13 +797,10 @@ io.on('connection', (socket) => {
   socket.on('quiz:watch', async ({ quizId } = {}) => {
     if (!quizId || !userId) return;
     try {
-      const { PrismaClient } = require('@prisma/client');
-      const _prisma = new PrismaClient();
-      const quiz = await _prisma.quiz.findFirst({
+      const quiz = await prisma.quiz.findFirst({
         where: { id: quizId, deletedAt: null },
         select: { id: true, teacher: { select: { userId: true } }, status: true, classId: true, schoolId: true }
       });
-      await _prisma.$disconnect();
       if (!quiz) return;
 
       // ── Authorization ─────────────────────────────────────────────────────
@@ -849,12 +845,11 @@ io.on('connection', (socket) => {
       socket.join(`quiz:${quizId}`);
 
       // Emit current snapshot: submitted count + pending count
-      const _prisma2 = new PrismaClient();
       const [submitted, total] = await Promise.all([
-        _prisma2.quizAttempt.count({ where: { quizId, status: 'SUBMITTED' } }),
-        _prisma2.enrollment.count({ where: { classId: quiz.classId, status: 'ACTIVE', deletedAt: null } })
+        prisma.quizAttempt.count({ where: { quizId, status: 'SUBMITTED' } }),
+        prisma.enrollment.count({ where: { classId: quiz.classId, status: 'ACTIVE', deletedAt: null } })
       ]);
-      const submittedRows = await _prisma2.quizAttempt.findMany({
+      const submittedRows = await prisma.quizAttempt.findMany({
         where:   { quizId, status: 'SUBMITTED' },
         orderBy: { submittedAt: 'desc' },
         select: {
@@ -862,8 +857,6 @@ io.on('connection', (socket) => {
           student: { select: { user: { select: { firstName: true, lastName: true } } } }
         }
       });
-      await _prisma2.$disconnect();
-
       socket.emit('quiz:snapshot', {
         quizId,
         submitted: submittedRows.map(a => ({
@@ -1089,35 +1082,6 @@ io.on('connection', (socket) => {
     } catch {}
   });
 });
-
-// ─── Enterprise feature initialization ───────────────────────────────────────────
-// Initialize OpenTelemetry tracing (BE-004)
-tracing.initialize().catch(err => logger.warn('Failed to initialize tracing:', err.message));
-
-// Initialize feature flags
-featureFlags.initialize(featureFlags.defaultFlags).catch(err => logger.warn('Failed to initialize feature flags:', err.message));
-
-// Initialize SMS service (Twilio) — safe no-op when credentials not configured
-try {
-  const sms = require('./utils/sms');
-  sms.initialize();
-} catch (err) {
-  logger.warn('[startup] SMS initialization skipped:', err.message);
-}
-
-// Initialize Elasticsearch — only when ELASTICSEARCH_URL is set
-// Falls back to MySQL LIKE queries automatically when not configured
-if (process.env.ELASTICSEARCH_URL) {
-  const es = require('./utils/elasticsearch');
-  es.initialize().catch(err =>
-    logger.warn('[startup] Elasticsearch initialization failed (falling back to MySQL search):', err.message)
-  );
-} else {
-  logger.info('[startup] Elasticsearch not configured — using MySQL full-text search fallback');
-}
-
-// Initialize leader election (for clustering)
-leaderElection.initialize('halqa-backend').catch(err => logger.warn('Failed to initialize leader election:', err.message));
 
 // ─── Static file serving — local uploads (STORAGE_TYPE=local only) ───────────
 // In production with R2, files are served directly from Cloudflare CDN.
@@ -1428,8 +1392,42 @@ app.use((req, res) => {
 // ─── Server startup ───────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
 
-async function startServer() {
+let startupPromise = null;
+let memoryMonitorHandle = null;
+let staleOnlineCleanupHandle = null;
+let autoEndRecoveryHandle = null;
+let signalHandlersRegistered = false;
+
+function initializeOperationalServices() {
+  // Preserve the existing production initialization order while keeping module
+  // import limited to application construction.
+  tracing.initialize().catch(err => logger.warn('Failed to initialize tracing:', err.message));
+  featureFlags.initialize(featureFlags.defaultFlags).catch(err => logger.warn('Failed to initialize feature flags:', err.message));
+
   try {
+    const sms = require('./utils/sms');
+    sms.initialize();
+  } catch (err) {
+    logger.warn('[startup] SMS initialization skipped:', err.message);
+  }
+
+  if (process.env.ELASTICSEARCH_URL) {
+    const es = require('./utils/elasticsearch');
+    es.initialize().catch(err =>
+      logger.warn('[startup] Elasticsearch initialization failed (falling back to MySQL search):', err.message)
+    );
+  } else {
+    logger.info('[startup] Elasticsearch not configured — using MySQL full-text search fallback');
+  }
+
+  const leaderElection = require('./utils/leaderElection');
+  leaderElection.initialize('halqa-backend').catch(err => logger.warn('Failed to initialize leader election:', err.message));
+}
+
+async function startServerOnce() {
+  try {
+    initializeOperationalServices();
+
     // ── 1. Connect Redis (required — fail fast if unavailable in production) ──
     // Redis powers: cache, Socket.IO multi-server adapter, BullMQ queues
     let redisConnected = false;
@@ -1842,7 +1840,8 @@ async function startServer() {
         //
         // For multi-process / Kubernetes: move to a Redis-backed delayed queue
         // (BullMQ delayed job) to make the auto-end durable across pod restarts.
-        setImmediate(async () => {
+        autoEndRecoveryHandle = setImmediate(async () => {
+          autoEndRecoveryHandle = null;
           try {
             const { scheduleAutoEnd } = require('./controllers/live-class.controller');
             const now = new Date();
@@ -1877,7 +1876,7 @@ async function startServer() {
           global.gc();
           logger.info('[memory] Initial GC run completed after startup');
         }
-        setInterval(() => {
+        memoryMonitorHandle = setInterval(() => {
           const { heapUsed, heapTotal } = process.memoryUsage();
           const pct = Math.round((heapUsed / heapTotal) * 100);
           if (pct > 85) {
@@ -1885,6 +1884,12 @@ async function startServer() {
             if (global.gc) global.gc(); // nudge GC if available
           }
         }, 60_000); // check every minute
+
+        const { cleanupStaleOnline } = require('./controllers/room-member.controller');
+        staleOnlineCleanupHandle = setInterval(
+          () => { cleanupStaleOnline(); },
+          2 * 60 * 1000
+        );
 
         resolve();
       });
@@ -1896,17 +1901,50 @@ async function startServer() {
     } else {
       logger.error(`Fatal startup error: ${err.message}`);
     }
-    process.exit(1);
+    throw err;
   }
 }
 
-startServer();
+function startServer() {
+  if (!startupPromise) {
+    startupPromise = startServerOnce().catch((err) => {
+      startupPromise = null;
+      throw err;
+    });
+  }
+  return startupPromise;
+}
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────
-async function shutdown(signal) {
+function clearApplicationHandles() {
+  if (autoEndRecoveryHandle) {
+    clearImmediate(autoEndRecoveryHandle);
+    autoEndRecoveryHandle = null;
+  }
+  if (memoryMonitorHandle) {
+    clearInterval(memoryMonitorHandle);
+    memoryMonitorHandle = null;
+  }
+  if (staleOnlineCleanupHandle) {
+    clearInterval(staleOnlineCleanupHandle);
+    staleOnlineCleanupHandle = null;
+  }
+}
+
+async function shutdown(signal, { exitProcess = true } = {}) {
   logger.info(`${signal} received, shutting down gracefully`);
-  httpServer.close(async () => {
+  clearApplicationHandles();
+
+  const finishShutdown = async () => {
     try {
+      try {
+        const jobScheduler = require('./utils/jobScheduler');
+        jobScheduler.shutdown();
+      } catch {}
+      try {
+        const leaderElection = require('./utils/leaderElection');
+        await leaderElection.shutdown();
+      } catch {}
       await prisma.$disconnect();
       // Disconnect Redis if it was connected
       try {
@@ -1914,22 +1952,42 @@ async function shutdown(signal) {
         await disconnectRedis();
       } catch {}
       logger.info('Server shut down cleanly');
-      process.exit(0);
+      startupPromise = null;
+      if (exitProcess) process.exit(0);
     } catch (err) {
       logger.error(`Error during shutdown: ${err.message}`);
-      process.exit(1);
+      if (exitProcess) process.exit(1);
+      else throw err;
     }
+  };
+
+  if (!httpServer.listening) {
+    await finishShutdown();
+    return;
+  }
+
+  await new Promise((resolve, reject) => {
+    httpServer.close(() => {
+      finishShutdown().then(resolve, reject);
+    });
   });
 }
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT',  () => shutdown('SIGINT'));
+function registerSignalHandlers() {
+  if (signalHandlersRegistered) return;
+  signalHandlersRegistered = true;
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
+}
 
-// ── Voice Club: online status cleanup job ─────────────────────────────────────
-// Marks voice room members as isOnline=false when their heartbeat is >3 min stale.
-// Runs every 2 minutes. Non-fatal — errors are swallowed inside cleanupStaleOnline.
-const { cleanupStaleOnline } = require('./controllers/room-member.controller');
-setInterval(() => { cleanupStaleOnline(); }, 2 * 60 * 1000);
+if (require.main === module) {
+  registerSignalHandlers();
+  startServer().catch(() => {
+    process.exit(1);
+  });
+}
 
 module.exports = app;
-
+module.exports.startServer = startServer;
+module.exports.shutdown = shutdown;
+module.exports.clearApplicationHandles = clearApplicationHandles;

@@ -214,6 +214,7 @@ describe('Lazy-initialization behavior (proxy exports)', () => {
 
     const loggerModule = require('../utils/logger');
     const warnSpy = jest.spyOn(loggerModule, 'warn');
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     const { strictLimiter } = require('../middleware/rateLimiter.user');
     const app = express();
@@ -234,6 +235,7 @@ describe('Lazy-initialization behavior (proxy exports)', () => {
       (args) => typeof args[0] === 'string' && args[0].includes('[userRateLimiter] Redis unavailable')
     );
     expect(warnsAfterRequest.length).toBeGreaterThanOrEqual(1);
+    expect(errorSpy.mock.calls.flat().join(' ')).not.toContain('ERR_ERL_CREATED_IN_REQUEST_HANDLER');
 
     jest.resetModules();
     jest.unmock('../utils/redis');
@@ -253,6 +255,7 @@ describe('Lazy-initialization behavior (proxy exports)', () => {
     app.use(express.json());
     app.get('/test', moderateLimiter, (_req, res) => res.json({ ok: true }));
 
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     const res = await request(app).get('/test')
       .set('X-User-Id', 'uid-redis')
       .set('authorization', 'Bearer fake');
@@ -269,8 +272,89 @@ describe('Lazy-initialization behavior (proxy exports)', () => {
         (args) => typeof args[0] === 'string' && args[0].includes('[userRateLimiter] Redis unavailable')
       )
     ).toHaveLength(0);
+    expect(errorSpy.mock.calls.flat().join(' ')).not.toContain('ERR_ERL_CREATED_IN_REQUEST_HANDLER');
 
     jest.resetModules();
     jest.unmock('../utils/redis');
+  });
+
+  test('caches the first-request memory selection without switching to Redis', async () => {
+    jest.resetModules();
+    const mockIsRedisReady = jest.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    const mockGetCache = jest.fn();
+    jest.doMock('../utils/redis', () => ({
+      isRedisReady: mockIsRedisReady,
+      getCache: mockGetCache,
+      setCache: jest.fn(),
+    }));
+
+    const { strictLimiter } = require('../middleware/rateLimiter.user');
+    const app = express();
+    app.get('/test', strictLimiter, (_req, res) => res.json({ ok: true }));
+
+    await request(app).get('/test');
+    await request(app).get('/test');
+
+    expect(mockIsRedisReady).toHaveBeenCalledTimes(1);
+    expect(mockGetCache).not.toHaveBeenCalled();
+    jest.resetModules();
+    jest.unmock('../utils/redis');
+  });
+
+  test('preserves Redis key format and fail-open behavior', async () => {
+    jest.resetModules();
+    const mockGetCache = jest.fn().mockRejectedValue(new Error('redis unavailable'));
+    jest.doMock('../utils/redis', () => ({
+      isRedisReady: jest.fn().mockReturnValue(true),
+      getCache: mockGetCache,
+      setCache: jest.fn(),
+    }));
+
+    const { strictLimiter } = require('../middleware/rateLimiter.user');
+    const app = express();
+    app.use((req, _res, next) => { req.user = { id: 'user-redis-key' }; next(); });
+    app.get('/test', strictLimiter, (_req, res) => res.json({ ok: true }));
+
+    const response = await request(app).get('/test');
+    expect(response.status).toBe(200);
+    expect(mockGetCache).toHaveBeenCalledWith('ratelimit:user:user-redis-key');
+    jest.resetModules();
+    jest.unmock('../utils/redis');
+  });
+});
+
+describe('Limiter policy parity', () => {
+  test('independent configured stores do not share counters', async () => {
+    const first = createUserRateLimiter({ max: 1, keyGenerator: () => 'same-user' });
+    const second = createUserRateLimiter({ max: 1, keyGenerator: () => 'same-user' });
+    const app = express();
+    app.get('/first', first, (_req, res) => res.json({ ok: true }));
+    app.get('/second', second, (_req, res) => res.json({ ok: true }));
+
+    expect((await request(app).get('/first')).status).toBe(200);
+    expect((await request(app).get('/second')).status).toBe(200);
+    expect((await request(app).get('/first')).status).toBe(429);
+    expect((await request(app).get('/second')).status).toBe(429);
+  });
+
+  test('production strict user threshold remains five requests', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    jest.resetModules();
+    jest.doMock('../utils/redis', () => ({
+      isRedisReady: jest.fn().mockReturnValue(false), getCache: jest.fn(), setCache: jest.fn(),
+    }));
+    try {
+      const { strictLimiter } = require('../middleware/rateLimiter.user');
+      const app = express();
+      app.get('/test', strictLimiter, (_req, res) => res.json({ ok: true }));
+      for (let i = 0; i < 5; i++) expect((await request(app).get('/test')).status).toBe(200);
+      expect((await request(app).get('/test')).status).toBe(429);
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      jest.resetModules();
+      jest.unmock('../utils/redis');
+    }
   });
 });
