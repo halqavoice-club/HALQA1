@@ -42,14 +42,15 @@ const fs   = require('fs');
 const path = require('path');
 
 // ─── File paths ───────────────────────────────────────────────────────────────
-const MOB_SCREEN   = path.join(__dirname, '../../../mobile/app/voice/[id].tsx');
-const WEB_SHARE    = path.join(__dirname, '../../../frontend/src/components/voice/VoiceShareSheet.tsx');
-const MOB_ENV      = path.join(__dirname, '../../../mobile/.env');
-const EAS_JSON     = path.join(__dirname, '../../../mobile/eas.json');
-const APP_JSON     = path.join(__dirname, '../../../mobile/app.json');
-const MOB_LAYOUT   = path.join(__dirname, '../../../mobile/app/_layout.tsx');
-const VOICE_CTRL   = path.join(__dirname, '../controllers/voice.controller.js');
-const VOICE_ROUTE  = path.join(__dirname, '../../../mobile/app/voice/[id].tsx');
+const MOB_SCREEN     = path.join(__dirname, '../../../mobile/app/voice/[id].tsx');
+const WEB_SHARE      = path.join(__dirname, '../../../frontend/src/components/voice/VoiceShareSheet.tsx');
+const MOB_ENV        = path.join(__dirname, '../../../mobile/.env');
+const MOB_ENV_EXAMPLE = path.join(__dirname, '../../../mobile/.env.example');
+const EAS_JSON       = path.join(__dirname, '../../../mobile/eas.json');
+const APP_JSON       = path.join(__dirname, '../../../mobile/app.json');
+const MOB_LAYOUT     = path.join(__dirname, '../../../mobile/app/_layout.tsx');
+const VOICE_CTRL     = path.join(__dirname, '../controllers/voice.controller.js');
+const VOICE_ROUTE    = path.join(__dirname, '../../../mobile/app/voice/[id].tsx');
 
 // Helper: extract a named async function body
 function extractFunction(src, name) {
@@ -195,13 +196,17 @@ describe('BUG-003 — Mobile Voice Club Share URL', () => {
 
   // ── 5. Environment configuration ─────────────────────────────────────────
   describe('Environment configuration: EXPO_PUBLIC_WEB_URL', () => {
-    test('mobile/.env defines EXPO_PUBLIC_WEB_URL', () => {
-      const env = fs.readFileSync(MOB_ENV, 'utf8');
+    test('mobile/.env or .env.example defines EXPO_PUBLIC_WEB_URL', () => {
+      // In local dev, .env exists; in CI, fall back to .env.example
+      const envPath = fs.existsSync(MOB_ENV) ? MOB_ENV : MOB_ENV_EXAMPLE;
+      expect(fs.existsSync(envPath)).toBe(true);
+      const env = fs.readFileSync(envPath, 'utf8');
       expect(env).toMatch(/EXPO_PUBLIC_WEB_URL\s*=/);
     });
 
-    test('mobile/.env WEB_URL does not use the API origin', () => {
-      const env = fs.readFileSync(MOB_ENV, 'utf8');
+    test('mobile/.env or .env.example WEB_URL does not use the API origin', () => {
+      const envPath = fs.existsSync(MOB_ENV) ? MOB_ENV : MOB_ENV_EXAMPLE;
+      const env = fs.readFileSync(envPath, 'utf8');
       // Extract the actual value
       const match = env.match(/EXPO_PUBLIC_WEB_URL\s*=\s*(.+)/);
       expect(match).toBeTruthy();
