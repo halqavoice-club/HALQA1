@@ -41,7 +41,7 @@ export interface LiveKitState {
   disconnect: () => void
   toggleMic: () => Promise<void>
   // Called by useVoiceRoom when Socket.IO says role changed — no reconnect needed
-  enableMic: () => Promise<void>
+  enableMic: () => Promise<boolean>
   disableMic: () => Promise<void>
 }
 
@@ -103,6 +103,8 @@ export function useLiveKit(roomId: string | null): LiveKitState {
   const reconnectAttempts      = useRef(0)
   const isUnmounted            = useRef(false)
   const isConnecting           = useRef(false)
+  const isInitialConnectionRef = useRef(true)   // FIX-01: distinguish initial from reconnect
+  const localMicIntentRef      = useRef(false)  // FIX-01: track user's current mic intent
 
   const [connectionState,   setConnectionState]   = useState<ConnectionState>(ConnectionState.Disconnected)
   const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>(ConnectionQuality.Unknown)
@@ -266,14 +268,20 @@ export function useLiveKit(roomId: string | null): LiveKitState {
 
       room.on(RoomEvent.TrackMuted, (pub, participant) => {
         if (participant.identity === room.localParticipant.identity) {
-          if (pub.source === Track.Source.Microphone) setIsMicEnabled(false)
+          if (pub.source === Track.Source.Microphone) {
+            setIsMicEnabled(false)
+            localMicIntentRef.current = false  // FIX-01: track SDK-driven state changes
+          }
         }
         // Remote track mute/unmute is handled by LiveKit internally via track.attach()
       })
 
       room.on(RoomEvent.TrackUnmuted, (pub, participant) => {
         if (participant.identity === room.localParticipant.identity) {
-          if (pub.source === Track.Source.Microphone) setIsMicEnabled(true)
+          if (pub.source === Track.Source.Microphone) {
+            setIsMicEnabled(true)
+            localMicIntentRef.current = true  // FIX-01: track SDK-driven state changes
+          }
         }
       })
 
@@ -315,9 +323,20 @@ export function useLiveKit(roomId: string | null): LiveKitState {
         })
       })
 
-      // Set initial mic state based on role — no reconnect ever needed for role changes
-      await room.localParticipant.setMicrophoneEnabled(!!micEnabled)
-      setIsMicEnabled(!!micEnabled)
+      // FIX-01: On initial connection, honor backend hint. On reconnection, preserve local intent.
+      if (isInitialConnectionRef.current) {
+        // First connection: backend micEnabled hint is authoritative
+        await room.localParticipant.setMicrophoneEnabled(!!micEnabled)
+        setIsMicEnabled(!!micEnabled)
+        localMicIntentRef.current = !!micEnabled
+        isInitialConnectionRef.current = false
+      } else {
+        // Reconnection: user's CURRENT local intent is authoritative
+        // (preserves explicit OFF if user muted before disconnect,
+        //  preserves explicit ON if user was actively speaking)
+        await room.localParticipant.setMicrophoneEnabled(localMicIntentRef.current)
+        setIsMicEnabled(localMicIntentRef.current)
+      }
 
     } catch (err: any) {
       const isTransient =
@@ -342,6 +361,8 @@ export function useLiveKit(roomId: string | null): LiveKitState {
     clearReconnectTimer()
     reconnectAttempts.current = 0
     isConnecting.current = false
+    isInitialConnectionRef.current = true   // FIX-01: reset for next connection
+    localMicIntentRef.current = false       // FIX-01: reset mic intent
     if (roomRef.current) {
       // Clear token refresh timer before disconnecting
       if (tokenRefreshTimerRef.current) {
@@ -361,11 +382,27 @@ export function useLiveKit(roomId: string | null): LiveKitState {
 
   // ── Mic controls — called by useVoiceRoom on role change via Socket.IO ────
   // These never reconnect. They just enable/disable the local mic track.
-  const enableMic = useCallback(async () => {
+  const enableMic = useCallback(async (): Promise<boolean> => {
     const room = roomRef.current
-    if (!room || room.state !== ConnectionState.Connected) return
-    await room.localParticipant.setMicrophoneEnabled(true)
-    setIsMicEnabled(true)
+    if (!room || room.state !== ConnectionState.Connected) {
+      console.warn('[useLiveKit] Cannot enable microphone: Room not connected')
+      return false
+    }
+    const perms = room.localParticipant?.permissions
+    if (!perms || perms.canPublish !== true) {
+      console.warn('[useLiveKit] Cannot enable microphone: SFU publishing permission not granted')
+      return false
+    }
+    try {
+      await room.localParticipant.setMicrophoneEnabled(true)
+      setIsMicEnabled(true)
+      localMicIntentRef.current = true  // FIX-01: track explicit user intent
+      return true
+    } catch (err) {
+      console.warn('[useLiveKit] Failed to enable microphone:', err)
+      setIsMicEnabled(false)
+      throw err
+    }
   }, [])
 
   const disableMic = useCallback(async () => {
@@ -373,6 +410,7 @@ export function useLiveKit(roomId: string | null): LiveKitState {
     if (!room || room.state !== ConnectionState.Connected) return
     await room.localParticipant.setMicrophoneEnabled(false)
     setIsMicEnabled(false)
+    localMicIntentRef.current = false  // FIX-01: track explicit user intent
   }, [])
 
   // ── Toggle mic (user-initiated mute button) ────────────────────────────────
@@ -382,6 +420,7 @@ export function useLiveKit(roomId: string | null): LiveKitState {
     const next = !room.localParticipant.isMicrophoneEnabled
     await room.localParticipant.setMicrophoneEnabled(next)
     setIsMicEnabled(next)
+    localMicIntentRef.current = next  // FIX-01: track explicit user intent
   }, [])
 
   // ── LB-CHANGE-001: Adaptive audio bitrate based on network quality ────────
@@ -449,19 +488,32 @@ export function useLiveKit(roomId: string | null): LiveKitState {
       artwork: [{ src: '/icon-192x192.png', sizes: '192x192', type: 'image/png' }],
     })
 
-    // Play/pause (headset button) → toggle mic mute
+    // Play/pause (headset button) → FIX-03: play does NOT activate mic (consent bypass)
     navigator.mediaSession.setActionHandler('play', () => {
       const room = roomRef.current
       if (!room || room.state !== ConnectionState.Connected) return
-      room.localParticipant.setMicrophoneEnabled(true).catch(() => {})
-      setIsMicEnabled(true)
+      // Show toast: headset button pressed, but mic requires explicit UI action
+      if (typeof window !== 'undefined' && !room.localParticipant.isMicrophoneEnabled) {
+        // Use custom event to avoid importing toast directly in the hook
+        const event = new CustomEvent('vc:toast', {
+          detail: {
+            title: '🎧 Headset button pressed',
+            description: 'Use the on-screen button to unmute your microphone.',
+          },
+        })
+        document.dispatchEvent(event)
+      }
     })
 
     navigator.mediaSession.setActionHandler('pause', () => {
       const room = roomRef.current
       if (!room || room.state !== ConnectionState.Connected) return
-      room.localParticipant.setMicrophoneEnabled(false).catch(() => {})
-      setIsMicEnabled(false)
+      // FIX-03: Pause only if mic is actually enabled (defensive check)
+      if (room.localParticipant.isMicrophoneEnabled) {
+        room.localParticipant.setMicrophoneEnabled(false).catch(() => {})
+        setIsMicEnabled(false)
+        localMicIntentRef.current = false  // FIX-01: update intent ref
+      }
     })
 
     // Next/previous track not applicable — clear them

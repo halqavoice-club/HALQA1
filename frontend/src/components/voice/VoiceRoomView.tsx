@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVoiceStore, VoiceParticipant, MEMBER_LEVEL_META, ROOM_LEVEL_CAPACITY } from '@/store/voice.store'
 import { useVoiceRoom, canModerate, canSpeak, VOICE_ROLES } from '@/hooks/useVoiceRoom'
+import { useToast } from '@/components/ui/use-toast'
 import { useLiveKit } from '@/hooks/useLiveKit'
 import { useAuthStore } from '@/store/auth.store'
 import { useThemeStore } from '@/store/theme.store'
@@ -328,6 +329,7 @@ function AudienceAvatar({
 export function VoiceRoomView({ onLeave }: Props) {
   const { user } = useAuthStore()
   const router = useRouter()
+  const { toast } = useToast()
   const { theme, setTheme } = useThemeStore()
   const isDark = theme === 'dark' || (theme === 'system' && typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches)
   const {
@@ -409,6 +411,16 @@ export function VoiceRoomView({ onLeave }: Props) {
     const vol = volume / 100
     document.dispatchEvent(new CustomEvent('vc:volume', { detail: vol }))
   }, [volume])
+
+  // FIX-03: MediaSession toast event listener — headset button feedback
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { title, description } = (e as CustomEvent).detail
+      toast({ title, description })
+    }
+    document.addEventListener('vc:toast', handler)
+    return () => document.removeEventListener('vc:toast', handler)
+  }, [toast])
 
   const [sendingMsg, setSendingMsg] = useState(false)
   const [showEmojis, setShowEmojis] = useState(false)
@@ -754,21 +766,13 @@ export function VoiceRoomView({ onLeave }: Props) {
     }
   }, [roomId]) // ← roomId only — activePKMatchId deliberately excluded
 
-  // Sync LiveKit mic with stage presence.
-  // HOST/MOD: on stage = unmuted (enableMic). Dropped to audience = muted (disableMic).
-  // SPEAKER: always enabled when role=SPEAKER.
-  // "Turn Off Mic" in the popup calls toggleMute() which sets isMuted=true in DB,
-  // which triggers this effect to disableMic(). HOST stays in stage grid if they
-  // want to stay on stage — they should use "Mute" (local only) for that.
-  // "End Mic" calls dropMic() which also sets isMuted=true → host moves to audience.
-  // The distinction is that "End Mic" is the intended "leave stage" action.
+  // Server state may revoke local capture, but must never activate hardware.
+  // Enabling the microphone is reserved for an explicit local button action.
   useEffect(() => {
     if (!roomId || !myParticipant) return
-    const onStage = myParticipant.role === VOICE_ROLES.SPEAKER ||
+    const mayKeepMicEnabled = (myParticipant.role === VOICE_ROLES.SPEAKER && !myParticipant.isMuted) ||
       ((myParticipant.role === VOICE_ROLES.HOST || myParticipant.role === VOICE_ROLES.MODERATOR) && !myParticipant.isMuted)
-    if (onStage) {
-      enableMic().catch(() => {})
-    } else {
+    if (!mayKeepMicEnabled) {
       disableMic().catch(() => {})
     }
   }, [myParticipant?.role, myParticipant?.isMuted]) // eslint-disable-line
@@ -1291,7 +1295,7 @@ export function VoiceRoomView({ onLeave }: Props) {
                     </div>
                   </button>
 
-                  {/* Unmute All */}
+                  {/* Release room-wide mute; each speaker opts in locally */}
                   <button
                     onClick={() => { unmuteAll(); setShowDotMenu(false) }}
                     style={{
@@ -1304,8 +1308,8 @@ export function VoiceRoomView({ onLeave }: Props) {
                   >
                     <span style={{ fontSize: 18, width: 24, textAlign: 'center' }}>🔊</span>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: '#16a34a' }}>Unmute All</div>
-                      <div style={{ fontSize: 11, color: '#94a3b8' }}>Allow all speakers</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: '#16a34a' }}>Release Mute All</div>
+                      <div style={{ fontSize: 11, color: '#94a3b8' }}>Speakers may turn on their mic</div>
                     </div>
                   </button>
 
@@ -1721,13 +1725,29 @@ export function VoiceRoomView({ onLeave }: Props) {
               {/* Turn On / Turn Off Mic — LOCAL ONLY — stays on stage */}
               <button className="mic-menu-item" onClick={async () => {
                 setShowMicMenu(false)
-                // LOCAL mic toggle only — does NOT call backend, does NOT move HOST to audience.
-                // HOST remains visible in the speakers grid with muted badge.
-                // Use "End Mic" (below) to actually leave the stage.
                 if (isMicEnabled) {
                   await disableMic().catch(() => {})
                 } else {
-                  await enableMic().catch(() => {})
+                  // Every explicit mic-on attempt must confirm the current
+                  // publishing grant, including retries after an SFU failure.
+                  const authorized = await toggleMute(false)
+                  if (!authorized) return
+                  try {
+                    const ok = await enableMic()
+                    if (!ok) {
+                      toast({
+                        title: 'Unable to enable microphone',
+                        description: 'Microphone permission or connection is not ready. Tap to retry.',
+                        variant: 'destructive',
+                      })
+                    }
+                  } catch (err: any) {
+                    toast({
+                      title: 'Microphone activation failed',
+                      description: err?.message || 'Could not access microphone hardware. Check browser permissions.',
+                      variant: 'destructive',
+                    })
+                  }
                 }
               }}>
                 <span className="mic-menu-icon">
