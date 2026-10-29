@@ -72,7 +72,7 @@ describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
   })
 
   test('Initial connection honors startMuted parameter', async () => {
-    const { result } = renderHook(() => useLiveKitAudio())
+    const { result } = await renderHook(() => useLiveKitAudio())
 
     // Connect with startMuted: false (user has permission to speak)
     await act(async () => {
@@ -90,7 +90,7 @@ describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
   })
 
   test('Auto-reconnect after disconnect starts muted', async () => {
-    const { result } = renderHook(() => useLiveKitAudio())
+    const { result } = await renderHook(() => useLiveKitAudio())
 
     // Initial connect (startMuted: false, canPublish: true)
     await act(async () => {
@@ -143,7 +143,7 @@ describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
   })
 
   test('Background recovery starts muted', async () => {
-    const { result } = renderHook(() => useLiveKitAudio())
+    const { result } = await renderHook(() => useLiveKitAudio())
 
     // Initial connect with mic enabled
     await act(async () => {
@@ -200,7 +200,7 @@ describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
     // Force connect to throw an error on first call
     mockConnect.mockRejectedValueOnce(new Error('Connection timeout'))
 
-    const { result } = renderHook(() => useLiveKitAudio())
+    const { result } = await renderHook(() => useLiveKitAudio())
 
     // Attempt initial connect
     await act(async () => {
@@ -235,7 +235,7 @@ describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
   })
 
   test('Force reconnect after explicit mic OFF stays muted', async () => {
-    const { result } = renderHook(() => useLiveKitAudio())
+    const { result } = await renderHook(() => useLiveKitAudio())
 
     // Initial connect
     await act(async () => {
@@ -273,7 +273,7 @@ describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
     // Remove canPublish permission
     mockLocalParticipant.permissions.canPublish = false
 
-    const { result } = renderHook(() => useLiveKitAudio())
+    const { result } = await renderHook(() => useLiveKitAudio())
 
     await act(async () => {
       await result.current.connect('wss://test', 'token', false, 'room-1')
@@ -291,5 +291,34 @@ describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
 
     // Restore permission for other tests
     mockLocalParticipant.permissions.canPublish = true
+  })
+
+  test('explicit OFF invalidates a pending ON and late SDK completion stays OFF', async () => {
+    let resolveEnable!: () => void
+    mockSetMicrophoneEnabled.mockImplementationOnce(() => new Promise<void>(resolve => { resolveEnable = resolve }))
+
+    const { result } = await renderHook(() => useLiveKitAudio())
+    await act(async () => {
+      await result.current.connect('wss://test', 'token', true, 'room-1')
+    })
+    mockSetMicrophoneEnabled.mockClear()
+    mockSetMicrophoneEnabled.mockImplementationOnce(() => new Promise<void>(resolve => { resolveEnable = resolve }))
+
+    let enabled = true
+    let pendingEnable!: Promise<void>
+    await act(async () => {
+      pendingEnable = result.current.enableMic().then((value: boolean) => { enabled = value })
+    })
+    await act(async () => {
+      await result.current.disableMic()
+    })
+    await act(async () => {
+      resolveEnable()
+      await pendingEnable
+    })
+
+    expect(enabled).toBe(false)
+    expect(result.current.micEnabled).toBe(false)
+    expect(mockSetMicrophoneEnabled.mock.calls.map(call => call[0])).toEqual([true, false, false])
   })
 })
