@@ -3,17 +3,46 @@
  * 
  * Verifies FIX-02 (mobile always starts muted on reconnect).
  */
-import { renderHook, act, waitFor } from '@testing-library/react-native'
-import { useLiveKitAudio } from '../useLiveKitAudio'
-import { AppState } from 'react-native'
+
+// Create mocks at module scope (hoisted)
+let mockAppStateAddEventListener: jest.Mock
+let mockAppStateRemoveEventListener: jest.Mock
+
+// Mock react-native with module factory
+jest.mock('react-native', () => {
+  // Initialize mocks inside factory
+  const addEventListener = jest.fn()
+  const removeEventListener = jest.fn()
+
+  // Export them so tests can access
+  mockAppStateAddEventListener = addEventListener
+  mockAppStateRemoveEventListener = removeEventListener
+
+  return {
+    AppState: {
+      addEventListener,
+      removeEventListener,
+      currentState: 'active',
+    },
+    Platform: {
+      OS: 'ios',
+      select: jest.fn((obj) => obj.ios || obj.default),
+    },
+  }
+})
 
 jest.mock('react-native-flash-message', () => ({
   showMessage: jest.fn(),
 }))
 
+import { renderHook, act, waitFor } from '@testing-library/react-native'
+
 jest.mock('@/lib/socket', () => ({
   getSocket: jest.fn(() => null),
 }))
+
+// Import the hook AFTER all mocks are defined
+import { useLiveKitAudio } from '../useLiveKitAudio'
 
 // Mock @livekit/react-native
 const mockSetMicrophoneEnabled = jest.fn().mockResolvedValue(undefined)
@@ -57,13 +86,25 @@ jest.mock('../useNetworkQuality', () => ({
 }))
 
 describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
+  let appStateChangeHandler: ((state: string) => void) | null = null
+
   beforeEach(() => {
     jest.clearAllMocks()
     jest.useFakeTimers()
     eventHandlers = {}
+    appStateChangeHandler = null
+
     mockOn.mockImplementation((event: string, handler: Function) => {
       eventHandlers[event] = handler
       return mockRoom
+    })
+
+    // Capture AppState listener
+    mockAppStateAddEventListener.mockImplementation((event: string, handler: (state: string) => void) => {
+      if (event === 'change') {
+        appStateChangeHandler = handler
+      }
+      return { remove: jest.fn() }
     })
   })
 
@@ -150,6 +191,9 @@ describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
       await result.current.connect('wss://test', 'token', false, 'room-1')
     })
 
+    // Verify AppState listener was registered
+    expect(appStateChangeHandler).not.toBeNull()
+
     // Enable mic
     await act(async () => {
       await result.current.enableMic()
@@ -161,9 +205,7 @@ describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
 
     // Simulate app going to background
     await act(async () => {
-      const listeners = (AppState.addEventListener as jest.Mock).mock.calls[0]
-      const changeHandler = listeners?.[1]
-      changeHandler?.('background')
+      appStateChangeHandler?.('background')
     })
 
     // Simulate disconnect
@@ -171,16 +213,19 @@ describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
       eventHandlers['disconnected']?.('BackgroundTimeout')
     })
 
-    // Simulate app coming to foreground
+    // Simulate app coming to foreground (triggers reconnection after 500ms)
     await act(async () => {
-      const listeners = (AppState.addEventListener as jest.Mock).mock.calls[0]
-      const changeHandler = listeners?.[1]
-      changeHandler?.('active')
+      appStateChangeHandler?.('active')
     })
 
-    // Wait for reconnection
+    // Wait for reconnection timer (500ms delay in implementation)
     await act(async () => {
-      jest.advanceTimersByTime(500)
+      jest.advanceTimersByTime(1000) // Give extra time for reconnect to complete
+    })
+
+    // Wait for async reconnection to complete
+    await act(async () => {
+      await Promise.resolve()
     })
 
     // Trigger Connected event
@@ -294,31 +339,64 @@ describe('useLiveKitAudio — FIX-02: Always Start Muted on Reconnect', () => {
   })
 
   test('explicit OFF invalidates a pending ON and late SDK completion stays OFF', async () => {
-    let resolveEnable!: () => void
-    mockSetMicrophoneEnabled.mockImplementationOnce(() => new Promise<void>(resolve => { resolveEnable = resolve }))
+    let resolveEnable!: (value?: void | PromiseLike<void>) => void
+    let rejectEnable!: (reason?: any) => void
 
     const { result } = await renderHook(() => useLiveKitAudio())
+
+    // Initial connect with mic muted
     await act(async () => {
       await result.current.connect('wss://test', 'token', true, 'room-1')
     })
-    mockSetMicrophoneEnabled.mockClear()
-    mockSetMicrophoneEnabled.mockImplementationOnce(() => new Promise<void>(resolve => { resolveEnable = resolve }))
 
-    let enabled = true
-    let pendingEnable!: Promise<void>
-    await act(async () => {
-      pendingEnable = result.current.enableMic().then((value: boolean) => { enabled = value })
+    // Clear initial calls
+    mockSetMicrophoneEnabled.mockClear()
+
+    // Mock setMicrophoneEnabled to return a controllable promise
+    mockSetMicrophoneEnabled.mockImplementation((enabled: boolean) => {
+      if (enabled) {
+        // Return a promise we can control for the ON call
+        return new Promise<void>((resolve, reject) => {
+          resolveEnable = resolve
+          rejectEnable = reject
+        })
+      } else {
+        // OFF calls resolve immediately
+        return Promise.resolve()
+      }
     })
+
+    // Start enabling mic (this will hang until we resolve it)
+    let enableResult: boolean | undefined
+    const enablePromise = act(async () => {
+      enableResult = await result.current.enableMic()
+    })
+
+    // Wait a tick to ensure enableMic has started
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    // Now disable mic while enable is still pending
     await act(async () => {
       await result.current.disableMic()
     })
+
+    // Verify disableMic was called
+    expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(false)
+
+    // Now resolve the pending enable (late completion)
     await act(async () => {
       resolveEnable()
-      await pendingEnable
+      await enablePromise
     })
 
-    expect(enabled).toBe(false)
+    // Verify the enable call returned false (invalidated)
+    expect(enableResult).toBe(false)
     expect(result.current.micEnabled).toBe(false)
-    expect(mockSetMicrophoneEnabled.mock.calls.map(call => call[0])).toEqual([true, false, false])
+
+    // Verify call sequence: enable(true), disable(false), enable revokes with disable(false)
+    const calls = mockSetMicrophoneEnabled.mock.calls.map(call => call[0])
+    expect(calls).toEqual([true, false, false])
   })
 })
