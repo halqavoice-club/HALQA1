@@ -80,6 +80,9 @@ export function useLiveKitAudio(): LiveKitAudioState {
   const isUnmountedRef      = useRef<boolean>(false);
   const isConnectingRef     = useRef<boolean>(false);
   const appStateRef         = useRef<AppStateStatus>(AppState.currentState);
+  // Consent fence: every explicit OFF invalidates all earlier asynchronous ON
+  // operations. A late LiveKit enable completion must never restore capture.
+  const micOperationRef     = useRef<number>(0);
 
   // Phase 2: auto-adapt bitrate when quality changes while connected.
   // Re-publishes the mic track with updated publish options so the bitrate
@@ -340,6 +343,7 @@ export function useLiveKitAudio(): LiveKitAudioState {
 
   // ─── Disconnect ───────────────────────────────────────────────────────────
   const disconnect = useCallback((reason: DisconnectReason = 'user') => {
+    micOperationRef.current += 1;
     clearReconnectTimer();
     reconnectCountRef.current = 0;
     isConnectingRef.current   = false;
@@ -359,9 +363,18 @@ export function useLiveKitAudio(): LiveKitAudioState {
     // Missing permissions or canPublish !== true must be treated as denied.
     const perms = roomRef.current.localParticipant?.permissions;
     if (!perms || perms.canPublish !== true) return false;
+    const operation = ++micOperationRef.current;
     try {
       const pubOpts = buildPublishOptions(quality);
       await roomRef.current.localParticipant.setMicrophoneEnabled(true, pubOpts);
+      if (operation !== micOperationRef.current) {
+        // OFF won while LiveKit was enabling. Revoke the stale publication
+        // before exposing any enabled state to callers or React.
+        await roomRef.current?.localParticipant?.setMicrophoneEnabled(false).catch(() => {});
+        setMicEnabled(false);
+        micEnabledRef.current = false;
+        return false;
+      }
       setMicEnabled(true);
       micEnabledRef.current = true;
       return true;
@@ -373,11 +386,13 @@ export function useLiveKitAudio(): LiveKitAudioState {
   }, [quality]);
 
   const disableMic = useCallback(async () => {
+    // Invalidate pending ON synchronously, before any SDK await.
+    micOperationRef.current += 1;
+    setMicEnabled(false);
+    micEnabledRef.current = false;
     if (!roomRef.current) return;
     try {
       await roomRef.current.localParticipant.setMicrophoneEnabled(false);
-      setMicEnabled(false);
-      micEnabledRef.current = false;
     } catch {}
   }, []);
 

@@ -2420,19 +2420,19 @@ export default function VoiceRoomScreen() {
           showMessage({ message, type: 'warning' });
         }
       } else {
-        // MOBILE-FIX-004: Mute path — disable local track immediately, sync to server
-        // Store previous track state for rollback if API fails
-        const wasTrackEnabled = true; // this branch is entered with lk.micEnabled=true
+        // Explicit OFF is authoritative locally: stop capture immediately and
+        // never reactivate it merely to match stale backend state.
         await lk.disableMic();
+        setParticipants(prev => prev.map(p =>
+          p.id === user?.id ? { ...p, isMuted: true } : p
+        ));
         try {
           await api.patch(`/voice/${id}/mute`, { isMuted: true });
         } catch (e: any) {
-          // MOBILE-FIX-005: Rollback local track state on API failure
-          // Re-enable mic so UI state matches server state (still unmuted on server)
-          if (wasTrackEnabled) {
-            await lk.enableMic().catch(() => {}); // re-enable, swallow secondary errors
-          }
-          const message = e?.response?.data?.message || 'Failed to mute';
+          // Backend/SFU state may be stale, but renewed capture requires a new
+          // explicit ON action and fresh authorization.
+          const detail = e?.response?.data?.message || 'server synchronization failed';
+          const message = `Microphone is off locally; ${detail}. Tap again later to retry synchronization.`;
           showMessage({ message, type: 'danger' });
         }
       }
@@ -5364,7 +5364,6 @@ const mobStyles = StyleSheet.create({
     fontWeight: '600',
   },
 });
-
 
 
 
