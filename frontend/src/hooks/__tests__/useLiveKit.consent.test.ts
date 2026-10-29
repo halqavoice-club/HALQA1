@@ -223,7 +223,7 @@ describe('useLiveKit — FIX-01: Reconnection Consent Preservation', () => {
     // User explicitly enables mic
     mockLocalParticipant.isMicrophoneEnabled = true
     await act(async () => {
-      await result.current.enableMic()
+      await result.current.enableMic(async () => true)
     })
 
     expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(true)
@@ -275,7 +275,7 @@ describe('useLiveKit — FIX-01: Reconnection Consent Preservation', () => {
     // User was speaking
     mockLocalParticipant.isMicrophoneEnabled = true
     await act(async () => {
-      await result.current.enableMic()
+      await result.current.enableMic(async () => true)
     })
 
     // Moderator mutes user in backend (DB isMuted=true)
@@ -451,7 +451,7 @@ describe('useLiveKit — FIX-03: MediaSession Consent Protection', () => {
     // Case 2: Mic is enabled — pause should mute
     mockLocalParticipant.isMicrophoneEnabled = true
     await act(async () => {
-      await result.current.enableMic()
+      await result.current.enableMic(async () => true)
     })
 
     mockSetMicrophoneEnabled.mockClear()

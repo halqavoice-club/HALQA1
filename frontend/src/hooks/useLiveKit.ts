@@ -41,7 +41,8 @@ export interface LiveKitState {
   disconnect: () => void
   toggleMic: () => Promise<void>
   // Called by useVoiceRoom when Socket.IO says role changed — no reconnect needed
-  enableMic: () => Promise<boolean>
+  // SEC01-WEB-P1-R2: MANDATORY authorize callback - backend permission check required before hardware activation
+  enableMic: (authorize: () => Promise<boolean>) => Promise<boolean>
   disableMic: () => Promise<void>
 }
 
@@ -105,6 +106,15 @@ export function useLiveKit(roomId: string | null): LiveKitState {
   const isConnecting           = useRef(false)
   const isInitialConnectionRef = useRef(true)   // FIX-01: distinguish initial from reconnect
   const localMicIntentRef      = useRef(false)  // FIX-01: track user's current mic intent
+  
+  // SEC01-WEB-P1-R2: Monotonic operation versioning for race protection
+  interface MicOperation {
+    id: string
+    type: 'ENABLE' | 'DISABLE'
+    timestamp: number
+    aborted: boolean
+  }
+  const pendingMicOpRef = useRef<MicOperation | null>(null)
 
   const [connectionState,   setConnectionState]   = useState<ConnectionState>(ConnectionState.Disconnected)
   const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>(ConnectionQuality.Unknown)
@@ -358,6 +368,11 @@ export function useLiveKit(roomId: string | null): LiveKitState {
 
   // ── Explicit disconnect (user-initiated) ──────────────────────────────────
   const disconnect = useCallback(() => {
+    // SEC01-WEB-P1-R2: Abort any pending microphone operations on disconnect
+    if (pendingMicOpRef.current?.type === 'ENABLE') {
+      pendingMicOpRef.current.aborted = true
+    }
+    
     clearReconnectTimer()
     reconnectAttempts.current = 0
     isConnecting.current = false
@@ -382,21 +397,61 @@ export function useLiveKit(roomId: string | null): LiveKitState {
 
   // ── Mic controls — called by useVoiceRoom on role change via Socket.IO ────
   // These never reconnect. They just enable/disable the local mic track.
-  const enableMic = useCallback(async (): Promise<boolean> => {
+  // SEC01-WEB-P1-R2: Mandatory authorize callback with operation versioning
+  const enableMic = useCallback(async (authorize: () => Promise<boolean>): Promise<boolean> => {
     const room = roomRef.current
     if (!room || room.state !== ConnectionState.Connected) {
       console.warn('[useLiveKit] Cannot enable microphone: Room not connected')
       return false
     }
+    
+    // SEC01-WEB-P1-R2: Create unique operation ID for this ENABLE attempt
+    const op: MicOperation = {
+      id: crypto.randomUUID(),
+      type: 'ENABLE',
+      timestamp: Date.now(),
+      aborted: false
+    }
+    pendingMicOpRef.current = op
+    
+    // SEC01-WEB-P1-R2: MANDATORY backend authorization check
+    let authorized = false
+    try {
+      authorized = await authorize()
+      if (!authorized) {
+        console.warn('[useLiveKit] Backend authorization denied microphone access')
+        return false
+      }
+    } catch (err) {
+      console.warn('[useLiveKit] Backend authorization check failed:', err)
+      return false
+    }
+    
+    // SEC01-WEB-P1-R2: Check if THIS operation was superseded or aborted during authorization
+    if (op.aborted || pendingMicOpRef.current?.id !== op.id) {
+      console.warn('[useLiveKit] Microphone enable cancelled: superseded by newer operation')
+      return false
+    }
+    
     const perms = room.localParticipant?.permissions
     if (!perms || perms.canPublish !== true) {
       console.warn('[useLiveKit] Cannot enable microphone: SFU publishing permission not granted')
       return false
     }
+    
     try {
       await room.localParticipant.setMicrophoneEnabled(true)
+      
+      // SEC01-WEB-P1-R2: Final check - if aborted during SDK call, force disable
+      if (op.aborted || pendingMicOpRef.current?.id !== op.id) {
+        console.warn('[useLiveKit] Microphone enable aborted after SDK activation - forcing disable')
+        await room.localParticipant.setMicrophoneEnabled(false).catch(() => {})
+        setIsMicEnabled(false)
+        return false
+      }
+      
       setIsMicEnabled(true)
-      localMicIntentRef.current = true  // FIX-01: track explicit user intent
+      localMicIntentRef.current = true
       return true
     } catch (err) {
       console.warn('[useLiveKit] Failed to enable microphone:', err)
@@ -408,9 +463,23 @@ export function useLiveKit(roomId: string | null): LiveKitState {
   const disableMic = useCallback(async () => {
     const room = roomRef.current
     if (!room || room.state !== ConnectionState.Connected) return
+    
+    // SEC01-WEB-P1-R2: Abort any pending ENABLE operation
+    if (pendingMicOpRef.current?.type === 'ENABLE') {
+      pendingMicOpRef.current.aborted = true
+    }
+    
+    // SEC01-WEB-P1-R2: Create DISABLE operation
+    pendingMicOpRef.current = {
+      id: crypto.randomUUID(),
+      type: 'DISABLE',
+      timestamp: Date.now(),
+      aborted: false
+    }
+    
     await room.localParticipant.setMicrophoneEnabled(false)
     setIsMicEnabled(false)
-    localMicIntentRef.current = false  // FIX-01: track explicit user intent
+    localMicIntentRef.current = false
   }, [])
 
   // ── Toggle mic (user-initiated mute button) ────────────────────────────────
