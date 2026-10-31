@@ -120,6 +120,7 @@ const SAFE_UNIT_TESTS = Object.freeze([
   'src/tests/validation.test.js',
   'src/tests/vc-sync-004-stale-session.test.js',
   'src/tests/vc-sync-005-sfu-demotion.test.js',
+  'src/tests/vc29-socket-token-type.test.js',
   'src/tests/view-count-dedup.test.js',
   'src/tests/voice-active-session-conflict.test.js',
   'src/tests/voice-behavioral.test.js',

@@ -170,6 +170,19 @@ io.use(async (socket, next) => {
     if (!token) return next(new Error('Authentication required'));
     const decoded = verifyAccessToken(token);
 
+    // VC-29-SOCKET: Reject 2FA challenge tokens in Socket.IO authentication.
+    // Access tokens do not have a 'type' field (undefined) — only 2FA challenge
+    // tokens have type: '2fa_challenge'. This matches the HTTP middleware pattern
+    // at auth.middleware.js:103-106.
+    if (decoded.type && decoded.type !== 'access') {
+      logger.warn('[Socket.IO Auth] Rejected non-access token', {
+        userId: decoded.userId || decoded.id,
+        tokenType: decoded.type,
+        socketId: socket.id
+      });
+      return next(new Error('Invalid token type'));
+    }
+
     // VULN-LIVE-006 FIX: Perform a current-user status check at connection time,
     // mirroring the existing HTTP authenticate() middleware.
     //
