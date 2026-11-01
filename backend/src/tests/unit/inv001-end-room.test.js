@@ -148,6 +148,12 @@ function makeMockTx(opts = {}) {
         order.push('voiceParticipant.findMany');
         return snapshot;
       }),
+      findUnique: jest.fn(async () => {
+        order.push('voiceParticipant.findUnique');
+        return opts.participant !== undefined
+          ? opts.participant
+          : { isActive: true, role: 'SPEAKER', isMuted: false, mutedByModerator: false, seatNumber: null };
+      }),
       updateMany: jest.fn(async () => {
         order.push('voiceParticipant.updateMany');
         return { count: snapshot.length };
@@ -196,6 +202,10 @@ beforeEach(() => {
   // Clear captured AccessToken options.
   Object.keys(mockAccessTokenOpts).forEach((k) => delete mockAccessTokenOpts[k]);
 
+  // Set LiveKit env vars so API key/secret checks pass (tests that want 503 override these).
+  process.env.LIVEKIT_API_KEY    = 'test-key';
+  process.env.LIVEKIT_API_SECRET = 'test-secret';
+
   // Side-effect mock defaults.
   prisma.voiceParticipant.count.mockResolvedValue(0);
   prisma.voiceMessage.count.mockResolvedValue(0);
@@ -217,6 +227,11 @@ beforeEach(() => {
   // Default active participant for generateToken voice-room path.
   prisma.voiceParticipant.findUnique.mockResolvedValue({ isActive: true, role: 'SPEAKER' });
   prisma.voiceParticipant.findMany.mockResolvedValue([{ userId: 'u1' }]);
+});
+
+afterEach(() => {
+  delete process.env.LIVEKIT_API_KEY;
+  delete process.env.LIVEKIT_API_SECRET;
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -293,7 +308,10 @@ describe('INV-001: endRoom LiveKit cleanup', () => {
       .toBeLessThan(tx._order.indexOf('voiceParticipant.updateMany'));
   });
 
-  it('5. calls removeParticipant for each snapshot identity', async () => {
+  it('5. initial cleanup calls svc.deleteRoom (not removeParticipant)', async () => {
+    // INV-001-7C: runSfuCleanup in initial mode (retryMode=false) deletes the whole
+    // SFU room in one call — it does NOT iterate per-participant. Per-participant sweep
+    // is only used in retryMode=true (sfuRetry path).
     const snapshot = [
       { userId: 'u1', joinedAt: new Date('2026-10-31T09:30:00Z') },
       { userId: 'u2', joinedAt: new Date('2026-10-31T09:45:00Z') },
@@ -307,31 +325,34 @@ describe('INV-001: endRoom LiveKit cleanup', () => {
     const { req, res, next } = reqRes();
     await voice.endRoom(req, res, next);
 
-    expect(svc.removeParticipant).toHaveBeenCalledTimes(snapshot.length);
-    snapshot.forEach((p) => {
-      expect(svc.removeParticipant).toHaveBeenCalledWith(ROOM_ID, p.userId);
-    });
+    // Initial mode: deleteRoom called once, removeParticipant not called.
+    expect(svc.deleteRoom).toHaveBeenCalledWith(ROOM_ID);
+    expect(svc.removeParticipant).not.toHaveBeenCalled();
+    const cleanup = res.body.data.sfuCleanup;
+    expect(cleanup.roomDeleted).toBe(true);
+    expect(cleanup.cleanupMode).toBe('room_delete');
   });
 
-  it('6. removeParticipant 404 counted as disconnected (not failed)', async () => {
+  it('6. initial cleanup: deleteRoom 404 counted as roomDeleted=true', async () => {
+    // INV-001-7C: 404 on deleteRoom means the SFU room is already gone — success.
     const snapshot = [
       { userId: 'u1', joinedAt: new Date('2026-10-31T09:30:00Z') },
       { userId: 'u2', joinedAt: new Date('2026-10-31T09:45:00Z') },
     ];
     const tx = makeMockTx({ snapshot });
     prisma.$transaction.mockImplementation(async (cb) => cb(tx));
-    const svc = makeSvc({ remove: 'reject' }); // every removeParticipant rejects 404
+    const svc = makeSvc({ deleteRoom: 'reject' }); // deleteRoom rejects 404
     getLivekitRoomService.mockReturnValue(svc);
 
     const { req, res, next } = reqRes();
     await voice.endRoom(req, res, next);
 
     const cleanup = res.body.data.sfuCleanup;
-    expect(cleanup.participantsDisconnected).toBe(2);
+    expect(cleanup.roomDeleted).toBe(true);
     expect(cleanup.participantsFailed).toBe(0);
   });
 
-  it('7. calls deleteRoom after the removeParticipant loop', async () => {
+  it('7. deleteRoom is called with the correct room ID', async () => {
     const snapshot = [
       { userId: 'u1', joinedAt: new Date('2026-10-31T09:30:00Z') },
       { userId: 'u2', joinedAt: new Date('2026-10-31T09:45:00Z') },
@@ -346,12 +367,8 @@ describe('INV-001: endRoom LiveKit cleanup', () => {
 
     expect(svc.deleteRoom).toHaveBeenCalledTimes(1);
     expect(svc.deleteRoom).toHaveBeenCalledWith(ROOM_ID);
-    // deleteRoom is the last operation, after every removeParticipant.
-    expect(svc._order[svc._order.length - 1]).toBe('deleteRoom');
-    expect(svc._order.filter((e) => e.startsWith('remove:')).length).toBe(2);
-    expect(svc._order.indexOf('deleteRoom')).toBeGreaterThan(
-      svc._order.lastIndexOf('remove:u2')
-    );
+    // Initial mode: no per-participant calls.
+    expect(svc.removeParticipant).not.toHaveBeenCalled();
   });
 
   it('8. deleteRoom 404 sets roomDeleted=true', async () => {
@@ -393,6 +410,7 @@ describe('INV-001: endRoom LiveKit cleanup', () => {
     const cleanup = res.body.data.sfuCleanup;
     expect(cleanup.tokenRevoked).toBeUndefined();
     expect(Object.keys(cleanup).sort()).toEqual([
+      'cleanupMode',
       'notConfigured',
       'participantsAttempted',
       'participantsDisconnected',
@@ -509,12 +527,16 @@ describe('INV-001: endRoom LiveKit cleanup', () => {
 describe('INV-001: LiveKit token TTL', () => {
 
   it('17. Voice Club getLiveKitToken TTL is 10m', async () => {
-    prisma.voiceRoom.findUnique.mockResolvedValue(
-      baseRoom({ status: 'LIVE', deletedAt: null, micLocked: false, allMuted: false })
-    );
-    prisma.voiceParticipant.findUnique.mockResolvedValue({
+    // getLiveKitToken now wraps room + participant reads + JWT signing in a tx.
+    // Set up the tx mock to return a LIVE room and active participant.
+    const tx = makeMockTx({ recheckStatus: 'LIVE' });
+    tx.voiceRoom.findUnique.mockResolvedValue({
+      status: 'LIVE', deletedAt: null, micLocked: false, allMuted: false,
+    });
+    tx.voiceParticipant.findUnique.mockResolvedValue({
       role: 'SPEAKER', isActive: true, isMuted: true, mutedByModerator: false, seatNumber: 1,
     });
+    prisma.$transaction.mockImplementation(async (cb) => cb(tx));
 
     const { req, res, next } = reqRes({
       roomId: ROOM_ID, userId: 'u1', role: 'MEMBER', firstName: 'T', lastName: 'U',
@@ -540,8 +562,13 @@ describe('INV-001: LiveKit token TTL', () => {
 
   it('19. generateToken for Voice Club room uses 10m TTL', async () => {
     prisma.user.findUnique.mockResolvedValue({ status: 'ACTIVE' });
+    // Outer (pre-tx) voiceRoom lookup — used to detect voice room.
     prisma.voiceRoom.findUnique.mockResolvedValue({ id: ROOM_ID, status: 'LIVE', deletedAt: null });
-    prisma.voiceParticipant.findUnique.mockResolvedValue({ isActive: true });
+    // Inside tx: room re-read returns LIVE, participant is active.
+    const tx = makeMockTx({ recheckStatus: 'LIVE' });
+    tx.voiceRoom.findUnique.mockResolvedValue({ status: 'LIVE', deletedAt: null });
+    tx.voiceParticipant.findUnique.mockResolvedValue({ isActive: true });
+    prisma.$transaction.mockImplementation(async (cb) => cb(tx));
 
     const { req, res, next } = reqRes({
       body: { roomId: ROOM_ID }, role: 'MEMBER', schoolId: null, firstName: 'T', lastName: 'U',

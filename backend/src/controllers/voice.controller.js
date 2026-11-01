@@ -35,6 +35,8 @@ const { scheduleRoomReminder, cancelRoomReminder } = require('../services/queue.
 // PH17-001/002/003 FIX: SFU helpers for capability enforcement
 const { sfuEvict, sfuRevokePublish, getLivekitRoomService } = require('../utils/livekitService');
 const { getVoiceAudioPermission } = require('../utils/voiceAudioPermission');
+// INV-001-7C: Shared lifecycle service — authoritative room termination contract
+const { terminateVoiceRoom, runSfuCleanup } = require('../services/voiceRoomLifecycle.service');
 
 //  STATUS CONSTANTS 
 // Rooms are PERSISTENT  they never auto-delete when empty.
@@ -57,94 +59,8 @@ const STATUS = {
   SCHEDULED: 'SCHEDULED',
 };
 
-// ── INV-001: LiveKit SFU cleanup for room termination (best-effort, bounded) ──
-// Mirrors sfuRevokePublish()'s 404/timeout classification (utils/livekitService.js).
-const SFU_OP_TIMEOUT_MS = 3000; // 3s per operation; N*3s + 3s bounds total near 15s
-
-async function runSfuCleanup(roomId, participants) {
-  const sfuCleanup = {
-    participantsAttempted: 0,
-    participantsDisconnected: 0,
-    participantsFailed: 0,
-    participantsTimedOut: 0,
-    roomDeleted: false,
-    notConfigured: false,
-  };
-
-  const svc = getLivekitRoomService();
-  if (!svc) {
-    sfuCleanup.notConfigured = true;
-    return sfuCleanup;
-  }
-
-  for (const p of participants) {
-    sfuCleanup.participantsAttempted++;
-    let timer;
-    try {
-      await Promise.race([
-        svc.removeParticipant(roomId, p.userId),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => {
-            const err = new Error(`removeParticipant timed out after ${SFU_OP_TIMEOUT_MS}ms`);
-            err.code = 'LIVEKIT_TIMEOUT';
-            reject(err);
-          }, SFU_OP_TIMEOUT_MS);
-          timer.unref?.();
-        }),
-      ]);
-      sfuCleanup.participantsDisconnected++;
-    } catch (err) {
-      if (err?.code === 'LIVEKIT_TIMEOUT') {
-        sfuCleanup.participantsTimedOut++;
-      } else {
-        const status = err?.status || err?.statusCode;
-        const missing = status === 404 || err?.code === 5 || /not found/i.test(err?.message || '');
-        if (missing) {
-          sfuCleanup.participantsDisconnected++; // already gone == success
-        } else {
-          sfuCleanup.participantsFailed++;
-        }
-      }
-      logger.warn(`[voice:end] removeParticipant failed for ${p.userId} in ${roomId}: ${err?.message || err}`);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }
-
-  // Delete the SFU room itself.
-  let delTimer;
-  try {
-    await Promise.race([
-      svc.deleteRoom(roomId),
-      new Promise((_, reject) => {
-        delTimer = setTimeout(() => {
-          const err = new Error(`deleteRoom timed out after ${SFU_OP_TIMEOUT_MS}ms`);
-          err.code = 'LIVEKIT_TIMEOUT';
-          reject(err);
-        }, SFU_OP_TIMEOUT_MS);
-        delTimer.unref?.();
-      }),
-    ]);
-    sfuCleanup.roomDeleted = true;
-  } catch (err) {
-    if (err?.code === 'LIVEKIT_TIMEOUT') {
-      logger.warn(`[voice:end] deleteRoom timed out for ${roomId}`);
-      // roomDeleted stays false
-    } else {
-      const status = err?.status || err?.statusCode;
-      const missing = status === 404 || err?.code === 5 || /not found/i.test(err?.message || '');
-      if (missing) {
-        sfuCleanup.roomDeleted = true; // room already gone == success
-      } else {
-        logger.warn(`[voice:end] deleteRoom failed for ${roomId}: ${err?.message || err}`);
-      }
-    }
-  } finally {
-    if (delTimer) clearTimeout(delTimer);
-  }
-
-  return sfuCleanup;
-}
+// INV-001-7C: runSfuCleanup is now provided by voiceRoomLifecycle.service.js (imported above).
+// The private implementation has been removed — both endRoom() and deleteRoom() use the service.
 
 // --- CACHE HELPERS ------------------------------------------------------------
 // Cache errors are non-fatal for read operations (we fall back to DB).
@@ -1227,7 +1143,7 @@ async function endRoom(req, res, next) {
         select: { userId: true },
         distinct: ['userId'],
       });
-      const sfuCleanup = await runSfuCleanup(roomId, allParticipants);
+      const sfuCleanup = await runSfuCleanup(roomId, allParticipants, { retryMode: true });
       voiceAudit(userId, 'ROOM_ENDED_SFU_RETRY', roomId, { sfuCleanup });
       return successResponse(res, { sfuCleanup }, 'SFU cleanup retry complete');
     }
@@ -1237,65 +1153,14 @@ async function endRoom(req, res, next) {
       ? Math.round((endedAt.getTime() - new Date(room.startedAt).getTime()) / 60000)
       : 0;
 
-    // INV-001: lock the room, pre-snapshot participants, then mutate — all in one tx.
-    let participantSnapshot = [];
-    try {
-      const txResult = await prisma.$transaction(
-        async (tx) => {
-          // 1. Lock the room row — serialize with joinRoom()'s room lock (change 1c).
-          const locked = await tx.$queryRaw`SELECT id FROM voice_rooms WHERE id = ${roomId} FOR UPDATE`;
-          if (!locked || locked.length === 0) {
-            const err = new Error('Room not found');
-            err.statusCode = 404;
-            throw err;
-          }
-          // 2. Re-check status inside the lock — terminal state is a 400.
-          const rechecked = await tx.voiceRoom.findUnique({
-            where: { id: roomId },
-            select: { status: true },
-          });
-          if (rechecked?.status === STATUS.ENDED) {
-            const err = new Error('Room already archived');
-            err.statusCode = 400;
-            throw err;
-          }
-          // 3. Pre-snapshot active participants BEFORE deactivating (for SFU + voiceMinutes).
-          participantSnapshot = await tx.voiceParticipant.findMany({
-            where: { roomId, isActive: true },
-            select: { userId: true, joinedAt: true },
-          });
-          // 4. Deactivate all participants (clear seatNumber for the @@unique constraint).
-          await tx.voiceParticipant.updateMany({
-            where: { roomId, isActive: true },
-            // FIX: seatNumber must be cleared with isActive=false. The @@unique([roomId, seatNumber])
-            // constraint applies to all rows including inactive ones. Without clearing seatNumber here,
-            // participants archived by endRoom retain their seatNumber, which could block seat
-            // reuse if the room is ever re-activated (permanent room design).
-            data: { isActive: false, leftAt: endedAt, seatNumber: null },
-          });
-          // 5. Mark the room ENDED.
-          await tx.voiceRoom.update({
-            where: { id: roomId },
-            data: {
-              status:  STATUS.ENDED,
-              endedAt,
-              updatedAt: endedAt
-            },
-          });
-          return { participantSnapshot };
-        },
-        { isolationLevel: require('@prisma/client').Prisma.TransactionIsolationLevel.ReadCommitted }
-      );
-      participantSnapshot = txResult.participantSnapshot;
-    } catch (txErr) {
-      if (txErr.statusCode === 400) {
-        return errorResponse(res, 'Room already archived', 400);
-      }
-      if (txErr.statusCode === 404) {
-        return errorResponse(res, 'Room not found', 404);
-      }
-      throw txErr; // unexpected — surface to the outer catch -> next(error)
+    // INV-001-7C: delegate to the shared lifecycle service.
+    // terminateVoiceRoom acquires voice_rooms FOR UPDATE first (same lock order as joinRoom).
+    const { alreadyEnded, participantSnapshot: snap } =
+      await terminateVoiceRoom(roomId, { endedAt });
+    if (alreadyEnded) {
+      return errorResponse(res, 'Room already archived', 400);
     }
+    const participantSnapshot = snap;
 
     // Update host stats
     try {
@@ -3102,14 +2967,39 @@ async function deleteRoom(req, res, next) {
       return errorResponse(res, 'Only the host can delete this room', 403);
     }
 
-    await prisma.voiceParticipant.updateMany({
-      where: { roomId, isActive: true },
-      data: { isActive: false, leftAt: new Date() }
-    });
-    await prisma.voiceRoom.update({
-      where: { id: roomId },
-      data: { deletedAt: new Date(), status: STATUS.ENDED, updatedAt: new Date() }
-    });
+    // INV-001-7C: wrap participant deactivation + soft-delete in a transaction with a row lock.
+    // Lock order: voice_rooms FOR UPDATE → voice_participants (write) — matches joinRoom/endRoom.
+    const deleteNow = new Date();
+    try {
+      await prisma.$transaction(
+        async (tx) => {
+          // 1. Acquire room row lock — serialize with concurrent join/end.
+          await tx.$queryRaw`SELECT id FROM voice_rooms WHERE id = ${roomId} FOR UPDATE`;
+          // 2. Recheck inside lock — concurrent endRoom may have already ENDED/deleted this room.
+          const recheckRoom = await tx.voiceRoom.findUnique({
+            where: { id: roomId },
+            select: { deletedAt: true },
+          });
+          if (!recheckRoom || recheckRoom.deletedAt) {
+            // Already soft-deleted — idempotent, nothing to do.
+            return;
+          }
+          // 3. Deactivate participants.
+          await tx.voiceParticipant.updateMany({
+            where: { roomId, isActive: true },
+            data: { isActive: false, leftAt: deleteNow },
+          });
+          // 4. Soft-delete and end room atomically.
+          await tx.voiceRoom.update({
+            where: { id: roomId },
+            data: { deletedAt: deleteNow, status: STATUS.ENDED, updatedAt: deleteNow },
+          });
+        },
+        { isolationLevel: require('@prisma/client').Prisma.TransactionIsolationLevel.ReadCommitted }
+      );
+    } catch (txErr) {
+      throw txErr;
+    }
 
     try { await clearQueue(roomId); } catch {}
     await invalidateRoomCache(roomId, null);

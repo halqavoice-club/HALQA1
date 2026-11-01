@@ -30,6 +30,8 @@ const { successResponse, errorResponse } = require('../utils/response');
 const { v4: uuidv4 } = require('uuid');
 const { getIo } = require('../sockets');
 const logger  = require('../utils/logger');
+// INV-001-7C: shared lifecycle service — authoritative room termination
+const { terminateVoiceRoom, runSfuCleanup } = require('../services/voiceRoomLifecycle.service');
 
 // Three-layer guard: IP allowlist + JWT + SUPER_ADMIN role
 router.use(ipAllowlist);
@@ -137,29 +139,47 @@ router.post('/voice/:id/terminate', async (req, res, next) => {
     const adminId = req.user.id;
     const { reason } = req.body;
 
+    // Parse sfuRetry — privileged cleanup-only operation for already-ENDED rooms.
+    // Authorized here (SUPER_ADMIN, router.use above) before any room-state exposure.
+    const sfuRetryParam = req.query.sfuRetry === 'true';
+
+    // Pre-load room for the 404 check, title (audit log), and sfuRetry guard.
     const room = await prisma.voiceRoom.findUnique({
       where: { id: roomId },
       select: { id: true, status: true, title: true, hostId: true, deletedAt: true }
     });
-
     if (!room || room.deletedAt) return errorResponse(res, 'Voice room not found', 404);
-    if (room.status === 'ENDED') {
+
+    // sfuRetry is only valid on already-ENDED rooms (cleanup-only, no lifecycle change).
+    // Attempting sfuRetry on a LIVE room is rejected — use the normal terminate path first.
+    if (sfuRetryParam && room.status !== 'ENDED') {
+      return errorResponse(res, 'sfuRetry is only valid for already-archived rooms', 400);
+    }
+
+    const endedAt = new Date();
+
+    // INV-001-7C: delegate to the authoritative lifecycle service (shared with endRoom).
+    // terminateVoiceRoom is idempotent — already-ENDED rooms return alreadyEnded=true.
+    const { alreadyEnded, participantSnapshot } =
+      await terminateVoiceRoom(roomId, { endedAt });
+
+    if (alreadyEnded && !sfuRetryParam) {
       return errorResponse(res, 'Voice room has already been archived', 400);
     }
 
-    const now = new Date();
-
-    // Mark all active participants inactive
-    await prisma.voiceParticipant.updateMany({
-      where: { roomId, isActive: true },
-      data:  { isActive: false, leftAt: now }
-    });
-
-    // Archive the room
-    await prisma.voiceRoom.update({
-      where: { id: roomId },
-      data:  { status: 'ENDED', endedAt: now, updatedAt: now }
-    });
+    // SFU cleanup:
+    //   - Normal termination (retryMode=false): delete the whole SFU room atomically.
+    //   - sfuRetry=true (already ENDED): per-participant sweep with bounded concurrency.
+    let sfuParticipants = participantSnapshot;
+    if (sfuRetryParam && alreadyEnded) {
+      // For retry sweep, load the distinct ever-joined participants from DB.
+      sfuParticipants = await prisma.voiceParticipant.findMany({
+        where: { roomId },
+        select: { userId: true },
+        distinct: ['userId'],
+      });
+    }
+    const sfuResult = await runSfuCleanup(roomId, sfuParticipants, { retryMode: sfuRetryParam });
 
     // Notify via Socket.IO
     const io = getIo();
@@ -170,13 +190,13 @@ router.post('/voice/:id/terminate', async (req, res, next) => {
 
     // Write audit log — UIGAP-013 fix: admin terminations are now audited
     await adminAudit(adminId, 'ADMIN_TERMINATE_VOICE_ROOM', 'VoiceRoom', roomId,
-      { title: room.title, reason: reason || null, previousStatus: room.status },
+      { title: room.title, reason: reason || null, previousStatus: room.status, sfuResult },
       req.ip
     );
 
     logger.info(`[admin-actions] Voice room ${roomId} terminated by admin ${adminId}`);
 
-    return successResponse(res, { roomId, status: 'ENDED' },
+    return successResponse(res, { roomId, status: 'ENDED', sfuResult },
       `Voice room "${room.title}" archived`);
   } catch (err) { next(err); }
 });
