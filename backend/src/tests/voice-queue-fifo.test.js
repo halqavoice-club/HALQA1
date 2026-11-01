@@ -307,7 +307,7 @@ describe('Stage-full approve: promoteParticipant uses seatNumber IS NOT NULL', (
     const fnEnd   = src.indexOf('async function kickParticipant', fnStart);
     const fn = src.slice(fnStart, fnEnd);
     // The transaction re-check must also use seatNumber, not role-based count
-    const txBlock = fn.match(/await prisma\.\$transaction[\s\S]{0,2000}/)?.[0] ?? '';
+    const txBlock = fn.match(/await prisma\.\$transaction[\s\S]{0,4000}/)?.[0] ?? ''; // window widened: security hardening preamble pushed the pattern past the old 2000-char limit
     expect(txBlock).toMatch(/seatNumber IS NOT NULL/);
   });
 });
@@ -427,14 +427,16 @@ describe('Ghost participant: already on stage when host approves', () => {
   test('autoPromoteNext skips already-seated users and cleans up stale handRaised', () => {
     const seatCheckIdx = autoSrc.indexOf('participant.seatNumber != null');
     expect(seatCheckIdx).toBeGreaterThan(-1);
-    const block = autoSrc.slice(seatCheckIdx, seatCheckIdx + 500);
+    const block = autoSrc.slice(seatCheckIdx, autoSrc.indexOf('const isQueueEligible', seatCheckIdx));
     expect(block).toMatch(/handRaised.*false|false.*handRaised/);
-    expect(block).toMatch(/autoPromoteNext/);
+    expect(block).toMatch(/updateMany/);
+    expect(block).toMatch(/seatNumber:\s*participant\.seatNumber/);
+    expect(block).toMatch(/skipStaleEntry\(\)/);
   });
 
   test('autoPromoteNext emits voice:hand_raised raised=false for already-seated ghost', () => {
     const seatCheckIdx = autoSrc.indexOf('participant.seatNumber != null');
-    const block = autoSrc.slice(seatCheckIdx, seatCheckIdx + 500);
+    const block = autoSrc.slice(seatCheckIdx, autoSrc.indexOf('const isQueueEligible', seatCheckIdx));
     expect(block).toMatch(/voice:hand_raised/);
     expect(block).toMatch(/raised.*false/);
   });
@@ -494,24 +496,24 @@ describe('MODERATOR approval: Free Stage OFF requires queue + approveUser endpoi
 
   test('_promoteUser accepts muted MODERATOR (isMuted=true) via isQueueEligible', () => {
     const fnStart = queueSrc.indexOf('async function _promoteUser');
-    const fn = queueSrc.slice(fnStart, fnStart + 3000);
+    const fn = queueSrc.slice(fnStart, queueSrc.indexOf('async function rejectUser', fnStart));
     // isQueueEligible check must include MODERATOR with isMuted
     expect(fn).toMatch(/MODERATOR.*isMuted|isMuted.*MODERATOR/);
   });
 
   test('_promoteUser keeps MODERATOR role when approving (no role change to SPEAKER)', () => {
     const fnStart = queueSrc.indexOf('async function _promoteUser');
-    const fn = queueSrc.slice(fnStart, fnStart + 4000);
+    const fn = queueSrc.slice(fnStart, queueSrc.indexOf('async function rejectUser', fnStart));
     // For MODERATOR path (txIsMod): must NOT set role = 'SPEAKER'
-    // Only sets isMuted=0 (unmutes) and seatNumber.
-    // The else branch (non-MOD) sets role = 'SPEAKER'.
+    // Both branches seat the participant muted until explicit self-unmute.
     expect(fn).toMatch(/txIsMod/);
-    // The non-mod else branch has role = 'SPEAKER'
-    expect(fn).toMatch(/role.*SPEAKER.*isMuted.*0|SPEAKER.*0.*updatedAt/s);
+    expect(fn).toMatch(/SET seatNumber[^;]*role = 'SPEAKER', isMuted = 1/);
     // The mod branch does NOT have role = 'SPEAKER'
     const txIsModIdx = fn.indexOf('if (txIsMod)');
-    const txBlock = fn.slice(txIsModIdx, txIsModIdx + 300);
+    const txBlock = fn.slice(txIsModIdx, fn.indexOf('} else {', txIsModIdx));
     expect(txBlock).not.toMatch(/role.*=.*'SPEAKER'/);
+    expect(txBlock).toMatch(/isMuted = 1/);
+    expect(txBlock).toMatch(/role = \$\{current\.role\}/);
   });
 
   test('_promoteUser emits voice:mute_changed (not role_changed) for MODERATOR', () => {
