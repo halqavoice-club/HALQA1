@@ -8,7 +8,7 @@ import { renderHook, act } from '@testing-library/react'
 import { ConnectionState } from 'livekit-client'
 
 // Mock modules before imports
-jest.mock('@/lib/api', () => ({ default: { patch: jest.fn() } }))
+jest.mock('@/lib/api', () => ({ default: { post: jest.fn(), patch: jest.fn() } }))
 jest.mock('@/lib/socket', () => ({
   getSocket: jest.fn(() => ({
     on: jest.fn(),
@@ -21,43 +21,61 @@ jest.mock('@/hooks/useNetworkQuality', () => ({
   qualityToAudioBitrate: () => 96000,
 }))
 
-// Stateful mock for LiveKit Room
-class MockLiveKitRoom {
-  state = ConnectionState.Connected
-  micEnabled = false
-  connectionQuality = 'excellent'
-  
-  localParticipant = {
-    identity: 'user-123',
-    permissions: { canPublish: true },
-    isMicrophoneEnabled: false,
-    setMicrophoneEnabled: jest.fn(async (enabled: boolean) => {
-      // Simulate async SDK call with small delay
-      await new Promise(resolve => setTimeout(resolve, 10))
-      if (this.state !== ConnectionState.Connected) {
-        throw new Error('Not connected')
-      }
-      this.micEnabled = enabled
-      this.localParticipant.isMicrophoneEnabled = enabled
-    }),
-    audioTracks: new Map(),
+// Stateful mock for LiveKit Room  
+let mockRoom: any
+
+// Mock livekit-client before imports
+jest.mock('livekit-client', () => {
+  const actual = jest.requireActual('livekit-client')
+  return {
+    ...actual,
+    Room: jest.fn().mockImplementation(() => mockRoom),
   }
-  
-  on = jest.fn()
-  off = jest.fn()
-  removeAllListeners = jest.fn()
-  disconnect = jest.fn()
-}
+})
 
 // Must import after mocks are defined
 import { useLiveKit } from '../useLiveKit'
 
 describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () => {
-  let mockRoom: MockLiveKitRoom
-
   beforeEach(() => {
     jest.clearAllMocks()
-    mockRoom = new MockLiveKitRoom()
+    
+    // Initialize mockRoom with proper structure
+    // M1-B-7J: Set state to 'connected' - connect() method doesn't change state, it fires events
+    mockRoom = {
+      state: ConnectionState.Connected,
+      micEnabled: false,
+      localParticipant: {
+        identity: 'user-123',
+        permissions: { canPublish: true },
+        isMicrophoneEnabled: false,
+        setMicrophoneEnabled: jest.fn(async (enabled: boolean) => {
+          // Simulate async SDK call with small delay
+          await new Promise(resolve => setTimeout(resolve, 10))
+          if (mockRoom.state !== ConnectionState.Connected) {
+            throw new Error('Not connected')
+          }
+          mockRoom.micEnabled = enabled
+          mockRoom.localParticipant.isMicrophoneEnabled = enabled
+        }),
+        audioTracks: new Map(),
+        audioTrackPublications: new Map(),
+      },
+      on: jest.fn((event: string, handler: Function) => {
+        // Store handlers for manual triggering if needed
+        return mockRoom
+      }),
+      off: jest.fn(),
+      removeAllListeners: jest.fn(),
+      disconnect: jest.fn(async () => {
+        mockRoom.state = ConnectionState.Disconnected
+      }),
+      connect: jest.fn(async () => {
+        // M1-B-7J: connect() fires events but doesn't directly set state
+        // Tests assume room is connected after connect() resolves
+      }),
+      remoteParticipants: new Map(),
+    }
     
     // Mock crypto.randomUUID
     let idCounter = 0
@@ -76,8 +94,9 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
     it('TC-01: Rejects enableMic() calls without authorization callback', async () => {
       const { result } = renderHook(() => useLiveKit('room-123'))
       
-      // Set up connected room via public API
-      mockRoom.state = ConnectionState.Connected
+      // M1-B-7J: Don't connect - room should not be connected for this test
+      mockRoom.state = ConnectionState.Disconnected
+      
       await act(async () => {
         // Wait for component to be ready - room won't exist without connect() but we can't connect without API mock
         // Instead: verify that enableMic() without authorize callback fails safely
@@ -102,6 +121,9 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
       await act(async () => {
         await result.current.connect()
       })
+      
+      // M1-B-7J: Clear mock after initial connection (hook sets mic to false for listening-only start)
+      mockRoom.localParticipant.setMicrophoneEnabled.mockClear()
 
       await act(async () => {
         const success = await result.current.enableMic(authorizeSpy)

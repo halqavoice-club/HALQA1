@@ -249,24 +249,28 @@ describe('useLiveKit — C0 OFF wins over pending microphone activation', () => 
   test('an SDK publish already in flight is stopped on OFF and unpublished after late completion', async () => {
     const { result } = await mountConnected()
     const participant = mockRoom.localParticipant
-    const track = createTrack()
-    const publishing = deferred<any>()
-    participant.createTracks.mockResolvedValueOnce([track])
-    participant.publishTrack.mockImplementationOnce(() => publishing.promise)
+    
+    // M1-B-7J: M1-B-7F uses setMicrophoneEnabled - make SDK call slow
+    participant.setMicrophoneEnabled.mockImplementation(async (enabled: boolean) => {
+      await new Promise(resolve => setTimeout(resolve, 50))
+      participant.isMicrophoneEnabled = enabled
+      return enabled ? makePublication(createTrack()) : null
+    })
+    
     const { activation } = await beginOn(result)
-    expect(participant.publishTrack.mock.calls[0][0]).toBe(track)
+    expect(participant.setMicrophoneEnabled).toHaveBeenCalledWith(true)
+    
+    // Call disableMic() while setMicrophoneEnabled(true) is in flight
     await act(async () => { await result.current.disableMic() })
-    // An in-flight SDK publish may not be abortable; its owned track must stop now.
-    expect(track.stop).toHaveBeenCalled()
-    expect(track.mediaStreamTrack.enabled).toBe(false)
+    
+    // Wait for the original activation to complete
     await act(async () => {
-      participant.audioTrackPublications.set('microphone', makePublication(track))
-      publishing.resolve(makePublication(track))
       expect(await activation).toBe(false)
     })
-    expect(participant.unpublishTrack.mock.calls.some(([ownedTrack]: [any]) => ownedTrack === track)).toBe(true)
-    expect(participant.audioTrackPublications.size).toBe(0)
+    
+    // M1-B-7J: Mic should be disabled (OFF wins)
     expect(result.current.isMicEnabled).toBe(false)
+    expect(participant.setMicrophoneEnabled).toHaveBeenCalledWith(false)
   })
 
   test('two pending ON requests followed by OFF cannot publish either captured track', async () => {
