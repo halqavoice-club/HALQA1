@@ -36,6 +36,7 @@ export interface LiveKitState {
   // LB-P1-1: self connection quality from LiveKit RoomEvent.ConnectionQualityChanged
   connectionQuality: ConnectionQuality
   isMicEnabled: boolean
+  isMicPending: boolean  // SEC01-WEB-P1-R2: mic activation in progress (hardware capture pending)
   activeSpeakers: Set<string>
   connect: () => Promise<void>
   disconnect: () => void
@@ -119,6 +120,7 @@ export function useLiveKit(roomId: string | null): LiveKitState {
   const [connectionState,   setConnectionState]   = useState<ConnectionState>(ConnectionState.Disconnected)
   const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>(ConnectionQuality.Unknown)
   const [isMicEnabled, setIsMicEnabled]           = useState(false)
+  const [isMicPending, setIsMicPending]           = useState(false)  // SEC01-WEB-P1-R2: mic activation in progress
   const [activeSpeakers, setActiveSpeakers]       = useState<Set<string>>(new Set())
   const activeSpeakersRef = useRef<Set<string>>(new Set())
 
@@ -414,28 +416,47 @@ export function useLiveKit(roomId: string | null): LiveKitState {
     }
     pendingMicOpRef.current = op
     
+    // M1-B-7F: Set pending state at operation start
+    setIsMicPending(true)
+    
     // SEC01-WEB-P1-R2: MANDATORY backend authorization check
     let authorized = false
     try {
       authorized = await authorize()
       if (!authorized) {
         console.warn('[useLiveKit] Backend authorization denied microphone access')
+        // M1-B-7F: Clear pending state on authorization failure (operation-ID check)
+        if (pendingMicOpRef.current?.id === op.id) {
+          setIsMicPending(false)
+        }
         return false
       }
     } catch (err) {
       console.warn('[useLiveKit] Backend authorization check failed:', err)
+      // M1-B-7F: Clear pending state on authorization error (operation-ID check)
+      if (pendingMicOpRef.current?.id === op.id) {
+        setIsMicPending(false)
+      }
       return false
     }
     
     // SEC01-WEB-P1-R2: Check if THIS operation was superseded or aborted during authorization
     if (op.aborted || pendingMicOpRef.current?.id !== op.id) {
       console.warn('[useLiveKit] Microphone enable cancelled: superseded by newer operation')
+      // M1-B-7F: Clear pending state on abort detection (operation-ID check)
+      if (pendingMicOpRef.current?.id === op.id) {
+        setIsMicPending(false)
+      }
       return false
     }
     
     const perms = room.localParticipant?.permissions
     if (!perms || perms.canPublish !== true) {
       console.warn('[useLiveKit] Cannot enable microphone: SFU publishing permission not granted')
+      // M1-B-7F: Clear pending state on SFU permission failure (operation-ID check)
+      if (pendingMicOpRef.current?.id === op.id) {
+        setIsMicPending(false)
+      }
       return false
     }
     
@@ -447,15 +468,27 @@ export function useLiveKit(roomId: string | null): LiveKitState {
         console.warn('[useLiveKit] Microphone enable aborted after SDK activation - forcing disable')
         await room.localParticipant.setMicrophoneEnabled(false).catch(() => {})
         setIsMicEnabled(false)
+        // M1-B-7F: Clear pending state on post-SDK abort (operation-ID check)
+        if (pendingMicOpRef.current?.id === op.id) {
+          setIsMicPending(false)
+        }
         return false
       }
       
       setIsMicEnabled(true)
       localMicIntentRef.current = true
+      // M1-B-7F: Clear pending state on success (operation-ID check)
+      if (pendingMicOpRef.current?.id === op.id) {
+        setIsMicPending(false)
+      }
       return true
     } catch (err) {
       console.warn('[useLiveKit] Failed to enable microphone:', err)
       setIsMicEnabled(false)
+      // M1-B-7F: Clear pending state on SDK failure (operation-ID check)
+      if (pendingMicOpRef.current?.id === op.id) {
+        setIsMicPending(false)
+      }
       throw err
     }
   }, [])
@@ -467,6 +500,8 @@ export function useLiveKit(roomId: string | null): LiveKitState {
     // SEC01-WEB-P1-R2: Abort any pending ENABLE operation
     if (pendingMicOpRef.current?.type === 'ENABLE') {
       pendingMicOpRef.current.aborted = true
+      // M1-B-7G: Clear pending state when aborting ENABLE — disableMic owns the transition
+      if (!isUnmounted.current) setIsMicPending(false)
     }
     
     // SEC01-WEB-P1-R2: Create DISABLE operation
@@ -628,6 +663,7 @@ export function useLiveKit(roomId: string | null): LiveKitState {
     connectionState,
     connectionQuality,
     isMicEnabled,
+    isMicPending,
     activeSpeakers,
     connect,
     disconnect,
