@@ -1162,6 +1162,10 @@ async function endRoom(req, res, next) {
     }
     const participantSnapshot = snap;
 
+    // INV-001-7E: SFU cleanup MUST run first — before any post-commit side effect
+    // that could throw and prevent cleanup from being attempted.
+    const sfuCleanup = await runSfuCleanup(roomId, participantSnapshot);
+
     // Update host stats
     try {
       const peakAudience = await prisma.voiceParticipant.count({
@@ -1218,8 +1222,7 @@ async function endRoom(req, res, next) {
     // Remove live card from feed
     broadcastLiveEnd('voice_room', roomId);
 
-    // INV-001: best-effort LiveKit SFU cleanup — disconnect participants, delete the room.
-    const sfuCleanup = await runSfuCleanup(roomId, participantSnapshot);
+    // INV-001-7E: SFU cleanup already ran above (before side effects).
     voiceAudit(userId, 'ROOM_ENDED', roomId, { durationMinutes, sfuCleanup });
     return successResponse(res, { sfuCleanup }, 'Room ended');
   } catch (error) { next(error); }
@@ -2970,19 +2973,20 @@ async function deleteRoom(req, res, next) {
     // INV-001-7C: wrap participant deactivation + soft-delete in a transaction with a row lock.
     // Lock order: voice_rooms FOR UPDATE → voice_participants (write) — matches joinRoom/endRoom.
     const deleteNow = new Date();
+    let skipEvents = false;
     try {
-      await prisma.$transaction(
+      const txResult = await prisma.$transaction(
         async (tx) => {
           // 1. Acquire room row lock — serialize with concurrent join/end.
           await tx.$queryRaw`SELECT id FROM voice_rooms WHERE id = ${roomId} FOR UPDATE`;
           // 2. Recheck inside lock — concurrent endRoom may have already ENDED/deleted this room.
           const recheckRoom = await tx.voiceRoom.findUnique({
             where: { id: roomId },
-            select: { deletedAt: true },
+            select: { deletedAt: true, status: true },
           });
           if (!recheckRoom || recheckRoom.deletedAt) {
             // Already soft-deleted — idempotent, nothing to do.
-            return;
+            return { skipEvents: true };
           }
           // 3. Deactivate participants.
           await tx.voiceParticipant.updateMany({
@@ -2990,25 +2994,35 @@ async function deleteRoom(req, res, next) {
             data: { isActive: false, leftAt: deleteNow },
           });
           // 4. Soft-delete and end room atomically.
+          const wasAlreadyEnded = recheckRoom.status === STATUS.ENDED;
           await tx.voiceRoom.update({
             where: { id: roomId },
             data: { deletedAt: deleteNow, status: STATUS.ENDED, updatedAt: deleteNow },
           });
+          return { skipEvents: wasAlreadyEnded };
         },
         { isolationLevel: require('@prisma/client').Prisma.TransactionIsolationLevel.ReadCommitted }
       );
+      skipEvents = txResult?.skipEvents ?? false;
     } catch (txErr) {
       throw txErr;
     }
 
-    try { await clearQueue(roomId); } catch {}
-    await invalidateRoomCache(roomId, null);
+    if (!skipEvents) {
+      try { await clearQueue(roomId); } catch {}
+      await invalidateRoomCache(roomId, null);
 
-    const io = getIo();
-    if (io) io.to(`voice:${roomId}`).emit('voice:room_deleted', { roomId });
+      const io = getIo();
+      if (io) io.to(`voice:${roomId}`).emit('voice:room_deleted', { roomId });
 
-    broadcastLiveEnd('voice_room', roomId);
-    voiceAudit(userId, 'ROOM_DELETED', roomId, {});
+      broadcastLiveEnd('voice_room', roomId);
+      voiceAudit(userId, 'ROOM_DELETED', roomId, {});
+    } else {
+      // Room was already ENDED or soft-deleted by a concurrent operation.
+      // Only invalidate cache — do not emit duplicate events or duplicate audit.
+      try { await clearQueue(roomId); } catch {}
+      await invalidateRoomCache(roomId, null);
+    }
     return successResponse(res, null, 'Room deleted');
   } catch (error) { next(error); }
 }

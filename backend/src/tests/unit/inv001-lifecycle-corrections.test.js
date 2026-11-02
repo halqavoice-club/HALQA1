@@ -405,17 +405,11 @@ describe('INV-001-7C corrections', () => {
 
   // ══════════════════════════════════════════════════════════════════════════
   // Test 10: Sleep worker $executeRaw returns 0 → no Socket.IO emit
+  // INV-001-7E: updated to call the real runRoomSleep function.
   // ══════════════════════════════════════════════════════════════════════════
   it('10. Sleep worker: $executeRaw returns 0 → no Socket.IO emit', async () => {
-    // Directly test the worker's runRoomSleep logic via a local simulation.
-    // The sleep worker does:
-    //   1. voiceRoom.findUnique → check status LIVE
-    //   2. voiceParticipant.count → check 0 active
-    //   3. $executeRaw (conditional update) → returns count of updated rows
-    //   4. If count !== 1 → return early (no side effects)
-    //   5. If count === 1 → emit io events
-    //
-    // When $executeRaw returns 0, side effects must NOT run.
+    const { runRoomSleep } = jest.requireActual('../../workers/voice-room-sleep.worker');
+
     prisma.$executeRaw.mockResolvedValue(0);
     prisma.voiceRoom.findUnique.mockResolvedValue({ status: 'LIVE' });
     prisma.voiceParticipant.count.mockResolvedValue(0);
@@ -424,27 +418,19 @@ describe('INV-001-7C corrections', () => {
     const io = { to: jest.fn().mockReturnThis(), emit: emitMock };
     getIo.mockReturnValue(io);
 
-    // Simulate the worker's runRoomSleep body inline (mirrors the worker code).
-    const room = await prisma.voiceRoom.findUnique({ where: { id: ROOM_ID }, select: { status: true } });
-    if (room && room.status === 'LIVE') {
-      const activeCount = await prisma.voiceParticipant.count({ where: { roomId: ROOM_ID, isActive: true } });
-      if (activeCount === 0) {
-        const updateResult = await prisma.$executeRaw`UPDATE voice_rooms SET status = 'IDLE' WHERE id = ${ROOM_ID} AND status = 'LIVE'`;
-        if (Number(updateResult) === 1) {
-          const ioInst = getIo();
-          if (ioInst) ioInst.to(`voice:${ROOM_ID}`).emit('voice:status_changed', { roomId: ROOM_ID, status: 'IDLE' });
-        }
-      }
-    }
+    await runRoomSleep(ROOM_ID);
 
-    // $executeRaw returned 0 → emit must NOT have been called.
+    // $executeRaw returned 0 (another operation won the race) → emit must NOT be called.
     expect(emitMock).not.toHaveBeenCalled();
   });
 
   // ══════════════════════════════════════════════════════════════════════════
   // Test 11: Sleep worker $executeRaw returns 1 → Socket.IO emit called
+  // INV-001-7E: updated to call the real runRoomSleep function.
   // ══════════════════════════════════════════════════════════════════════════
   it('11. Sleep worker: $executeRaw returns 1 → Socket.IO emit called', async () => {
+    const { runRoomSleep } = jest.requireActual('../../workers/voice-room-sleep.worker');
+
     prisma.$executeRaw.mockResolvedValue(1);
     prisma.voiceRoom.findUnique.mockResolvedValue({ status: 'LIVE' });
     prisma.voiceParticipant.count.mockResolvedValue(0);
@@ -453,20 +439,9 @@ describe('INV-001-7C corrections', () => {
     const io = { to: jest.fn().mockReturnThis(), emit: emitMock };
     getIo.mockReturnValue(io);
 
-    // Simulate the worker's runRoomSleep body inline (mirrors the worker code).
-    const room = await prisma.voiceRoom.findUnique({ where: { id: ROOM_ID }, select: { status: true } });
-    if (room && room.status === 'LIVE') {
-      const activeCount = await prisma.voiceParticipant.count({ where: { roomId: ROOM_ID, isActive: true } });
-      if (activeCount === 0) {
-        const updateResult = await prisma.$executeRaw`UPDATE voice_rooms SET status = 'IDLE' WHERE id = ${ROOM_ID} AND status = 'LIVE'`;
-        if (Number(updateResult) === 1) {
-          const ioInst = getIo();
-          if (ioInst) ioInst.to(`voice:${ROOM_ID}`).emit('voice:status_changed', { roomId: ROOM_ID, status: 'IDLE', reason: 'empty_room_sleep' });
-        }
-      }
-    }
+    await runRoomSleep(ROOM_ID);
 
-    // $executeRaw returned 1 → emit must have been called.
+    // $executeRaw returned 1 (LIVE→IDLE succeeded) → emit must be called.
     expect(emitMock).toHaveBeenCalledWith('voice:status_changed', expect.objectContaining({
       roomId: ROOM_ID, status: 'IDLE',
     }));
@@ -539,6 +514,138 @@ describe('INV-001-7C corrections', () => {
     // All 12 participants were processed.
     const allIds = participants.map((p) => p.userId);
     allIds.forEach((id) => expect(callOrder).toContain(id));
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Test 15: SFU cleanup runs even when invalidateRoomCache throws (INV-001-7E)
+  // ══════════════════════════════════════════════════════════════════════════
+  it('15. endRoom: SFU cleanup runs even when invalidateRoomCache throws', async () => {
+    const tx = makeMockTx();
+    prisma.$transaction.mockImplementation(async (cb) => {
+      const result = await cb(tx);
+      return result;
+    });
+    prisma.voiceRoom.findUnique.mockResolvedValue(baseRoom());
+    prisma.voiceParticipant.count.mockResolvedValue(0);
+    prisma.voiceMessage.count.mockResolvedValue(0);
+
+    // invalidateRoomCache throws after the DB commit.
+    invalidateRoomCache.mockRejectedValue(new Error('cache error'));
+
+    const svc = { deleteRoom: jest.fn().mockResolvedValue(), removeParticipant: jest.fn() };
+    getLivekitRoomService.mockReturnValue(svc);
+    lifecycleService.terminateVoiceRoom.mockResolvedValue({
+      alreadyEnded: false,
+      participantSnapshot: [{ userId: 'u1', joinedAt: new Date() }],
+    });
+    lifecycleService.runSfuCleanup.mockResolvedValue({
+      participantsAttempted: 0, participantsDisconnected: 0,
+      participantsFailed: 0, participantsTimedOut: 0,
+      roomDeleted: true, notConfigured: false, cleanupMode: 'room_delete',
+    });
+
+    const { req, res, next } = reqRes({ userId: ADMIN_ID });
+    process.env.LIVEKIT_API_KEY    = 'key';
+    process.env.LIVEKIT_API_SECRET = 'sec';
+
+    // endRoom catches the cache error via outer catch, but SFU cleanup already ran
+    // (it is invoked before invalidateRoomCache in INV-001-7E).
+    await voice.endRoom(req, res, next);
+
+    // SFU cleanup (via the mocked service) was attempted.
+    expect(lifecycleService.runSfuCleanup).toHaveBeenCalled();
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Test 16: generateToken — missing participant returns 403, DB error returns 503
+  // ══════════════════════════════════════════════════════════════════════════
+  it('16a. generateToken: missing participant returns 403', async () => {
+    const { generateToken } = require('../../controllers/livekit.controller');
+    process.env.LIVEKIT_API_KEY    = 'key';
+    process.env.LIVEKIT_API_SECRET = 'sec';
+
+    prisma.user.findUnique.mockResolvedValue({ status: 'ACTIVE' });
+    prisma.liveClass.findFirst.mockResolvedValue(null);
+
+    // voice room exists and is LIVE; participant is null (not a member)
+    prisma.$transaction.mockImplementation(async (cb) => {
+      const tx = {
+        $queryRaw: jest.fn().mockResolvedValue([{ id: 'room-1' }]),
+        voiceRoom: {
+          findUnique: jest.fn().mockResolvedValue({ id: 'room-1', status: 'LIVE', deletedAt: null }),
+        },
+        voiceParticipant: {
+          findUnique: jest.fn().mockResolvedValue(null), // not a participant
+        },
+      };
+      return cb(tx);
+    });
+
+    const { req, res, next } = reqRes({ userId: ADMIN_ID });
+    req.body = { roomId: ROOM_ID };
+    await generateToken(req, res, next);
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('16b. generateToken: participant DB error returns 503 (fail-closed)', async () => {
+    const { generateToken } = require('../../controllers/livekit.controller');
+    process.env.LIVEKIT_API_KEY    = 'key';
+    process.env.LIVEKIT_API_SECRET = 'sec';
+
+    prisma.user.findUnique.mockResolvedValue({ status: 'ACTIVE' });
+    prisma.liveClass.findFirst.mockResolvedValue(null);
+
+    prisma.$transaction.mockImplementation(async (cb) => {
+      const tx = {
+        $queryRaw: jest.fn().mockResolvedValue([{ id: 'room-1' }]),
+        voiceRoom: {
+          findUnique: jest.fn().mockResolvedValue({ id: 'room-1', status: 'LIVE', deletedAt: null }),
+        },
+        voiceParticipant: {
+          findUnique: jest.fn().mockRejectedValue(new Error('DB connection lost')),
+        },
+      };
+      return cb(tx);
+    });
+
+    const { req, res, next } = reqRes({ userId: ADMIN_ID });
+    req.body = { roomId: ROOM_ID };
+    await generateToken(req, res, next);
+
+    expect(res.statusCode).toBe(503);
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // Test 17: deleteRoom — no stale events when room was already ENDED
+  // ══════════════════════════════════════════════════════════════════════════
+  it('17. deleteRoom HOST: no voice:room_deleted event when room was already ENDED', async () => {
+    // The tx returns skipEvents=true when status was already ENDED.
+    prisma.$transaction.mockImplementation(async (cb) => {
+      const tx = {
+        $queryRaw: jest.fn().mockResolvedValue([{ id: ROOM_ID }]),
+        voiceRoom: {
+          findUnique: jest.fn().mockResolvedValue({ deletedAt: null, status: 'ENDED' }),
+          update: jest.fn().mockResolvedValue({}),
+        },
+        voiceParticipant: {
+          updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+        },
+      };
+      return cb(tx);
+    });
+    prisma.voiceRoom.findUnique.mockResolvedValue(baseRoom({ hostId: ADMIN_ID }));
+
+    const emitMock = jest.fn();
+    const io = { to: jest.fn().mockReturnThis(), emit: emitMock };
+    getIo.mockReturnValue(io);
+
+    const { req, res, next } = reqRes({ userId: ADMIN_ID });
+    await voice.deleteRoom(req, res, next);
+
+    // Response succeeds but no room_deleted event (room was already terminated).
+    expect(res.statusCode).toBe(200);
+    expect(emitMock).not.toHaveBeenCalledWith('voice:room_deleted', expect.anything());
   });
 
 });

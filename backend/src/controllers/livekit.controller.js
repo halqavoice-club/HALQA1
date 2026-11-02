@@ -296,8 +296,11 @@ async function generateToken(req, res, next) {
                   where: { roomId_userId: { roomId, userId } },
                   select: { isActive: true },
                 });
-              } catch {
-                voiceParticipant = null;
+              } catch (dbErr) {
+                // INV-001-7E: fail-closed — DB error must not silently issue a token.
+                const err = new Error('Unable to verify participant status');
+                err.statusCode = 503;
+                throw err;
               }
               if (!voiceParticipant?.isActive) {
                 const err = new Error('You are not an active participant in this voice room. Use POST /voice/:id/livekit-token instead.');
@@ -327,6 +330,7 @@ async function generateToken(req, res, next) {
           if (txErr.statusCode === 404) return errorResponse(res, 'Room not found', 404);
           if (txErr.statusCode === 400) return errorResponse(res, txErr.message, 400);
           if (txErr.statusCode === 403) return errorResponse(res, txErr.message, 403);
+          if (txErr.statusCode === 503) return errorResponse(res, txErr.message, 503);
           throw txErr;
         }
         return successResponse(res, {

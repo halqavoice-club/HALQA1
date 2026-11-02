@@ -126,4 +126,4 @@ function createVoiceRoomSleepWorker(connection) {
   return worker;
 }
 
-module.exports = { createVoiceRoomSleepWorker };
+module.exports = { createVoiceRoomSleepWorker, runRoomSleep };
