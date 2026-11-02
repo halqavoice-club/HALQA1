@@ -40,7 +40,7 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
   beforeEach(() => {
     jest.clearAllMocks()
     
-    // Initialize mockRoom with proper structure
+    // Initialize mockRoom with proper structure BEFORE Room constructor is called
     // M1-B-7J: Set state to 'connected' - connect() method doesn't change state, it fires events
     mockRoom = {
       state: ConnectionState.Connected,
@@ -72,7 +72,8 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
       }),
       connect: jest.fn(async () => {
         // M1-B-7J: connect() fires events but doesn't directly set state
-        // Tests assume room is connected after connect() resolves
+        // State is already set to Connected in beforeEach
+        mockRoom.state = ConnectionState.Connected
       }),
       remoteParticipants: new Map(),
     }
@@ -142,9 +143,15 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
       
+      // M1-B-7J: Start with room disconnected
+      mockRoom.state = ConnectionState.Disconnected
+      
       await act(async () => {
         await result.current.connect()
       })
+      
+      // M1-B-7J: Clear the setMicrophoneEnabled call from initial connection (FIX-01 behavior)
+      mockRoom.localParticipant.setMicrophoneEnabled.mockClear()
 
       await act(async () => {
         const success = await result.current.enableMic(authorizeSpy)
@@ -179,19 +186,28 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
   describe('Operation Versioning - OFF Wins', () => {
     it('TC-05: Aborts when disableMic called during authorization', async () => {
       const { result } = renderHook(() => useLiveKit('room-123'))
-      // M1-B-7J: Fix scope - declare resolveAuth in outer scope before creating promise
-      let resolveAuth!: (value: boolean) => void
-      
-      const authorizeSpy = jest.fn(() => new Promise<boolean>(resolve => {
-        resolveAuth = resolve
-      }))
       
       ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
       
+      // M1-B-7J: Start disconnected
+      mockRoom.state = ConnectionState.Disconnected
+      
       await act(async () => {
         await result.current.connect()
+      })
+      
+      // M1-B-7J: Clear initial connection call
+      mockRoom.localParticipant.setMicrophoneEnabled.mockClear()
+
+      // M1-B-7J: Fix scope - declare resolveAuth in outer scope BEFORE creating the promise
+      let resolveAuth!: (value: boolean) => void
+      
+      const authorizeSpy = jest.fn(() => {
+        return new Promise<boolean>(resolve => {
+          resolveAuth = resolve
+        })
       })
 
       // Start enableMic (authorization pending)
@@ -224,6 +240,9 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
       
+      // M1-B-7J: Start disconnected
+      mockRoom.state = ConnectionState.Disconnected
+      
       await act(async () => {
         await result.current.connect()
       })
@@ -232,6 +251,7 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
       mockRoom.localParticipant.setMicrophoneEnabled = jest.fn(async (enabled) => {
         await new Promise(resolve => setTimeout(resolve, 50))
         mockRoom.localParticipant.isMicrophoneEnabled = enabled
+        mockRoom.micEnabled = enabled
       })
 
       // Start enableMic
@@ -259,6 +279,9 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
       ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
+      
+      // M1-B-7J: Start disconnected
+      mockRoom.state = ConnectionState.Disconnected
       
       await act(async () => {
         await result.current.connect()
@@ -288,19 +311,25 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
   describe('Disconnect Invalidation', () => {
     it('TC-08: Aborts pending ENABLE on disconnect', async () => {
       const { result } = renderHook(() => useLiveKit('room-123'))
-      // M1-B-7J: Fix scope - declare resolveAuth in outer scope
-      let resolveAuth!: (value: boolean) => void
-      
-      const authorizeSpy = jest.fn(() => new Promise<boolean>(resolve => {
-        resolveAuth = resolve
-      }))
       
       ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
       
+      // M1-B-7J: Start disconnected
+      mockRoom.state = ConnectionState.Disconnected
+      
       await act(async () => {
         await result.current.connect()
+      })
+
+      // M1-B-7J: Fix scope - declare resolveAuth in outer scope BEFORE creating promise
+      let resolveAuth!: (value: boolean) => void
+      
+      const authorizeSpy = jest.fn(() => {
+        return new Promise<boolean>(resolve => {
+          resolveAuth = resolve
+        })
       })
 
       // Start enableMic
