@@ -335,12 +335,13 @@ export function useLiveKit(roomId: string | null): LiveKitState {
         })
       })
 
-      // FIX-01: On initial connection, honor backend hint. On reconnection, preserve local intent.
+      // FIX-01 + C1A: On initial connection, always start listening-only. On reconnection, preserve local intent.
       if (isInitialConnectionRef.current) {
-        // First connection: backend micEnabled hint is authoritative
-        await room.localParticipant.setMicrophoneEnabled(!!micEnabled)
-        setIsMicEnabled(!!micEnabled)
-        localMicIntentRef.current = !!micEnabled
+        // C1A: Always start listening-only on initial connection for security
+        // Ignore backend micEnabled hint to prevent unauthorized mic activation
+        await room.localParticipant.setMicrophoneEnabled(false)
+        setIsMicEnabled(false)
+        localMicIntentRef.current = false
         isInitialConnectionRef.current = false
       } else {
         // Reconnection: user's CURRENT local intent is authoritative
@@ -448,6 +449,20 @@ export function useLiveKit(roomId: string | null): LiveKitState {
         setIsMicPending(false)
       }
       return false
+    }
+    
+    // M1-B-7K Issue #2: Check MediaSession PAUSE state — OFF-wins contract
+    // If user pressed headset PAUSE button, block microphone activation
+    // even if backend authorization succeeded. User pause intent is
+    // authoritative and supersedes delayed backend approval.
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      if (navigator.mediaSession.playbackState === 'paused') {
+        console.warn('[useLiveKit] Microphone enable blocked: MediaSession is paused (OFF-wins contract)')
+        if (pendingMicOpRef.current?.id === op.id) {
+          setIsMicPending(false)
+        }
+        return false
+      }
     }
     
     const perms = room.localParticipant?.permissions

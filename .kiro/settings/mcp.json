@@ -1,4 +1,14 @@
-{
+\\\\\\\\\\\\\\\\\\\*{
   "mcpServers": {
+    "aikido": {
+      "command": "npx",
+      "args": [
+        "--yes",
+        "--prefer-offline",
+        "@aikidosec/mcp@latest"
+      ],
+      "disabled": false,
+      "autoApprove": []
+    }
   }
 }

@@ -8,7 +8,7 @@ import { renderHook, act } from '@testing-library/react'
 import { ConnectionState } from 'livekit-client'
 
 // Mock modules before imports
-jest.mock('@/lib/api', () => ({ default: { post: jest.fn(), patch: jest.fn() } }))
+jest.mock('@/lib/api', () => ({ __esModule: true, default: { post: jest.fn(), patch: jest.fn() } }))
 jest.mock('@/lib/socket', () => ({
   getSocket: jest.fn(() => ({
     on: jest.fn(),
@@ -35,6 +35,7 @@ jest.mock('livekit-client', () => {
 
 // Must import after mocks are defined
 import { useLiveKit } from '../useLiveKit'
+import api from '@/lib/api'
 
 describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () => {
   beforeEach(() => {
@@ -50,8 +51,9 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
         permissions: { canPublish: true },
         isMicrophoneEnabled: false,
         setMicrophoneEnabled: jest.fn(async (enabled: boolean) => {
-          // Simulate async SDK call with small delay
-          await new Promise(resolve => setTimeout(resolve, 10))
+          // Instant SDK resolution (deterministic — no real-timer races).
+          // Tests that need a pending SDK window override this mock with their
+          // own deferred/timer implementation (see TC-06, TC-12).
           if (mockRoom.state !== ConnectionState.Connected) {
             throw new Error('Not connected')
           }
@@ -85,10 +87,15 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
     } as any
     
     // Mock getUserMedia and getLocalDevices for hardware capture verification
-    global.navigator.mediaDevices = {
-      getUserMedia: jest.fn(),
-      getLocalDevices: jest.fn(),
-    } as any
+    // M1-B-7K Issue #1: Use Object.defineProperty to override readonly property
+    Object.defineProperty(global.navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: jest.fn(),
+        getLocalDevices: jest.fn(),
+      },
+      writable: true,
+      configurable: true
+    })
   })
 
   describe('Mandatory Authorization', () => {
@@ -110,13 +117,13 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
     })
 
     it('TC-02: Invokes mandatory authorization callback before hardware', async () => {
-      const { result } = renderHook(() => useLiveKit('room-123'))
-      const authorizeSpy = jest.fn().mockResolvedValue(true)
-      
-      // Simulate connected room by mocking api.post to return token
-      ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
+      // M1-B-7J: Mock API before rendering hook
+      ;(api.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
+      
+      const { result } = renderHook(() => useLiveKit('room-123'))
+      const authorizeSpy = jest.fn().mockResolvedValue(true)
       
       // Connect the hook
       await act(async () => {
@@ -136,15 +143,13 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
     })
 
     it('TC-03: Aborts on authorization denial', async () => {
-      const { result } = renderHook(() => useLiveKit('room-123'))
-      const authorizeSpy = jest.fn().mockResolvedValue(false)
-      
-      ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
+      // M1-B-7J: Mock API before rendering hook
+      ;(api.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
       
-      // M1-B-7J: Start with room disconnected
-      mockRoom.state = ConnectionState.Disconnected
+      const { result } = renderHook(() => useLiveKit('room-123'))
+      const authorizeSpy = jest.fn().mockResolvedValue(false)
       
       await act(async () => {
         await result.current.connect()
@@ -163,12 +168,13 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
     })
 
     it('TC-04: Aborts on authorization exception', async () => {
-      const { result } = renderHook(() => useLiveKit('room-123'))
-      const authorizeSpy = jest.fn().mockRejectedValue(new Error('Backend error'))
-      
-      ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
+      // M1-B-7J: Mock API before rendering hook
+      ;(api.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
+      
+      const { result } = renderHook(() => useLiveKit('room-123'))
+      const authorizeSpy = jest.fn().mockRejectedValue(new Error('Backend error'))
       
       await act(async () => {
         await result.current.connect()
@@ -185,14 +191,12 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
 
   describe('Operation Versioning - OFF Wins', () => {
     it('TC-05: Aborts when disableMic called during authorization', async () => {
-      const { result } = renderHook(() => useLiveKit('room-123'))
-      
-      ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
+      // M1-B-7J: Mock API before rendering hook
+      ;(api.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
       
-      // M1-B-7J: Start disconnected
-      mockRoom.state = ConnectionState.Disconnected
+      const { result } = renderHook(() => useLiveKit('room-123'))
       
       await act(async () => {
         await result.current.connect()
@@ -233,15 +237,13 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
     })
 
     it('TC-06: Aborts when disableMic called during SDK activation', async () => {
-      const { result } = renderHook(() => useLiveKit('room-123'))
-      const authorizeSpy = jest.fn().mockResolvedValue(true)
-      
-      ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
+      // M1-B-7J: Mock API before rendering hook
+      ;(api.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
       
-      // M1-B-7J: Start disconnected
-      mockRoom.state = ConnectionState.Disconnected
+      const { result } = renderHook(() => useLiveKit('room-123'))
+      const authorizeSpy = jest.fn().mockResolvedValue(true)
       
       await act(async () => {
         await result.current.connect()
@@ -274,50 +276,56 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
     })
 
     it('TC-07: ON/OFF/ON concurrent operations - latest wins', async () => {
-      const { result } = renderHook(() => useLiveKit('room-123'))
-      
-      ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
+      // M1-B-7J: Mock API before rendering hook
+      ;(api.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
-      
-      // M1-B-7J: Start disconnected
-      mockRoom.state = ConnectionState.Disconnected
-      
+
+      const { result } = renderHook(() => useLiveKit('room-123'))
+
       await act(async () => {
         await result.current.connect()
       })
 
-      const auth1 = jest.fn().mockResolvedValue(true)
-      const auth2 = jest.fn().mockResolvedValue(true)
+      // Deferred authorizations so each ON stays pending at the auth check,
+      // giving the OFF a deterministic window to abort ON #1. Everything runs
+      // inside a single act() to avoid overlapping act() scopes (which would
+      // corrupt the act scope for subsequent tests).
+      let resolveAuth1!: (v: boolean) => void
+      let resolveAuth2!: (v: boolean) => void
+      const auth1 = jest.fn(() => new Promise<boolean>((r) => { resolveAuth1 = r }))
+      const auth2 = jest.fn(() => new Promise<boolean>((r) => { resolveAuth2 = r }))
 
-      // Start ON #1
-      const enable1 = act(async () => result.current.enableMic(auth1))
-      
-      // Immediately start OFF
+      let r1: boolean | undefined
+      let r2: boolean | undefined
       await act(async () => {
+        // ON #1 — pending at the authorization check
+        const p1 = result.current.enableMic(auth1)
+        // OFF — aborts the pending ON #1 (operation-ID abort)
         await result.current.disableMic()
+        // ON #2 — pending at the authorization check
+        const p2 = result.current.enableMic(auth2)
+        // Resolve both authorizations: ON #1 is already aborted; ON #2 is active
+        resolveAuth1(true)
+        resolveAuth2(true)
+        ;[r1, r2] = await Promise.all([p1, p2])
       })
-      
-      // Immediately start ON #2
-      const enable2 = act(async () => result.current.enableMic(auth2))
 
-      await Promise.all([enable1, enable2])
-
-      // M1-B-7J: Updated expectation - final state should be ON (latest operation wins)
+      // ON #1 was aborted by OFF; ON #2 (the latest) wins
+      expect(r1).toBe(false)
+      expect(r2).toBe(true)
       expect(result.current.isMicEnabled).toBe(true)
     })
   })
 
   describe('Disconnect Invalidation', () => {
     it('TC-08: Aborts pending ENABLE on disconnect', async () => {
-      const { result } = renderHook(() => useLiveKit('room-123'))
-      
-      ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
+      // M1-B-7J: Mock API before rendering hook
+      ;(api.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
       
-      // M1-B-7J: Start disconnected
-      mockRoom.state = ConnectionState.Disconnected
+      const { result } = renderHook(() => useLiveKit('room-123'))
       
       await act(async () => {
         await result.current.connect()
@@ -356,12 +364,13 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
 
   describe('SFU Permission Checks', () => {
     it('TC-09: Aborts when SFU canPublish is false', async () => {
-      const { result } = renderHook(() => useLiveKit('room-123'))
-      const authorizeSpy = jest.fn().mockResolvedValue(true)
-      
-      ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
+      // M1-B-7J: Mock API before rendering hook
+      ;(api.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
+      
+      const { result } = renderHook(() => useLiveKit('room-123'))
+      const authorizeSpy = jest.fn().mockResolvedValue(true)
       
       await act(async () => {
         await result.current.connect()
@@ -398,11 +407,12 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
 
   describe('Stateful Publication Evidence', () => {
     it('TC-11: Hardware state matches final intent after races', async () => {
-      const { result } = renderHook(() => useLiveKit('room-123'))
-      
-      ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
+      // M1-B-7J: Mock API before rendering hook
+      ;(api.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
+      
+      const { result } = renderHook(() => useLiveKit('room-123'))
       
       await act(async () => {
         await result.current.connect()
@@ -429,43 +439,44 @@ describe('SEC01-WEB-P1-R2: Mandatory Authorization & Operation Versioning', () =
     })
 
     it('TC-12: Late SDK completion after abort forces disable', async () => {
-      const { result } = renderHook(() => useLiveKit('room-123'))
-      const authorizeSpy = jest.fn().mockResolvedValue(true)
-      
-      ;(require('@/lib/api').default.post as jest.Mock).mockResolvedValue({
+      // M1-B-7J: Mock API before rendering hook
+      ;(api.post as jest.Mock).mockResolvedValue({
         data: { data: { token: 'test-token', livekitUrl: 'wss://test', micEnabled: false } }
       })
-      
+
+      const { result } = renderHook(() => useLiveKit('room-123'))
+      const authorizeSpy = jest.fn().mockResolvedValue(true)
+
       await act(async () => {
         await result.current.connect()
       })
-      
-      // SDK activation takes 100ms
-      let sdkResolve!: (value: void) => void
-      mockRoom.localParticipant.setMicrophoneEnabled = jest.fn(async (enabled) => {
-        await new Promise<void>(resolve => { sdkResolve = resolve })
+
+      // SDK enable is slow (deferred); SDK disable is instant. Only the enable
+      // call blocks on sdkResolve so disableMic does not hang on the same gate.
+      let sdkResolve!: () => void
+      mockRoom.localParticipant.setMicrophoneEnabled = jest.fn(async (enabled: boolean) => {
+        if (enabled) {
+          await new Promise<void>((r) => { sdkResolve = r })
+        }
         mockRoom.localParticipant.isMicrophoneEnabled = enabled
       })
 
-      // Start enableMic
-      const enablePromise = act(async () => {
-        return result.current.enableMic(authorizeSpy)
-      })
-
-      // Wait a bit, then disable
-      await new Promise(resolve => setTimeout(resolve, 20))
+      let success: boolean | undefined
       await act(async () => {
+        // ON — pending at the deferred SDK enable
+        const p = result.current.enableMic(authorizeSpy)
+        // Let enableMic progress past the (instant) authorization and the
+        // pre-SDK abort check to the deferred setMicrophoneEnabled(true) call,
+        // so the abort below happens during the SDK stage, not the auth stage.
+        await Promise.resolve()
+        // OFF — aborts the pending ON (disable is instant)
         await result.current.disableMic()
-      })
-
-      // Now complete SDK activation (simulating late completion)
-      act(() => {
+        // Late SDK enable completion → enableMic detects the abort and forces disable
         sdkResolve()
+        success = await p
       })
 
-      const success = await enablePromise
-
-      // M1-B-7J: Updated expectation - should detect abort and keep mic off
+      // The late SDK completion is detected as aborted → mic forced off
       expect(success).toBe(false)
       expect(result.current.isMicEnabled).toBe(false)
     })
