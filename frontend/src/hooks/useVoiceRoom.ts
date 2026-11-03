@@ -1315,6 +1315,26 @@ export function useVoiceRoom(roomId: string | null) {
     }
   }, [roomId, myParticipant?.userId, myParticipant?.isMuted]) // eslint-disable-line
 
+  // M1-B-7K-P8: Check if the current user is authorized to unmute their microphone.
+  // Backend checks: role !== AUDIENCE && !mutedByModerator && isActive
+  const checkMicAuthorization = useCallback(async (): Promise<boolean> => {
+    if (!roomId || !myParticipant) return false
+
+    // Optimistic local check first
+    if (myParticipant.role === 'AUDIENCE') return false
+    if (myParticipant.mutedByModerator) return false
+
+    // Authoritative backend check
+    try {
+      const res = await api.get(`/voice/${roomId}/mic-status`)
+      return res.data?.data?.canUnmute === true
+    } catch (err: any) {
+      // 404 = not a participant, 403 = muted, 500 = server error
+      console.warn('[useVoiceRoom] checkMicAuthorization failed:', err?.response?.status)
+      return false
+    }
+  }, [roomId, myParticipant?.userId, myParticipant?.role, myParticipant?.mutedByModerator]) // eslint-disable-line
+
   const raiseHand = useCallback(async () => {
     if (!roomId || !myParticipant) return
     try {
@@ -1857,7 +1877,7 @@ export function useVoiceRoom(roomId: string | null) {
   return {
     myParticipant,
     // Self controls
-    toggleMute, raiseHand, sendMessage,
+    toggleMute, checkMicAuthorization, raiseHand, sendMessage,
     broadcastReaction, broadcastSpeaking,
     // Open Mic
     grabMic, dropMic, toggleOpenMic, toggleMicLock, toggleSeatLock,

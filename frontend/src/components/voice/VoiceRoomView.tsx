@@ -345,6 +345,7 @@ export function VoiceRoomView({ onLeave }: Props) {
   const {
     myParticipant,
     toggleMute,
+    checkMicAuthorization,
     sendMessage,
     promoteUser,
     kickUser,
@@ -1728,18 +1729,26 @@ export function VoiceRoomView({ onLeave }: Props) {
                 if (isMicEnabled) {
                   await disableMic().catch(() => {})
                 } else {
-                  // Every explicit mic-on attempt must confirm the current
-                  // publishing grant, including retries after an SFU failure.
+                  // M1-B-7K-P8: Backend authorization check before hardware activation
+                  // Step 1: Check if user can unmute (role, moderator mute state)
+                  const canUnmute = await checkMicAuthorization()
+                  if (!canUnmute) {
+                    toast({
+                      title: 'Cannot unmute',
+                      description: 'You are muted by a moderator or do not have speaker permissions.',
+                      variant: 'destructive',
+                    })
+                    return
+                  }
+
+                  // Step 2: Activate hardware with authorization callback
+                  // Re-check authorization just before hardware activation to prevent race
+                  // (moderator could mute between step 1 and step 2)
                   try {
                     const ok = await enableMic(async () => {
-                      // Authorize mic activation: confirm backend permission by unmuting on server
-                      try {
-                        await api.patch(`/voice/${roomId}/mute`, { isMuted: false })
-                        return true
-                      } catch {
-                        return false
-                      }
+                      return await checkMicAuthorization()
                     })
+
                     if (!ok) {
                       toast({
                         title: 'Unable to enable microphone',

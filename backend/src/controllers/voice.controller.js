@@ -1463,6 +1463,43 @@ async function toggleMute(req, res, next) {
   } catch (error) { next(error); }
 }
 
+// M1-B-7K-P8: Check if current user can unmute microphone (backend authorization)
+// Returns { canUnmute: boolean, role, mutedByModerator } based on DB state.
+// Used by VoiceRoomView before calling enableMic() to validate authorization.
+async function getMicStatus(req, res, next) {
+  try {
+    const { id: roomId } = req.params;
+    const userId = req.user.id;
+
+    const participant = await prisma.voiceParticipant.findUnique({
+      where: { roomId_userId: { roomId, userId } },
+      select: { role: true, mutedByModerator: true, isActive: true }
+    });
+
+    if (!participant) {
+      return res.status(404).json({
+        error: 'NOT_PARTICIPANT',
+        message: 'You are not a participant in this room'
+      });
+    }
+
+    // Backend authorization logic mirrors getLiveKitToken micEnabled check:
+    // Can unmute if: role !== AUDIENCE && !mutedByModerator && isActive
+    const canUnmute =
+      participant.role !== 'AUDIENCE' &&
+      !participant.mutedByModerator &&
+      participant.isActive;
+
+    return successResponse(res, {
+      canUnmute: !!canUnmute,
+      role: participant.role,
+      mutedByModerator: participant.mutedByModerator
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 // --- RAISE HAND ---------------------------------------------------------------
 // --- RAISE HAND (legacy endpoint — now delegates to FIFO queue) ---------------
 // P1-1 FIX: Previously this only updated DB handRaised flag without enqueuing
@@ -3177,6 +3214,7 @@ module.exports = {
   leaveRoom,
   endRoom,
   toggleMute,
+  getMicStatus,
   raiseHand,
   promoteParticipant,
   kickParticipant,

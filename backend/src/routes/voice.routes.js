@@ -349,6 +349,10 @@ router.get('/:id/hand-queue', getHandQueue);
 // ─── LIVEKIT TOKEN ────────────────────────────────────────────────────────────
 router.post('/:id/livekit-token', getLiveKitToken);
 
+// M1-B-7K-P8: Check if current user can unmute microphone (backend authorization)
+const { getMicStatus } = require('../controllers/voice.controller');
+router.get('/:id/mic-status', getMicStatus);
+
 // ─── GIFTS ────────────────────────────────────────────────────────────────────
 // Send a gift to a host/speaker in the room
 router.post('/:id/gifts',
