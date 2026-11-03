@@ -1730,10 +1730,16 @@ export function VoiceRoomView({ onLeave }: Props) {
                 } else {
                   // Every explicit mic-on attempt must confirm the current
                   // publishing grant, including retries after an SFU failure.
-                  const authorized = await toggleMute(false)
-                  if (!authorized) return
                   try {
-                    const ok = await enableMic()
+                    const ok = await enableMic(async () => {
+                      // Authorize mic activation: confirm backend permission by unmuting on server
+                      try {
+                        await api.patch(`/voice/${roomId}/mute`, { isMuted: false })
+                        return true
+                      } catch {
+                        return false
+                      }
+                    })
                     if (!ok) {
                       toast({
                         title: 'Unable to enable microphone',
