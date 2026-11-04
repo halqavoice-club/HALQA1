@@ -51,34 +51,42 @@ describe('AUDIT-043-SEC: Frontend security header configuration', () => {
 
   // ── 1. Permissions-Policy: single source in middleware.ts ─────────────────
 
-  test('1a. middleware.ts sets Permissions-Policy header', () => {
-    expect(middlewareSrc).toContain("'Permissions-Policy'")
-  })
+  test("1a. middleware.ts sets Permissions-Policy header", () => {
+    expect(middlewareSrc).toContain("Permissions-Policy");
+  });
 
   test('1b. Permissions-Policy includes camera=* (required for LiveKit camera)', () => {
     // Extract the policy value line
-    const policyMatch = middlewareSrc.match(/'Permissions-Policy'\s*:\s*'([^']+)'/)
-    expect(policyMatch).not.toBeNull()
-    expect(policyMatch![1]).toMatch(/camera=\*/)
-  })
+    const policyMatch = middlewareSrc.match(
+      /"Permissions-Policy"\s*:\s*"([^"]+)"/,
+    );
+    expect(policyMatch).not.toBeNull();
+    expect(policyMatch![1]).toMatch(/camera=\*/);
+  });
 
-  test('1c. Permissions-Policy includes microphone=* (required for LiveKit audio)', () => {
-    const policyMatch = middlewareSrc.match(/'Permissions-Policy'\s*:\s*'([^']+)'/)
-    expect(policyMatch).not.toBeNull()
-    expect(policyMatch![1]).toMatch(/microphone=\*/)
-  })
+  test("1c. Permissions-Policy includes microphone=* (required for LiveKit audio)", () => {
+    const policyMatch = middlewareSrc.match(
+      /"Permissions-Policy"\s*:\s*"([^"]+)"/,
+    );
+    expect(policyMatch).not.toBeNull();
+    expect(policyMatch![1]).toMatch(/microphone=\*/);
+  });
 
-  test('1d. Permissions-Policy includes display-capture=* (required for screen sharing)', () => {
-    const policyMatch = middlewareSrc.match(/'Permissions-Policy'\s*:\s*'([^']+)'/)
-    expect(policyMatch).not.toBeNull()
-    expect(policyMatch![1]).toMatch(/display-capture=\*/)
-  })
+  test("1d. Permissions-Policy includes display-capture=* (required for screen sharing)", () => {
+    const policyMatch = middlewareSrc.match(
+      /"Permissions-Policy"\s*:\s*"([^"]+)"/,
+    );
+    expect(policyMatch).not.toBeNull();
+    expect(policyMatch![1]).toMatch(/display-capture=\*/);
+  });
 
-  test('1e. Permissions-Policy denies geolocation (not used by HALQA)', () => {
-    const policyMatch = middlewareSrc.match(/'Permissions-Policy'\s*:\s*'([^']+)'/)
-    expect(policyMatch).not.toBeNull()
-    expect(policyMatch![1]).toMatch(/geolocation=\(\)/)
-  })
+  test("1e. Permissions-Policy denies geolocation (not used by HALQA)", () => {
+    const policyMatch = middlewareSrc.match(
+      /"Permissions-Policy"\s*:\s*"([^"]+)"/,
+    );
+    expect(policyMatch).not.toBeNull();
+    expect(policyMatch![1]).toMatch(/geolocation=\(\)/);
+  });
 
   // ── 2. Deduplication: next.config.js must NOT set Permissions-Policy ──────
   //
@@ -140,23 +148,23 @@ describe('AUDIT-043-SEC: Frontend security header configuration', () => {
 
   // ── 5. Other required security headers are present in middleware.ts ────────
 
-  test('5a. X-Frame-Options: SAMEORIGIN is set (clickjacking protection)', () => {
-    expect(middlewareSrc).toContain("'X-Frame-Options'")
-    expect(middlewareSrc).toMatch(/SAMEORIGIN/)
-  })
+  test("5a. X-Frame-Options: SAMEORIGIN is set (clickjacking protection)", () => {
+    expect(middlewareSrc).toContain("X-Frame-Options");
+    expect(middlewareSrc).toMatch(/SAMEORIGIN/);
+  });
 
-  test('5b. X-Content-Type-Options: nosniff is set (MIME sniffing protection)', () => {
-    expect(middlewareSrc).toContain("'X-Content-Type-Options'")
-    expect(middlewareSrc).toMatch(/nosniff/)
-  })
+  test("5b. X-Content-Type-Options: nosniff is set (MIME sniffing protection)", () => {
+    expect(middlewareSrc).toContain("X-Content-Type-Options");
+    expect(middlewareSrc).toMatch(/nosniff/);
+  });
 
-  test('5c. Referrer-Policy is set', () => {
-    expect(middlewareSrc).toContain("'Referrer-Policy'")
-  })
+  test("5c. Referrer-Policy is set", () => {
+    expect(middlewareSrc).toContain("Referrer-Policy");
+  });
 
-  test('5d. X-XSS-Protection is set (legacy browser protection)', () => {
-    expect(middlewareSrc).toContain("'X-XSS-Protection'")
-  })
+  test("5d. X-XSS-Protection is set (legacy browser protection)", () => {
+    expect(middlewareSrc).toContain("X-XSS-Protection");
+  });
 
   // ── 6. applySecurityHeaders is called on every response path ──────────────
 
