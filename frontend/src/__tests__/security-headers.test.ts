@@ -56,33 +56,36 @@ describe('AUDIT-043-SEC: Frontend security header configuration', () => {
   });
 
   test('1b. Permissions-Policy includes camera=* (required for LiveKit camera)', () => {
-    // Extract the policy value line
+    // Extract the policy value line (accept either single or double quotes)
     const policyMatch = middlewareSrc.match(
-      /"Permissions-Policy"\s*:\s*"([^"]+)"/,
+      /['"]Permissions-Policy['"]\s*:\s*['"]([^'"]+)['"]/,
     );
     expect(policyMatch).not.toBeNull();
     expect(policyMatch![1]).toMatch(/camera=\*/);
   });
 
   test("1c. Permissions-Policy includes microphone=* (required for LiveKit audio)", () => {
+    // Extract the policy value line (accept either single or double quotes)
     const policyMatch = middlewareSrc.match(
-      /"Permissions-Policy"\s*:\s*"([^"]+)"/,
+      /['"]Permissions-Policy['"]\s*:\s*['"]([^'"]+)['"]/,
     );
     expect(policyMatch).not.toBeNull();
     expect(policyMatch![1]).toMatch(/microphone=\*/);
   });
 
   test("1d. Permissions-Policy includes display-capture=* (required for screen sharing)", () => {
+    // Extract the policy value line (accept either single or double quotes)
     const policyMatch = middlewareSrc.match(
-      /"Permissions-Policy"\s*:\s*"([^"]+)"/,
+      /['"]Permissions-Policy['"]\s*:\s*['"]([^'"]+)['"]/,
     );
     expect(policyMatch).not.toBeNull();
     expect(policyMatch![1]).toMatch(/display-capture=\*/);
   });
 
   test("1e. Permissions-Policy denies geolocation (not used by HALQA)", () => {
+    // Extract the policy value line (accept either single or double quotes)
     const policyMatch = middlewareSrc.match(
-      /"Permissions-Policy"\s*:\s*"([^"]+)"/,
+      /['"]Permissions-Policy['"]\s*:\s*['"]([^'"]+)['"]/,
     );
     expect(policyMatch).not.toBeNull();
     expect(policyMatch![1]).toMatch(/geolocation=\(\)/);
