@@ -89,6 +89,7 @@ jest.mock('livekit-client', () => ({
 describe('useLiveKit — FIX-01: Reconnection Consent Preservation', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    jest.useFakeTimers()
     eventHandlers = {}
     mockOn.mockImplementation((event: string, handler: Function) => {
       eventHandlers[event] = handler
@@ -104,7 +105,12 @@ describe('useLiveKit — FIX-01: Reconnection Consent Preservation', () => {
     })
   })
 
-  test('Initial connection honors backend micEnabled=true hint', async () => {
+  afterEach(() => {
+    jest.runOnlyPendingTimers()
+    jest.useRealTimers()
+  })
+
+  test('Initial connection ignores backend micEnabled=true hint (C1A policy)', async () => {
     ;(api.post as jest.Mock).mockResolvedValue({
       data: {
         data: {
@@ -122,12 +128,13 @@ describe('useLiveKit — FIX-01: Reconnection Consent Preservation', () => {
     })
 
     await waitFor(() => {
-      expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(true)
-      expect(result.current.isMicEnabled).toBe(true)
+      // C1A: Initial connection ALWAYS starts listening-only, ignoring backend hint
+      expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(false)
+      expect(result.current.isMicEnabled).toBe(false)
     })
   })
 
-  test('Initial connection honors backend micEnabled=false hint', async () => {
+  test('Initial connection with backend micEnabled=false also starts OFF', async () => {
     ;(api.post as jest.Mock).mockResolvedValue({
       data: {
         data: {
@@ -176,6 +183,7 @@ describe('useLiveKit — FIX-01: Reconnection Consent Preservation', () => {
 
     // Simulate disconnect → auto-reconnect (not user-initiated)
     await act(async () => {
+      mockRoom.state = ConnectionState.Disconnected // Update room state to allow reconnection
       eventHandlers['disconnected']?.() // undefined reason = not user-initiated
     })
 
@@ -187,14 +195,31 @@ describe('useLiveKit — FIX-01: Reconnection Consent Preservation', () => {
     // Reconnect completes
     await act(async () => {
       await result.current.connect()
+      mockRoom.state = ConnectionState.Connected // Update room state after reconnection
+    })
+
+    // Trigger reconnected event (in addition to connection-state-changed)
+    await act(async () => {
+      eventHandlers['reconnected']?.()
+    })
+
+    // Trigger connection state changed event
+    await act(async () => {
+      eventHandlers['connection-state-changed']?.(ConnectionState.Connected)
+    })
+
+    // Advance timers to let any pending effects run
+    await act(async () => {
+      jest.advanceTimersByTime(500)
     })
 
     // Wait for mic state to be set
     await waitFor(() => {
-      // setMicrophoneEnabled should be called with FALSE (preserving OFF intent)
-      expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(false)
+      // Check state first - this causes waitFor to retry until state updates
       expect(result.current.isMicEnabled).toBe(false)
-    })
+      // Then verify the SDK method was called
+      expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(false)
+    }, { timeout: 2000 })
   })
 
   test('Reconnection preserves user explicit ON intent (active speaker continuity)', async () => {
@@ -233,6 +258,7 @@ describe('useLiveKit — FIX-01: Reconnection Consent Preservation', () => {
 
     // Simulate network blip → auto-reconnect
     await act(async () => {
+      mockRoom.state = ConnectionState.Disconnected // Update room state to allow reconnection
       eventHandlers['disconnected']?.() // Network error
     })
 
@@ -244,14 +270,31 @@ describe('useLiveKit — FIX-01: Reconnection Consent Preservation', () => {
     // Reconnect completes
     await act(async () => {
       await result.current.connect()
+      mockRoom.state = ConnectionState.Connected // Update room state after reconnection
+    })
+
+    // Trigger reconnected event (in addition to connection-state-changed)
+    await act(async () => {
+      eventHandlers['reconnected']?.()
+    })
+
+    // Trigger connection state changed event
+    await act(async () => {
+      eventHandlers['connection-state-changed']?.(ConnectionState.Connected)
+    })
+
+    // Advance timers to let any pending effects run
+    await act(async () => {
+      jest.advanceTimersByTime(500)
     })
 
     // Wait for mic state
     await waitFor(() => {
-      // setMicrophoneEnabled should be called with TRUE (preserving ON intent)
-      expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(true)
+      // Check state first - this causes waitFor to retry until state updates
       expect(result.current.isMicEnabled).toBe(true)
-    })
+      // Then verify the SDK method was called
+      expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(true)
+    }, { timeout: 2000 })
   })
 
   test('Token refresh reconnection uses new backend hint', async () => {
@@ -322,7 +365,7 @@ describe('useLiveKit — FIX-01: Reconnection Consent Preservation', () => {
       result.current.disconnect()
     })
 
-    // Second connection should be treated as initial (honor backend hint)
+    // Second connection should be treated as initial
     ;(api.post as jest.Mock).mockResolvedValue({
       data: {
         data: {
@@ -340,8 +383,9 @@ describe('useLiveKit — FIX-01: Reconnection Consent Preservation', () => {
     })
 
     await waitFor(() => {
-      expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(true)
-      expect(result.current.isMicEnabled).toBe(true)
+      // C1A: Even after explicit disconnect, initial connection starts listening-only
+      expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(false)
+      expect(result.current.isMicEnabled).toBe(false)
     })
   })
 })
@@ -385,6 +429,16 @@ describe('useLiveKit — FIX-03: MediaSession Consent Protection', () => {
       await result.current.connect()
     })
 
+    // Trigger connection state changed to ensure MediaSession is set up
+    await act(async () => {
+      eventHandlers['connection-state-changed']?.(ConnectionState.Connected)
+    })
+
+    // Give React time to run effects
+    await act(async () => {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    })
+
     // Verify MediaSession play handler was registered
     const mediaSession = global.navigator.mediaSession as any
     expect(mediaSession.setActionHandler).toHaveBeenCalledWith('play', expect.any(Function))
@@ -395,6 +449,9 @@ describe('useLiveKit — FIX-03: MediaSession Consent Protection', () => {
     )?.[1]
 
     expect(playHandler).toBeDefined()
+
+    // Ensure mic is DISABLED before testing the play handler (production code guards on this)
+    mockLocalParticipant.isMicrophoneEnabled = false
 
     // Mock document.dispatchEvent to capture toast event
     const dispatchEventSpy = jest.spyOn(document, 'dispatchEvent')

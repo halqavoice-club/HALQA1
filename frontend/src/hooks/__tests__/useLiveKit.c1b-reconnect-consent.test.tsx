@@ -132,14 +132,14 @@ describe('PHASE 3A-3C3A-C1B: Web Reconnection Consent - canPublish Guard', () =>
   /**
    * C1B-01: Baseline - C1A behavior preserved
    */
-  test('C1B-01: Initial connection honors backend micEnabled hint (FIX-01)', async () => {
+  test('C1B-01: Initial connection ignores backend micEnabled hint (C1A policy)', async () => {
     tokenResponse({ micEnabled: true, canPublishAudio: true })
     const { result } = await connectHook()
     
     expect(mockRoom.connect).toHaveBeenCalledWith('wss://mock-livekit', 'mock-token')
-    // M1-B-7J: FIX-01 honors backend micEnabled=true on initial connection
-    expect(mockRoom.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(true)
-    expect(result.current.isMicEnabled).toBe(true)
+    // C1A: Initial connection ALWAYS starts listening-only, ignoring backend hint
+    expect(mockRoom.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(false)
+    expect(result.current.isMicEnabled).toBe(false)
   })
 
   /**

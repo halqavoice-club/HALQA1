@@ -108,14 +108,15 @@ beforeEach(() => {
 afterEach(() => { cleanup() })
 
 describe('C1A: initial Voice Club connection requires local microphone consent', () => {
-  test.each([true, false])('initial token micEnabled=%s is honored by FIX-01 but later overridden by C1A', async micEnabled => {
+  test.each([true, false])('initial token micEnabled=%s is IGNORED on initial connection (C1A overrides FIX-01)', async micEnabled => {
     tokenResponse({ micEnabled, canPublishAudio: true })
     const { result } = await connectHook()
     expect(mockRoom.connect).toHaveBeenCalledWith('wss://mock-livekit', 'mock-token')
-    // M1-B-7J: FIX-01 implementation honors backend micEnabled hint on initial connection
-    // This calls setMicrophoneEnabled(micEnabled) - tests updated to match production behavior
-    expect(mockRoom.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(micEnabled)
-    expect(result.current.isMicEnabled).toBe(micEnabled)
+    // C1A: Initial connection ALWAYS forces listening-only mode for security
+    // Backend micEnabled hint is ignored on initial connection
+    // FIX-01 only applies to RECONNECTION (after isInitialConnectionRef.current = false)
+    expect(mockRoom.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(false)
+    expect(result.current.isMicEnabled).toBe(false)
     expect(result.current.isMicPending).toBe(false)
   })
 
@@ -127,9 +128,9 @@ describe('C1A: initial Voice Club connection requires local microphone consent',
       tokenResponse({ role, seatNumber: role === 'HOST' ? 1 : canPublish ? 2 : null, isMuted: false,
         micEnabled: true, canPublishAudio: canPublish })
       const { result } = await connectHook()
-      // M1-B-7J: FIX-01 honors backend micEnabled=true, so setMicrophoneEnabled(true) IS called
-      expect(mockRoom.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(true)
-      expect(result.current.isMicEnabled).toBe(true)
+      // C1A: Initial connection ALWAYS forces OFF regardless of role or backend micEnabled
+      expect(mockRoom.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(false)
+      expect(result.current.isMicEnabled).toBe(false)
     },
   )
 
@@ -224,18 +225,22 @@ describe('C1A: initial Voice Club connection requires local microphone consent',
     // M1-B-7J: Clear the initial connection call
     mockRoom.localParticipant.setMicrophoneEnabled.mockClear()
     
-    // M1-B-7J: This test expects old createTracks/publishTrack implementation
-    // Current implementation uses setMicrophoneEnabled(true) - test needs updating
+    // Use deferred authorization to create cancellation window
+    const approval = deferred<boolean>()
     let pending!: Promise<boolean>
-    await act(async () => { pending = result.current.enableMic(async () => true) })
+    await act(async () => { pending = result.current.enableMic(() => approval.promise) })
     
-    // M1-B-7J: Updated expectation - enableMic uses setMicrophoneEnabled, not createTracks
-    expect(mockRoom.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(true)
-    
+    // Now call disableMic() while authorization is pending
     await act(async () => { await result.current.disableMic() })
+    
+    // Resolve authorization after OFF - should still return false
     await act(async () => {
+      approval.resolve(true)
       expect(await pending).toBe(false)
     })
+    
+    // M1-B-7J: setMicrophoneEnabled(true) should not have been called due to abortion
+    expect(mockRoom.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalledWith(true)
     expect(result.current.isMicEnabled).toBe(false)
   })
 
@@ -281,12 +286,15 @@ describe('C1A: initial Voice Club connection requires local microphone consent',
     
     const { result } = await connectHook()
     
-    // M1-B-7J: FIX-01 honors backend micEnabled=true, so mic IS enabled on initial connection
+    // C1A: Initial connection ALWAYS forces OFF, even for SPEAKER with micEnabled=true
+    // User must explicitly enable mic after promotion
+    expect(mockRoom.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(false)
+    expect(result.current.isMicEnabled).toBe(false)
+    
+    // Explicit enableMic() after promotion works correctly
+    mockRoom.localParticipant.setMicrophoneEnabled.mockClear()
+    await act(async () => { expect(await result.current.enableMic(async () => true)).toBe(true) })
     expect(mockRoom.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(true)
     expect(result.current.isMicEnabled).toBe(true)
-    
-    // Explicit disableMic() still works to turn it off
-    await act(async () => { await result.current.disableMic() })
-    expect(result.current.isMicEnabled).toBe(false)
   })
 })

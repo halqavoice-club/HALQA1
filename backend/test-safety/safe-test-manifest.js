@@ -128,6 +128,7 @@ const SAFE_UNIT_TESTS = Object.freeze([
   'src/tests/unit/inv001-lifecycle-corrections.test.js',
   'src/tests/unit/liveclass-microphone-schema.test.js',
   'src/tests/unit/liveclass-microphone-authority.service.test.js',
+  'src/tests/unit/voice-mic-status.test.js',
   'src/tests/tracing.test.js',
   'src/tests/trust-proxy.test.js',
   'src/tests/ui-separation.test.js',
