@@ -74,9 +74,9 @@ describe('approved unit-mode PrismaClient construction guard', () => {
     const discovered = discoverTestFiles(process.cwd());
 
     expect(() => auditClassification(discovered)).not.toThrow();
-    expect(SAFE_UNIT_TESTS).toHaveLength(128);
-    expect(DESTRUCTIVE_TESTS).toHaveLength(15);
-    expect(discovered).toHaveLength(143);
+    expect(SAFE_UNIT_TESTS).toHaveLength(161);
+    expect(DESTRUCTIVE_TESTS).toHaveLength(18);
+    expect(discovered).toHaveLength(179);
     expect(SAFE_UNIT_TESTS).toContain(
       'src/tests/test-safety/prisma-client-unit-guard.test.js'
     );
