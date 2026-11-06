@@ -275,3 +275,397 @@ describe("DEF-02 microphone consent source contracts", () => {
     }
   });
 });
+
+
+/**
+ * Phase 16c security hardening tests - Authorization fail-closed validation
+ *
+ * Verifies that missing or invalid authorization data denies microphone publication.
+ * Tests the hardened voiceAudioPermission utility added in Phase B.
+ */
+describe("getVoiceAudioPermission - Security Hardening (Phase 16c)", () => {
+  const { getVoiceAudioPermission } = require("../utils/voiceAudioPermission");
+
+  const validRoom = { micLocked: false, allMuted: false };
+  const validParticipant = {
+    role: "SPEAKER",
+    isActive: true,
+    seatNumber: 2,
+    isMuted: false,
+    mutedByModerator: false,
+  };
+
+  describe("Room data validation", () => {
+    test("denies null room", () => {
+      expect(
+        getVoiceAudioPermission({ participant: validParticipant, room: null }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "NO_ROOM_DATA",
+      });
+    });
+
+    test("denies undefined room", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: validParticipant,
+          room: undefined,
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "NO_ROOM_DATA",
+      });
+    });
+
+    test("denies empty room object", () => {
+      expect(
+        getVoiceAudioPermission({ participant: validParticipant, room: {} }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "INVALID_ROOM_AUTHORIZATION",
+      });
+    });
+
+    test("denies room missing micLocked field", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: validParticipant,
+          room: { allMuted: false },
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "INVALID_ROOM_AUTHORIZATION",
+      });
+    });
+
+    test("denies room missing allMuted field", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: validParticipant,
+          room: { micLocked: false },
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "INVALID_ROOM_AUTHORIZATION",
+      });
+    });
+
+    test("denies room with non-boolean micLocked", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: validParticipant,
+          room: { micLocked: "false", allMuted: false },
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "INVALID_ROOM_AUTHORIZATION",
+      });
+    });
+
+    test("denies room with non-boolean allMuted", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: validParticipant,
+          room: { micLocked: false, allMuted: 0 },
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "INVALID_ROOM_AUTHORIZATION",
+      });
+    });
+
+    test("denies room with null micLocked", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: validParticipant,
+          room: { micLocked: null, allMuted: false },
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "INVALID_ROOM_AUTHORIZATION",
+      });
+    });
+  });
+
+  describe("Participant data validation", () => {
+    test("denies null participant", () => {
+      expect(
+        getVoiceAudioPermission({ participant: null, room: validRoom }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "NO_PARTICIPANT_DATA",
+      });
+    });
+
+    test("denies undefined participant", () => {
+      expect(
+        getVoiceAudioPermission({ participant: undefined, room: validRoom }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "NO_PARTICIPANT_DATA",
+      });
+    });
+
+    test("denies participant missing role", () => {
+      const { role, ...noRole } = validParticipant;
+      expect(
+        getVoiceAudioPermission({ participant: noRole, room: validRoom }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "ROLE_NOT_ELIGIBLE",
+      });
+    });
+
+    test("denies participant with null role", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: { ...validParticipant, role: null },
+          room: validRoom,
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "ROLE_NOT_ELIGIBLE",
+      });
+    });
+
+    test("denies participant with invalid role", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: { ...validParticipant, role: "INVALID" },
+          room: validRoom,
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "ROLE_NOT_ELIGIBLE",
+      });
+    });
+
+    test("denies participant missing mutedByModerator field", () => {
+      const { mutedByModerator, ...incomplete } = validParticipant;
+      expect(
+        getVoiceAudioPermission({ participant: incomplete, room: validRoom }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "INVALID_PARTICIPANT_AUTHORIZATION",
+      });
+    });
+
+    test("denies participant missing isMuted field", () => {
+      const { isMuted, ...incomplete } = validParticipant;
+      expect(
+        getVoiceAudioPermission({ participant: incomplete, room: validRoom }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "INVALID_PARTICIPANT_AUTHORIZATION",
+      });
+    });
+
+    test("denies participant with non-boolean mutedByModerator", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: { ...validParticipant, mutedByModerator: 0 },
+          room: validRoom,
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "INVALID_PARTICIPANT_AUTHORIZATION",
+      });
+    });
+
+    test("denies participant with non-boolean isMuted", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: { ...validParticipant, isMuted: "false" },
+          room: validRoom,
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "INVALID_PARTICIPANT_AUTHORIZATION",
+      });
+    });
+  });
+
+  describe("Authorization precedence with valid data", () => {
+    test("denies moderator-muted SPEAKER even with valid room", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: { ...validParticipant, mutedByModerator: true },
+          room: validRoom,
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "MUTED_BY_MODERATOR",
+      });
+    });
+
+    test("denies self-muted SPEAKER with valid room", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: { ...validParticipant, isMuted: true },
+          room: validRoom,
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "SELF_MUTED",
+      });
+    });
+
+    test("denies SPEAKER when room micLocked is true", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: validParticipant,
+          room: { ...validRoom, micLocked: true },
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "MIC_LOCKED",
+      });
+    });
+
+    test("denies SPEAKER when room allMuted is true", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: validParticipant,
+          room: { ...validRoom, allMuted: true },
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "ALL_MUTED",
+      });
+    });
+
+    test("allows HOST with micLocked room", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: { ...validParticipant, role: "HOST" },
+          room: { ...validRoom, micLocked: true },
+        }),
+      ).toEqual({
+        canPublishAudio: true,
+        reason: "ALLOWED",
+      });
+    });
+
+    test("allows MODERATOR with allMuted room", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: { ...validParticipant, role: "MODERATOR" },
+          room: { ...validRoom, allMuted: true },
+        }),
+      ).toEqual({
+        canPublishAudio: true,
+        reason: "ALLOWED",
+      });
+    });
+
+    test("denies HOST with moderator mute (no privilege bypass)", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: {
+            ...validParticipant,
+            role: "HOST",
+            mutedByModerator: true,
+          },
+          room: validRoom,
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "MUTED_BY_MODERATOR",
+      });
+    });
+
+    test("denies MODERATOR with self-mute (no privilege bypass)", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: { ...validParticipant, role: "MODERATOR", isMuted: true },
+          room: validRoom,
+        }),
+      ).toEqual({
+        canPublishAudio: false,
+        reason: "SELF_MUTED",
+      });
+    });
+  });
+
+  describe("Fail-closed guarantee - no incomplete input grants permission", () => {
+    test("no null room path returns canPublishAudio: true", () => {
+      expect(
+        getVoiceAudioPermission({ participant: validParticipant, room: null })
+          .canPublishAudio,
+      ).toBe(false);
+    });
+
+    test("no undefined room path returns canPublishAudio: true", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: validParticipant,
+          room: undefined,
+        }).canPublishAudio,
+      ).toBe(false);
+    });
+
+    test("no empty room path returns canPublishAudio: true", () => {
+      expect(
+        getVoiceAudioPermission({ participant: validParticipant, room: {} })
+          .canPublishAudio,
+      ).toBe(false);
+    });
+
+    test("no null participant path returns canPublishAudio: true", () => {
+      expect(
+        getVoiceAudioPermission({ participant: null, room: validRoom })
+          .canPublishAudio,
+      ).toBe(false);
+    });
+
+    test("no undefined participant path returns canPublishAudio: true", () => {
+      expect(
+        getVoiceAudioPermission({ participant: undefined, room: validRoom })
+          .canPublishAudio,
+      ).toBe(false);
+    });
+
+    test("no missing authorization field path returns canPublishAudio: true", () => {
+      const { mutedByModerator, ...incomplete} = validParticipant;
+      expect(
+        getVoiceAudioPermission({ participant: incomplete, room: validRoom })
+          .canPublishAudio,
+      ).toBe(false);
+    });
+  });
+
+  describe("Allows valid unrestricted participants", () => {
+    test("allows active SPEAKER with valid seat and no restrictions", () => {
+      expect(
+        getVoiceAudioPermission({ participant: validParticipant, room: validRoom }),
+      ).toEqual({
+        canPublishAudio: true,
+        reason: "ALLOWED",
+      });
+    });
+
+    test("allows active HOST with valid seat and no restrictions", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: { ...validParticipant, role: "HOST" },
+          room: validRoom,
+        }),
+      ).toEqual({
+        canPublishAudio: true,
+        reason: "ALLOWED",
+      });
+    });
+
+    test("allows active MODERATOR with valid seat and no restrictions", () => {
+      expect(
+        getVoiceAudioPermission({
+          participant: { ...validParticipant, role: "MODERATOR" },
+          room: validRoom,
+        }),
+      ).toEqual({
+        canPublishAudio: true,
+        reason: "ALLOWED",
+      });
+    });
+  });
+});
