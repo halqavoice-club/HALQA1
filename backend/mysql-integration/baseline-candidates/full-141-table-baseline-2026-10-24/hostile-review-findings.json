@@ -1,0 +1,18 @@
+{
+  "formatVersion": 3,
+  "verdict": "FINAL_OFFLINE_ACCEPTANCE",
+  "independence": "Distinct hostile pass in the same Codex environment; not organizationally independent",
+  "resolvedFindings": [
+    { "id": "B6C-F01", "status": "VERIFIED_RESOLVED", "evidence": "141/141 executable unique CREATE TABLE statements; exact 94/46/0/1 classification; hostile parser tests" },
+    { "id": "B6C-F02", "status": "VERIFIED_RESOLVED", "evidence": "Exact six-CHECK tuple validation and nine mutation tests" },
+    { "id": "B6-F02", "status": "VERIFIED_RESOLVED_BY_ALTERNATIVE", "evidence": "Authoritative README and UNIT-B6-FINAL-COMPLETION.md reject and supersede ownership-uncertain B-5 guidance" }
+  ],
+  "openFindings": [
+    { "id": "B6-G01", "classification": "GAP", "issue": "Original Prisma executable path and environment were not recorded" },
+    { "id": "B6-G02", "classification": "GAP", "issue": "No MySQL 8.4 runtime parsing or enforcement evidence" },
+    { "id": "B6-B01", "classification": "BLOCKED", "issue": "No authenticated Aikido scan" },
+    { "id": "B6-B02", "classification": "BLOCKED", "issue": "No organizationally independent reviewer" }
+  ],
+  "unitCExecutionAuthorized": false,
+  "productionRelease": "NO_GO"
+}

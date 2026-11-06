@@ -155,6 +155,7 @@ const SAFE_UNIT_TESTS = Object.freeze([
   'src/tests/voice-p0-mic-pass-sfu.test.js',
   'src/tests/voice-p0-queue-approval-consent.test.js',
   'src/tests/voice-phase1-audio-permission.test.js',
+  'src/tests/voice-phase16c-controller-guards.test.js',
   'src/tests/voice-queue-fifo.test.js',
   'src/tests/voice-realtime-join-fix.test.js',
   'src/tests/voice-realtime-sync.test.js',

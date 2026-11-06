@@ -1273,6 +1273,10 @@ async function toggleMute(req, res, next) {
           where: { id: roomId },
           select: { micLocked: true, allMuted: true },
         });
+        // PHASE 16c: Explicit null guard — missing room data must never authorize microphone publication.
+        if (!room) {
+          return errorResponse(res, 'Room no longer exists', 404);
+        }
         const permission = getVoiceAudioPermission({
           participant: { ...participant, isMuted: false },
           room,
@@ -1307,6 +1311,11 @@ async function toggleMute(req, res, next) {
 
           if (!freshParticipant || !freshParticipant.isActive) {
             return errorResponse(res, 'User is not in this room', 403);
+          }
+
+          // PHASE 16c: Explicit null guard — idempotent re-grant must not proceed with missing room authorization.
+          if (!freshRoom) {
+            return errorResponse(res, 'Room no longer exists', 404);
           }
 
           if (freshParticipant.mutedByModerator) {
@@ -1411,6 +1420,10 @@ async function toggleMute(req, res, next) {
         where: { id: roomId },
         select: { micLocked: true, allMuted: true },
       });
+      // PHASE 16c: Explicit null guard — moderator action must not grant SFU publishing with missing room authorization.
+      if (!room) {
+        return errorResponse(res, 'Room no longer exists', 404);
+      }
       const permission = getVoiceAudioPermission({ participant: updated, room });
       const sfuTag = newMuted ? '[voice:mod-mute]' : '[voice:mod-unmute]';
       const sfuResult = await sfuRevokePublish(
@@ -1436,6 +1449,10 @@ async function toggleMute(req, res, next) {
         where: { id: roomId },
         select: { micLocked: true, allMuted: true },
       });
+      // PHASE 16c: Explicit null guard — final self-unmute authorization must not grant SFU publishing with missing room data.
+      if (!room) {
+        return errorResponse(res, 'Room no longer exists', 404);
+      }
       const permission = getVoiceAudioPermission({ participant: updated, room });
       let sfuResult = { enforced: false, reason: permission.reason };
       if (permission.canPublishAudio) {

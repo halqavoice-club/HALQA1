@@ -1,0 +1,20 @@
+{
+  "formatVersion": 2,
+  "status": "OFFLINE_VERIFIED_RUNTIME_UNVERIFIED",
+  "checkConstraints": [
+    { "table": "wallets", "constraintName": "chk_wallet_coins_positive", "expression": "`coins` >= 0", "sourceMigration": "20260821_add_wallet_balance_checks", "sourceLine": 16 },
+    { "table": "wallets", "constraintName": "chk_wallet_diamonds_positive", "expression": "`diamonds` >= 0", "sourceMigration": "20260821_add_wallet_balance_checks", "sourceLine": 17 },
+    { "table": "wallets", "constraintName": "chk_wallet_total_spent", "expression": "`totalSpent` >= 0", "sourceMigration": "20260821_add_wallet_balance_checks", "sourceLine": 18 },
+    { "table": "wallets", "constraintName": "chk_wallet_total_earned", "expression": "`totalEarned` >= 0", "sourceMigration": "20260821_add_wallet_balance_checks", "sourceLine": 19 },
+    { "table": "school_memberships", "constraintName": "chk_membership_role", "expression": "`role` IN ('SCHOOL_ADMIN','TEACHER','STUDENT','GUARDIAN','REPRESENTATIVE')", "sourceMigration": "20260821_add_membership_role_check", "sourceLine": 28 },
+    { "table": "wallet_transactions", "constraintName": "chk_wallet_tx_type", "expression": "`type` IN ('STRIPE_PURCHASE','GIFT_SEND','GIFT_RECEIVE','TIP_SEND','TIP_RECEIVE','SUBSCRIPTION','SUBSCRIPTION_RECEIVE','ADMIN_GRANT','REFUND','PAYOUT','PAYOUT_REVERSAL','DISPUTED')", "sourceMigration": "20261007_add_wallet_tx_type_check", "sourceLine": 47 }
+  ],
+  "fulltextIndexes": [
+    { "table": "posts", "indexName": "posts_ft_body", "columns": ["body"], "sourceMigration": "20260721_add_fulltext_indexes", "sourceLine": 14 },
+    { "table": "users", "indexName": "users_ft_name", "columns": ["firstName", "lastName"], "sourceMigration": "20260721_add_fulltext_indexes", "sourceLine": 18 },
+    { "table": "communities", "indexName": "communities_ft_name_desc", "columns": ["name", "description"], "sourceMigration": "20260721_add_fulltext_indexes", "sourceLine": 22 },
+    { "table": "voice_rooms", "indexName": "voice_rooms_ft_title_topic", "columns": ["title", "topic", "description"], "sourceMigration": "20260721_add_fulltext_indexes", "sourceLine": 26 },
+    { "table": "hashtags", "indexName": "hashtags_ft_name", "columns": ["name"], "sourceMigration": "20260721_add_fulltext_indexes", "sourceLine": 30 }
+  ],
+  "summary": { "checkConstraintCount": 6, "fulltextIndexCount": 5, "runtimeEnforcementVerified": false }
+}
