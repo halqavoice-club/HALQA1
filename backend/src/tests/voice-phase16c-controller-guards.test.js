@@ -26,12 +26,16 @@ jest.mock('../utils/prisma', () => {
     voiceRoom: {
       findUnique: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
     voiceParticipant: {
       findUnique: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
       findMany: jest.fn(),
     },
+    $queryRaw: jest.fn(),
+    $executeRaw: jest.fn(),
   };
   mockPrisma.$transaction = jest.fn((callback) => callback(mockPrisma));
   return mockPrisma;
@@ -58,6 +62,30 @@ jest.mock('../utils/livekitService', () => ({
   sfuRevokePublish: jest.fn(),
   sfuEvict: jest.fn(),
   getLivekitRoomService: jest.fn(() => null),
+}));
+
+jest.mock('../utils/response', () => ({
+  successResponse: (res, data, message) => {
+    return res.status(200).json({
+      success: true,
+      data,
+      message: message || 'Success',
+    });
+  },
+  errorResponse: (res, message, statusCode) => {
+    return res.status(statusCode || 400).json({
+      success: false,
+      error: message,
+      message,
+    });
+  },
+}));
+
+jest.mock('../utils/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
 }));
 
 const { sfuRevokePublish } = require('../utils/livekitService');
@@ -91,6 +119,9 @@ describe('Phase 16c: Controller-Level Authorization Guards', () => {
     
     // Default mock: sfuRevokePublish returns successful enforcement
     sfuRevokePublish.mockResolvedValue({ enforced: true, reason: 'OK' });
+    
+    // Default mock: updateMany returns success
+    prisma.voiceParticipant.updateMany.mockResolvedValue({ count: 1 });
   });
 
   describe('Call Site 1: toggleMute self-unmute initial check', () => {
@@ -154,31 +185,33 @@ describe('Phase 16c: Controller-Level Authorization Guards', () => {
       const roomId = 'room-3';
       const userId = 'test-user-id';
 
-      prisma.voiceParticipant.findUnique.mockResolvedValue({
-        userId,
-        roomId,
-        role: 'SPEAKER',
-        isActive: true,
-        isMuted: true,
-        mutedByModerator: false,
-        seatNumber: 2,
-      });
+      // First call: initial participant check
+      prisma.voiceParticipant.findUnique
+        .mockResolvedValueOnce({
+          userId,
+          roomId,
+          role: 'SPEAKER',
+          isActive: true,
+          isMuted: true,
+          mutedByModerator: false,
+          seatNumber: 2,
+        })
+        .mockResolvedValueOnce({
+          // Second call: after updateMany, read updated state
+          userId,
+          roomId,
+          role: 'SPEAKER',
+          isActive: true,
+          isMuted: false,  // Now unmuted
+          mutedByModerator: false,
+          seatNumber: 2,
+        });
 
       // Valid room data
       prisma.voiceRoom.findUnique.mockResolvedValue({
         id: roomId,
         micLocked: false,
         allMuted: false,
-      });
-
-      prisma.voiceParticipant.update.mockResolvedValue({
-        userId,
-        roomId,
-        role: 'SPEAKER',
-        isActive: true,
-        isMuted: false,
-        mutedByModerator: false,
-        seatNumber: 2,
       });
 
       const response = await request(app)
@@ -442,15 +475,27 @@ describe('Phase 16c: Controller-Level Authorization Guards', () => {
       const roomId = 'room-9';
       const userId = 'test-user-id';
 
-      prisma.voiceParticipant.findUnique.mockResolvedValue({
-        userId,
-        roomId,
-        role: 'SPEAKER',
-        isActive: true,
-        isMuted: true,
-        mutedByModerator: false,
-        seatNumber: 2,
-      });
+      // Initial participant state (muted)
+      prisma.voiceParticipant.findUnique
+        .mockResolvedValueOnce({
+          userId,
+          roomId,
+          role: 'SPEAKER',
+          isActive: true,
+          isMuted: true,
+          mutedByModerator: false,
+          seatNumber: 2,
+        })
+        .mockResolvedValueOnce({
+          // After update (unmuted)
+          userId,
+          roomId,
+          role: 'SPEAKER',
+          isActive: true,
+          isMuted: false,
+          mutedByModerator: false,
+          seatNumber: 2,
+        });
 
       // Both room queries succeed
       prisma.voiceRoom.findUnique.mockResolvedValue({
@@ -459,15 +504,8 @@ describe('Phase 16c: Controller-Level Authorization Guards', () => {
         allMuted: false,
       });
 
-      prisma.voiceParticipant.update.mockResolvedValue({
-        userId,
-        roomId,
-        role: 'SPEAKER',
-        isActive: true,
-        isMuted: false,
-        mutedByModerator: false,
-        seatNumber: 2,
-      });
+      // Mock the updateMany to return success
+      prisma.voiceParticipant.updateMany.mockResolvedValue({ count: 1 });
 
       const response = await request(app)
         .post(`/voice/${roomId}/toggle-mute`)
