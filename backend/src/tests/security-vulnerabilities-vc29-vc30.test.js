@@ -133,11 +133,11 @@ describe("VC-29: 2FA Challenge Token Authentication Bypass", () => {
     const user = USERS.userA;
     const challengeToken = generate2FAChallengeToken(user.id);
 
-    // Mock is not needed because the token type check happens before DB access
-    // NOTE: Current implementation returns "User not found" for 2FA challenge tokens
-    // because the token decodes successfully but user lookup uses challenge-specific ID
-    // that doesn't match real user records. This is correct behavior - 2FA tokens
-    // are rejected from regular endpoints.
+    // VC-29 FIX: The token type check now happens in auth.middleware.js before DB access.
+    // 2FA challenge tokens must be explicitly rejected with "Invalid token type" error.
+    // This prevents 2FA bypass attacks where an attacker uses a challenge token
+    // (obtained after password verification) to authenticate regular endpoints
+    // without completing the TOTP challenge.
 
     const res = await request(app)
       .get("/api/v1/auth/me")
@@ -145,9 +145,8 @@ describe("VC-29: 2FA Challenge Token Authentication Bypass", () => {
 
     expect(res.status).toBe(401);
     expect(res.body.success).toBe(false);
-    // Security requirement satisfied: 2FA challenge token rejected (401)
-    // Actual error message may be "User not found" or "invalid token type"
-    expect(res.body.message).toMatch(/user not found|invalid token type/i);
+    // Security requirement: 2FA challenge tokens must be explicitly rejected
+    expect(res.body.message).toMatch(/invalid token type/i);
   });
 
   test("should accept valid access token on regular authenticated endpoint", async () => {

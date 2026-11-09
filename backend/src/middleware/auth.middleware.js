@@ -96,6 +96,14 @@ async function authenticate(req, res, next) {
     const token = authHeader.split(' ')[1];
     const decoded = verifyAccessToken(token);
 
+    // VC-29 FIX: Reject 2FA challenge tokens on regular authenticated endpoints.
+    // 2FA challenge tokens are ONLY valid for POST /api/v1/auth/2fa/authenticate.
+    // They must NOT authenticate regular API endpoints — that would bypass the
+    // entire 2FA security control.
+    if (decoded.type === '2fa_challenge') {
+      return errorResponse(res, 'Invalid token type', 401);
+    }
+
     // 1. Try cache first
     let user = await getUserFromCache(decoded.userId);
 
