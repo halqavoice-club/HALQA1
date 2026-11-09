@@ -44,6 +44,7 @@ const SAFE_UNIT_TESTS = Object.freeze([
   'src/tests/live-class-spotlight.test.js',
   'src/tests/live-class-stage-lifecycle.test.js',
   'src/tests/livekit-factory-url-normalization.test.js',
+  'src/tests/livekitService-contract.test.js',
   'src/tests/maxspeakers-concurrency.test.js',
   'src/tests/p0-security-fixes.test.js',
   'src/tests/p1-security-fixes.test.js',

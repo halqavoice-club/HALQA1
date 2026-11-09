@@ -453,6 +453,13 @@ async function unmuteAll(req, res, next) {
     await prisma.$transaction(async (tx) => {
       // DEF-003 FIX: Filter on mutedByModerator=false so individually muted
       // participants are excluded from the room-wide unmute.
+      // ARCH-GAP-C1: self-muted (isMuted=true, mutedByModerator=false set by toggleMute())
+      // and room-muted (muteAll → isMuted=true, mutedByModerator=false) are indistinguishable
+      // in the current schema. A participant who self-muted while room-wide mute was active
+      // will have the same DB state as one muted only by muteAll(), so unmuteAll() will
+      // inadvertently restore them. Resolution requires a dedicated mutedByRoom boolean column
+      // (default false): muteAll() sets it true; unmuteAll() targets mutedByRoom=true only.
+      // This schema change is out of scope for F3.1 — tracked as ARCH-GAP-C1.
       targets = await tx.voiceParticipant.findMany({
         where: {
           roomId,

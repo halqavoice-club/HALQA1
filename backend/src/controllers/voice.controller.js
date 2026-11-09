@@ -1331,12 +1331,13 @@ async function toggleMute(req, res, next) {
             return errorResponse(res, `Microphone unavailable: ${perm.reason}`, 403);
           }
 
+          // PHASE F2-A: sfuRevokePublish now returns explicit result object
           const sfuResult = await sfuRevokePublish(
             roomId,
             subjectId,
             true,
             '[voice:self-unmute]',
-          ) || { enforced: false, reason: 'NO_RESULT' };
+          );
 
           return successResponse(res, {
             isMuted: freshParticipant.isMuted,
@@ -1426,12 +1427,13 @@ async function toggleMute(req, res, next) {
       }
       const permission = getVoiceAudioPermission({ participant: updated, room });
       const sfuTag = newMuted ? '[voice:mod-mute]' : '[voice:mod-unmute]';
+      // PHASE F2-A: sfuRevokePublish now returns explicit result object
       const sfuResult = await sfuRevokePublish(
         roomId,
         subjectId,
         permission.canPublishAudio,
         sfuTag,
-      ) || { enforced: false, reason: 'NO_RESULT' };
+      );
       return successResponse(res, {
         isMuted: updated.isMuted,
         mutedByModerator: updated.mutedByModerator,
@@ -1454,6 +1456,7 @@ async function toggleMute(req, res, next) {
         return errorResponse(res, 'Room no longer exists', 404);
       }
       const permission = getVoiceAudioPermission({ participant: updated, room });
+      // PHASE F2-A: sfuRevokePublish now returns explicit result object
       let sfuResult = { enforced: false, reason: permission.reason };
       if (permission.canPublishAudio) {
         sfuResult = await sfuRevokePublish(
@@ -1461,7 +1464,7 @@ async function toggleMute(req, res, next) {
           subjectId,
           true,
           '[voice:self-unmute]',
-        ) || { enforced: false, reason: 'NO_RESULT' };
+        );
       }
       return successResponse(res, {
         isMuted: updated.isMuted,
@@ -2345,6 +2348,7 @@ async function toggleMicLock(req, res, next) {
       },
     });
     const effectiveRoom = { ...room, micLocked: newState };
+    // PHASE F2-A: sfuRevokePublish now returns explicit enforcement status
     await Promise.all(participants.map(async participant => {
       const permission = getVoiceAudioPermission({ participant, room: effectiveRoom });
       const result = await sfuRevokePublish(
@@ -2353,11 +2357,11 @@ async function toggleMicLock(req, res, next) {
         permission.canPublishAudio,
         newState ? '[voice:mic-lock]' : '[voice:mic-unlock]',
       );
-      if (!result?.enforced) {
+      if (!result.enforced) {
         logger.warn('[voice:mic-lock] SFU reconciliation incomplete', {
           roomId,
           userId: participant.userId,
-          reason: result?.reason || 'NO_RESULT',
+          reason: result.reason,
           permissionReason: permission.reason,
         });
       }

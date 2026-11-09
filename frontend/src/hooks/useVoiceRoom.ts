@@ -1538,15 +1538,13 @@ export function useVoiceRoom(roomId: string | null) {
     if (!roomId) return
     try {
       await api.patch(`/voice/${roomId}/unmute-all`)
-      // Optimistic update: unmute all SPEAKER and MODERATOR participants in the local store.
-      const myId = useAuthStore.getState().user?.id
-      const participants = useVoiceStore.getState().activeRoom?.participants ?? []
-      participants.forEach(p => {
-        if (p.userId !== myId && (p.role === VOICE_ROLES.SPEAKER || p.role === VOICE_ROLES.MODERATOR) && p.isMuted) {
-          useVoiceStore.getState().updateParticipant(p.userId, { isMuted: false, mutedByModerator: false })
-        }
-      })
-      toast({ title: '🎙️ All speakers unmuted' })
+      // PHASE F2-B FIX: Removed optimistic update that violated microphone consent.
+      // Backend emits voice:mute_changed only for participants actually unmuted (those
+      // who were isMuted:true AND mutedByModerator:false). Socket.IO handlers in this
+      // hook already update the Zustand store on voice:mute_changed events.
+      // The backend also emits voice:room_policy_changed with allMuted:false.
+      // No optimistic update needed — authoritative socket events provide truth.
+      toast({ title: '🎙️ Room unmute requested' })
     } catch {
       toast({ title: 'Failed to unmute all', variant: 'destructive' })
     }
