@@ -507,22 +507,25 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       assignedSeat = seat;
 
       // Assign seat using raw SQL (Prisma client not regenerated with seatNumber yet)
-      // DEF-002: MODERATOR is exempt from allMuted; AUDIENCE→SPEAKER respects it.
+      // DEF-002: ALL queue promotions (SPEAKER and MODERATOR) always seat with isMuted=1.
+      // This is the consent-preserving invariant: the participant must explicitly tap
+      // their mic button to publish audio. The previous allMuted-conditional path
+      // (isMuted = allMuted ? 1 : 0) was incorrect — it auto-activated the mic when
+      // the room was not in allMuted mode, violating the consent-first permission model.
       if (txIsMod) {
         await tx.$executeRaw`
           UPDATE voice_participants
-          SET seatNumber = ${seat}, isMuted = 0,
+          SET seatNumber = ${seat}, isMuted = 1,
               handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
           WHERE roomId = ${roomId} AND userId = ${userId}
         `;
-        promotedIsMuted = false; // MODERATOR exempt from allMuted
+        promotedIsMuted = true; // DEF-002: consent-first — always muted on stage entry
       } else {
-        // DEF-002: queue promotions are always AUDIENCE→SPEAKER; respect allMuted.
-        const promoteAllMuted = Boolean(room.allMuted);
-        promotedIsMuted = promoteAllMuted;
+        // DEF-002: AUDIENCE→SPEAKER promotion always seats muted (consent-first).
+        promotedIsMuted = true;
         await tx.$executeRaw`
           UPDATE voice_participants
-          SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = ${promoteAllMuted ? 1 : 0},
+          SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = 1,
               handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
           WHERE roomId = ${roomId} AND userId = ${userId}
         `;
@@ -599,14 +602,16 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       message: `You've been approved as a speaker at Seat ${assignedSeat}!`
     });
 
-    // GAP-D1 FIX: Restore SFU canPublish for the newly promoted speaker.
-    // Without this, a participant whose canPublish was previously revoked (e.g. by micLocked
-    // or a prior mute) cannot publish audio until they request a new token (up to 1h gap).
-    // Best-effort — matches the pattern used in unmuteAll() P3a fix.
-    try {
-      const { sfuRevokePublish } = require('../utils/livekitService');
-      sfuRevokePublish(roomId, userId, true, '[voice:promote]').catch(() => {});
-    } catch {}
+    // GAP-D1 FIX: Restore SFU canPublish for the newly promoted speaker, but ONLY if they
+    // are being seated without a mute (promotedIsMuted=false). With the DEF-002 consent-first
+    // model, every promotion sets isMuted=true, so this call is a no-op for normal promotions.
+    // It still fires correctly for future cases where a promotion might seat unmuted.
+    if (!promotedIsMuted) {
+      try {
+        const { sfuRevokePublish } = require('../utils/livekitService');
+        sfuRevokePublish(roomId, userId, true, '[voice:promote]').catch(() => {});
+      } catch {}
+    }
 
     // BUG-004 FIX: Add LEFT JOIN users so profile fields are included in the snapshot.
     // Audience was already included (no seatNumber filter) from a previous partial fix.

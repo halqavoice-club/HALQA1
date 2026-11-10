@@ -231,11 +231,21 @@ describe("DEF-02 microphone consent source contracts", () => {
     ),
   );
 
-  test("unmuteAll releases only allMuted and never changes participant or SFU state", () => {
+  test("unmuteAll clears allMuted and restores SFU canPublish for actually-unmuted participants (F3.1)", () => {
+    // DEF-001: allMuted flag is cleared
     expect(unmuteAll).toMatch(/allMuted:\s*false/);
-    expect(unmuteAll).not.toMatch(/voiceParticipant\.(findMany|updateMany)/);
-    expect(unmuteAll).not.toMatch(/voice:mute_changed/);
-    expect(unmuteAll).not.toMatch(/sfuRevokePublish/);
+    // F-04: target selection uses findMany inside the transaction (READ COMMITTED)
+    expect(unmuteAll).toMatch(/voiceParticipant\.findMany/);
+    // F3.1: per-participant updates via updateMany with mutedByModerator guard
+    expect(unmuteAll).toMatch(/voiceParticipant\.updateMany/);
+    // P3a: SFU canPublish restored for actually-unmuted participants (canPublish=true)
+    expect(unmuteAll).toMatch(/sfuRevokePublish/);
+    // Client notification: voice:mute_changed emitted per unmuted participant
+    expect(unmuteAll).toMatch(/voice:mute_changed/);
+    // Room-wide policy event so all clients update allMuted state
+    expect(unmuteAll).toMatch(/voice:room_policy_changed/);
+    // Safety: individually mod-muted participants are excluded (mutedByModerator guard)
+    expect(unmuteAll).toMatch(/mutedByModerator.*false/);
   });
 
   test("web server-state synchronization is disable-only", () => {

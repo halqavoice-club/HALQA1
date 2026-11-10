@@ -499,8 +499,14 @@ describe("Voice Mute Authorization — MOCKED UNIT TESTS", () => {
     expect(targetIds).toEqual(["p1"]); // only speaker-a, NOT speaker-b
   });
 
-  // ── Test 9: unmuteAll releases policy without changing participant consent ───
-  test("9. unmuteAll clears allMuted but leaves every participant mute state unchanged", async () => {
+  // ── Test 9: unmuteAll releases policy, restores SFU for actually-unmuted participants ───
+  // F3.1 behavior: unmuteAll runs findMany inside the transaction (F-04 fix) to identify
+  // targets, then updateMany + sfuRevokePublish(canPublish=true) for each actually-unmuted
+  // participant (P3a fix). When no participants are room-muted, only allMuted is cleared.
+  test("9. unmuteAll clears allMuted and restores SFU for actually-unmuted participants (F3.1)", async () => {
+    // Supply empty target list — no participants are currently room-muted
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([]);
+
     const req = makeReq({
       params: { id: "room-1" },
       user: { id: "host-id" },
@@ -509,20 +515,23 @@ describe("Voice Mute Authorization — MOCKED UNIT TESTS", () => {
 
     await voiceRolesCtrl.unmuteAll(req, res, next);
 
+    // voiceRoom.update MUST be called to clear allMuted flag (DEF-001)
     expect(prisma.voiceRoom.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: "room-1" },
         data: expect.objectContaining({ allMuted: false }),
       }),
     );
-    expect(prisma.voiceParticipant.findMany).not.toHaveBeenCalled();
+    // findMany IS called (F-04: target selection inside transaction)
+    expect(prisma.voiceParticipant.findMany).toHaveBeenCalled();
+    // With no targets: updateMany and sfuRevokePublish are NOT called
     expect(prisma.voiceParticipant.updateMany).not.toHaveBeenCalled();
     expect(sfuRevokePublish).not.toHaveBeenCalled();
+    // Response reflects 0 participants actually unmuted
     expect(res.body.data).toEqual(
       expect.objectContaining({
         allMuted: false,
         unmutedCount: 0,
-        consentRequired: true,
       }),
     );
   });

@@ -508,8 +508,16 @@ describe("Voice Mute Concurrency — MOCKED UNIT TESTS", () => {
     expect(muteAllCall.where.id.in).toEqual(["p1"]); // only speaker-a
     expect(muteAllCall.data.mutedByModerator).toBe(false); // room-wide policy, not individual lock
 
-    // Now release room policy. Neither voluntary nor individual mute state moves.
+    // Now release room policy. F3.1: unmuteAll finds targets inside the transaction (F-04).
+    // speaker-b (mutedByModerator=true) is excluded; speaker-a was muted by muteAll
+    // (mutedByModerator=false). Supply the in-tx findMany and the post-tx re-read.
     jest.clearAllMocks();
+    sfuRevokePublish.mockResolvedValue({ enforced: true, reason: "UPDATED" });
+    // in-tx findMany: speaker-a is the only room-muted participant (mutedByModerator=false)
+    prisma.voiceParticipant.findMany
+      .mockResolvedValueOnce([{ id: "p1", userId: "speaker-a" }]) // in-transaction targets
+      .mockResolvedValueOnce([{ userId: "speaker-a" }]); // post-tx re-read (actually unmuted)
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 1 });
 
     const reqUnmuteAll = makeReq({
       params: { id: "room-1" },
@@ -519,13 +527,19 @@ describe("Voice Mute Concurrency — MOCKED UNIT TESTS", () => {
 
     await voiceRolesCtrl.unmuteAll(reqUnmuteAll, resUnmuteAll, next);
 
+    // allMuted cleared (DEF-001)
     expect(prisma.voiceRoom.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ allMuted: false }),
       }),
     );
-    expect(prisma.voiceParticipant.updateMany).not.toHaveBeenCalled();
-    expect(sfuRevokePublish).not.toHaveBeenCalled();
+    // findMany IS called (F-04 fix)
+    expect(prisma.voiceParticipant.findMany).toHaveBeenCalled();
+    // speaker-a was room-muted so updateMany IS called (F3.1 restores participants)
+    expect(prisma.voiceParticipant.updateMany).toHaveBeenCalled();
+    // SFU canPublish restored for speaker-a (P3a fix)
+    expect(sfuRevokePublish).toHaveBeenCalledWith("room-1", "speaker-a", true, "[voice:unmute-all]");
+    // speaker-b's individual lock is still intact (mutedByModerator=true; not in target list)
   });
 
   // ── Test 6: Stale socket event handling (frontend store logic verification) ───

@@ -127,3 +127,71 @@ describe('Phase 3B-1 guarded Jest launcher', () => {
     expect(fs.readFileSync(userFile)).toEqual(before);
   });
 });
+
+describe('buildFullSuiteBatches', () => {
+  const { buildFullSuiteBatches } = launcher;
+
+  // ── (a) No batch exceeds 30 files ───────────────────────────────────────
+  test('(a) no batch exceeds 30 files', () => {
+    // Use the full real safe-unit inventory — largest real-world input
+    const batches = buildFullSuiteBatches([...SAFE_UNIT_TESTS]);
+    for (const batch of batches) {
+      expect(batch.length).toBeLessThanOrEqual(30);
+    }
+  });
+
+  // ── (b) Residual batch (tests matching no group) stays ≤ 5 files ────────
+  test('(b) residual-only batches are capped at 5 files', () => {
+    // Craft an input that matches no group regex so it falls into residual
+    const residualOnly = Array.from({ length: 12 }, (_, i) => `src/tests/zzz-no-group-${i}.test.js`);
+    const batches = buildFullSuiteBatches(residualOnly);
+    // All batches come from the residual partition (cap=5), so none exceed 5
+    for (const batch of batches) {
+      expect(batch.length).toBeLessThanOrEqual(5);
+    }
+    // Verify total coverage
+    const allFiles = batches.flat();
+    expect(allFiles.sort()).toEqual([...residualOnly].sort());
+  });
+
+  // ── (c) Every input file appears in exactly one batch (no silent skipping) ──
+  test('(c) every input file appears in exactly one batch — no skipping, no duplicates', () => {
+    const input = [...SAFE_UNIT_TESTS];
+    const batches = buildFullSuiteBatches(input);
+    const allFiles = batches.flat();
+
+    // No file is missing
+    expect(allFiles.sort()).toEqual([...input].sort());
+
+    // No file appears more than once
+    const seen = new Set();
+    for (const file of allFiles) {
+      expect(seen.has(file)).toBe(false);
+      seen.add(file);
+    }
+    expect(seen.size).toBe(input.length);
+  });
+
+  // ── (d) Empty input returns no batches ────────────────────────────────────
+  test('(d) empty input returns an empty batch list', () => {
+    const batches = buildFullSuiteBatches([]);
+    expect(batches).toEqual([]);
+  });
+
+  // ── additional: mixed group + residual correctly partitioned ─────────────
+  test('(e) group files and residual files are both present in output', () => {
+    // Pick one known voice file and one known auth file plus a residual file
+    const voiceFile   = 'src/tests/voice-realtime-sync.test.js';
+    const authFile    = 'src/tests/auth.test.js';
+    const residual    = 'src/tests/zzz-residual-only.test.js';
+    const input       = [voiceFile, authFile, residual];
+    const batches     = buildFullSuiteBatches(input);
+    const allFiles    = batches.flat();
+
+    expect(allFiles).toContain(voiceFile);
+    expect(allFiles).toContain(authFile);
+    expect(allFiles).toContain(residual);
+    // All files present exactly once
+    expect(allFiles.length).toBe(3);
+  });
+});

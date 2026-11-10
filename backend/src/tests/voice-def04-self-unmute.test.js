@@ -214,8 +214,14 @@ describe("DEF-04: Self-unmute LiveKit SFU Grant Restoration", () => {
       "[voice:mute-all]",
     );
 
-    // 2. unmuteAll() clears allMuted policy, participant isMuted stays true, SFU NOT called
+    // 2. unmuteAll() clears allMuted policy AND restores SFU canPublish for actually-unmuted
+    //    participants (F3.1/P3a fix). Supply mocks for the in-tx findMany and post-tx re-read.
     sfuRevokePublish.mockClear();
+    // in-tx findMany: speaker-1 was muted by muteAll (mutedByModerator=false)
+    prisma.voiceParticipant.findMany
+      .mockResolvedValueOnce([{ id: "p1", userId: "speaker-1" }]) // in-transaction targets
+      .mockResolvedValueOnce([{ userId: "speaker-1" }]); // post-tx re-read (actually unmuted)
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 1 });
     const reqUnmuteAll = makeReq({
       params: { id: "room-1" },
       user: { id: "mod-1", role: "USER" },
@@ -224,7 +230,13 @@ describe("DEF-04: Self-unmute LiveKit SFU Grant Restoration", () => {
     await voiceRolesCtrl.unmuteAll(reqUnmuteAll, resUnmuteAll, next);
 
     expect(resUnmuteAll.statusCode).toBe(200);
-    expect(sfuRevokePublish).not.toHaveBeenCalled();
+    // F3.1/P3a: SFU canPublish IS restored for speaker-1 (canPublish=true)
+    expect(sfuRevokePublish).toHaveBeenCalledWith(
+      "room-1",
+      "speaker-1",
+      true,
+      "[voice:unmute-all]",
+    );
 
     // 3. Speaker explicitly calls toggleMute({ isMuted: false })
     // Pre-check reads: participant (isMuted: true, seat: 2), room (allMuted: false)
@@ -688,7 +700,10 @@ describe("DEF-04: Self-unmute LiveKit SFU Grant Restoration", () => {
       "utf8",
     );
 
-    // unmuteAll implementation must not emit voice:mute_changed or call sfuRevokePublish
+    // F3.1 behavior: unmuteAll DOES restore SFU (P3a fix) and emit voice:mute_changed
+    // per actually-unmuted participant. It also emits voice:room_policy_changed.
+    // Auto-enable must NOT happen from socket events on the client side (disable-only
+    // server-sync) — but the server correctly restores canPublish on the SFU.
     const unmuteAllFn = rolesSource.slice(
       rolesSource.indexOf("async function unmuteAll"),
       rolesSource.indexOf(
@@ -696,8 +711,14 @@ describe("DEF-04: Self-unmute LiveKit SFU Grant Restoration", () => {
         rolesSource.indexOf("async function unmuteAll"),
       ),
     );
-    expect(unmuteAllFn).not.toMatch(/voice:mute_changed/);
-    expect(unmuteAllFn).not.toMatch(/sfuRevokePublish/);
+    // F3.1: unmuteAll clears allMuted flag (DEF-001)
+    expect(unmuteAllFn).toMatch(/allMuted:\s*false/);
+    // F3.1/P3a: unmuteAll restores SFU canPublish for actually-unmuted participants
+    expect(unmuteAllFn).toMatch(/sfuRevokePublish/);
+    // F3.1: socket events emitted for per-participant state changes
+    expect(unmuteAllFn).toMatch(/voice:mute_changed/);
+    // F3.1: room policy event broadcast
+    expect(unmuteAllFn).toMatch(/voice:room_policy_changed/);
 
     // Web VoiceRoomView stage presence effect is disable-only
     const micEffectStart = webViewSource.indexOf(
