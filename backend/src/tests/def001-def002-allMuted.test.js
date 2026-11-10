@@ -616,46 +616,58 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
   test('T12 — autoPromoteNext() with allMuted=true → raw SQL has isMuted=1', async () => {
     const autoPromote = jest.requireActual('../utils/autoPromote');
 
-    // autoPromoteNext fetches room first
+    // autoPromoteNext (real module; prisma is mocked) happy-path call sequence
+    // when Redis is unavailable (isRedisReady()=false) and it is invoked without
+    // an io instance (so the post-transaction broadcast block is skipped):
+    //   1. voiceRoom.findUnique        → room (status, micLocked, maxSpeakers, allMuted, lockedSeats)
+    //   2. $queryRaw COUNT(*)          → [{cnt:0}]   (speakerCount < maxSpeakers)
+    //   3. voiceParticipant.findFirst  → waiting queued user (DB fallback for the queue head)
+    //   4. voiceParticipant.findUnique   → participant revalidation (must be active/eligible,
+    //                                    otherwise skipStaleEntry() recurses without the Redis
+    //                                    guard and exhausts the heap)
+    //   5. $transaction(callback) — tx proxy is the same mocked prisma:
+    //      a. voiceParticipant.findUnique → current (in-tx revalidation)
+    //      b. voiceRoom.findUnique        → txRoom (deletedAt, status, micLocked, lockedSeats)
+    //      c. $queryRaw occupied seats    → []   (seat 2 is free)
+    //      d. $executeRaw UPDATE           → 1    (promotion; isMuted = 1 is a SQL literal)
+    //      e. voiceParticipant.findUnique → approved (mutedByModerator select)
     prisma.voiceRoom.findUnique.mockResolvedValue({
-      id: 'room-1', status: 'LIVE', micLocked: false, maxSpeakers: 12, allMuted: true,
+      id: 'room-1', status: 'LIVE', deletedAt: null,
+      micLocked: false, maxSpeakers: 12, allMuted: true, lockedSeats: [],
     });
 
-    // findFirst: one AUDIENCE user in queue (handRaised=true, handRaisedAt set)
     prisma.voiceParticipant.findFirst.mockResolvedValue({
       userId: 'queued-user', role: 'AUDIENCE', isMuted: true,
       handRaised: true, handRaisedAt: new Date(),
     });
 
-    // findMany for stage state (who is currently on stage)
-    prisma.voiceParticipant.findMany.mockResolvedValue([]);
+    const eligibleParticipant = {
+      userId: 'queued-user', isActive: true, wasKicked: false,
+      handRaised: true, seatNumber: null, role: 'AUDIENCE', isMuted: true,
+    };
+    prisma.voiceParticipant.findUnique
+      .mockResolvedValueOnce(eligibleParticipant)   // 4. outer revalidation
+      .mockResolvedValueOnce(eligibleParticipant)   // 5a. in-tx current
+      .mockResolvedValueOnce({ mutedByModerator: false }); // 5e. approved
 
-    // count for seat availability
-    prisma.voiceParticipant.count.mockResolvedValue(0);
-
-    // $queryRaw chain inside autoPromoteNext:
-    //   1. occupied seats pre-tx check
-    //   (then inside tx:)
-    //   2. current seatRow check
-    //   3. occupied seats tx re-check
     prisma.$queryRaw
-      .mockResolvedValueOnce([])              // pre-tx occupied seats
-      .mockResolvedValueOnce([{ seatNumber: null }]) // tx: seatRow
-      .mockResolvedValueOnce([]);             // tx: occupiedTx
+      .mockResolvedValueOnce([{ cnt: 0 }]) // 2. stage COUNT
+      .mockResolvedValueOnce([]);          // 5c. occupied seats (seat 2 free)
+
+    // $executeRaw returns 1 so the "Number(updated) !== 1" guard passes and the
+    // promotion is committed. autoPromote writes isMuted = 1 as a SQL literal.
+    prisma.$executeRaw.mockResolvedValue(1);
 
     await autoPromote.autoPromoteNext('room-1');
 
     const execCalls = prisma.$executeRaw.mock.calls;
-    if (execCalls.length > 0) {
-      // Promotion SQL: SET seatNumber=${seat}, role='SPEAKER', isMuted=${allMuted?1:0},...
-      // call[1]=seat, call[2]=isMuted → must be 1 when allMuted=true
-      const hasAllMutedWrite = execCalls.some(call => tplValues(call)[1] === 1);
-      expect(hasAllMutedWrite).toBe(true);
-    } else {
-      // Auto-promote may bail out at a pre-condition (e.g. no io available).
-      // Log the skip so it's visible in output.
-      console.log('  ℹ  T12: autoPromoteNext did not reach $executeRaw — pre-condition not met in mock env');
-    }
+    expect(execCalls.length).toBeGreaterThanOrEqual(1);
+
+    // autoPromote's promotion SQL uses `isMuted = 1` as a literal (not an
+    // interpolated ${...} param), so assert against the SQL text rather than the
+    // interpolated tplValues (whose 2nd value is roomId, not isMuted).
+    const hasAllMutedWrite = execCalls.some(call => /isMuted\s*=\s*1/.test(call[0].join('?')));
+    expect(hasAllMutedWrite).toBe(true);
   });
 
   // ── T13: acceptMicOffer() with allMuted=true → new SPEAKER gets isMuted=1 ─

@@ -140,21 +140,99 @@ function buildLaunchPlan({ args = [], inheritedEnv = {}, existingTestFiles } = {
     selectedTests: Object.freeze(selectedTests),
     jestArgs: Object.freeze(jestArgs),
     childEnv: Object.freeze(sanitizeEnvironment(inheritedEnv)),
+    // Execution metadata used by run() to decide whether the full suite should
+    // be split into bounded batches (see FULL_SUITE_BATCH_SIZE).
+    group: parsed.group,
+    listTests: parsed.listTests,
+    coverage: parsed.coverage,
+    requestedTests: Object.freeze(parsed.requestedTests),
   });
+}
+
+// Full-suite runs accumulate heap across the entire safe-unit inventory inside
+// one --runInBand process and exhaust memory (verified: the suite OOMs even at
+// Node's ~4.3 GB default heap, and a 40-file mixed batch OOMs at the 3072 cap).
+// The suite is therefore partitioned by the existing group regexes (each group
+// run already completes within the heap cap) with first-match assignment so
+// every test runs exactly once, then each partition is capped so no single Jest
+// process accumulates enough heap to OOM. Only the no-argument full-suite path
+// is batched; group runs, explicit test paths, --listTests and --coverage keep
+// the single-process path (--coverage must run in one process to produce a
+// combined report; --listTests is a metadata query).
+// Group partitions are each a subset of a group run that already completes
+// within the heap cap (verified via --group=<name>), so they are capped at 30
+// (well within their proven full-group size). The residual partition (tests
+// matching no group, including the memory-heavy stage-2 crypto suites) is
+// capped smaller so its heaviest cluster never approaches the heap limit.
+const FULL_SUITE_GROUP_BATCH_SIZE = 30;
+const FULL_SUITE_RESIDUAL_BATCH_SIZE = 5;
+
+function spawnJest(spawn, jestBin, jestArgs, childEnv) {
+  const result = spawn(
+    process.execPath,
+    ['--max-old-space-size=3072', jestBin, ...jestArgs],
+    { cwd: BACKEND_ROOT, env: childEnv, stdio: 'inherit', windowsHide: true },
+  );
+  if (result.error) throw safetyError(`Jest could not start: ${result.error.message}`);
+  return Number.isInteger(result.status) ? result.status : 1;
+}
+
+// Partition the full safe-unit inventory by group regex (first match wins) and
+// cap each partition. Group partitions are subsets of group runs that already
+// complete within the heap cap, so the bounded batches inherit that memory
+// profile; tests matching no group form a residual partition that is capped
+// smaller (its stage-2 crypto cluster is memory-heavy). Returns an ordered list
+// of disjoint test-path batches.
+function buildFullSuiteBatches(selectedTests) {
+  const assigned = new Set();
+  const partitions = [];
+  for (const groupName of Object.keys(GROUPS)) {
+    const re = GROUPS[groupName];
+    const part = selectedTests.filter((t) => !assigned.has(t) && re.test(t));
+    part.forEach((t) => assigned.add(t));
+    if (part.length) partitions.push({ tests: part, cap: FULL_SUITE_GROUP_BATCH_SIZE });
+  }
+  const residual = selectedTests.filter((t) => !assigned.has(t));
+  if (residual.length) partitions.push({ tests: residual, cap: FULL_SUITE_RESIDUAL_BATCH_SIZE });
+
+  const batches = [];
+  for (const { tests, cap } of partitions) {
+    for (let i = 0; i < tests.length; i += cap) {
+      batches.push(tests.slice(i, i + cap));
+    }
+  }
+  return batches;
 }
 
 function run({ args = process.argv.slice(2), inheritedEnv = process.env, spawn = spawnSync } = {}) {
   if (!fs.existsSync(UNIT_CONFIG)) throw safetyError('approved unit Jest configuration is missing');
   const jestBin = require.resolve('jest/bin/jest');
   const plan = buildLaunchPlan({ args, inheritedEnv });
-  const result = spawn(process.execPath, ['--max-old-space-size=3072', jestBin, ...plan.jestArgs], {
-    cwd: BACKEND_ROOT,
-    env: plan.childEnv,
-    stdio: 'inherit',
-    windowsHide: true,
-  });
-  if (result.error) throw safetyError(`Jest could not start: ${result.error.message}`);
-  return Number.isInteger(result.status) ? result.status : 1;
+
+  const fullSuite =
+    !plan.group && plan.requestedTests.length === 0 && !plan.listTests && !plan.coverage;
+
+  if (!fullSuite) {
+    return spawnJest(spawn, jestBin, plan.jestArgs, plan.childEnv);
+  }
+
+  // Bounded full-suite execution: run the partitioned batches sequentially so
+  // each Jest process is fresh and stays well under the heap cap. Every approved
+  // test still runs exactly once; the batch boundary only resets the Jest
+  // process. A non-zero batch status is preserved so real test failures still
+  // surface (this only prevents the heap-exhaustion crash, exit 134).
+  const batches = buildFullSuiteBatches(plan.selectedTests);
+  let finalStatus = 0;
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b];
+    process.stderr.write(
+      `\n[run-jest] full-suite batch ${b + 1}/${batches.length} — ${batch.length} file(s)\n`,
+    );
+    const batchArgs = ['--config', UNIT_CONFIG, '--runInBand', '--runTestsByPath', ...batch];
+    const status = spawnJest(spawn, jestBin, batchArgs, plan.childEnv);
+    if (status !== 0 && finalStatus === 0) finalStatus = status;
+  }
+  return finalStatus;
 }
 
 if (require.main === module) {
@@ -170,6 +248,7 @@ module.exports = {
   SAFE_INHERITED_ENV,
   auditClassification,
   buildLaunchPlan,
+  buildFullSuiteBatches,
   discoverTestFiles,
   normalizeTestPath,
   parseArguments,
