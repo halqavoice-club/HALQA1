@@ -596,7 +596,19 @@ describe('E2E attack scenarios', () => {
 // (P0 fix — voice room participant check in generateToken)
 // ─────────────────────────────────────────────────────────────────────────────
 describe('SEC-CRIT-003: generateToken guards voice-* rooms (P0 fix)', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // F5E FIX: jest.clearAllMocks() wipes mockImplementation, including $transaction.
+    // generateToken uses a callback-style transaction for the voice room lifecycle lock;
+    // without restoring $transaction, the voice participant check never executes and
+    // all tests in this block get 200 instead of the expected 403/400/404.
+    prisma.$transaction.mockImplementation(async (opsOrFn, _opts) => {
+      if (typeof opsOrFn === 'function') return opsOrFn(prisma);
+      return Promise.all(opsOrFn);
+    });
+    // F5E FIX: also restore $queryRaw so the FOR UPDATE lock query inside the tx resolves.
+    prisma.$queryRaw.mockResolvedValue([{ id: 'row' }]);
+  });
 
   const VOICE_ROOM_ID = '11111111-2222-3333-4444-555555555555';
 

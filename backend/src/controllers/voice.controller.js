@@ -1427,13 +1427,20 @@ async function toggleMute(req, res, next) {
       }
       const permission = getVoiceAudioPermission({ participant: updated, room });
       const sfuTag = newMuted ? '[voice:mod-mute]' : '[voice:mod-unmute]';
-      // PHASE F2-A: sfuRevokePublish now returns explicit result object
-      const sfuResult = await sfuRevokePublish(
-        roomId,
-        subjectId,
-        permission.canPublishAudio,
-        sfuTag,
-      );
+      // PHASE F2-A: sfuRevokePublish now returns explicit result object.
+      // F5E: wrap in try/catch so SFU transport errors are non-fatal — the DB mute
+      // is already persisted; callers receive sfuEnforced=false to signal degraded enforcement.
+      let sfuResult = { enforced: false, reason: 'SFU_ERROR' };
+      try {
+        sfuResult = await sfuRevokePublish(
+          roomId,
+          subjectId,
+          permission.canPublishAudio,
+          sfuTag,
+        );
+      } catch (sfuErr) {
+        logger.warn(`[toggleMute] SFU call failed (non-fatal): ${sfuErr.message}`);
+      }
       return successResponse(res, {
         isMuted: updated.isMuted,
         mutedByModerator: updated.mutedByModerator,

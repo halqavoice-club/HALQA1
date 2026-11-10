@@ -14,6 +14,7 @@ jest.mock('../utils/prisma', () => {
     voiceParticipant: {
       findUnique: jest.fn(),
       findFirst:  jest.fn(),
+      findMany:   jest.fn().mockResolvedValue([]), // F5E: acceptMicOffer stage snapshot
       update:     jest.fn().mockResolvedValue({}),
     },
     $queryRaw:    jest.fn(),
@@ -48,6 +49,8 @@ jest.mock('../utils/livekitService', () => ({
 
 jest.mock('../utils/voiceRoomCache', () => ({
   invalidateRoomCache: jest.fn().mockResolvedValue(undefined),
+  // F5E: acceptMicOffer calls getNextStageVersion after the tx for stage snapshot
+  getNextStageVersion: jest.fn().mockResolvedValue(0),
 }));
 
 jest.mock('../utils/voiceQueue', () => ({
@@ -56,6 +59,7 @@ jest.mock('../utils/voiceQueue', () => ({
   dequeue:   jest.fn().mockResolvedValue(undefined),
   getQueue:  jest.fn().mockResolvedValue([]),
   isInQueue: jest.fn().mockResolvedValue(false),
+  peekNext:  jest.fn().mockResolvedValue(null),
   popNext:   jest.fn().mockResolvedValue(null),
   clearQueue: jest.fn(),
 }));
@@ -337,7 +341,8 @@ describe('FIX-001 — promoteParticipant() seat-lock enforcement [MOCKED]', () =
     jest.clearAllMocks();
     freshIo();
     prisma.$transaction.mockImplementation(async (fn) => fn(prisma));
-    prisma.$executeRaw.mockResolvedValue(0);
+    // F5E: writeCount guard requires $executeRaw to return 1 (success)
+    prisma.$executeRaw.mockResolvedValue(1);
     prisma.voiceParticipant.update.mockResolvedValue({});
   });
 
@@ -345,7 +350,8 @@ describe('FIX-001 — promoteParticipant() seat-lock enforcement [MOCKED]', () =
     prisma.voiceParticipant.findUnique
       .mockResolvedValueOnce({ userId:'host', isActive:true, role:'HOST' })  // 1. requester
       .mockResolvedValueOnce({ userId:'user-1', isActive:true, role:'AUDIENCE', user:{ firstName:'A', lastName:'B' }}) // 2. target
-      .mockResolvedValueOnce({ role:'AUDIENCE', isActive:true }); // 5. tx current
+      .mockResolvedValueOnce({ role:'HOST', isActive:true })                // 3. tx currentRequester (F5E: in-tx approver re-read)
+      .mockResolvedValueOnce({ role:'AUDIENCE', isActive:true }); // 4. tx current (was 3)
     prisma.voiceRoom.findUnique
       .mockResolvedValueOnce({ micLocked:false, maxSpeakers, allMuted:false })        // 3. outer
       .mockResolvedValueOnce({ maxSpeakers, allMuted:false, lockedSeats });            // 7. tx inner
@@ -413,7 +419,8 @@ describe('FIX-001 — _promoteUser() queue approval seat-lock enforcement [MOCKE
     jest.clearAllMocks();
     freshIo();
     prisma.$transaction.mockImplementation(async (fn) => fn(prisma));
-    prisma.$executeRaw.mockResolvedValue(0);
+    // F5E: writeCount guard requires $executeRaw to return 1 (success)
+    prisma.$executeRaw.mockResolvedValue(1);
     prisma.voiceParticipant.update.mockResolvedValue({});
     enqueue.mockResolvedValue(1);
   });
@@ -423,7 +430,8 @@ describe('FIX-001 — _promoteUser() queue approval seat-lock enforcement [MOCKE
     prisma.voiceParticipant.findUnique
       .mockResolvedValueOnce({ userId:'host', isActive:true, role:'HOST' })   // 1. caller
       .mockResolvedValueOnce({ role:'AUDIENCE', isMuted:true, isActive:true }) // 7. userRow
-      .mockResolvedValueOnce({ role:'AUDIENCE', isActive:true, isMuted:true }); // 8a. tx current
+      .mockResolvedValueOnce({ role:'AUDIENCE', isActive:true, isMuted:true, wasKicked:false, handRaised:true }) // 8a. tx current (F5E: Fix F fields)
+      .mockResolvedValueOnce({ role:'HOST', isActive:true }); // 8a2. tx approver (F5E: Fix G in-tx approver re-read)
     prisma.voiceParticipant.findFirst.mockResolvedValue({
       userId:'user-1', isActive:true, role:'AUDIENCE', handRaised:true, handRaisedAt:new Date(),
       user:{ id:'user-1', firstName:'Q', lastName:'U', avatarUrl:null },
@@ -553,7 +561,8 @@ describe('FIX-001 — approveUser() carries raisedAt into _promoteUser [MOCKED]'
     jest.clearAllMocks();
     freshIo();
     prisma.$transaction.mockImplementation(async (fn) => fn(prisma));
-    prisma.$executeRaw.mockResolvedValue(0);
+    // F5E: writeCount guard requires $executeRaw to return 1 (success)
+    prisma.$executeRaw.mockResolvedValue(1);
     prisma.voiceParticipant.update.mockResolvedValue({});
     enqueue.mockResolvedValue(1);
   });
@@ -569,7 +578,8 @@ describe('FIX-001 — approveUser() carries raisedAt into _promoteUser [MOCKED]'
         user:{ id:'user-1', firstName:'A', lastName:'B', avatarUrl:null },
       })
       .mockResolvedValueOnce({ role:'AUDIENCE', isMuted:true, isActive:true })         // 8. userRow
-      .mockResolvedValueOnce({ role:'AUDIENCE', isActive:true, isMuted:true });        // 9a. tx current
+      .mockResolvedValueOnce({ role:'AUDIENCE', isActive:true, isMuted:true, wasKicked:false, handRaised:true }) // 9a. tx current (F5E: Fix F fields)
+      .mockResolvedValueOnce({ role:'HOST', isActive:true });                          // 9b. tx approver (F5E: Fix G)
 
     // maxSpeakers=2, seat 2 locked, seat 1 occupied → null seat → requeue + 400
     const room = {
@@ -649,15 +659,16 @@ describe('FIX-001 — autoPromoteNext() seat-lock enforcement [MOCKED]', () => {
   });
 
   // T-AUTO: autoPromoteNext all-locked → requeue the popped user with original raisedAt
-  // (product decision 2: do NOT drop the user). Uses the Redis-on path so popNext returns
+  // (product decision 2: do NOT drop the user). Uses the Redis-on path so peekNext returns
   // real queue meta including raisedAt; the requeue mock then observes the FIFO score.
   test('T-AUTO: autoPromoteNext all-locked → requeue called with original raisedAt before returning null', async () => {
     const autoPromote = jest.requireActual('../utils/autoPromote');
     const { isRedisReady } = require('../utils/redis');
+    const { peekNext } = require('../utils/voiceQueue');
 
-    // Redis ON for this one call so popNext returns real queue meta with raisedAt
+    // Redis ON for this one call so peekNext returns real queue meta with raisedAt
     isRedisReady.mockReturnValueOnce(true);
-    popNext.mockResolvedValueOnce({
+    peekNext.mockResolvedValueOnce({
       userId: 'queued-user', firstName: 'Q', lastName: 'U', avatarUrl: null,
       raisedAt: '2026-01-01T00:00:00.000Z',
     });
@@ -713,7 +724,8 @@ describe('FIX-001 — acceptMicOffer() seat-lock enforcement [MOCKED]', () => {
       if (Array.isArray(fn)) return Promise.all(fn);
       return fn(prisma);
     });
-    prisma.$executeRaw.mockResolvedValue(0);
+    // F5E: writeCount guard requires $executeRaw to return 1 (success)
+    prisma.$executeRaw.mockResolvedValue(1);
   });
 
   test('T8: locked seat not used — HOST passes mic, locked seat skipped (MOCKED)', async () => {
@@ -736,7 +748,8 @@ describe('FIX-001 — acceptMicOffer() seat-lock enforcement [MOCKED]', () => {
       .mockResolvedValueOnce({
         userId:'user-1', isActive:true, role:'AUDIENCE', seatNumber:null,
         user:{ id:'user-1', firstName:'A', lastName:'B' },
-      });
+      })
+      .mockResolvedValueOnce({ role:'AUDIENCE', isActive:true, seatNumber:null }); // F5E: in-tx txTarget re-read
 
     // 7. passerRow seatNumber (HOST is on seat 1)
     prisma.$queryRaw.mockResolvedValueOnce([{ seatNumber:1 }]);

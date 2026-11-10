@@ -60,8 +60,22 @@ const updateLiveClassSchema = z.object({
   maxSpeakers: z.number().int().min(1).max(50).optional(),
 }).passthrough();
 
+// ─── SEC01-G-BE02-A: Self-service microphone authorization schema ──────────────
+// PATCH /live-classes/:id/microphone
+// Strict: extra keys (e.g. userId from client targeting another participant) are rejected.
+// expectedVersion accepts number, non-negative integer string, or non-negative BigInt.
+const liveClassMicrophoneSchema = z.object({
+  enabled: z.boolean(),
+  expectedVersion: z.union([
+    z.number().int().min(0),
+    z.string().regex(/^\d+$/, 'expectedVersion string must be a non-negative integer'),
+    z.bigint().min(0n),
+  ]),
+}).strict();
+
 module.exports = {
   validateZod,
   createLiveClassSchema,
   updateLiveClassSchema,
+  liveClassMicrophoneSchema,
 };

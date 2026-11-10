@@ -11,7 +11,7 @@
  * Returns the promoted user's userId, or null if queue was empty.
  */
 
-const { peekNext, dequeue, getQueue } = require('./voiceQueue');
+const { peekNext, requeue, dequeue, getQueue } = require('./voiceQueue');
 const { deleteCache, isRedisReady } = require('./redis');
 const { getNextStageVersion } = require('./voiceRoomCache');
 const logger = require('./logger');
@@ -231,7 +231,28 @@ async function autoPromoteNext(roomId, io) {
         logger.warn(`[autoPromote] Seat race exhausted retries for userId=${userId} room=${roomId} — retaining queue position`);
         return null;
       }
-      if (assignErr.statusCode === 403 || assignErr.statusCode === 409) return null;
+      if (assignErr.statusCode === 403 || assignErr.statusCode === 409) {
+        // F5E (T-AUTO): on locked-seat 409, requeue the user with their original FIFO
+        // score so they stay at the front of the queue for the next available slot.
+        // We already called popNext (not peek), so the entry was consumed; we must
+        // restore it. The 403 path (mic locked / room ended) drops the user intentionally.
+        if (assignErr.statusCode === 409 &&
+            assignErr.message === 'No unlocked seat available' &&
+            next?.raisedAt) {
+          try {
+            await requeue(roomId, {
+              userId,
+              firstName: next.firstName ?? null,
+              lastName:  next.lastName  ?? null,
+              avatarUrl: next.avatarUrl ?? null,
+              raisedAt:  next.raisedAt,
+            });
+          } catch (requeueErr) {
+            logger.warn(`[autoPromote] requeue failed for userId=${userId}: ${requeueErr.message}`);
+          }
+        }
+        return null;
+      }
       // Non-seat-race error — re-throw so callers see it
       throw assignErr;
     }
