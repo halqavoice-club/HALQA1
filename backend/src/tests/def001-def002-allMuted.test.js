@@ -500,6 +500,7 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
     const roomObj = {
       id: 'room-1', status: 'LIVE', deletedAt: null,
       micLocked: false, maxSpeakers: 12, allMuted: true, isOpenMic: false,
+      lockedSeats: [],
     };
 
     // voiceParticipant.findUnique call sequence
@@ -515,11 +516,18 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
       })
       // 4. userRow (role/isMuted check in _promoteUser pre-tx)
       .mockResolvedValueOnce({ role: 'AUDIENCE', isMuted: true, isActive: true })
-      // 5. inside tx: current
-      .mockResolvedValueOnce({ role: 'AUDIENCE', isActive: true, isMuted: true });
+      // 5. inside tx: current (Fix F: expanded select includes wasKicked, handRaised)
+      .mockResolvedValueOnce({ role: 'AUDIENCE', isActive: true, isMuted: true, wasKicked: false, handRaised: true })
+      // 6. inside tx: approver re-read (Fix G: TOCTOU approver consent check)
+      .mockResolvedValueOnce({ role: 'HOST', isActive: true })
+      // 7. inside tx: post-write mutedByModerator read (Fix B)
+      .mockResolvedValueOnce({ mutedByModerator: false });
 
-    // voiceRoom.findUnique — single call in approveUser
+    // voiceRoom.findUnique — returns for approveUser + in-tx txRoom (Fix H)
     prisma.voiceRoom.findUnique.mockResolvedValue(roomObj);
+
+    // $executeRaw: return 1 (1 row affected) so the writeCount guard passes
+    prisma.$executeRaw.mockResolvedValue(1);
 
     // $queryRaw chain:
     //   1. countSpeakers (approveUser)          → [{cnt: 0}]

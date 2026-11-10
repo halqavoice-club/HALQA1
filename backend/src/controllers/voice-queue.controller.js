@@ -280,11 +280,11 @@ async function approveNext(req, res, next) {
       return errorResponse(res, `All ${limit} stage seats are occupied — wait for a slot to open`, 400);
     }
 
-    // ── Pop next from queue (Redis-safe: fall back to DB handRaised) ──────
+    // ── Peek next from queue WITHOUT removing (Fix A: dequeue after commit) ──
     let nextUser = null;
     if (isRedisReady()) {
-      try { nextUser = await queue.popNext(roomId); } catch (err) {
-        logger.warn(`[voice-queue:approveNext] Redis popNext failed: ${err.message}`);
+      try { nextUser = await queue.peekNext(roomId); } catch (err) {
+        logger.warn(`[voice-queue:approveNext] Redis peekNext failed: ${err.message}`);
       }
     }
     if (!nextUser) {
@@ -367,14 +367,8 @@ async function approveUser(req, res, next) {
       return errorResponse(res, `All ${limit} stage seats are occupied`, 400);
     }
 
-    // ── Remove from queue (Redis-safe) — approveUser ──────────────────────
-    if (isRedisReady()) {
-      try { await queue.dequeue(roomId, targetUserId); } catch (err) {
-        logger.warn(`[voice-queue:approveUser] Redis dequeue failed: ${err.message}`);
-      }
-    }
-
-    // Fetch meta from DB since we dequeued without popping
+    // Fix A: do NOT dequeue here — dequeue happens post-commit inside _promoteUser.
+    // Fetch meta from DB
     const targetParticipant = await prisma.voiceParticipant.findUnique({
       where: { roomId_userId: { roomId, userId: targetUserId } },
       include: { user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } } }
@@ -438,13 +432,18 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
   // DEF-002: track the actual isMuted value written by the transaction so socket
   // events and the response body reflect the authoritative post-promotion state.
   let promotedIsMuted = false;
+  // Fix B+C: promotedRole and promotedModeratorMute are set inside the tx from
+  // the authoritative in-tx participant state (not stale pre-tx isMod).
+  let promotedRole = isMod ? VOICE_ROLES.MODERATOR : 'SPEAKER';
+  let promotedModeratorMute = false;
 
   try {
     await prisma.$transaction(async (tx) => {
       // Re-read inside transaction — race condition protection
+      // Fix F: expand select to include wasKicked and handRaised for recipient revalidation
       const current = await tx.voiceParticipant.findUnique({
         where: { roomId_userId: { roomId, userId } },
-        select: { role: true, isActive: true, isMuted: true }
+        select: { role: true, isActive: true, isMuted: true, wasKicked: true, handRaised: true }
       });
 
       if (!current?.isActive) {
@@ -452,6 +451,24 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
         err.statusCode = 400;
         throw err;
       }
+      // Fix F: reject kicked or hand-withdrawn participants inside the transaction
+      if (current.wasKicked || !current.handRaised) {
+        const err = new Error('Participant is no longer eligible for the queue');
+        err.statusCode = 409;
+        throw err;
+      }
+
+      // Fix G: re-read the approver's state inside the transaction (TOCTOU — consent integrity)
+      const approver = await tx.voiceParticipant.findUnique({
+        where: { roomId_userId: { roomId, userId: req.user.id } },
+        select: { role: true, isActive: true },
+      });
+      if (!approver?.isActive || !MODERATOR_ROLES.includes(approver.role)) {
+        const err = new Error('Approver no longer has permission to approve speakers');
+        err.statusCode = 403;
+        throw err;
+      }
+
       // QUEUE FIFO FIX: Accept AUDIENCE or muted MODERATOR from the queue.
       // Also accept SPEAKER with seatNumber=null (ghost state from crash/disconnect).
       // Check seatNumber directly — it's the authoritative "on stage" indicator.
@@ -483,17 +500,28 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       `;
       const occupiedSetTx = new Set(occupiedTx.map(r => Number(r.seatNumber)));
       const txIsMod = current.role === 'MODERATOR';
-      // FIX-001: re-read lockedSeats inside the transaction so a concurrent toggleSeatLock()
-      // is visible to this promotion. This is a non-locking read (Prisma default isolation,
-      // REPEATABLE READ on MySQL); a lock toggle racing in the same tiny window can still be
-      // missed — closing that fully would need SELECT ... FOR UPDATE on the room row, a
-      // larger change. See FIX-001 report (known concurrency limitation).
-      const txLockRoom = await tx.voiceRoom.findUnique({ where: { id: roomId }, select: { lockedSeats: true } });
-      const lockedSet = buildLockedSet(txLockRoom?.lockedSeats); // FIX-001: locked seats (in-tx re-read)
+      // Fix C: update promotedRole from the authoritative in-tx role
+      promotedRole = txIsMod ? VOICE_ROLES.MODERATOR : 'SPEAKER';
+
+      // Fix H: expand room re-read to include micLocked, status, deletedAt, maxSpeakers
+      // so concurrent room-condition changes are detected inside the transaction.
+      const txRoom = await tx.voiceRoom.findUnique({
+        where: { id: roomId },
+        select: { lockedSeats: true, micLocked: true, status: true, deletedAt: true, maxSpeakers: true },
+      });
+      if (!txRoom || txRoom.deletedAt || txRoom.status === 'ENDED' || txRoom.micLocked) {
+        const err = new Error('The stage is unavailable for queue promotion');
+        err.statusCode = 403;
+        throw err;
+      }
+      const lockedSet = buildLockedSet(txRoom?.lockedSeats);
+      // Fix H: use in-tx maxSpeakers for capacity check
+      const txFullLimit = txRoom.maxSpeakers || 12;
+
       let seat = null;
-      for (let s = 1; s <= fullLimit; s++) {
+      for (let s = 1; s <= txFullLimit; s++) {
         if (occupiedSetTx.has(s)) continue;
-        if (lockedSet.has(s)) continue; // FIX-001: skip locked seats
+        if (lockedSet.has(s)) continue;
         if (s === 1 && !txIsMod) continue;
         seat = s; break;
       }
@@ -512,23 +540,54 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       // their mic button to publish audio. The previous allMuted-conditional path
       // (isMuted = allMuted ? 1 : 0) was incorrect — it auto-activated the mic when
       // the room was not in allMuted mode, violating the consent-first permission model.
+      //
+      // Fix D+J: capture $executeRaw return value and guard against writeCount=0 (concurrent
+      // state change). SQL WHERE clause includes safety predicates so the update is atomic.
       if (txIsMod) {
-        await tx.$executeRaw`
+        const updated = await tx.$executeRaw`
           UPDATE voice_participants
           SET seatNumber = ${seat}, isMuted = 1,
               handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
           WHERE roomId = ${roomId} AND userId = ${userId}
+            AND isActive = 1 AND wasKicked = 0
+            AND seatNumber IS NULL AND handRaised = 1
+            AND role = ${current.role}
         `;
+        if (Number(updated) !== 1) {
+          const err = new Error('Participant state changed during queue promotion');
+          err.statusCode = 409;
+          throw err;
+        }
         promotedIsMuted = true; // DEF-002: consent-first — always muted on stage entry
+        // Fix B: read mutedByModerator from the just-written row (via same tx)
+        const approved = await tx.voiceParticipant.findUnique({
+          where: { roomId_userId: { roomId, userId } },
+          select: { mutedByModerator: true },
+        });
+        promotedModeratorMute = Boolean(approved?.mutedByModerator);
       } else {
         // DEF-002: AUDIENCE→SPEAKER promotion always seats muted (consent-first).
         promotedIsMuted = true;
-        await tx.$executeRaw`
+        const updated = await tx.$executeRaw`
           UPDATE voice_participants
           SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = 1,
               handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
           WHERE roomId = ${roomId} AND userId = ${userId}
+            AND isActive = 1 AND wasKicked = 0
+            AND seatNumber IS NULL AND handRaised = 1
+            AND role = ${current.role}
         `;
+        if (Number(updated) !== 1) {
+          const err = new Error('Participant state changed during queue promotion');
+          err.statusCode = 409;
+          throw err;
+        }
+        // Fix B: read mutedByModerator from the just-written row (via same tx)
+        const approved = await tx.voiceParticipant.findUnique({
+          where: { roomId_userId: { roomId, userId } },
+          select: { mutedByModerator: true },
+        });
+        promotedModeratorMute = Boolean(approved?.mutedByModerator);
       }
     });
   } catch (txErr) {
@@ -547,22 +606,37 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
         ioClean.to(`voice:${roomId}`).emit('voice:hand_raised', { roomId, userId, raised: false });
         await broadcastQueue(roomId);
       }
-      // Return success — the user IS on stage, which is the desired outcome.
+      // Fix I: return actual participant state instead of hardcoded values
+      const actual = await prisma.voiceParticipant.findUnique({
+        where: { roomId_userId: { roomId, userId } },
+        select: { role: true, seatNumber: true, isMuted: true, mutedByModerator: true },
+      });
+      // Fix A (ALREADY_ON_STAGE): dequeue the user since they're already on stage.
+      try { await queue.dequeue(roomId, userId); } catch {}
       return successResponse(res, {
         userId,
-        role: 'SPEAKER',
-        seatNumber: null,
+        role: actual?.role ?? 'SPEAKER',
+        seatNumber: actual?.seatNumber ?? null,
+        isMuted: actual?.isMuted ?? false,
+        mutedByModerator: actual?.mutedByModerator ?? false,
         firstName: userMeta.firstName,
         lastName: userMeta.lastName,
         alreadyOnStage: true,
       }, `${userMeta.firstName} is already on stage`);
     }
     if (txErr.statusCode) {
+      // Fix F+H: requeue on ALL transaction validation failures so the queue entry
+      // is preserved regardless of which condition rejected the promotion attempt.
+      // The user or host can retry; the rejection is due to concurrent state change,
+      // not a deliberate "deny" (use rejectUser for intentional denial).
+      try { await queue.requeue(roomId, { userId, firstName: userMeta.firstName, lastName: userMeta.lastName, avatarUrl: userMeta.avatarUrl, raisedAt: userMeta.raisedAt }); } catch {}
       return errorResponse(res, txErr.message, txErr.statusCode);
     }
     // SEAT RACE PROTECTION: DB unique constraint on (roomId, seatNumber) prevented a duplicate.
     // Two concurrent promotions targeted the same seat. Treat as "seat taken" → 409.
-    const isDupSeat = txErr.code === 'P2002' ||
+    // Fix E: expand isDupSeat to include ER_DUP_ENTRY and P2010+1062 error shapes.
+    const isDupSeat = txErr.code === 'P2002' || txErr.code === 'ER_DUP_ENTRY' ||
+      String(txErr.meta?.code) === '1062' ||
       (txErr.message && (txErr.message.includes('Duplicate entry') || txErr.message.includes('voice_participants_roomId_seatNumber_key')));
     if (isDupSeat) {
       logger.warn(`[_promoteUser] Seat race for userId=${userId} room=${roomId} — concurrent seat assignment. Returning 409.`);
@@ -577,28 +651,35 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
     throw txErr;
   }
 
+  // Fix A: dequeue AFTER successful commit — queue entry is removed only on success.
+  // This ensures atomicity: if the transaction failed for any reason, the user stays queued.
+  try { await queue.dequeue(roomId, userId); } catch (err) {
+    logger.warn(`[_promoteUser] Post-commit dequeue failed for userId=${userId}: ${err.message}`);
+  }
+
   await safeDeleteCache(roomCacheKey(roomId));
 
   // ── Broadcast with seatNumber ─────────────────────────────────────────
   const io = getIo();
   if (io) {
-    if (isMod) {
+    // Fix C: use promotedRole (set from in-tx txIsMod) instead of stale outer isMod
+    if (promotedRole === VOICE_ROLES.MODERATOR) {
       io.to(`voice:${roomId}`).emit('voice:mute_changed', {
         roomId, userId, isMuted: promotedIsMuted, seatNumber: assignedSeat,
-        mutedByModerator: false,
+        mutedByModerator: promotedModeratorMute,
       });
     } else {
       io.to(`voice:${roomId}`).emit('voice:role_changed', {
         roomId, userId, role: 'SPEAKER', seatNumber: assignedSeat,
-        isMuted: promotedIsMuted, mutedByModerator: false,
+        isMuted: promotedIsMuted, mutedByModerator: promotedModeratorMute,
       });
     }
     io.to(`user:${userId}`).emit('voice:promoted_to_speaker', {
       roomId,
       seatNumber: assignedSeat,
-      role: isMod ? VOICE_ROLES.MODERATOR : 'SPEAKER',
+      role: promotedRole,
       isMuted: promotedIsMuted,
-      mutedByModerator: false,
+      mutedByModerator: promotedModeratorMute,
       message: `You've been approved as a speaker at Seat ${assignedSeat}!`
     });
 
@@ -657,13 +738,15 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
     data:  { roomId, type: 'speaker_approved' }
   }).catch(() => {});
 
+  // Fix B+C: use promotedRole (from in-tx authoritative state) and promotedModeratorMute
   return successResponse(res, {
     userId,
-    role:       isMod ? VOICE_ROLES.MODERATOR : 'SPEAKER',
-    seatNumber: assignedSeat,
-    isMuted:    promotedIsMuted,
-    firstName:  userMeta.firstName,
-    lastName:   userMeta.lastName,
+    role:             promotedRole,
+    seatNumber:       assignedSeat,
+    isMuted:          promotedIsMuted,
+    mutedByModerator: promotedModeratorMute,
+    firstName:        userMeta.firstName,
+    lastName:         userMeta.lastName,
   }, `${userMeta.firstName} promoted to speaker`);
 }
 
