@@ -343,11 +343,11 @@ describe('AUDIT-FIX: LiveKit token security', () => {
     const fnEnd   = src.indexOf('async function', fnStart + 1);
     const fnBody  = src.slice(fnStart, fnEnd);
 
-    // Active TTL must be 1h
-    expect(fnBody).toMatch(/ttl.*'1h'|ttl.*"1h"/);
-    // The actual token grant must NOT use 8h as TTL value in code (comment is ok)
-    // Check: the AccessToken instantiation should have ttl: '1h'
-    expect(fnBody).toMatch(/ttl:\s*'1h'/);
+    // Active TTL must be 10m (INV-001: reduced from 1h to shorten revocation window)
+    expect(fnBody).toMatch(/ttl.*'10m'|ttl.*"10m"/);
+    // The actual token grant must NOT use 1h or 8h as TTL value in code (comment is ok)
+    // Check: the AccessToken instantiation should have ttl: '10m'
+    expect(fnBody).toMatch(/ttl:\s*'10m'/);
   });
 
   test('getLiveKitToken identity comes from req.user.id (server-derived, not client-supplied)', () => {

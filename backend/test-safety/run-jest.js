@@ -147,7 +147,7 @@ function run({ args = process.argv.slice(2), inheritedEnv = process.env, spawn =
   if (!fs.existsSync(UNIT_CONFIG)) throw safetyError('approved unit Jest configuration is missing');
   const jestBin = require.resolve('jest/bin/jest');
   const plan = buildLaunchPlan({ args, inheritedEnv });
-  const result = spawn(process.execPath, [jestBin, ...plan.jestArgs], {
+  const result = spawn(process.execPath, ['--max-old-space-size=3072', jestBin, ...plan.jestArgs], {
     cwd: BACKEND_ROOT,
     env: plan.childEnv,
     stdio: 'inherit',

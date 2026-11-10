@@ -426,10 +426,12 @@ describe('Voice Club — one-active-room invariant', () => {
   test('J: Banned user returns 403', async () => {
     prisma.voiceRoom.findUnique.mockResolvedValue(makeRoom({ hostId: 'host-1' }));
 
-    // The transaction calls $queryRaw twice:
-    //   1. Users FOR UPDATE (returns user row — any truthy result)
-    //   2. VRM FOR UPDATE (returns VRM row with isBanned=1 → triggers 403)
+    // The transaction calls $queryRaw three times:
+    //   1. Room FOR UPDATE (INV-001: room lock — serialize with endRoom)
+    //   2. Users FOR UPDATE (returns user row — user-lock serialization)
+    //   3. VRM FOR UPDATE (returns VRM row with isBanned=1 → triggers 403)
     prisma.$queryRaw
+      .mockResolvedValueOnce([{ id: 'room-a' }])           // Room FOR UPDATE (INV-001)
       .mockResolvedValueOnce([{ id: 'user-99' }])          // Users FOR UPDATE
       .mockResolvedValueOnce([{ id: 'vrm-1', isBanned: 1 }]); // VRM FOR UPDATE — banned
 

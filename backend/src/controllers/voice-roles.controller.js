@@ -80,16 +80,15 @@ async function assignModerator(req, res, next) {
       return errorResponse(res, 'User is already a moderator', 400);
     }
 
-    await prisma.voiceParticipant.update({
+    // DEF-D FIX: assignModerator must NOT overwrite isMuted.
+    // The participant's voluntary mute consent and any moderator-enforced mute
+    // must survive the role change. Sending isMuted:false here caused a TOCTOU
+    // race where a concurrent self-mute or disciplinary mute committed between
+    // the findUnique read above and this update would be silently overwritten.
+    const updated = await prisma.voiceParticipant.update({
       where: { roomId_userId: { roomId, userId: targetUserId } },
       data: {
-        role:    'MODERATOR',
-        // MODERATOR EXEMPTION (DEF-002): Moderators are always unmuted on assignment.
-        // allMuted (room-wide mute policy) does NOT apply to MODERATOR or HOST roles.
-        // A newly assigned moderator must be able to speak immediately to fulfil their
-        // moderation duties. This is intentional and correct — do NOT add an allMuted
-        // check here. Individual mute via toggleMute() remains available if needed.
-        isMuted: false,
+        role:      'MODERATOR',
         updatedAt: new Date()
       }
     });
@@ -98,12 +97,18 @@ async function assignModerator(req, res, next) {
 
     const io = getIo();
     if (io) {
+      // DEF-D: Include authoritative isMuted and seatNumber from the DB record
+      // so mobile and web clients can apply the correct state without an extra fetch.
+      // updated.isMuted reflects any concurrent mute that committed before this update.
       io.to(`voice:${roomId}`).emit('voice:moderator_assigned', {
         roomId,
         userId:    targetUserId,
         firstName: target.user.firstName,
         lastName:  target.user.lastName,
-        avatarUrl: target.user.avatarUrl
+        avatarUrl: target.user.avatarUrl,
+        role:      VOICE_ROLES.MODERATOR,
+        isMuted:   Boolean(updated.isMuted),
+        seatNumber: updated.seatNumber != null ? Number(updated.seatNumber) : null,
       });
       io.to(`voice:${roomId}`).emit('voice:role_changed', {
         roomId,

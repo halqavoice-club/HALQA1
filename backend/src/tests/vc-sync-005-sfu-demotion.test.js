@@ -288,10 +288,10 @@ function setupDemoteSuccess() {
       user: { firstName: 'Alice', lastName: 'Smith' }
     });
 
-  // Inside transaction: re-read target
-  prisma._mockTx.voiceParticipant.findUnique.mockResolvedValueOnce({
-    role: 'SPEAKER', isActive: true,
-  });
+  // Inside transaction: re-read requester first (TOCTOU revalidation), then target
+  prisma._mockTx.voiceParticipant.findUnique
+    .mockResolvedValueOnce({ role: 'HOST', isActive: true })   // currentRequester
+    .mockResolvedValueOnce({ role: 'SPEAKER', isActive: true }); // current target
   prisma._mockTx.$executeRaw.mockResolvedValue(1);
 }
 
@@ -451,10 +451,10 @@ describe('T7: target already AUDIENCE — idempotent demotion', () => {
         user: { firstName: 'Charlie', lastName: 'Brown' }
       });
 
-    // Inside transaction: target is still AUDIENCE (no role collision guard in the else branch)
-    prisma._mockTx.voiceParticipant.findUnique.mockResolvedValueOnce({
-      role: 'AUDIENCE', isActive: true,
-    });
+    // Inside transaction: requester re-read first (TOCTOU revalidation), then target
+    prisma._mockTx.voiceParticipant.findUnique
+      .mockResolvedValueOnce({ role: 'HOST', isActive: true })     // currentRequester
+      .mockResolvedValueOnce({ role: 'AUDIENCE', isActive: true }); // current target (still AUDIENCE)
     prisma._mockTx.$executeRaw.mockResolvedValue(1);
 
     const io = makeIo();

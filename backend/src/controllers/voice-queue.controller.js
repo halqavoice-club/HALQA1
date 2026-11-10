@@ -313,7 +313,7 @@ async function approveNext(req, res, next) {
       };
     }
 
-    return _promoteUser(req, res, nextUser, roomId, room);
+    return await _promoteUser(req, res, nextUser, roomId, room);
   } catch (error) { next(error); }
 }
 /**
@@ -389,7 +389,7 @@ async function approveUser(req, res, next) {
       raisedAt:  targetParticipant.handRaisedAt ? targetParticipant.handRaisedAt.toISOString() : undefined,
     };
 
-    return _promoteUser(req, res, meta, roomId, room);
+    return await _promoteUser(req, res, meta, roomId, room);
   } catch (error) { next(error); }
 }
 
@@ -435,6 +435,9 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
   }
   // FIX-001: fall through to tx if no pre-tx seat (tx re-enqueues on reject)
   let assignedSeat = preSeat;
+  // DEF-002: track the actual isMuted value written by the transaction so socket
+  // events and the response body reflect the authoritative post-promotion state.
+  let promotedIsMuted = false;
 
   try {
     await prisma.$transaction(async (tx) => {
@@ -512,9 +515,11 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
               handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
           WHERE roomId = ${roomId} AND userId = ${userId}
         `;
+        promotedIsMuted = false; // MODERATOR exempt from allMuted
       } else {
         // DEF-002: queue promotions are always AUDIENCE→SPEAKER; respect allMuted.
         const promoteAllMuted = Boolean(room.allMuted);
+        promotedIsMuted = promoteAllMuted;
         await tx.$executeRaw`
           UPDATE voice_participants
           SET seatNumber = ${seat}, role = 'SPEAKER', isMuted = ${promoteAllMuted ? 1 : 0},
@@ -563,6 +568,9 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
       try { await queue.requeue(roomId, { userId, firstName: userMeta.firstName, lastName: userMeta.lastName, avatarUrl: userMeta.avatarUrl, raisedAt: userMeta.raisedAt }); } catch {}
       return errorResponse(res, 'Seat was just taken by another user — please try again', 409);
     }
+    // Unexpected DB failure — requeue the user so they remain in the queue for retry.
+    // The user was already popped/dequeued before the transaction attempt.
+    try { await queue.requeue(roomId, { userId, firstName: userMeta.firstName, lastName: userMeta.lastName, avatarUrl: userMeta.avatarUrl, raisedAt: userMeta.raisedAt }); } catch {}
     throw txErr;
   }
 
@@ -573,16 +581,21 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
   if (io) {
     if (isMod) {
       io.to(`voice:${roomId}`).emit('voice:mute_changed', {
-        roomId, userId, isMuted: false, seatNumber: assignedSeat
+        roomId, userId, isMuted: promotedIsMuted, seatNumber: assignedSeat,
+        mutedByModerator: false,
       });
     } else {
       io.to(`voice:${roomId}`).emit('voice:role_changed', {
-        roomId, userId, role: 'SPEAKER', seatNumber: assignedSeat
+        roomId, userId, role: 'SPEAKER', seatNumber: assignedSeat,
+        isMuted: promotedIsMuted, mutedByModerator: false,
       });
     }
     io.to(`user:${userId}`).emit('voice:promoted_to_speaker', {
       roomId,
       seatNumber: assignedSeat,
+      role: isMod ? VOICE_ROLES.MODERATOR : 'SPEAKER',
+      isMuted: promotedIsMuted,
+      mutedByModerator: false,
       message: `You've been approved as a speaker at Seat ${assignedSeat}!`
     });
 
@@ -643,6 +656,7 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
     userId,
     role:       isMod ? VOICE_ROLES.MODERATOR : 'SPEAKER',
     seatNumber: assignedSeat,
+    isMuted:    promotedIsMuted,
     firstName:  userMeta.firstName,
     lastName:   userMeta.lastName,
   }, `${userMeta.firstName} promoted to speaker`);

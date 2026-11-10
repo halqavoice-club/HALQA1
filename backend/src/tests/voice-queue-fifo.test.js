@@ -507,13 +507,16 @@ describe('MODERATOR approval: Free Stage OFF requires queue + approveUser endpoi
     // For MODERATOR path (txIsMod): must NOT set role = 'SPEAKER'
     // Both branches seat the participant muted until explicit self-unmute.
     expect(fn).toMatch(/txIsMod/);
-    expect(fn).toMatch(/SET seatNumber[^;]*role = 'SPEAKER', isMuted = 1/);
     // The mod branch does NOT have role = 'SPEAKER'
     const txIsModIdx = fn.indexOf('if (txIsMod)');
     const txBlock = fn.slice(txIsModIdx, fn.indexOf('} else {', txIsModIdx));
     expect(txBlock).not.toMatch(/role.*=.*'SPEAKER'/);
-    expect(txBlock).toMatch(/isMuted = 1/);
-    expect(txBlock).toMatch(/role = \$\{current\.role\}/);
+    // DEF-002: MODERATOR branch unconditionally sets isMuted = 0 (exempt from allMuted)
+    expect(txBlock).toMatch(/isMuted = 0/);
+    // DEF-002: SPEAKER branch (else) uses promoteAllMuted conditional
+    const elseStart = fn.indexOf('} else {', txIsModIdx);
+    const elseBlock = fn.slice(elseStart, fn.indexOf('\n      }', elseStart + 10));
+    expect(elseBlock).toMatch(/isMuted = \$\{.*promoteAllMuted.*\}/);
   });
 
   test('_promoteUser emits voice:mute_changed (not role_changed) for MODERATOR', () => {

@@ -1169,10 +1169,19 @@ describe('BUG-005: Web onStageState — stale-seat sweep for absent participants
 
 // ─── BUG-008: Mobile voice:moderator_assigned isMuted sync ───────────────────
 describe('BUG-008: Mobile moderator assignment — isMuted:false set immediately', () => {
-  test('mobile voice:moderator_assigned sets isMuted:false', () => {
+  test('mobile voice:moderator_assigned explicitly handles isMuted from event payload (DEF-D contract)', () => {
+    // DEF-D contract: moderator assignment must read isMuted from the event payload
+    // (d.isMuted) and explicitly set isMuted in the returned participant object.
+    // It must NOT unconditionally force isMuted:false — that was the BUG-008 regression.
+    // Use a 900-char window to capture the full return-object body including the ternary.
     const idx = mobileSrc.indexOf("voice:moderator_assigned");
-    const handler = mobileSrc.slice(idx, idx + 600);
-    expect(handler).toMatch(/isMuted.*false|false.*isMuted/);
+    const handler = mobileSrc.slice(idx, idx + 900);
+    // 1. Handler reads isMuted from the event payload (d.isMuted)
+    expect(handler).toMatch(/d\.isMuted/);
+    // 2. isMuted is explicitly set in the returned participant object
+    expect(handler).toMatch(/isMuted\s*:/);
+    // 3. No unconditional isMuted:false assignment (BUG-008 regression guard)
+    expect(handler).not.toMatch(/isMuted\s*:\s*false[^?]/);
   });
 
   test('mobile moderator_assigned sets role MODERATOR', () => {

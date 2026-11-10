@@ -242,6 +242,7 @@ describe("DEF-D: Moderator Assignment State Consistency (Phase 3A-1F)", () => {
         isActive: true,
         seatNumber: 3,
         isMuted: false,
+        mutedByModerator: false,
       },
       room: { micLocked: false, allMuted: false },
     });
@@ -290,6 +291,7 @@ describe("DEF-D: Moderator Assignment State Consistency (Phase 3A-1F)", () => {
         isActive: true,
         seatNumber: 4,
         isMuted: true,
+        mutedByModerator: false,
       },
       room: { micLocked: false, allMuted: false },
     });
@@ -575,7 +577,7 @@ describe("DEF-D: Moderator Assignment State Consistency (Phase 3A-1F)", () => {
       }).canPublishAudio,
     ).toBe(false);
 
-    // HOST on stage allowed
+    // HOST on stage allowed (mutedByModerator:false required by fail-closed auth guard)
     expect(
       getVoiceAudioPermission({
         participant: {
@@ -583,12 +585,13 @@ describe("DEF-D: Moderator Assignment State Consistency (Phase 3A-1F)", () => {
           isActive: true,
           seatNumber: 1,
           isMuted: false,
+          mutedByModerator: false,
         },
         room: { micLocked: true, allMuted: true },
       }).canPublishAudio,
     ).toBe(true);
 
-    // MODERATOR on stage allowed
+    // MODERATOR on stage allowed (mutedByModerator:false required by fail-closed auth guard)
     expect(
       getVoiceAudioPermission({
         participant: {
@@ -596,6 +599,7 @@ describe("DEF-D: Moderator Assignment State Consistency (Phase 3A-1F)", () => {
           isActive: true,
           seatNumber: 2,
           isMuted: false,
+          mutedByModerator: false,
         },
         room: { micLocked: true, allMuted: true },
       }).canPublishAudio,
