@@ -547,9 +547,10 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
     const execCalls = prisma.$executeRaw.mock.calls;
     expect(execCalls.length).toBeGreaterThanOrEqual(1);
 
-    // Promotion SQL: SET seatNumber=${seat}, role='SPEAKER', isMuted=${allMuted?1:0},...
-    // call[1]=seat, call[2]=isMuted → must be 1 when allMuted=true
-    const hasAllMutedWrite = execCalls.some(call => tplValues(call)[1] === 1);
+    // DEF-002 consent-first: isMuted = 1 is now a SQL literal (not an interpolated
+    // parameter), so we match the SQL text string rather than tplValues().
+    // e.g. SET seatNumber=?, role='SPEAKER', isMuted = 1, ...
+    const hasAllMutedWrite = execCalls.some(call => /isMuted\s*=\s*1/.test(call[0].join('?')));
     expect(hasAllMutedWrite).toBe(true);
   });
 
