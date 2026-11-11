@@ -22,7 +22,14 @@ const artifactIntegrity = require('../../../test-safety/trusted-mysql-runner/art
 const secretEnvironment = require('../../../test-safety/trusted-mysql-runner/secret-environment');
 
 describe('Trusted MySQL Runner - Negative Security Tests', () => {
-  
+
+  // Isolation guard: reset runner-authority module state before every test in this suite.
+  // In CI batch runs, Jest reuses the module instance across test files.
+  // _resetMACKeyForTesting() rotates MAC_SECRET_KEY and clears CONSUMED_NONCES.
+  beforeEach(() => {
+    runnerAuthority._resetMACKeyForTesting();
+  });
+
   describe('Image Supply Chain Policy', () => {
     
     test('1. Missing approved digest - MUST reject', () => {

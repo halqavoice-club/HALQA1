@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const {
   AUTHORIZATION_EVIDENCE_KIND,
   buildMigrationChildEnvironment,
@@ -29,6 +30,17 @@ const CONTAINER_ID = 'a'.repeat(64);
 const IMAGE_DIGEST = `sha256:${'b'.repeat(64)}`;
 const POLICY_DIGEST = `sha256:${'c'.repeat(64)}`;
 
+// ---- Authority key and MAC helper for tests that require a valid HMAC ----
+// Deterministic 32-byte zero key — structurally valid, safe for unit tests only.
+const AUTHORITY_KEY = Buffer.alloc(32);
+
+function computeTestMAC(evidenceObj) {
+  const { kind, operation, runId, runAttempt, containerId, imageDigest, policyDigest, databaseName } = evidenceObj;
+  const payload = { kind, operation, runId, runAttempt, containerId, imageDigest, policyDigest, databaseName };
+  const canonical = JSON.stringify(payload, Object.keys(payload).sort());
+  return crypto.createHmac('sha256', AUTHORITY_KEY).update(canonical).digest('hex');
+}
+
 function profile(role = 'reader', overrides = {}) {
   const username = role === 'reader' ? 'halqa_ci_reader' : 'halqa_ci_migrator';
   return {
@@ -46,13 +58,18 @@ function profile(role = 'reader', overrides = {}) {
 }
 
 function evidence(role = 'reader', overrides = {}) {
-  return {
+  const base = {
     kind: AUTHORIZATION_EVIDENCE_KIND,
     operation: role === 'reader' ? 'read-only-smoke' : 'migration',
     runId: '40114997858', runAttempt: '1', containerId: CONTAINER_ID,
     imageDigest: IMAGE_DIGEST, policyDigest: POLICY_DIGEST, databaseName: DATABASE,
     ...overrides,
   };
+  // Compute MAC over the final merged object unless caller explicitly supplied one.
+  if (!base.mac) {
+    base.mac = computeTestMAC(base);
+  }
+  return base;
 }
 
 function url(role = 'reader', password = 'unit-test-password', port = '3307') {
@@ -198,25 +215,27 @@ describe('Phase 3D-1C Unit A fail-closed MySQL CI guards', () => {
   });
 
   test('T16 missing service attestation rejected where required', () => {
-    expect(() => validateMysqlCiTarget({ databaseUrl: url(), profile: profile() })).toThrow(/evidence is required/);
+    expect(() => validateMysqlCiTarget({ databaseUrl: url(), profile: profile(), authorityKey: AUTHORITY_KEY })).toThrow(/evidence is required/);
     expect(() => validateMysqlCiTarget({
       databaseUrl: url(), profile: profile(), authorizationEvidence: evidence('reader', { containerId: 'forged' }),
+      authorityKey: AUTHORITY_KEY,
     })).toThrow(/does not match/);
     expect(() => validateMysqlCiTarget({
       databaseUrl: url(), profile: profile('reader', { expectedServerUuid: undefined }),
       authorizationEvidence: evidence(),
+      authorityKey: AUTHORITY_KEY,
     })).toThrow(/expectedServerUuid/);
   });
 
   test('T17 approved mapped endpoint 3307 to internal 3306 handled', () => {
-    const validated = validateMysqlCiTarget({ databaseUrl: url(), profile: profile(), authorizationEvidence: evidence() });
+    const validated = validateMysqlCiTarget({ databaseUrl: url(), profile: profile(), authorizationEvidence: evidence(), authorityKey: AUTHORITY_KEY });
     expect(validated.target.endpointPort).toBe('3307');
     expect(validated.profile.mysqlServerPort).toBe('3306');
     expect(validateRuntimeSnapshot(snapshot())).toMatchObject({ endpointPort: '3307', mysqlServerPort: '3306' });
   });
 
   test('T18 wrong endpoint port rejected', () => {
-    expect(() => validateMysqlCiTarget({ databaseUrl: url('reader', 'secret', '3308'), profile: profile(), authorizationEvidence: evidence() }))
+    expect(() => validateMysqlCiTarget({ databaseUrl: url('reader', 'secret', '3308'), profile: profile(), authorizationEvidence: evidence(), authorityKey: AUTHORITY_KEY }))
       .toThrow(/endpointPort/);
   });
 
@@ -263,7 +282,7 @@ describe('Phase 3D-1C Unit A fail-closed MySQL CI guards', () => {
   test('T25 inherited DATABASE_URL cannot override explicit target', () => {
     const env = buildReaderChildEnvironment({
       inheritedEnv: { DATABASE_URL: 'mysql://root:secret@localhost:3306/halqa_db', TEST_DATABASE_URL: 'unsafe' },
-      databaseUrl: url(), profile: profile(), authorizationEvidence: evidence(),
+      databaseUrl: url(), profile: profile(), authorizationEvidence: evidence(), authorityKey: AUTHORITY_KEY,
     });
     expect(env.DATABASE_URL).toBe(url());
     expect(env).not.toHaveProperty('TEST_DATABASE_URL');
@@ -273,13 +292,14 @@ describe('Phase 3D-1C Unit A fail-closed MySQL CI guards', () => {
     const migrationUrl = url('migration', 'migration-secret');
     const env = buildReaderChildEnvironment({
       inheritedEnv: { DATABASE_URL: migrationUrl, MYSQL_CI_MIGRATION_URL: migrationUrl },
-      databaseUrl: url(), profile: profile(), authorizationEvidence: evidence(),
+      databaseUrl: url(), profile: profile(), authorizationEvidence: evidence(), authorityKey: AUTHORITY_KEY,
     });
     expect(Object.values(env)).not.toContain(migrationUrl);
     expect(env).not.toHaveProperty('MYSQL_CI_MIGRATION_URL');
     // Mismatched profile (reader) with URL (migration) should be rejected
     expect(() => buildMigrationChildEnvironment({
-      inheritedEnv: {}, databaseUrl: url('reader'), profile: profile('migration'), authorizationEvidence: evidence('migration'),
+      inheritedEnv: {}, databaseUrl: url('reader'), profile: profile('migration'),
+      authorizationEvidence: evidence('migration'), authorityKey: AUTHORITY_KEY,
     })).toThrow(/username does not match/);
   });
 

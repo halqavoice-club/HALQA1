@@ -211,14 +211,21 @@ describe('Stage 2 Recovery Coordinator - Revocation', () => {
   });
   
   test('S2-153: revokeFailedRun marks active run as REVOKED', () => {
-    authorityStore.state.runs['run-test'] = { status: 'ACTIVE' };
-    
+    // Use registerRun() so the run is persisted to disk and survives _freshReadUnderLock()
+    // inside revokeRun(). Direct state mutation bypasses persistence and fails after disk re-read.
+    authorityStore.registerRun(
+      'run-test',
+      'sha256:' + 'a'.repeat(64),
+    );
+
     const result = coordinator.revokeFailedRun('run-test', 'test-failure');
-    
+
     expect(result.revoked).toBe(true);
-    expect(authorityStore.state.runs['run-test'].status).toBe('REVOKED');
-    expect(authorityStore.state.runs['run-test'].revokedAt).toBeDefined();
-    expect(authorityStore.state.runs['run-test'].revocationReason).toBe('test-failure');
+    // After revokeRun(), _freshReadUnderLock() re-reads disk — verify via getStateSnapshot()
+    const snap = authorityStore.getStateSnapshot();
+    expect(snap.runs['run-test'].status).toBe('REVOKED');
+    expect(snap.runs['run-test'].revokedAt).toBeDefined();
+    expect(snap.runs['run-test'].revocationReason).toBe('test-failure');
   });
   
   test('S2-154: revokeFailedRun is idempotent for already-revoked run', () => {
