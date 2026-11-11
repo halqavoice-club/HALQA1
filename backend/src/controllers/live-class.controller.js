@@ -6,7 +6,6 @@ const { broadcastLiveStart, broadcastLiveEnd } = require('../utils/feedLive');
 const { queueBulkNotifications } = require('../services/queue.service');
 const logger = require('../utils/logger');
 const { v4: uuidv4 } = require('uuid');
-const { MICROPHONE_AUTHORIZATION_MODES } = require('../utils/liveClassMicrophoneContract');
 
 const userSelect = { id: true, firstName: true, lastName: true, avatarUrl: true, role: true };
 
@@ -54,7 +53,6 @@ async function rawCreateLiveClass(data) {
       chatEnabled, handRaiseEnabled, whiteboardEnabled,
       quranPanelEnabled, isOpenMic, screenShareEnabled,
       maxSpeakers, maxParticipants, isRecorded,
-      microphone_authorization_mode,
       createdAt, updatedAt
     ) VALUES (
       ?, ?, ?,
@@ -63,7 +61,6 @@ async function rawCreateLiveClass(data) {
       ?, ?, ?,
       ?, ?, ?,
       ?, ?, ?,
-      ?,
       ?, ?
     )
   `,
@@ -83,8 +80,6 @@ async function rawCreateLiveClass(data) {
     data.maxSpeakers != null ? data.maxSpeakers : 20,
     data.maxParticipants != null ? data.maxParticipants : null,
     data.isRecorded          ? 1 : 0,
-    // SEC01-G-BE02-A: all new sessions created in protected mode explicitly
-    MICROPHONE_AUTHORIZATION_MODES.SFU_AUTHORITATIVE,
     now, now
   );
 
@@ -189,48 +184,6 @@ async function rawUpdateLiveClassStatus(id, data) {
   vals.push(id);
   await prisma.$executeRawUnsafe(`UPDATE live_classes SET ${sets.join(', ')} WHERE id = ?`, ...vals);
   return rawFindLiveClass(id);
-}
-
-// ─── SEC01-G-BE02-A: Protected microphone mode helpers ───────────────────────
-
-/**
- * assertProtectedRuntimeReady(lc) — pre-flight guard for ensureProtectedScheduledMicrophoneMode.
- * Throws if the class state is incompatible with a scheduled upgrade:
- *   - Only SCHEDULED classes may be upgraded (not LIVE, ENDED, or CANCELLED).
- *   - A CANCELLED class must never enter protected mode.
- */
-async function assertProtectedRuntimeReady(lc) {
-  if (!lc) throw Object.assign(new Error('Live class not found'), { statusCode: 404 });
-  if (lc.status === 'CANCELLED') {
-    throw Object.assign(
-      new Error('Cannot set protected microphone mode on a CANCELLED class'),
-      { statusCode: 400 }
-    );
-  }
-  if (lc.status !== 'SCHEDULED') {
-    throw Object.assign(
-      new Error('microphone_authorization_mode may only be changed on SCHEDULED classes'),
-      { statusCode: 400 }
-    );
-  }
-}
-
-/**
- * ensureProtectedScheduledMicrophoneMode(liveClassId) — idempotent upgrade helper.
- * Upgrades a SCHEDULED class from LEGACY to SFU_AUTHORITATIVE before it goes LIVE.
- * Called at the start of startLiveClass, after assertProtectedRuntimeReady.
- *
- * SQL predicate: only updates rows where
- *   status = 'SCHEDULED' AND microphone_authorization_mode = 'LEGACY'
- * so the update is a no-op if the class is already in protected mode.
- */
-async function ensureProtectedScheduledMicrophoneMode(liveClassId) {
-  await prisma.$executeRawUnsafe(
-    `UPDATE live_classes
-     SET microphone_authorization_mode = 'SFU_AUTHORITATIVE', updatedAt = NOW()
-     WHERE id = ? AND status = 'SCHEDULED' AND microphone_authorization_mode = 'LEGACY'`,
-    liveClassId
-  );
 }
 
 /**
@@ -843,13 +796,6 @@ async function startLiveClass(req, res, next) {
     if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     if (lc.status === 'LIVE') return errorResponse(res, 'Class already live', 400);
     if (lc.status === 'ENDED') return errorResponse(res, 'Class already ended', 400);
-    if (lc.status === 'CANCELLED') return errorResponse(res, 'Class has been cancelled', 400);
-
-    // SEC01-G-BE02-A: ensure protected microphone mode before going LIVE.
-    // assertProtectedRuntimeReady guards against incompatible states (CANCELLED, non-SCHEDULED);
-    // ensureProtectedScheduledMicrophoneMode upgrades LEGACY → SFU_AUTHORITATIVE idempotently.
-    await assertProtectedRuntimeReady(lc);
-    await ensureProtectedScheduledMicrophoneMode(lc.id);
 
     const livekitRoomName = `liveclass-${lc.id}`;
     const now = new Date();

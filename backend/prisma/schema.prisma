@@ -307,8 +307,6 @@ model User {
   hostedPublicLiveStreams LiveClass[]            @relation("LiveClassHost")
   // Delegated hosting — live classes where this user is the current delegated operational host
   delegatedLiveClasses    LiveClass[]            @relation("LiveClassDelegatedHost")
-  // SEC01-G-BE02-A: microphone authorization requests submitted by this user
-  liveClassMicrophoneRequests LiveClassMicrophoneRequest[] @relation("LiveClassMicrophoneRequests")
   // Report & Block
   reportsSent        UserReport[]       @relation("ReportsSent")
   reportsReceived    UserReport[]       @relation("ReportsReceived")
@@ -1791,7 +1789,6 @@ model LiveClass {
   attendance    LiveClassAttendance[]
   polls             LiveClassPoll[]
   whiteboardSnapshot LiveClassWhiteboardSnapshot?
-  microphoneRequests LiveClassMicrophoneRequest[]
 
   @@index([streamType])
   @@index([schoolId])
@@ -1925,25 +1922,6 @@ model LiveClassWhiteboardSnapshot {
   updatedAt   DateTime  @updatedAt
 
   @@map("live_class_whiteboard_snapshots")
-}
-
-// SEC01-G-BE02-A: idempotency table for self-service microphone authorization requests
-model LiveClassMicrophoneRequest {
-  id                 String    @id @default(uuid())
-  liveClassId        String
-  liveClass          LiveClass @relation(fields: [liveClassId], references: [id], onDelete: Cascade)
-  actorUserId        String
-  actorUser          User      @relation("LiveClassMicrophoneRequests", fields: [actorUserId], references: [id], onDelete: Cascade)
-  idempotencyKey     String    @db.VarChar(128)
-  requestFingerprint String    @db.Char(64)
-  enabled            Boolean   @default(false)
-  expectedVersion    BigInt    @default(0)
-  processedAt        DateTime?
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
-
-  @@unique([liveClassId, actorUserId, idempotencyKey])
-  @@map("live_class_microphone_requests")
 }
 
 // ─── DIRECT MESSAGES ─────────────────────────────────────────────────────────
