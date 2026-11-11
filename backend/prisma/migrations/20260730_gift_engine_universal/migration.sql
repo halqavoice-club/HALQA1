@@ -34,10 +34,10 @@ PREPARE stmt2 FROM @sql2; EXECUTE stmt2; DEALLOCATE PREPARE stmt2;
 
 -- 3. Add room_type column to both tables (idempotent)
 ALTER TABLE `gift_transactions`
-  ADD COLUMN IF NOT EXISTS `room_type` VARCHAR(30) NOT NULL DEFAULT 'voice';
+  ADD COLUMN `room_type` VARCHAR(30) NOT NULL DEFAULT 'voice';
 
 ALTER TABLE `room_gift_leaderboard`
-  ADD COLUMN IF NOT EXISTS `room_type` VARCHAR(30) NOT NULL DEFAULT 'voice';
+  ADD COLUMN `room_type` VARCHAR(30) NOT NULL DEFAULT 'voice';
 
 -- 4. Add indexes for room_type
 CREATE INDEX IF NOT EXISTS `gift_transactions_room_type_idx` ON `gift_transactions` (`room_type`);
@@ -45,8 +45,8 @@ CREATE INDEX IF NOT EXISTS `room_gift_leaderboard_room_type_idx` ON `room_gift_l
 
 -- 5. Add missing columns to gifts table if needed (idempotent)
 ALTER TABLE `gifts`
-  ADD COLUMN IF NOT EXISTS `priority`  VARCHAR(30) NOT NULL DEFAULT 'normal',
-  ADD COLUMN IF NOT EXISTS `isPremium` BOOLEAN     NOT NULL DEFAULT false;
+  ADD COLUMN `priority`  VARCHAR(30) NOT NULL DEFAULT 'normal',
+  ADD COLUMN `isPremium` BOOLEAN     NOT NULL DEFAULT false;
 
 -- 6. Seed educational gift collection (camelCase column names to match existing schema)
 INSERT IGNORE INTO `gifts` (`id`, `name`, `emoji`, `imageUrl`, `animationType`, `soundEffect`, `priceCoins`, `rarity`, `comboEnabled`, `priority`, `isPremium`, `isActive`, `sortOrder`, `createdAt`, `updatedAt`) VALUES

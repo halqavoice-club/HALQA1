@@ -23,7 +23,7 @@
 -- NOTE: This step may already be applied if a previous partial run succeeded.
 -- The IF NOT EXISTS guard on the index prevents a duplicate-index error.
 ALTER TABLE `wallet_transactions`
-  ADD COLUMN IF NOT EXISTS `idempotencyKey` VARCHAR(128) NULL;
+  ADD COLUMN `idempotencyKey` VARCHAR(128) NULL;
 
 -- Add unique index only if it doesn't already exist (idempotent re-run safety)
 SET @idx_exists = (
