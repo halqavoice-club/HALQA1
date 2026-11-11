@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('crypto');
+
 // ============================================================================
 // AUTHORIZATION BOUNDARY AND SECURITY MODEL
 // ============================================================================
@@ -217,7 +219,12 @@ function validateTrustedMysqlProfile(profile) {
   });
 }
 
-function validateAuthorizationEvidence(evidence, profile) {
+function validateAuthorizationEvidence(evidence, profile, authorityKey) {
+  // Authority key validation — required for MAC verification
+  if (!authorityKey || !Buffer.isBuffer(authorityKey) || authorityKey.length < 32) {
+    throw targetError('authority key required: must be a Buffer of at least 32 bytes');
+  }
+
   if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
     throw targetError('external runner authorization evidence is required');
   }
@@ -229,6 +236,27 @@ function validateAuthorizationEvidence(evidence, profile) {
   const imageDigest = requirePlainString(evidence.imageDigest, 'authorizationEvidence.imageDigest');
   const policyDigest = requirePlainString(evidence.policyDigest, 'authorizationEvidence.policyDigest');
   const databaseName = requirePlainString(evidence.databaseName, 'authorizationEvidence.databaseName');
+
+  // MAC field presence and format validation — before anything else
+  if (!evidence.mac || typeof evidence.mac !== 'string' || evidence.mac.trim() === '') {
+    throw targetError('authorizationEvidence.mac must be a non-empty string');
+  }
+  if (!/^[a-f0-9]{64}$/.test(evidence.mac)) {
+    throw targetError('MAC must be 64-character hex string');
+  }
+
+  // MAC verification — build canonical payload from required fields (sorted keys), no mac field
+  // MUST happen before binding checks so tampered fields are caught as MAC failures, not field errors
+  const payload = { kind, operation, runId, runAttempt, containerId, imageDigest, policyDigest, databaseName };
+  const canonical = JSON.stringify(payload, Object.keys(payload).sort());
+  const expectedMac = crypto.createHmac('sha256', authorityKey).update(canonical).digest('hex');
+  const actualMacBuf = Buffer.from(evidence.mac, 'hex');
+  const expectedMacBuf = Buffer.from(expectedMac, 'hex');
+  if (actualMacBuf.length !== expectedMacBuf.length || !crypto.timingSafeEqual(actualMacBuf, expectedMacBuf)) {
+    throw targetError('MAC verification failed: evidence integrity check failed');
+  }
+
+  // Field-level binding checks (only reached when MAC is valid)
   if (kind !== AUTHORIZATION_EVIDENCE_KIND) throw targetError('authorization evidence kind is not approved');
   const expectedOperation = profile.role === 'migration' ? 'migration' : 'read-only-smoke';
   if (operation !== expectedOperation) throw targetError('authorization evidence operation is not approved');
@@ -241,6 +269,7 @@ function validateAuthorizationEvidence(evidence, profile) {
   if (databaseName !== binding.databaseName) {
     throw targetError('authorization evidence databaseName does not match the runner policy');
   }
+
   return Object.freeze({
     kind, operation, runId, runAttempt, containerId, imageDigest, policyDigest, databaseName,
   });
@@ -273,9 +302,9 @@ function parseMysqlCiUrl(databaseUrl) {
   });
 }
 
-function validateMysqlCiTarget({ databaseUrl, profile, authorizationEvidence } = {}) {
+function validateMysqlCiTarget({ databaseUrl, profile, authorizationEvidence, authorityKey } = {}) {
   const trusted = validateTrustedMysqlProfile(profile);
-  const evidence = validateAuthorizationEvidence(authorizationEvidence, trusted);
+  const evidence = validateAuthorizationEvidence(authorizationEvidence, trusted, authorityKey);
   const target = parseMysqlCiUrl(databaseUrl);
   const expected = {
     protocol: trusted.protocol,
@@ -300,9 +329,9 @@ function copyAllowedEnvironment(inheritedEnv) {
   return childEnv;
 }
 
-function buildChildEnvironment({ inheritedEnv = {}, databaseUrl, profile, authorizationEvidence, role } = {}) {
+function buildChildEnvironment({ inheritedEnv = {}, databaseUrl, profile, authorizationEvidence, authorityKey, role } = {}) {
   if (role !== 'migration' && role !== 'reader') throw targetError('an explicit child role is required');
-  const validated = validateMysqlCiTarget({ databaseUrl, profile, authorizationEvidence });
+  const validated = validateMysqlCiTarget({ databaseUrl, profile, authorizationEvidence, authorityKey });
   if (validated.profile.role !== role) throw targetError('child role does not match the runner policy');
   const childEnv = copyAllowedEnvironment(inheritedEnv);
   childEnv.DATABASE_URL = databaseUrl;

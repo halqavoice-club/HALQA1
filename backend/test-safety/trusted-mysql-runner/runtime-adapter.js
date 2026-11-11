@@ -76,6 +76,42 @@ function createTrustedRuntimeAdapter({ containerRuntime, mysqlObserver, authorit
     return owned.filter(item => !active.has(item.runId)).map(item => Object.freeze({ runId: item.runId, containerId: item.containerId, action: 'TEARDOWN_REQUIRED' }));
   }
   async function teardown(record) {
+    // Input validation — fail-closed on missing identifiers
+    if (!record.runId) {
+      const err = new Error('Teardown requires explicit runId');
+      err.code = 'UNVERIFIED_RESOURCE_OWNERSHIP';
+      throw err;
+    }
+    if (!record.containerId) {
+      const err = new Error('Teardown requires explicit containerId');
+      err.code = 'UNVERIFIED_RESOURCE_OWNERSHIP';
+      throw err;
+    }
+
+    // Ownership verification — look up run, verify it exists
+    const run = authorityStore.getRun(record.runId);
+    if (!run) {
+      const err = new Error('unknown run: ' + record.runId);
+      err.code = 'UNVERIFIED_RESOURCE_OWNERSHIP';
+      throw err;
+    }
+
+    // Status check — only ACTIVE runs may be torn down
+    if (run.status !== 'ACTIVE') {
+      const err = new Error('Run is not active: ' + record.runId);
+      err.code = 'UNVERIFIED_RESOURCE_OWNERSHIP';
+      throw err;
+    }
+
+    // Container ownership verification — stored containerId must match caller's
+    // If the run was registered without a containerId, ownership cannot be verified
+    if (!run.containerId || run.containerId !== record.containerId) {
+      const err = new Error('Container ownership not verified for run: ' + record.runId);
+      err.code = 'UNVERIFIED_RESOURCE_OWNERSHIP';
+      throw err;
+    }
+
+    // All checks pass — revoke and tear down
     authorityStore.revokeRun(record.runId, 'teardown');
     await containerRuntime.teardown(record.containerId);
     return true;
