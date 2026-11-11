@@ -384,30 +384,84 @@ describe('Trusted MySQL Runner - Negative Security Tests', () => {
   });
   
   describe('Artifact Integrity', () => {
-    
+    // Helper: create a temp dir with 8 real files whose content matches EXPECTED_MANIFEST
+    // so verifyArtifactSet reaches hash/manifest checks rather than failing on ENOENT.
+    function buildTempArtifactDir(overrideFiles = {}) {
+      const os = require('os');
+      const fs = require('fs');
+      const crypto = require('crypto');
+      const tmpDir = fs.mkdtempSync(require('path').join(os.tmpdir(), 'halqa-artifact-test-'));
+      const manifest = artifactIntegrity.EXPECTED_MANIFEST;
+      manifest.files.forEach(entry => {
+        const content = overrideFiles[entry.name] !== undefined
+          ? overrideFiles[entry.name]
+          // Write content whose SHA-256 matches the declared hash so we can test selective tampering
+          : Buffer.from(entry.name + '\n'); // placeholder — actual hash won't match, but that's OK for test 24
+        fs.writeFileSync(require('path').join(tmpDir, entry.name), content);
+      });
+      return tmpDir;
+    }
+
     test('23. Altered SQL artifact - MUST detect', () => {
+      // Build a temp dir whose files produce a KNOWN hash, then alter the manifest
+      // so the declared sha256 for file[0] is wrong → triggers "Hash mismatch"
+      const os = require('os');
+      const fs = require('fs');
       const path = require('path');
+      const crypto = require('crypto');
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'halqa-artifact-23-'));
+      const manifest = artifactIntegrity.EXPECTED_MANIFEST;
+      // Write all 8 files with deterministic content
+      const fileContents = {};
+      manifest.files.forEach(entry => {
+        const content = Buffer.from(`content-for-${entry.name}`);
+        fs.writeFileSync(path.join(tmpDir, entry.name), content);
+        fileContents[entry.name] = content;
+      });
+      // Build a valid manifest with correct hashes, then corrupt the first entry
+      const validFiles = manifest.files.map(entry => ({
+        ...entry,
+        sha256: crypto.createHash('sha256').update(fileContents[entry.name]).digest('hex').toUpperCase(),
+        size: fileContents[entry.name].length,
+      }));
       const alteredManifest = {
-        ...artifactIntegrity.EXPECTED_MANIFEST,
-        files: artifactIntegrity.EXPECTED_MANIFEST.files.map((file, index) => index === 0 ? { ...file, sha256: 'F'.repeat(64) } : file),
+        ...manifest,
+        files: validFiles.map((file, index) => index === 0 ? { ...file, sha256: 'F'.repeat(64) } : file),
       };
-      
-      const artifactDir = path.resolve(__dirname, '../../../mysql-integration/baseline-candidates/full-141-table-baseline-2026-10-24');
-      
-      expect(() => {
-        artifactIntegrity.verifyArtifactSet(artifactDir, alteredManifest);
-      }).toThrow(/Hash mismatch/);
+      try {
+        expect(() => {
+          artifactIntegrity.verifyArtifactSet(tmpDir, alteredManifest);
+        }).toThrow(/Hash mismatch/);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
     
     test('24. Missing FULLTEXT supplement - MUST detect', () => {
+      // incompleteManifest has only 7 files — verifyArtifactSet must reject it
+      // before reading any files (manifest length check fires first)
+      const incompleteManifest = {
+        ...artifactIntegrity.EXPECTED_MANIFEST,
+        files: artifactIntegrity.EXPECTED_MANIFEST.files.filter(
+          file => file.name !== 'historical-fulltext-index-supplement.sql'
+        ),
+      };
+      const os = require('os');
+      const fs = require('fs');
       const path = require('path');
-      const incompleteManifest = { ...artifactIntegrity.EXPECTED_MANIFEST, files: artifactIntegrity.EXPECTED_MANIFEST.files.filter(file => file.name !== 'historical-fulltext-index-supplement.sql') };
-      
-      const artifactDir = path.resolve(__dirname, '../../../mysql-integration/baseline-candidates/full-141-table-baseline-2026-10-24');
-      
-      expect(() => {
-        artifactIntegrity.verifyArtifactSet(artifactDir, incompleteManifest);
-      }).toThrow(/bind all 8 canonical/);
+      // A real directory is still required because verifyArtifactSet calls fs.lstatSync
+      // before the manifest-length check. Use a temp dir with just the 7 kept files.
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'halqa-artifact-24-'));
+      incompleteManifest.files.forEach(entry => {
+        fs.writeFileSync(path.join(tmpDir, entry.name), Buffer.from(`placeholder-${entry.name}`));
+      });
+      try {
+        expect(() => {
+          artifactIntegrity.verifyArtifactSet(tmpDir, incompleteManifest);
+        }).toThrow(/bind all 8 canonical/);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
     
     test('25. Path traversal - MUST detect', () => {
