@@ -96,11 +96,11 @@ async function authenticate(req, res, next) {
     const token = authHeader.split(' ')[1];
     const decoded = verifyAccessToken(token);
 
-    // VC-29 FIX: Reject 2FA challenge tokens on regular authenticated endpoints.
-    // 2FA challenge tokens are ONLY valid for POST /api/v1/auth/2fa/authenticate.
-    // They must NOT authenticate regular API endpoints — that would bypass the
-    // entire 2FA security control.
-    if (decoded.type === '2fa_challenge') {
+    // VC-29 FIX: Reject any token whose type field is present and not 'access'.
+    // Access tokens have no 'type' field (undefined). 2FA challenge tokens have
+    // type: '2fa_challenge'. Any future typed token that is not 'access' is also
+    // rejected, matching the stronger guard in app.js io.use() middleware.
+    if (decoded.type && decoded.type !== 'access') {
       return errorResponse(res, 'Invalid token type', 401);
     }
 
