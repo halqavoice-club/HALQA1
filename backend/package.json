@@ -13,7 +13,7 @@
     "test:group:live-class": "node test-safety/run-jest.js --group=live-class",
     "test:group:auth": "node test-safety/run-jest.js --group=auth",
     "test:group:realtime": "node test-safety/run-jest.js --group=realtime",
-    "test:integration": "node -e \"console.error('Disabled in Phase 3B-1: destructive integration execution is not authorized.'); process.exit(1)\"",
+    "test:integration": "node test-safety/disabled-integration.js",
     "test:coverage": "node test-safety/run-jest.js --coverage",
     "check": "node src/prisma/check-setup.js",
     "setup": "npx prisma generate && npx prisma migrate dev --name init && node src/prisma/seed.js",
