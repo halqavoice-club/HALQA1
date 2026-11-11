@@ -17,5 +17,7 @@ ALTER TABLE `direct_messages`
   ADD COLUMN `height`   INT           NULL,
   ADD COLUMN `thumbnail` VARCHAR(2048) NULL;
 
--- Index — CREATE INDEX IF NOT EXISTS is supported in MariaDB 10.1.4+
-CREATE INDEX IF NOT EXISTS `direct_messages_msgType_idx` ON `direct_messages` (`msgType`);
+-- Index — use information_schema guard (CREATE INDEX IF NOT EXISTS not supported on all MySQL 8.0)
+SET @idx_dm = (SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='direct_messages' AND INDEX_NAME='direct_messages_msgType_idx');
+SET @sql_dm = IF(@idx_dm=0, 'CREATE INDEX `direct_messages_msgType_idx` ON `direct_messages` (`msgType`)', 'SELECT 1');
+PREPARE stmt_dm FROM @sql_dm; EXECUTE stmt_dm; DEALLOCATE PREPARE stmt_dm;

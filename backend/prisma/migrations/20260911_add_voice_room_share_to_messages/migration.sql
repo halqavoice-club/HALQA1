@@ -29,9 +29,10 @@ ALTER TABLE `group_messages`
 -- Index: enables efficient lookup of all VOICE_ROOM_SHARE messages for a given room
 -- IF NOT EXISTS: 20260905c_add_group_chat creates group_messages with this index
 -- already defined in the CREATE TABLE statement. On a fresh database the CREATE TABLE
--- runs first, making this a duplicate. IF NOT EXISTS guards against error 1061.
-CREATE INDEX IF NOT EXISTS `group_messages_refEntityType_refEntityId_idx`
-  ON `group_messages` (`refEntityType`, `refEntityId`);
+-- runs first, making this a duplicate. Use information_schema guard.
+SET @idx_vrs = (SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='group_messages' AND INDEX_NAME='group_messages_refEntityType_refEntityId_idx');
+SET @sql_vrs = IF(@idx_vrs=0, 'CREATE INDEX `group_messages_refEntityType_refEntityId_idx` ON `group_messages` (`refEntityType`, `refEntityId`)', 'SELECT 1');
+PREPARE stmt_vrs FROM @sql_vrs; EXECUTE stmt_vrs; DEALLOCATE PREPARE stmt_vrs;
 
 -- ── group_messages.type enum: append VOICE_ROOM_SHARE ─────────────────────────
 -- MySQL 8 enum extension is online-safe: appending a value does not rebuild the table.
