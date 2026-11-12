@@ -1771,9 +1771,9 @@ async function promoteParticipant(req, res, next) {
     // on the live SFU connection immediately — no reconnect needed.
     // Called AFTER the transaction commits so the DB state is already authoritative.
     if (role === VOICE_ROLES.AUDIENCE) {
-      sfuRevokePublish(roomId, targetUserId, false, '[voice:demote]').catch(err => {
-        logger.warn('[voice:demote] sfuRevokePublish failed:', err?.message || err);
-      });
+      sfuRevokePublish(roomId, targetUserId, false, '[voice:demote]')
+        .then(r => { if (r && !r.enforced) logger.warn('[voice:demote] SFU enforcement gap', { roomId, userId: targetUserId, reason: r.reason }); })
+        .catch(err => { logger.warn('[voice:demote] sfuRevokePublish failed:', err?.message || err); });
     }
 
     // assignedSeatNumber was captured inside the transaction — always reliable.
@@ -2867,9 +2867,9 @@ async function dropMic(req, res, next) {
     // MUTE-FIX-003: Revoke SFU canPublish on dropMic so the participant cannot
     // continue publishing audio with their existing token after dropping from stage.
     // Best-effort — DB state change (seatNumber=NULL, isMuted=true) always persists.
-    sfuRevokePublish(roomId, userId, false, '[voice:drop-mic]').catch(err => {
-      logger.warn(`[voice:drop-mic] sfuRevokePublish failed: ${err?.message || err}`);
-    });
+    sfuRevokePublish(roomId, userId, false, '[voice:drop-mic]')
+      .then(r => { if (r && !r.enforced) logger.warn('[voice:drop-mic] SFU enforcement gap', { roomId, userId, reason: r.reason }); })
+      .catch(err => { logger.warn(`[voice:drop-mic] sfuRevokePublish failed: ${err?.message || err}`); });
 
     const io = getIo();
     if (io) {

@@ -327,7 +327,9 @@ describe('PH17-003: sfuRevokePublish on moderator removal and muteAll', () => {
     const src = fs.readFileSync(
       path.join(__dirname, '../controllers/voice-roles.controller.js'), 'utf8'
     );
-    const matches = src.match(/sfuRevokePublish\([^)]+\)\.catch\(\(\)/g) || [];
+    // sfuRevokePublish calls are best-effort: each ends with .catch(() => {})
+    // Some now have a .then(monitoring) chain before .catch — match both forms.
+    const matches = src.match(/sfuRevokePublish\([^)]+\)[\s\S]*?\.catch\(\(\)/g) || [];
     expect(matches.length).toBeGreaterThanOrEqual(2);
   });
 });

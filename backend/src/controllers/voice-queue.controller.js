@@ -690,7 +690,9 @@ async function _promoteUser(req, res, userMeta, roomId, room) {
     if (!promotedIsMuted) {
       try {
         const { sfuRevokePublish } = require('../utils/livekitService');
-        sfuRevokePublish(roomId, userId, true, '[voice:promote]').catch(() => {});
+        sfuRevokePublish(roomId, userId, true, '[voice:promote]')
+          .then(r => { if (r && !r.enforced) logger.warn('[voice:promote] SFU enforcement gap', { roomId, userId, reason: r.reason }); })
+          .catch(() => {});
       } catch {}
     }
 
