@@ -9,9 +9,21 @@
 -- This migration adds the missing FK constraint using a stored procedure
 -- to check if the constraint already exists first (idempotent).
 
--- Drop the FK if it already exists (handles re-running on existing DBs)
--- Then re-add with ON DELETE CASCADE to ensure correct behavior.
-ALTER TABLE `wallets` DROP FOREIGN KEY IF EXISTS `wallets_userId_fkey`;
+-- Drop the FK if it already exists (information_schema guard — DROP FOREIGN KEY IF EXISTS
+-- is MySQL 8.0.19+ syntax, not supported on all mysql:8.0 builds)
+SET @fk_wallet = (
+  SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME   = 'wallets'
+    AND COLUMN_NAME  = 'userId'
+    AND CONSTRAINT_NAME = 'wallets_userId_fkey'
+  LIMIT 1
+);
+SET @sql_drop_fk = IF(@fk_wallet IS NOT NULL,
+  'ALTER TABLE `wallets` DROP FOREIGN KEY `wallets_userId_fkey`',
+  'SELECT 1'
+);
+PREPARE stmt_drop_fk FROM @sql_drop_fk; EXECUTE stmt_drop_fk; DEALLOCATE PREPARE stmt_drop_fk;
 
 -- Add FK with ON DELETE CASCADE
 ALTER TABLE `wallets`

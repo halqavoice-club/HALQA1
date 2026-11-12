@@ -2,7 +2,7 @@
 -- animationType 'video' uses this URL for TikTok-style fullscreen animations
 
 ALTER TABLE `gifts`
-  ADD COLUMN IF NOT EXISTS `videoUrl` VARCHAR(512) NULL
+  ADD COLUMN `videoUrl` VARCHAR(512) NULL
   COMMENT 'Optional video animation file path or URL (webm/mp4)';
 
 -- Update animationType to include 'video' as a valid type (no constraint needed since it is a string)

@@ -6,6 +6,8 @@ const { broadcastLiveStart, broadcastLiveEnd } = require('../utils/feedLive');
 const { queueBulkNotifications } = require('../services/queue.service');
 const logger = require('../utils/logger');
 const { v4: uuidv4 } = require('uuid');
+const { MICROPHONE_AUTHORIZATION_MODES } = require('../utils/liveClassMicrophoneContract');
+const { assertProtectedRuntimeReady } = require('../services/liveclass-microphone-authority.service');
 
 const userSelect = { id: true, firstName: true, lastName: true, avatarUrl: true, role: true };
 
@@ -44,6 +46,9 @@ async function rawCreateLiveClass(data) {
   const schoolId    = data.schoolId     ?? null;
   const classId     = data.classId      ?? null;
   const teacherId   = data.teacherId    ?? null;
+  // SEC01-G-BE02: All new classes are created in SFU_AUTHORITATIVE mode by default.
+  const microphoneAuthorizationMode = data.microphoneAuthorizationMode
+    || MICROPHONE_AUTHORIZATION_MODES.SFU_AUTHORITATIVE;
 
   await prisma.$executeRawUnsafe(`
     INSERT INTO live_classes (
@@ -53,6 +58,7 @@ async function rawCreateLiveClass(data) {
       chatEnabled, handRaiseEnabled, whiteboardEnabled,
       quranPanelEnabled, isOpenMic, screenShareEnabled,
       maxSpeakers, maxParticipants, isRecorded,
+      microphone_authorization_mode,
       createdAt, updatedAt
     ) VALUES (
       ?, ?, ?,
@@ -61,6 +67,7 @@ async function rawCreateLiveClass(data) {
       ?, ?, ?,
       ?, ?, ?,
       ?, ?, ?,
+      ?,
       ?, ?
     )
   `,
@@ -80,6 +87,7 @@ async function rawCreateLiveClass(data) {
     data.maxSpeakers != null ? data.maxSpeakers : 20,
     data.maxParticipants != null ? data.maxParticipants : null,
     data.isRecorded          ? 1 : 0,
+    microphoneAuthorizationMode,
     now, now
   );
 
@@ -184,6 +192,48 @@ async function rawUpdateLiveClassStatus(id, data) {
   vals.push(id);
   await prisma.$executeRawUnsafe(`UPDATE live_classes SET ${sets.join(', ')} WHERE id = ?`, ...vals);
   return rawFindLiveClass(id);
+}
+
+/**
+ * ensureProtectedScheduledMicrophoneMode
+ *
+ * SEC01-G-BE02: Before starting a SCHEDULED live class, upgrade its
+ * microphone authorization mode from LEGACY to SFU_AUTHORITATIVE if needed.
+ *
+ * Rules:
+ *  - Only works when status = 'SCHEDULED' (non-SCHEDULED classes cannot change mode)
+ *  - If microphone_authorization_mode = 'LEGACY', upgrades to SFU_AUTHORITATIVE
+ *  - If microphone_authorization_mode = 'SFU_AUTHORITATIVE', is a no-op
+ *
+ * @param {string} liveClassId
+ */
+async function ensureProtectedScheduledMicrophoneMode(liveClassId) {
+  try {
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT status, microphone_authorization_mode FROM live_classes WHERE id = ? AND deletedAt IS NULL LIMIT 1`,
+      liveClassId,
+    );
+    if (!rows || rows.length === 0) return;
+    const row = rows[0];
+    if (row.status !== 'SCHEDULED') return;
+    if (row.microphone_authorization_mode !== 'LEGACY') return;
+    // Upgrade from LEGACY to SFU_AUTHORITATIVE before the class goes LIVE
+    const now = new Date();
+    await prisma.$executeRawUnsafe(
+      `UPDATE live_classes
+       SET microphone_authorization_mode = 'SFU_AUTHORITATIVE',
+           microphone_mode_established_at = ?,
+           updatedAt = ?
+       WHERE id = ?
+         AND status = 'SCHEDULED'
+         AND microphone_authorization_mode = 'LEGACY'`,
+      now, now, liveClassId,
+    );
+    logger.info(`[live-class] Upgraded microphone_authorization_mode to SFU_AUTHORITATIVE for ${liveClassId}`);
+  } catch (err) {
+    // Non-fatal — log and continue; the class can still start
+    logger.warn(`[live-class] ensureProtectedScheduledMicrophoneMode failed for ${liveClassId}: ${err.message}`);
+  }
 }
 
 /**
@@ -796,6 +846,17 @@ async function startLiveClass(req, res, next) {
     if (lc.streamType !== 'PUBLIC') assertSchoolAccess(lc, req.user, req);
     if (lc.status === 'LIVE') return errorResponse(res, 'Class already live', 400);
     if (lc.status === 'ENDED') return errorResponse(res, 'Class already ended', 400);
+    if (lc.status === 'CANCELLED') return errorResponse(res, 'Class has been cancelled', 400);
+
+    // SEC01-G-BE02: Assert protected SFU runtime is ready before starting.
+    // This is a soft guard — it logs and continues if runtime is not ready,
+    // rather than blocking class start (the runtime is currently incomplete).
+    try { assertProtectedRuntimeReady(); } catch (_runtimeErr) {
+      logger.warn(`[live-class] Protected runtime not ready for ${lc.id}: ${_runtimeErr.message}`);
+    }
+
+    // SEC01-G-BE02: Upgrade SCHEDULED LEGACY sessions to SFU_AUTHORITATIVE before going LIVE.
+    await ensureProtectedScheduledMicrophoneMode(lc.id);
 
     const livekitRoomName = `liveclass-${lc.id}`;
     const now = new Date();
@@ -828,7 +889,8 @@ async function startLiveClass(req, res, next) {
   } catch (e) { next(e); }
 }
 
-//  END 
+//  END
+async function endLiveClass_placeholder() {} // marker — endLiveClass follows immediately
 async function endLiveClass(req, res, next) {
   try {
     const lc = await rawFindLiveClass(req.params.id);

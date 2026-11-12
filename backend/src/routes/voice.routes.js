@@ -12,7 +12,7 @@ const multer = require('multer');
 const path   = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { saveFile } = require('../utils/storage');
-const { moderateLimiter, writeLimiter } = require('../middleware/rateLimiter.user');
+const { moderateLimiter, writeLimiter, createUserRateLimiter } = require('../middleware/rateLimiter.user');
 const { moderateDeviceLimiter } = require('../middleware/rateLimiter.device');
 const { middleware: idempotency } = require('../middleware/idempotency');
 const {
@@ -188,10 +188,18 @@ router.patch('/:id/end',
 );
 
 // ─── PARTICIPANT CONTROLS ─────────────────────────────────────────────────────
+// MUTE-FIX-001: Add rate limiter (30 req/60s) to prevent mute/unmute spam attacks.
+// MUTE-FIX-002: Add UUID format + length validation for targetUserId.
+const muteRateLimiter = createUserRateLimiter({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: 'Too many mute requests, please slow down'
+});
 router.patch('/:id/mute',
+  muteRateLimiter,
   [
     body('isMuted').optional().isBoolean(),
-    body('targetUserId').optional().isString()
+    body('targetUserId').optional().isString().isLength({ max: 191 }).isUUID()
   ],
   validate,
   toggleMute
@@ -340,6 +348,10 @@ router.get('/:id/hand-queue', getHandQueue);
 
 // ─── LIVEKIT TOKEN ────────────────────────────────────────────────────────────
 router.post('/:id/livekit-token', getLiveKitToken);
+
+// M1-B-7K-P8: Check if current user can unmute microphone (backend authorization)
+const { getMicStatus } = require('../controllers/voice.controller');
+router.get('/:id/mic-status', getMicStatus);
 
 // ─── GIFTS ────────────────────────────────────────────────────────────────────
 // Send a gift to a host/speaker in the room

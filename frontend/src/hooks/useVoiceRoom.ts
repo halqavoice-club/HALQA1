@@ -1315,6 +1315,26 @@ export function useVoiceRoom(roomId: string | null) {
     }
   }, [roomId, myParticipant?.userId, myParticipant?.isMuted]) // eslint-disable-line
 
+  // M1-B-7K-P8: Check if the current user is authorized to unmute their microphone.
+  // Backend checks: role !== AUDIENCE && !mutedByModerator && isActive
+  const checkMicAuthorization = useCallback(async (): Promise<boolean> => {
+    if (!roomId || !myParticipant) return false
+
+    // Optimistic local check first
+    if (myParticipant.role === 'AUDIENCE') return false
+    if (myParticipant.mutedByModerator) return false
+
+    // Authoritative backend check
+    try {
+      const res = await api.get(`/voice/${roomId}/mic-status`)
+      return res.data?.data?.canUnmute === true
+    } catch (err: any) {
+      // 404 = not a participant, 403 = muted, 500 = server error
+      console.warn('[useVoiceRoom] checkMicAuthorization failed:', err?.response?.status)
+      return false
+    }
+  }, [roomId, myParticipant?.userId, myParticipant?.role, myParticipant?.mutedByModerator]) // eslint-disable-line
+
   const raiseHand = useCallback(async () => {
     if (!roomId || !myParticipant) return
     try {
@@ -1518,15 +1538,13 @@ export function useVoiceRoom(roomId: string | null) {
     if (!roomId) return
     try {
       await api.patch(`/voice/${roomId}/unmute-all`)
-      // Optimistic update: unmute all SPEAKER and MODERATOR participants in the local store.
-      const myId = useAuthStore.getState().user?.id
-      const participants = useVoiceStore.getState().activeRoom?.participants ?? []
-      participants.forEach(p => {
-        if (p.userId !== myId && (p.role === VOICE_ROLES.SPEAKER || p.role === VOICE_ROLES.MODERATOR) && p.isMuted) {
-          useVoiceStore.getState().updateParticipant(p.userId, { isMuted: false, mutedByModerator: false })
-        }
-      })
-      toast({ title: '🎙️ All speakers unmuted' })
+      // PHASE F2-B FIX: Removed optimistic update that violated microphone consent.
+      // Backend emits voice:mute_changed only for participants actually unmuted (those
+      // who were isMuted:true AND mutedByModerator:false). Socket.IO handlers in this
+      // hook already update the Zustand store on voice:mute_changed events.
+      // The backend also emits voice:room_policy_changed with allMuted:false.
+      // No optimistic update needed — authoritative socket events provide truth.
+      toast({ title: '🎙️ Room unmute requested' })
     } catch {
       toast({ title: 'Failed to unmute all', variant: 'destructive' })
     }
@@ -1857,7 +1875,7 @@ export function useVoiceRoom(roomId: string | null) {
   return {
     myParticipant,
     // Self controls
-    toggleMute, raiseHand, sendMessage,
+    toggleMute, checkMicAuthorization, raiseHand, sendMessage,
     broadcastReaction, broadcastSpeaking,
     // Open Mic
     grabMic, dropMic, toggleOpenMic, toggleMicLock, toggleSeatLock,

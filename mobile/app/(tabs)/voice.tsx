@@ -386,6 +386,7 @@ export default function VoiceClubScreen() {
       {/* Active room banner — tap to return */}
       {activeRoomId && (
         <TouchableOpacity
+          testID="activeRoom"
           style={s.activeRoomBanner}
           onPress={() => router.push({ pathname: '/voice/[id]', params: { id: activeRoomId } } as any)}
           activeOpacity={0.85}
@@ -431,6 +432,7 @@ export default function VoiceClubScreen() {
             <View style={s.center}><ActivityIndicator size="large" color="#7c3aed" /></View>
           ) : (
             <FlatList
+              testID="roomsList"
               data={[
                 ...(liveRooms.length > 0 ? [{ type: 'header', label: `🔴 Live Now (${liveRooms.length})` } as any, ...liveRooms] : []),
                 ...(otherRooms.length > 0 ? [{ type: 'header', label: 'Rooms' } as any, ...otherRooms] : []),

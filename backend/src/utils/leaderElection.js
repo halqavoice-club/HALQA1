@@ -390,19 +390,6 @@ async function shutdown() {
 }
 
 /**
- * Handle process shutdown
- */
-process.on('SIGTERM', async () => {
-  await shutdown();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  await shutdown();
-  process.exit(0);
-});
-
-/**
  * Express middleware for leader-only routes
  */
 function leaderOnlyMiddleware() {

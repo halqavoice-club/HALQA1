@@ -213,7 +213,7 @@ export function VoiceShareSheet({ roomId, roomTitle, onClose }: Props) {
           <div style={{ padding: '12px 16px 0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
               <p style={{ margin: 0, fontSize: 16, fontWeight: 700, color: '#1e293b' }}>Share Room</p>
-              <p style={{ margin: 0, fontSize: 12, color: '#94a3b8', marginTop: 2 }} title={roomTitle}>
+              <p style={{ margin: 0, fontSize: 12, color: '#64748b', marginTop: 2 }} title={roomTitle}>
                 🎙️ {roomTitle.length > 35 ? roomTitle.slice(0, 35) + '…' : roomTitle}
               </p>
             </div>
@@ -266,7 +266,7 @@ export function VoiceShareSheet({ roomId, roomTitle, onClose }: Props) {
                   />
                 </div>
                 {filteredDM.length === 0 ? (
-                  <p style={{ textAlign: 'center', color: '#94a3b8', fontSize: 13, padding: 24 }}>No conversations found</p>
+                  <p style={{ textAlign: 'center', color: '#64748b', fontSize: 13, padding: 24 }}>No conversations found</p>
                 ) : filteredDM.map((conv: any) => (
                   <div key={conv.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px' }}>
                     <div style={{ width: 42, height: 42, borderRadius: 21, overflow: 'hidden', background: '#e0e7ff', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 700, color: '#6366f1' }}>
@@ -304,7 +304,7 @@ export function VoiceShareSheet({ roomId, roomTitle, onClose }: Props) {
                   />
                 </div>
                 {filteredGroup.length === 0 ? (
-                  <p style={{ textAlign: 'center', color: '#94a3b8', fontSize: 13, padding: 24 }}>No groups found</p>
+                  <p style={{ textAlign: 'center', color: '#64748b', fontSize: 13, padding: 24 }}>No groups found</p>
                 ) : filteredGroup.map((conv: any) => (
                   <div key={conv.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px' }}>
                     <div style={{ width: 42, height: 42, borderRadius: 21, overflow: 'hidden', background: '#e0e7ff', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 700, color: '#6366f1' }}>
@@ -314,7 +314,7 @@ export function VoiceShareSheet({ roomId, roomTitle, onClose }: Props) {
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: '#1e293b' }}>{conv.name}</p>
-                      <p style={{ margin: 0, fontSize: 11, color: '#94a3b8' }}>{conv.memberCount ?? ''} members</p>
+                      <p style={{ margin: 0, fontSize: 11, color: '#64748b' }}>{conv.memberCount ?? ''} members</p>
                     </div>
                     <button
                       onClick={() => handleSendGroup(conv)}
@@ -332,7 +332,7 @@ export function VoiceShareSheet({ roomId, roomTitle, onClose }: Props) {
             {tab === 'feed' && (
               <div style={{ padding: '12px 16px' }}>
                 <p style={{ margin: '0 0 4px', fontSize: 12, color: '#64748b' }}>Add a note (optional)</p>
-                <p style={{ margin: '0 0 8px', fontSize: 11, color: '#94a3b8' }}>
+                <p style={{ margin: '0 0 8px', fontSize: 11, color: '#64748b' }}>
                   A Voice Club card will appear in your feed — recipients can tap "Join" directly.
                 </p>
                 <textarea
@@ -356,7 +356,7 @@ export function VoiceShareSheet({ roomId, roomTitle, onClose }: Props) {
             {/* Community */}
             {tab === 'community' && (
               filteredCommunities.length === 0 ? (
-                <p style={{ textAlign: 'center', color: '#94a3b8', fontSize: 13, padding: 24 }}>
+                <p style={{ textAlign: 'center', color: '#64748b', fontSize: 13, padding: 24 }}>
                   {myCommunities.length === 0 ? 'You are not a member of any communities' : 'No communities found'}
                 </p>
               ) : (
@@ -381,7 +381,7 @@ export function VoiceShareSheet({ roomId, roomTitle, onClose }: Props) {
                       </div>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: '#1e293b' }}>{community.name}</p>
-                        <p style={{ margin: 0, fontSize: 11, color: '#94a3b8' }}>
+                        <p style={{ margin: 0, fontSize: 11, color: '#64748b' }}>
                           {community.privacy} · {community._count?.members ?? community.memberCount ?? ''} members
                         </p>
                       </div>
@@ -410,7 +410,7 @@ export function VoiceShareSheet({ roomId, roomTitle, onClose }: Props) {
                 >
                   📋 Copy Link
                 </button>
-                <p style={{ textAlign: 'center', color: '#94a3b8', fontSize: 11, marginTop: 8 }}>
+                <p style={{ textAlign: 'center', color: '#64748b', fontSize: 11, marginTop: 8 }}>
                   Anyone with this link can join the room
                 </p>
               </div>

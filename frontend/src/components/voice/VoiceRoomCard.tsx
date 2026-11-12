@@ -52,7 +52,7 @@ export function VoiceRoomCard({ room, onJoin, isJoining, currentUserId }: Props)
           )}
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <h3 className="font-semibold text-gray-900 text-sm leading-tight line-clamp-1">{room.title}</h3>
+              <h2 className="font-semibold text-gray-900 text-sm leading-tight line-clamp-1">{room.title}</h2>
               {room.status === 'LIVE' && (
                 <span className="flex-shrink-0 flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-600 border border-red-200">
                   <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />

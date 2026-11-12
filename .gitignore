@@ -96,6 +96,7 @@ coverage/
 # Test artifacts
 *.test.result
 login_test.json
+**/test-results.txt
 
 # Python bytecode (from root utility scripts)
 __pycache__/
@@ -200,6 +201,10 @@ frontend/e2e/.auth/
 
 # Agent audit reports and task artifacts (generated, not source code)
 .agents/tasks/
+
+# Experimental MySQL baselines (not part of production schema — Prisma migrations are authoritative)
+backend/mysql-integration/baseline/
+backend/mysql-integration/baseline-candidates/
 
 # Worktrees directory (local git worktrees, never committed)
 .worktrees/

@@ -28,6 +28,8 @@ const fs   = require('fs');
 const path = require('path');
 
 const APP_JS = path.join(__dirname, '../app.js');
+const QUIZ_SERVICE_JS = path.join(__dirname, '../services/quiz.service.js');
+const QUIZ_CONTROLLER_JS = path.join(__dirname, '../controllers/quiz.controller.js');
 
 // ─── Source helpers ────────────────────────────────────────────────────────────
 
@@ -47,6 +49,23 @@ function getQuizWatchHandlerSource() {
  */
 function idx(handler, literal) {
   return handler.indexOf(literal);
+}
+
+function compileQuizWatchHandler({ socket, userId, prisma, logger }) {
+  const src = fs.readFileSync(APP_JS, 'utf8');
+  const match = src.match(
+    /socket\.on\('quiz:watch',\s*(async\s*\(\{ quizId \}\s*=\s*\{\}\)\s*=>\s*\{[\s\S]*?)\n\s*\}\);\s*\n\s*socket\.on\('quiz:unwatch'/
+  );
+  if (!match) throw new Error('quiz:watch handler could not be compiled');
+
+  // Execute only the extracted handler with service-free mocks. app.js itself
+  // is never imported, so application startup and external services stay off.
+  return Function('socket', 'userId', 'prisma', 'logger', `return (${match[1]}\n});`)(
+    socket,
+    userId,
+    prisma,
+    logger
+  );
 }
 
 // ─── Test suite ────────────────────────────────────────────────────────────────
@@ -298,4 +317,77 @@ describe('AUDIT-007-AUTHZ: quiz:watch socket handler authorization', () => {
     );
   });
 
+});
+
+describe('Phase 3B-2 Stage 2 Prisma singleton consolidation', () => {
+  test('quiz production modules use the shared singleton without direct construction', () => {
+    const service = fs.readFileSync(QUIZ_SERVICE_JS, 'utf8');
+    const controller = fs.readFileSync(QUIZ_CONTROLLER_JS, 'utf8');
+    const handler = getQuizWatchHandlerSource();
+
+    expect(service).toContain("const prisma = require('../utils/prisma');");
+    expect(controller).toContain("const prisma = require('../utils/prisma');");
+    for (const source of [service, controller, handler]) {
+      expect(source).not.toMatch(/new\s+PrismaClient\s*\(/);
+      expect(source).not.toMatch(/require\(['"]@prisma\/client['"]\)/);
+    }
+    expect(handler).not.toMatch(/\.\$disconnect\s*\(/);
+  });
+
+  test('quiz:watch reuses the shared client and preserves snapshot behavior', async () => {
+    const submittedAt = new Date('2026-10-24T00:00:00.000Z');
+    const prisma = {
+      quiz: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'quiz-1',
+          teacher: { userId: 'teacher-1' },
+          status: 'PUBLISHED',
+          classId: 'class-1',
+          schoolId: 'school-1',
+        }),
+      },
+      quizAttempt: {
+        count: jest.fn().mockResolvedValue(1),
+        findMany: jest.fn().mockResolvedValue([{
+          id: 'attempt-1',
+          studentId: 'student-1',
+          score: 80,
+          submittedAt,
+          student: { user: { firstName: 'A', lastName: 'Student' } },
+        }]),
+      },
+      enrollment: { count: jest.fn().mockResolvedValue(3) },
+    };
+    const socket = {
+      userRole: 'TEACHER',
+      userSchoolId: 'school-1',
+      join: jest.fn(),
+      emit: jest.fn(),
+    };
+    const handler = compileQuizWatchHandler({
+      socket,
+      userId: 'teacher-1',
+      prisma,
+      logger: { warn: jest.fn() },
+    });
+
+    await handler({ quizId: 'quiz-1' });
+
+    expect(prisma.quiz.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'quiz-1', deletedAt: null },
+    }));
+    expect(socket.join).toHaveBeenCalledWith('quiz:quiz-1');
+    expect(socket.emit).toHaveBeenCalledWith('quiz:snapshot', {
+      quizId: 'quiz-1',
+      submitted: [{
+        attemptId: 'attempt-1',
+        studentId: 'student-1',
+        firstName: 'A',
+        lastName: 'Student',
+        score: 80,
+        submittedAt,
+      }],
+      total: 3,
+    });
+  });
 });

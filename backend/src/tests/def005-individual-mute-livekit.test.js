@@ -179,10 +179,14 @@ describe('DEF-005 — toggleMute() SFU enforcement (MOCKED)', () => {
     const emitFn = jest.fn();
     const toFn   = jest.fn().mockReturnValue({ emit: emitFn });
     getIo.mockReturnValue({ to: toFn, emit: emitFn });
-    // Restore default sfuRevokePublish to resolve successfully
-    sfuRevokePublish.mockResolvedValue(undefined);
+    // Restore default sfuRevokePublish to resolve with an object (not undefined).
+    // F5E FIX: voice.controller.js reads sfuResult.enforced — undefined would throw.
+    sfuRevokePublish.mockResolvedValue({ enforced: true, reason: 'TEST_MOCK' });
     // Restore default update to resolve
     prisma.voiceParticipant.update.mockResolvedValue({});
+    // F5E FIX: updateMany must return { count: 1 } so the write-result check passes.
+    // After jest.clearAllMocks(), the inline mock becomes a bare jest.fn() returning undefined.
+    prisma.voiceParticipant.updateMany.mockResolvedValue({ count: 1 });
   });
 
   // ── Test 1 ──────────────────────────────────────────────────────────────────
@@ -190,6 +194,8 @@ describe('DEF-005 — toggleMute() SFU enforcement (MOCKED)', () => {
     'authorized moderator mute calls sfuRevokePublish(roomId, targetId, false, "[voice:mod-mute]") NOT callerId',
     async () => {
       // Caller is MODERATOR, subject is a SPEAKER
+      // F5E FIX: add 3rd findUnique mock for post-write `updated` re-read.
+      // Also mock voiceRoom.findUnique for the room permission check in the moderator path.
       prisma.voiceParticipant.findUnique
         .mockResolvedValueOnce({
           userId: 'caller-id', isActive: true, role: 'MODERATOR',
@@ -198,7 +204,14 @@ describe('DEF-005 — toggleMute() SFU enforcement (MOCKED)', () => {
         .mockResolvedValueOnce({
           userId: 'target-id', isActive: true, role: 'SPEAKER',
           isMuted: false, mutedByModerator: false,
+        })
+        .mockResolvedValueOnce({
+          // post-write re-read: target is now muted by moderator
+          role: 'SPEAKER', isActive: true, isMuted: true, mutedByModerator: true, seatNumber: null,
         });
+      prisma.voiceRoom.findUnique.mockResolvedValue({
+        micLocked: false, allMuted: false,
+      });
 
       const req = makeReq({
         params: { id: 'room-1' },
@@ -282,6 +295,8 @@ describe('DEF-005 — toggleMute() SFU enforcement (MOCKED)', () => {
   test(
     'authorized unmute calls sfuRevokePublish with canPublish=true and does not clear other participants mutedByModerator',
     async () => {
+      // F5E FIX: add 3rd findUnique mock for post-write `updated` re-read.
+      // Also mock voiceRoom.findUnique for the room permission check in the moderator path.
       prisma.voiceParticipant.findUnique
         .mockResolvedValueOnce({
           userId: 'host-id', isActive: true, role: 'HOST',
@@ -290,7 +305,15 @@ describe('DEF-005 — toggleMute() SFU enforcement (MOCKED)', () => {
         .mockResolvedValueOnce({
           userId: 'target-id', isActive: true, role: 'SPEAKER',
           isMuted: true, mutedByModerator: true,
+        })
+        .mockResolvedValueOnce({
+          // post-write re-read: moderator lock cleared, isMuted cleared too,
+          // participant is on stage — canPublishAudio=true for sfuRevokePublish
+          role: 'SPEAKER', isActive: true, isMuted: false, mutedByModerator: false, seatNumber: 2,
         });
+      prisma.voiceRoom.findUnique.mockResolvedValue({
+        micLocked: false, allMuted: false,
+      });
 
       const req = makeReq({
         params: { id: 'room-1' },
@@ -306,15 +329,17 @@ describe('DEF-005 — toggleMute() SFU enforcement (MOCKED)', () => {
         'room-1', 'target-id', true, '[voice:mod-unmute]'
       );
 
-      // DB update must target only the subject, clearing mutedByModerator
-      expect(prisma.voiceParticipant.update).toHaveBeenCalledWith(
+      // DB update must target only the subject, clearing mutedByModerator.
+      // F5E FIX: current toggleMute uses updateMany (not update) for moderator unmute,
+      // clearing only mutedByModerator — the target must self-unmute to change isMuted.
+      expect(prisma.voiceParticipant.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { roomId_userId: { roomId: 'room-1', userId: 'target-id' } },
-          data:  expect.objectContaining({ isMuted: false, mutedByModerator: false }),
+          where: expect.objectContaining({ roomId: 'room-1', userId: 'target-id' }),
+          data:  expect.objectContaining({ mutedByModerator: false }),
         })
       );
-      // Confirm only ONE update call — not touching other participants
-      expect(prisma.voiceParticipant.update).toHaveBeenCalledTimes(1);
+      // Confirm only ONE updateMany call — not touching other participants
+      expect(prisma.voiceParticipant.updateMany).toHaveBeenCalledTimes(1);
 
       expect(res.body.data.sfuEnforced).toBe(true);
     }
@@ -325,6 +350,8 @@ describe('DEF-005 — toggleMute() SFU enforcement (MOCKED)', () => {
   test(
     'SFU failure returns sfuEnforced=false but HTTP 200 — DB and socket still fire (MOCKED — does not prove audio track stopped)',
     async () => {
+      // F5E FIX: add 3rd findUnique mock for post-write `updated` re-read.
+      // Also mock voiceRoom.findUnique for the room permission check in the moderator path.
       prisma.voiceParticipant.findUnique
         .mockResolvedValueOnce({
           userId: 'host-id', isActive: true, role: 'HOST',
@@ -333,9 +360,16 @@ describe('DEF-005 — toggleMute() SFU enforcement (MOCKED)', () => {
         .mockResolvedValueOnce({
           userId: 'target-id', isActive: true, role: 'SPEAKER',
           isMuted: false, mutedByModerator: false,
+        })
+        .mockResolvedValueOnce({
+          // post-write re-read: target is now muted by moderator
+          role: 'SPEAKER', isActive: true, isMuted: true, mutedByModerator: true, seatNumber: null,
         });
+      prisma.voiceRoom.findUnique.mockResolvedValue({
+        micLocked: false, allMuted: false,
+      });
 
-      // Simulate sfuRevokePublish throwing (unexpected error outside its own try/catch)
+      // Simulate sfuRevokePublish throwing — controller now catches this and returns sfuEnforced=false
       sfuRevokePublish.mockRejectedValue(new Error('SFU timeout'));
 
       // Override the io mock for this test so we can spy on emit directly.
@@ -357,8 +391,8 @@ describe('DEF-005 — toggleMute() SFU enforcement (MOCKED)', () => {
       // sfuEnforced flag tells the caller that SFU enforcement did NOT succeed
       expect(res.body.data.sfuEnforced).toBe(false);
 
-      // DB update was still persisted
-      expect(prisma.voiceParticipant.update).toHaveBeenCalledTimes(1);
+      // DB update was still persisted (moderator mute uses updateMany)
+      expect(prisma.voiceParticipant.updateMany).toHaveBeenCalledTimes(1);
 
       // Socket event was still emitted
       expect(emitSpy).toHaveBeenCalledWith(
@@ -381,10 +415,16 @@ describe('DEF-005 — toggleMute() SFU enforcement (MOCKED)', () => {
     'self-mute does NOT call sfuRevokePublish',
     async () => {
       // Self-mute: no targetUserId — subjectId === callerId
+      // F5E FIX: add 2nd findUnique mock for post-write `updated` re-read.
+      // Self-mute path: 1st call = participant fetch, then updateMany, then findUnique for `updated`.
       prisma.voiceParticipant.findUnique
         .mockResolvedValueOnce({
           userId: 'speaker-id', isActive: true, role: 'SPEAKER',
           isMuted: false, mutedByModerator: false,
+        })
+        .mockResolvedValueOnce({
+          // post-write re-read: speaker is now self-muted
+          role: 'SPEAKER', isActive: true, isMuted: true, mutedByModerator: false, seatNumber: null,
         });
 
       const req = makeReq({

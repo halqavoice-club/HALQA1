@@ -6,15 +6,15 @@
   "scripts": {
     "start": "node --max-old-space-size=512 --expose-gc src/app.js",
     "dev": "npx nodemon --config nodemon.json src/app.js",
-    "test": "jest --runInBand --forceExit",
-    "test:unit": "jest --runInBand --forceExit --testPathIgnorePatterns=integration --testPathIgnorePatterns=real-db --testPathIgnorePatterns=phase-c --testPathIgnorePatterns=google-auth --testPathIgnorePatterns=bug-003",
-    "test:group:social": "jest --runInBand --forceExit --testPathIgnorePatterns=integration --testPathIgnorePatterns=real-db --testPathIgnorePatterns=phase-c --testPathIgnorePatterns=google-auth --testPathIgnorePatterns=bug-003 --testPathPattern=\"social|post|feed|comment|reaction|follow|friend|explore|story|report|community.socket|phase3|phase4|phase5|phase6|phase7|task2|task6|bug.005|sprint11\" --no-coverage",
-    "test:group:voice": "jest --runInBand --forceExit --testPathIgnorePatterns=integration --testPathIgnorePatterns=real-db --testPathIgnorePatterns=phase-c --testPathIgnorePatterns=google-auth --testPathIgnorePatterns=bug-003 --testPathPattern=\"voice|ph19|ph24c|pk|vc.sync|sprint12|sprint17|sprint18|sprint19\" --no-coverage",
-    "test:group:live-class": "jest --runInBand --forceExit --testPathIgnorePatterns=integration --testPathIgnorePatterns=real-db --testPathIgnorePatterns=phase-c --testPathIgnorePatterns=google-auth --testPathIgnorePatterns=bug-003 --testPathPattern=\"live.class|livekit|maxspeaker|public.stream|ph24a|sprint14|sprint16\" --no-coverage",
-    "test:group:auth": "jest --runInBand --forceExit --testPathIgnorePatterns=integration --testPathIgnorePatterns=real-db --testPathIgnorePatterns=phase-c --testPathIgnorePatterns=google-auth --testPathIgnorePatterns=bug-003 --testPathPattern=\"super.admin|architecture|p0.security|p1.security|p2.security|p3.security|erp.remediation|school.auth|school.membership|platform.admin|phase24j|idempotency|health|rateLimiter|session|privilege|ui.separation|auth\\.test|sprint7|sprint8|sprint9|sprint10|graphql|validation|encryption|internal.provisioning|phase2|phase4b|payout|wallet|gift|economy|creator|stripe\" --no-coverage",
-    "test:group:realtime": "jest --runInBand --forceExit --testPathIgnorePatterns=integration --testPathIgnorePatterns=real-db --testPathIgnorePatterns=phase-c --testPathIgnorePatterns=google-auth --testPathIgnorePatterns=bug-003 --testPathPattern=\"socket.auth.vuln|alerting|cache|circuitBreaker|tracing|db.hardening|production.hardening|apiVersion|errors\" --no-coverage",
-    "test:integration": "jest --runInBand --forceExit --testPathIgnorePatterns=node_modules --testPathPattern=integration",
-    "test:coverage": "jest --runInBand --forceExit --coverage --testPathIgnorePatterns='integration'",
+    "test": "node test-safety/run-jest.js",
+    "test:unit": "node test-safety/run-jest.js",
+    "test:group:social": "node test-safety/run-jest.js --group=social",
+    "test:group:voice": "node test-safety/run-jest.js --group=voice",
+    "test:group:live-class": "node test-safety/run-jest.js --group=live-class",
+    "test:group:auth": "node test-safety/run-jest.js --group=auth",
+    "test:group:realtime": "node test-safety/run-jest.js --group=realtime",
+    "test:integration": "node test-safety/disabled-integration.js",
+    "test:coverage": "node test-safety/run-jest.js --coverage",
     "check": "node src/prisma/check-setup.js",
     "setup": "npx prisma generate && npx prisma migrate dev --name init && node src/prisma/seed.js",
     "secrets": "node src/prisma/generate-secrets.js",
@@ -27,9 +27,9 @@
     "seed:gifts": "node src/prisma/seed-gifts.js",
     "fix-voice-db": "node src/prisma/fix-voice-db.js",
     "check-columns": "node src/prisma/check-columns.js",
-    "test-runtime": "node src/prisma/runtime-test.js",
+    "test-runtime": "node -e \"console.error('Disabled in Phase 3B-1: this command connects to a database.'); process.exit(1)\"",
     "backup": "node src/prisma/backup.js",
-    "test:r2": "node test-r2.js",
+    "test:r2": "node -e \"console.error('Disabled in Phase 3B-1: this command mutates external R2 storage.'); process.exit(1)\"",
     "migrate:r2": "node src/prisma/migrate-to-r2.js",
     "migrate:r2:dry": "node src/prisma/migrate-to-r2.js --dry-run"
   },
@@ -88,28 +88,5 @@
     "nodemon": "^3.0.3",
     "socket.io-client": "^4.8.3",
     "supertest": "7.0.0"
-  },
-  "jest": {
-    "testEnvironment": "node",
-    "testMatch": [
-      "**/src/tests/**/*.test.js"
-    ],
-    "testPathIgnorePatterns": [
-      "/node_modules/",
-      "/src/tests/integration/"
-    ],
-    "testTimeout": 30000,
-    "clearMocks": true,
-    "restoreMocks": false,
-    "setupFiles": [
-      "./jest.setup.js"
-    ],
-    "moduleNameMapper": {
-      "@opentelemetry/instrumentation-prisma": "<rootDir>/src/tests/__mocks__/otel-prisma.js",
-      "@opentelemetry/instrumentation-redis": "<rootDir>/src/tests/__mocks__/otel-redis.js"
-    },
-    "transformIgnorePatterns": [
-      "node_modules/(?!(livekit-server-sdk|@livekit)/)"
-    ]
   }
 }

@@ -346,11 +346,14 @@ export default function VoiceClubPage() {
           <motion.div
             initial={{ opacity: 0, scale: 0.92 }}
             animate={{ opacity: 1, scale: 1 }}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="conflict-dialog-title"
             className="w-full max-w-sm bg-white rounded-3xl shadow-2xl overflow-hidden"
           >
-            <div className="bg-gradient-to-br from-orange-400 to-pink-500 p-6 text-white text-center">
+            <div className="bg-gradient-to-br from-orange-600 to-pink-600 p-6 text-white text-center">
               <span className="text-4xl">{conflictRoom.emoji}</span>
-              <h2 className="text-lg font-black mt-2">You&apos;re already in a room</h2>
+              <h2 id="conflict-dialog-title" className="text-lg font-black mt-2">You&apos;re already in a room</h2>
               <p className="text-white/90 text-sm mt-1 font-semibold">
                 &ldquo;{conflictRoom.title}&rdquo;
               </p>
@@ -394,11 +397,12 @@ export default function VoiceClubPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Link href="/voice-club/stats">
-            <button className="flex items-center gap-1.5 px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-xl text-sm font-medium transition-colors">
-              <BarChart2 className="w-4 h-4" />
-              <span className="hidden sm:inline">Stats</span>
-            </button>
+          <Link
+            href="/voice-club/stats"
+            className="flex items-center gap-1.5 px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-xl text-sm font-medium transition-colors"
+          >
+            <BarChart2 className="w-4 h-4" />
+            <span className="hidden sm:inline">Stats</span>
           </Link>
           {/* SA-VOICE-UI-01: SUPER_ADMIN cannot create voice rooms — platform admin only */}
           {!isSuperAdmin && (
@@ -623,6 +627,7 @@ export default function VoiceClubPage() {
                             onClick={() => setEditRoom(room)}
                             className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition-colors"
                             title="Edit room"
+                            aria-label={`Edit room "${room.title}"`}
                           >
                             <Settings className="w-4 h-4" />
                           </button>
@@ -634,6 +639,7 @@ export default function VoiceClubPage() {
                           disabled={isDeleting}
                           className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
                           title="Archive room (permanent)"
+                          aria-label={`Archive room "${room.title}"`}
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>

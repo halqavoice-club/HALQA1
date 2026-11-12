@@ -32,21 +32,40 @@ SET @sql2 = IF(@fk2 IS NOT NULL,
 );
 PREPARE stmt2 FROM @sql2; EXECUTE stmt2; DEALLOCATE PREPARE stmt2;
 
--- 3. Add room_type column to both tables (idempotent)
-ALTER TABLE `gift_transactions`
-  ADD COLUMN IF NOT EXISTS `room_type` VARCHAR(30) NOT NULL DEFAULT 'voice';
+-- 3. Add room_type column to both tables (idempotent guard)
+SET @col_rt1 = (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='gift_transactions'    AND COLUMN_NAME='room_type');
+SET @col_rt2 = (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='room_gift_leaderboard' AND COLUMN_NAME='room_type');
+SET @add_rt1 = IF(@col_rt1=0, 'ALTER TABLE `gift_transactions`    ADD COLUMN `room_type` VARCHAR(30) NOT NULL DEFAULT ''voice''', 'SELECT 1');
+SET @add_rt2 = IF(@col_rt2=0, 'ALTER TABLE `room_gift_leaderboard` ADD COLUMN `room_type` VARCHAR(30) NOT NULL DEFAULT ''voice''', 'SELECT 1');
+PREPARE stmt_rt1 FROM @add_rt1; EXECUTE stmt_rt1; DEALLOCATE PREPARE stmt_rt1;
+PREPARE stmt_rt2 FROM @add_rt2; EXECUTE stmt_rt2; DEALLOCATE PREPARE stmt_rt2;
 
-ALTER TABLE `room_gift_leaderboard`
-  ADD COLUMN IF NOT EXISTS `room_type` VARCHAR(30) NOT NULL DEFAULT 'voice';
+-- 4. Add indexes for room_type (idempotent guard)
+SET @idx1 = (SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='gift_transactions'    AND INDEX_NAME='gift_transactions_room_type_idx');
+SET @idx2 = (SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='room_gift_leaderboard' AND INDEX_NAME='room_gift_leaderboard_room_type_idx');
+SET @add_idx1 = IF(@idx1=0, 'CREATE INDEX `gift_transactions_room_type_idx`    ON `gift_transactions`    (`room_type`)', 'SELECT 1');
+SET @add_idx2 = IF(@idx2=0, 'CREATE INDEX `room_gift_leaderboard_room_type_idx` ON `room_gift_leaderboard` (`room_type`)', 'SELECT 1');
+PREPARE stmt_idx1 FROM @add_idx1; EXECUTE stmt_idx1; DEALLOCATE PREPARE stmt_idx1;
+PREPARE stmt_idx2 FROM @add_idx2; EXECUTE stmt_idx2; DEALLOCATE PREPARE stmt_idx2;
 
--- 4. Add indexes for room_type
-CREATE INDEX IF NOT EXISTS `gift_transactions_room_type_idx` ON `gift_transactions` (`room_type`);
-CREATE INDEX IF NOT EXISTS `room_gift_leaderboard_room_type_idx` ON `room_gift_leaderboard` (`room_type`);
-
--- 5. Add missing columns to gifts table if needed (idempotent)
-ALTER TABLE `gifts`
-  ADD COLUMN IF NOT EXISTS `priority`  VARCHAR(30) NOT NULL DEFAULT 'normal',
-  ADD COLUMN IF NOT EXISTS `isPremium` BOOLEAN     NOT NULL DEFAULT false;
+-- 5. Add missing columns to gifts table if needed (idempotent guard:
+--    20260503_add_premium_gifts already added these on some databases)
+SET @col_priority = (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME   = 'gifts'
+    AND COLUMN_NAME  = 'priority'
+);
+SET @col_isPremium = (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME   = 'gifts'
+    AND COLUMN_NAME  = 'isPremium'
+);
+SET @add_priority  = IF(@col_priority  = 0, 'ALTER TABLE `gifts` ADD COLUMN `priority`  VARCHAR(30) NOT NULL DEFAULT ''normal''', 'SELECT 1');
+SET @add_isPremium = IF(@col_isPremium = 0, 'ALTER TABLE `gifts` ADD COLUMN `isPremium` BOOLEAN     NOT NULL DEFAULT false',       'SELECT 1');
+PREPARE stmt_p FROM @add_priority;  EXECUTE stmt_p;  DEALLOCATE PREPARE stmt_p;
+PREPARE stmt_i FROM @add_isPremium; EXECUTE stmt_i;  DEALLOCATE PREPARE stmt_i;
 
 -- 6. Seed educational gift collection (camelCase column names to match existing schema)
 INSERT IGNORE INTO `gifts` (`id`, `name`, `emoji`, `imageUrl`, `animationType`, `soundEffect`, `priceCoins`, `rarity`, `comboEnabled`, `priority`, `isPremium`, `isActive`, `sortOrder`, `createdAt`, `updatedAt`) VALUES

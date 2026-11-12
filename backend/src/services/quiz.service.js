@@ -12,10 +12,8 @@
  * Pattern reference: backend/src/controllers/live-class.controller.js
  * (scheduleAutoEnd / cancelAutoEnd for the same setTimeout+Map approach)
  */
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../utils/prisma');
 const logger = require('../utils/logger');
-
-const prisma = new PrismaClient();
 
 // ─── Auto-close timer registry ────────────────────────────────────────────────
 // Maps quizId → NodeJS.Timeout so we can cancel when quiz is manually closed

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * HALQA Mobile — Voice Room Screen
  * Live audio room: participants, mic, hand raise, gifts, leaderboard, leave
  */
@@ -26,6 +26,7 @@ import { useNetworkQuality, qualityToPollInterval } from '@/hooks/useNetworkQual
 import MicPassModal, { type MicPassUser } from '@/components/voice/MicPassModal';
 import { MemberManagementPanel } from '@/components/voice/MemberManagementPanel';
 import { useVoiceStore } from '@/store/voice.store';
+import { useLowDataMode, useLowData } from '@/store/lowDataMode.store';
 import { GiftLeaderboard, type LeaderEntry } from '@/components/voice/GiftLeaderboard';
 import { RoomSettingsSheet } from '@/components/voice/RoomSettingsSheet';
 import { LiveVideoGrid, type VideoSpeaker } from '@/components/live-class/LiveVideoGrid';
@@ -909,15 +910,24 @@ function LeaderboardPanel({ visible, roomId, onClose }: {
   );
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function getInitials(name: string): string {
+  const parts = name.trim().split(/\s+/);
+  return ((parts[0]?.[0] ?? '') + (parts[1]?.[0] ?? '')).toUpperCase() || '?';
+}
+
 // ─── Participant Tile ─────────────────────────────────────────────────────────
-function ParticipantTile({ participant, queuePosition }: { participant: Participant; queuePosition?: number }) {
+function ParticipantTile({ participant, queuePosition, isLowData = false }: { participant: Participant; queuePosition?: number; isLowData?: boolean }) {
   const roleColor = participant.role === 'HOST' ? '#f59e0b'
     : participant.role === 'MODERATOR' ? '#10b981'
     : participant.role === 'SPEAKER'   ? '#6366f1' : '#6b7280';
   return (
     <View style={[styles.tile, participant.isSpeaking && styles.tileSpeaking]}>
       <View style={styles.tileAvatarWrap}>
-        <Image source={{ uri: avatarUrl(participant.avatar, participant.name) }} style={styles.tileAvatar} />
+        {isLowData
+          ? <View style={[styles.tileAvatar, styles.avatarPlaceholder]}><Text style={styles.avatarInitials}>{getInitials(participant.name)}</Text></View>
+          : <Image source={{ uri: avatarUrl(participant.avatar, participant.name) }} style={styles.tileAvatar} />
+        }
         {participant.isSpeaking && <View style={styles.speakingRing} />}
         {participant.handRaised && <View style={styles.handBadge}><Text style={{ fontSize: 12 }}>✋</Text></View>}
         {/* Queue position badge for audience waiting */}
@@ -1061,7 +1071,10 @@ export default function VoiceRoomScreen() {
   const [isJoined,       setIsJoined]       = useState(false);
   const [showHostControls, setShowHostControls] = useState(false);
   // Phase 1+12: adaptive poll interval based on network quality
-  const { quality: netQuality } = useNetworkQuality();
+  const { quality: netQuality, lowDataMode: netLowDataMode } = useNetworkQuality();
+  // LowDataMode store — auto-enable from network quality, user preference persisted
+  const { setAutoEnabled } = useLowDataMode();
+  const isLowData = useLowData();
   // LiveKit real audio (native builds only — degrades gracefully in Expo Go)
   const lk = useLiveKitAudio();
   const [isConnecting,   setIsConnecting]   = useState(false);
@@ -1083,6 +1096,11 @@ export default function VoiceRoomScreen() {
   // F-006b: guards voice:leave_room cleanup so it only fires on intentional leave or room change
   const intentionalLeaveRef = useRef(false)
   const prevRoomIdRef = useRef<string | null>(null)
+  // R-003 FIX: AppState ref used to gate the 30s authoritative poll — prevents
+  // background data/battery drain on rural metered connections. Declared here
+  // (before the poll effect at ~line 1284) so it is in scope for the poll guard.
+  // Also referenced by the AppState change handler further below.
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState)
   // G2 FIX: emitJoinRoomAck wraps socket.emit('voice:join_room') with an ack
   // callback so the client can detect refused/rate-limited joins and retry
   // instead of silently going deaf to all room events.
@@ -1283,6 +1301,7 @@ export default function VoiceRoomScreen() {
     if (!id) return;
     const interval = setInterval(() => {
       if (!hasJoinedRef.current) return; // only poll once HTTP join has completed
+      if (appStateRef.current !== 'active') return; // R-003 FIX: skip poll when app is backgrounded
       api.get(`/voice/${id}/stage-state`)
         .then((r: any) => {
           const data = r.data?.data;
@@ -1367,7 +1386,7 @@ export default function VoiceRoomScreen() {
     // ── Real-time events ─────────────────────────────────────────────────────
 
     // Mute state changed for a participant (also carries seatNumber when dropping mic)
-    const onMuteChanged = (d: { roomId?: string; userId: string; isMuted: boolean; mutedByModerator?: boolean; seatNumber?: number | null }) => {
+    const onMuteChanged = (d: { roomId?: string; userId: string; isMuted: boolean; mutedByModerator?: boolean; seatNumber?: number | null; role?: string }) => {
       // GAP-M3 FIX: guard against events from other rooms
       if (d.roomId && d.roomId !== id) return;
       setParticipants(prev => {
@@ -1379,22 +1398,19 @@ export default function VoiceRoomScreen() {
           return u;
         });
         // GAP-M1 FIX: upsert if not in prev — prev.map() silently no-ops for unknown ids.
-        // Only upsert on MODERATOR approval path: isMuted===false + seatNumber set.
+        // Queue approval identifies MODERATOR explicitly, including when seated muted.
         const wasFound = prev.some(p => p.id === d.userId);
-        if (!wasFound && d.seatNumber != null && d.isMuted === false) {
+        if (!wasFound && d.seatNumber != null && (d.role === 'MODERATOR' || d.isMuted === false)) {
           updated.push({
             id:               d.userId,
             name:             'Loading...',  // applyStageSnapshot will fill real name
             avatar:           undefined,
-            // NOTE: The only backend code path that emits voice:mute_changed with
-            // seatNumber != null AND isMuted === false is _promoteUser for a MODERATOR.
-            // If a future path breaks this invariant, this upsert will insert the wrong role.
-            // Consider adding role to the mute_changed payload to make this explicit.
+            // Preserve the existing legacy false-mute fallback for older servers.
             role:             'MODERATOR',
-            isMuted:          false,
+            isMuted:          d.isMuted,
             isSpeaking:       false,
             handRaised:       false,
-            mutedByModerator: false,
+            mutedByModerator: d.mutedByModerator ?? false,
             isActive:         true,
             seatNumber:       Number(d.seatNumber),
             isPinned:         false,
@@ -1417,7 +1433,7 @@ export default function VoiceRoomScreen() {
     // Used for both voice:role_changed (room-wide) and voice:your_role_changed (personal).
     // voice:your_role_changed may not include userId in older server versions;
     // fall back to user?.id so the promoted user's own seat always appears.
-    const onRoleChanged = (d: { roomId?: string; userId?: string; role: string; seatNumber?: number | null }) => {
+    const onRoleChanged = (d: { roomId?: string; userId?: string; role: string; seatNumber?: number | null; isMuted?: boolean; mutedByModerator?: boolean }) => {
       // GAP-M3 FIX: guard against events from other rooms
       if (d.roomId && d.roomId !== id) return;
       const targetId = d.userId ?? user?.id;
@@ -1427,8 +1443,10 @@ export default function VoiceRoomScreen() {
           if (p.id !== targetId) return p;
           const u: Participant = { ...p, role: d.role as Participant['role'] };
           if (d.seatNumber !== undefined) u.seatNumber = d.seatNumber ?? null;
+          if (d.mutedByModerator !== undefined) u.mutedByModerator = d.mutedByModerator;
           if (d.role === 'AUDIENCE') { u.isMuted = true; u.seatNumber = null; }
-          else if (d.role === 'SPEAKER' && d.seatNumber != null) u.isMuted = false;
+          else if (d.role === 'SPEAKER' && d.seatNumber != null) u.isMuted = true;
+          else if (d.isMuted !== undefined) u.isMuted = d.isMuted;
           return u;
         });
         // GAP-M1 FIX: upsert if not in prev — prev.map() silently no-ops for unknown ids.
@@ -1440,10 +1458,10 @@ export default function VoiceRoomScreen() {
             name:             'Loading...',  // applyStageSnapshot will fill real name
             avatar:           undefined,
             role:             'SPEAKER',
-            isMuted:          false,
+            isMuted:          true,
             isSpeaking:       false,
             handRaised:       false,
-            mutedByModerator: false,
+            mutedByModerator: d.mutedByModerator ?? false,
             isActive:         true,
             seatNumber:       Number(d.seatNumber),
             isPinned:         false,
@@ -1455,7 +1473,8 @@ export default function VoiceRoomScreen() {
       queryClient.invalidateQueries({ queryKey: ['voice-room', id] });
       if (targetId === user?.id && lk.connected) {
         if (d.role === 'AUDIENCE') lk.disableMic().catch(() => {});
-        else if (d.role === 'SPEAKER') lk.enableMic().catch(() => {});
+        // SPEAKER promotion grants eligibility, not microphone consent.
+        // The user must explicitly tap the mic control before local capture starts.
       }
     };
 
@@ -1645,7 +1664,8 @@ export default function VoiceRoomScreen() {
 
     // Mic pass accepted — someone accepted the mic offer we (sender) sent.
     // Backend event: voice:mic_passed { roomId, passerId, passerName, targetId, targetName, passerRole, seatNumber }
-    const onMicPassResult = (d: { passerId?: string; targetId?: string; targetName?: string; passerRole?: string; seatNumber?: number | null }) => {
+    const onMicPassResult = (d: { roomId?: string; passerId?: string; targetId?: string; targetName?: string; passerRole?: string; targetRole?: string; seatNumber?: number | null; isMuted?: boolean }) => {
+      if (d.roomId && d.roomId !== id) return;
       // If we are the passer, show confirmation
       if (d.passerId === user?.id) {
         showMessage({ message: `🎤 ${d.targetName ?? 'User'} accepted the mic!`, type: 'success' });
@@ -1653,13 +1673,18 @@ export default function VoiceRoomScreen() {
       // Update roles in participant list — passer releases seat, target takes it
       if (d.passerRole && d.passerRole !== 'HOST' && d.passerId) {
         setParticipants(prev => prev.map(p =>
-          p.id === d.passerId ? { ...p, role: 'AUDIENCE' as const, isMuted: true, seatNumber: null } : p
+          p.id === d.passerId ? {
+            ...p, role: d.passerRole === 'MODERATOR' ? 'MODERATOR' as const : 'AUDIENCE' as const,
+            isMuted: true, seatNumber: null,
+          } : p
         ));
       }
       if (d.targetId) {
         setParticipants(prev => prev.map(p =>
           p.id === d.targetId ? {
-            ...p, role: 'SPEAKER' as const, isMuted: false, handRaised: false,
+            ...p,
+            role: p.role === 'HOST' || p.role === 'MODERATOR' ? p.role : (d.targetRole ?? 'SPEAKER') as Participant['role'],
+            isMuted: d.isMuted ?? true, handRaised: false,
             seatNumber: d.seatNumber != null ? Number(d.seatNumber) : p.seatNumber,
           } : p
         ));
@@ -1833,7 +1858,12 @@ export default function VoiceRoomScreen() {
       if (d.seatNumber != null) {
         setParticipants(prev => prev.map(p =>
           p.id === user?.id
-            ? { ...p, role: 'SPEAKER' as const, isMuted: false, seatNumber: Number(d.seatNumber), handRaised: false }
+            ? {
+              ...p,
+              role: p.role === 'HOST' || p.role === 'MODERATOR' ? p.role : (d.role ?? 'SPEAKER') as Participant['role'],
+              isMuted: d.isMuted ?? true, seatNumber: Number(d.seatNumber), handRaised: false,
+              ...(d.mutedByModerator !== undefined ? { mutedByModerator: d.mutedByModerator } : {}),
+            }
             : p
         ));
       }
@@ -1883,16 +1913,23 @@ export default function VoiceRoomScreen() {
 
     // MODERATOR ASSIGNMENT — realtime update for all participants
     // voice:moderator_assigned: HOST assigned someone as MODERATOR
-    socket.on('voice:moderator_assigned', (d: { roomId: string; userId: string; firstName?: string; lastName?: string }) => {
+    socket.on('voice:moderator_assigned', (d: {
+      roomId: string; userId: string; firstName?: string; lastName?: string;
+      role?: string; isMuted?: boolean; seatNumber?: number | null
+    }) => {
       if (d.roomId !== id) return;
-      // BUG-008 FIX: Set isMuted:false — backend sets isMuted=false when assigning
-      // moderator (voice-roles.controller.js assignModerator). Web onModeratorAssigned
-      // already sets isMuted:false; mobile must do the same so newly assigned moderators
-      // do not show as muted on other clients until the next stage_state snapshot.
-      // seatNumber is intentionally not changed — the new moderator retains their seat.
-      setParticipants(prev => prev.map(p =>
-        p.id === d.userId ? { ...p, role: 'MODERATOR' as const, isMuted: false } : p
-      ));
+      // DEF-D: Moderator assignment preserves existing voluntary mute state and seat.
+      // Use authoritative event state if provided, otherwise preserve existing participant state.
+      // Hardware is NEVER automatically activated on role change.
+      setParticipants(prev => prev.map(p => {
+        if (p.id !== d.userId) return p;
+        return {
+          ...p,
+          role: 'MODERATOR' as const,
+          isMuted: d.isMuted !== undefined ? d.isMuted : p.isMuted,
+          ...(d.seatNumber !== undefined ? { seatNumber: d.seatNumber } : {})
+        };
+      }));
       if (d.userId === user?.id) {
         showMessage({ message: '🛡️ You are now a moderator!', type: 'success' });
       }
@@ -2128,6 +2165,18 @@ export default function VoiceRoomScreen() {
             if (!token) throw new Error('No token in response');
             return token;
           };
+          // iOS audio session: allowsRecordingIOS must be true before connecting
+          // so the microphone is accessible. Without this, iOS silently blocks
+          // mic access when the ringer switch is off or the session is in playback mode.
+          try {
+            await ExpoAudio.setAudioModeAsync({
+              allowsRecordingIOS: true,
+              playsInSilentModeIOS: true,
+              staysActiveInBackground: true,
+              shouldDuckAndroid: false,
+              playThroughEarpieceAndroid: false,
+            });
+          } catch { /* audio-mode setup failed — Expo Go / Android ignores unsupported keys */ }
           await lk.connect(livekitUrl, lkToken, true /* start muted */, id, tokenFetcher);
         }
       } catch { /* non-fatal — audio not available in Expo Go */ }
@@ -2191,6 +2240,8 @@ export default function VoiceRoomScreen() {
         intentionalLeaveRef.current = true
         try { await api.post(`/voice/${id}/leave`); } catch {}
         lk.disconnect();
+        // Restore iOS audio session to non-recording mode after leaving the room.
+        try { await ExpoAudio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true, staysActiveInBackground: false }); } catch {}
         clearActiveRoom();
         clearQueuePosition();
         // FEAT-002: reset join ref so onReconnect won't re-register after leave
@@ -2200,6 +2251,12 @@ export default function VoiceRoomScreen() {
       }},
     ]);
   }, [id, router, clearActiveRoom, clearQueuePosition]);
+
+  // Sync network-quality low-data signal to the LowDataMode store.
+  // setAutoEnabled is a no-op when the user has set an explicit preference.
+  useEffect(() => {
+    setAutoEnabled(netLowDataMode);
+  }, [netLowDataMode, setAutoEnabled]);
 
   // P0-3 FIX: Auto-rejoin on screen focus when returning from a tab switch.
   // On tab switch, expo-router unmounts this screen. On return, isJoined resets
@@ -2231,7 +2288,8 @@ export default function VoiceRoomScreen() {
   // worker while backgrounded), silently re-POST /join before re-fetching state.
   // Only the minimal re-join is performed here — no LiveKit reconnect, no full
   // handleJoin flow — so the UI does not flicker.
-  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  // (appStateRef is declared above near the other refs so it is also available
+  //  for the 30s poll AppState gate — no second declaration needed here.)
   useEffect(() => {
     const sub = AppState.addEventListener('change', (nextState: AppStateStatus) => {
       const prev = appStateRef.current;
@@ -2301,6 +2359,7 @@ export default function VoiceRoomScreen() {
   }, [isJoined, handleLeave]);
 
   const toggleMic = useCallback(async () => {
+    // MOBILE-FIX-001: Improved error handling and rollback for mute/unmute operations
     // GUARD: if the participant was muted by a moderator, they cannot self-unmute.
     const me = participants.find(p => p.id === user?.id);
     if (me?.mutedByModerator && me?.isMuted) {
@@ -2308,20 +2367,77 @@ export default function VoiceRoomScreen() {
       return;
     }
     if (lk.connected) {
-      const currentMuted = me?.isMuted ?? true;
-      const newMuted = !currentMuted;
-      if (currentMuted) await lk.enableMic();
-      else await lk.disableMic();
-      // DEF-006: sync mute state to backend so participants list and server state
-      // stay consistent. Best-effort — LiveKit track toggle is NOT rolled back on failure.
-      try {
-        await api.patch(`/voice/${id}/mute`, { isMuted: newMuted });
-      } catch {
-        // Non-fatal: local LiveKit toggle already applied; server will reconcile
-        // on the next voice:mute_changed socket event or stage-state pull.
+      if (!lk.micEnabled) {
+        // MOBILE-FIX-002: Unmute path — fail closed, obtain server authorization first
+        // A moderator-lock release leaves isMuted=true until this explicit action.
+        try {
+          // 1. Server permission check first (fail-closed security model)
+          const res = await api.patch(`/voice/${id}/mute`, { isMuted: false });
+          const payload = res?.data?.data ?? res?.data ?? {};
+          const isAuthorized = payload.canPublishAudio === true && payload.sfuEnforced === true;
+
+          if (!isAuthorized) {
+            setParticipants(prev => prev.map(p =>
+              p.id === user?.id ? { ...p, isMuted: true } : p
+            ));
+            let errorMsg = 'Unable to connect microphone to voice server. Tap microphone to retry.';
+            if (payload.canPublishAudio === false) {
+              errorMsg = payload.audioPermissionReason
+                ? `Microphone unavailable: ${payload.audioPermissionReason}`
+                : 'Microphone permission denied.';
+            } else if (payload.sfuEnforced === false) {
+              if (payload.sfuEnforcementReason === 'TIMEOUT') {
+                errorMsg = 'Voice server connection timed out. Tap microphone to retry.';
+              } else if (payload.sfuEnforcementReason === 'NOT_FOUND') {
+                errorMsg = 'Voice session not found on media server. Tap microphone to reconnect.';
+              } else if (payload.sfuEnforcementReason === 'NOT_CONFIGURED') {
+                errorMsg = 'Voice server is temporarily unavailable.';
+              } else if (payload.sfuEnforcementReason === 'UPDATE_FAILED') {
+                errorMsg = 'Media server failed to update audio permission. Tap microphone to retry.';
+              } else if (payload.sfuEnforcementReason === 'NO_RESULT') {
+                errorMsg = 'No response from media server. Tap microphone to retry.';
+              }
+            }
+            showMessage({ message: errorMsg, type: 'warning' });
+            return;
+          }
+
+          // 2. Enable local microphone track only after confirmed server and SFU approval
+          const enabled = await lk.enableMic();
+          if (!enabled) {
+            showMessage({
+              message: 'Unable to activate microphone. Please check connection and permissions.',
+              type: 'warning',
+            });
+            return;
+          }
+          setParticipants(prev => prev.map(p =>
+            p.id === user?.id ? { ...p, isMuted: false } : p
+          ));
+        } catch (e: any) {
+          // MOBILE-FIX-003: Propagate backend error message to user
+          const message = e?.response?.data?.message || 'Microphone is not authorized';
+          showMessage({ message, type: 'warning' });
+        }
+      } else {
+        // Explicit OFF is authoritative locally: stop capture immediately and
+        // never reactivate it merely to match stale backend state.
+        await lk.disableMic();
+        setParticipants(prev => prev.map(p =>
+          p.id === user?.id ? { ...p, isMuted: true } : p
+        ));
+        try {
+          await api.patch(`/voice/${id}/mute`, { isMuted: true });
+        } catch (e: any) {
+          // Backend/SFU state may be stale, but renewed capture requires a new
+          // explicit ON action and fresh authorization.
+          const detail = e?.response?.data?.message || 'server synchronization failed';
+          const message = `Microphone is off locally; ${detail}. Tap again later to retry synchronization.`;
+          showMessage({ message, type: 'danger' });
+        }
       }
     }
-  }, [participants, user?.id, id]);
+  }, [participants, user?.id, id, lk]);
 
   const toggleHand = useCallback(async () => {
     if (room?.micLocked) { showMessage({ message: '🔒 Mic is locked by the host', type: 'warning' }); return; }
@@ -2371,21 +2487,69 @@ export default function VoiceRoomScreen() {
   const canModerate = myRole === 'HOST' || myRole === 'MODERATOR';
 
   const handleMuteAll = useCallback(async () => {
-    try { await api.patch(`/voice/${id}/mute-all`); showMessage({ message: '🔇 All speakers muted', type: 'info' }); } catch {}
-  }, [id]);
+    // MOBILE-FIX-009: muteAll with optimistic update + rollback on failure
+    const myId = user?.id;
+    const affectedUsers = participants
+      .filter(p => p.id !== myId && (p.role === 'SPEAKER' || p.role === 'MODERATOR') && !p.isMuted)
+      .map(p => ({ userId: p.id, originalMuted: p.isMuted, originalLocked: p.mutedByModerator }));
+    
+    // Apply optimistic update (mutedByModerator=false for room-wide policy, not individual lock)
+    affectedUsers.forEach(u => {
+      setParticipants(prev => prev.map(p =>
+        p.id === u.userId ? { ...p, isMuted: true, mutedByModerator: false } : p
+      ));
+    });
+    
+    try {
+      await api.patch(`/voice/${id}/mute-all`);
+      showMessage({ message: '🔇 All speakers muted', type: 'info' });
+    } catch (e: any) {
+      // MOBILE-FIX-010: Rollback optimistic update on API failure
+      affectedUsers.forEach(u => {
+        setParticipants(prev => prev.map(p =>
+          p.id === u.userId
+            ? { ...p, isMuted: u.originalMuted, mutedByModerator: u.originalLocked }
+            : p
+        ));
+      });
+      const message = e?.response?.data?.message || 'Failed to mute all';
+      showMessage({ message, type: 'danger' });
+    }
+  }, [id, participants, user?.id]);
 
   const handleMuteUser = useCallback(async (targetId: string, currentlyMuted: boolean) => {
+    // MOBILE-FIX-006: Moderator mute with optimistic update + rollback on failure
+    const newMuted = !currentlyMuted;
+    
+    // Snapshot original state for rollback
+    const originalParticipant = participants.find(p => p.id === targetId);
+    if (!originalParticipant) return;
+    
+    const originalMuted = originalParticipant.isMuted;
+    const originalLockedByMod = originalParticipant.mutedByModerator;
+    
+    // Optimistic update: also set mutedByModerator so the target's mic button locks correctly
+    setParticipants(prev => prev.map(p =>
+      p.id === targetId
+        ? { ...p, isMuted: newMuted, mutedByModerator: newMuted }
+        : p
+    ));
+    
     try {
-      await api.patch(`/voice/${id}/mute`, { targetUserId: targetId, isMuted: !currentlyMuted });
-      // Optimistic update: also set mutedByModerator so the target's mic button locks correctly
+      await api.patch(`/voice/${id}/mute`, { targetUserId: targetId, isMuted: newMuted });
+      showMessage({ message: newMuted ? '🔇 Speaker muted' : '🎙️ Speaker unmuted', type: 'info' });
+    } catch (e: any) {
+      // MOBILE-FIX-007: Rollback optimistic update on API failure
       setParticipants(prev => prev.map(p =>
         p.id === targetId
-          ? { ...p, isMuted: !currentlyMuted, mutedByModerator: !currentlyMuted }
+          ? { ...p, isMuted: originalMuted, mutedByModerator: originalLockedByMod }
           : p
       ));
-      showMessage({ message: !currentlyMuted ? '🔇 Speaker muted' : '🎙️ Speaker unmuted', type: 'info' });
-    } catch {}
-  }, [id]);
+      // MOBILE-FIX-008: Propagate backend error message
+      const message = e?.response?.data?.message || 'Failed to mute user';
+      showMessage({ message, type: 'danger' });
+    }
+  }, [id, participants]);
 
   const handlePromote = useCallback(async (targetId: string, role: 'SPEAKER' | 'AUDIENCE') => {
     try {
@@ -2449,8 +2613,11 @@ export default function VoiceRoomScreen() {
   const handleUnmuteAll = useCallback(async () => {
     try {
       await api.patch(`/voice/${id}/unmute-all`);
-      showMessage({ message: '🎙️ All speakers unmuted', type: 'info' });
-    } catch {}
+      showMessage({ message: '🎙️ Room-wide mute released. Speakers can turn on their microphones.', type: 'info' });
+    } catch (e: any) {
+      const message = e?.response?.data?.message || 'Failed to unmute all';
+      showMessage({ message, type: 'danger' });
+    }
   }, [id]);
 
   const handleEndRoom = useCallback(async () => {
@@ -2473,7 +2640,7 @@ export default function VoiceRoomScreen() {
   }, [id]);
 
   // Approve a SPECIFIC queued user — handles both AUDIENCE→SPEAKER and
-  // MODERATOR→unmuted-on-stage. The generic PATCH /promote rejects MODERATOR targets.
+  // MODERATOR→seated-muted. The generic PATCH /promote rejects MODERATOR targets.
   const handleApproveQueueUser = useCallback(async (targetId: string) => {
     try {
       await api.post(`/voice/${id}/queue/approve/${targetId}`);
@@ -2795,7 +2962,7 @@ export default function VoiceRoomScreen() {
         />
       )}
 
-      <View style={[mobStyles.container, { paddingBottom: insets.bottom }]}>
+      <View testID="voice-room-screen" style={[mobStyles.container, { paddingBottom: insets.bottom }]}>
         {/* Room header — white card matching target design */}
         <View style={mobStyles.header}>
           <View style={mobStyles.headerLeft}>
@@ -2908,7 +3075,7 @@ export default function VoiceRoomScreen() {
 
             {/* ── Speakers grid card — white, rounded bottom, 4 columns ── */}
             <View style={mobStyles.speakersCard}>
-              <View style={mobStyles.speakersGrid}>
+              <View testID="participantsList" style={mobStyles.speakersGrid}>
                 {speakerSlotArray.map((speaker, i) => {
                   const isMe = speaker?.id === user?.id;
                   const seatLocked = lockedSeats.includes(i);
@@ -3139,11 +3306,9 @@ export default function VoiceRoomScreen() {
                         showMessage({ message: '⬇️ Left the stage', type: 'info' });
                       } catch (e: any) {
                         // Rollback on API error
-                        // [removed redundant setIsMuted]  //setIsMuted(false);
                         setParticipants(prev => prev.map(p =>
-                          p.id === user?.id ? { ...p, isMuted: false } : p
+                          p.id === user?.id ? { ...p, isMuted: true } : p
                         ));
-                        if (lk.connected) await lk.enableMic();
                         showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
                       }
                     }}
@@ -3160,22 +3325,19 @@ export default function VoiceRoomScreen() {
                         showMessage({ message: '🔒 Mic is locked', type: 'warning' });
                         return;
                       }
-                      // Optimistic update — show HOST as on-stage immediately
-                      // [removed redundant setIsMuted]  //setIsMuted(false);
+                      // DEF-C: Taking stage places user on stage in muted state.
+                      // Do NOT activate mic hardware before backend authorization or without user consent.
                       setParticipants(prev => prev.map(p =>
-                        p.id === user?.id ? { ...p, isMuted: false } : p
+                        p.id === user?.id ? { ...p, isMuted: true } : p
                       ));
-                      if (lk.connected) await lk.enableMic();
                       try {
                         await api.post(`/voice/${id}/grab-mic`);
-                        showMessage({ message: '🎤 You are on stage!', type: 'success' });
+                        showMessage({ message: '🎤 You are on stage! Tap mic to speak.', type: 'success' });
                       } catch (e: any) {
                         // Rollback on error
-                        // [removed redundant setIsMuted]  //setIsMuted(true);
                         setParticipants(prev => prev.map(p =>
                           p.id === user?.id ? { ...p, isMuted: true } : p
                         ));
-                        if (lk.connected) await lk.disableMic();
                         showMessage({ message: e?.response?.data?.message ?? 'Failed', type: 'danger' });
                       }
                     }}
@@ -3192,6 +3354,7 @@ export default function VoiceRoomScreen() {
                    SPEAKERs are not HOST/MOD so amHostOrMod is false, but they
                    hold a seat and must be able to voluntarily return to audience. */
                 <TouchableOpacity
+                  testID="voice-mic-toggle"
                   style={[mobStyles.ctrlBtn, { backgroundColor: '#fffbeb', borderWidth: 1.5, borderColor: '#fde68a' }]}
                   onPress={async () => {
                     const prevSeatNumber = myParticipant?.seatNumber;
@@ -3204,11 +3367,10 @@ export default function VoiceRoomScreen() {
                       await api.post(`/voice/${id}/drop-mic`);
                       showMessage({ message: '⬇ Left the stage', type: 'info' });
                     } catch (e: any) {
-                      // Rollback optimistic update on error
+                      // Rollback optimistic update on error — keep muted, do not auto-enable mic
                       setParticipants(prev => prev.map(p =>
-                        p.id === user?.id ? { ...p, isMuted: false, seatNumber: prevSeatNumber, role: 'SPEAKER' } : p
+                        p.id === user?.id ? { ...p, isMuted: true, seatNumber: prevSeatNumber, role: 'SPEAKER' } : p
                       ));
-                      if (lk.connected) await lk.enableMic();
                       showMessage({ message: e?.response?.data?.message ?? 'Failed to leave stage', type: 'danger' });
                     }
                   }}
@@ -3277,6 +3439,7 @@ export default function VoiceRoomScreen() {
               {/* Mic — only shown when on stage */}
               {amOnStage && (
                 <TouchableOpacity
+                  testID="voice-mic-toggle"
                   style={[
                     mobStyles.ctrlBtn,
                     lk.micEnabled && mobStyles.ctrlBtnActive,
@@ -3293,6 +3456,7 @@ export default function VoiceRoomScreen() {
                   <Text style={mobStyles.ctrlLabel}>
                     {myParticipant?.mutedByModerator && myParticipant?.isMuted ? 'Mod Muted' : lk.micEnabled ? 'Mute' : 'Unmute'}
                   </Text>
+                  <View accessible={false} testID={lk.micEnabled ? 'voice-mic-status-on' : 'voice-mic-status-off'} style={{ position: 'absolute', opacity: 0, width: 1, height: 1 }} />
                 </TouchableOpacity>
               )}
 
@@ -3355,6 +3519,29 @@ export default function VoiceRoomScreen() {
             </>
           )}
         </View>
+
+        {/* Dev-only E2E test control — network reconnect trigger (invisible) */}
+        {__DEV__ && (
+          <TouchableOpacity
+            testID="voice-test-network-reconnect"
+            onPress={() => {
+              // Trigger LiveKit disconnect → reconnect cycle for E2E testing
+              lk.disconnect();
+              setTimeout(() => {
+                // Re-join will happen via the focus effect / foreground logic
+                handleJoin();
+              }, 1000);
+            }}
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              width: 1,
+              height: 1,
+              opacity: 0,
+            }}
+          />
+        )}
       </View>
 
       {/* Gift panel modal */}
@@ -3445,10 +3632,8 @@ export default function VoiceRoomScreen() {
             setShowMicPassIncoming(false);
             setMicPassOfferedBy(null);
             setMicPassOfferId(null);
-            // Optimistically update own role to SPEAKER
-            if (user?.id) {
-              setParticipants(prev => prev.map(p => p.id === user.id ? { ...p, role: 'SPEAKER', isMuted: false } : p));
-            }
+            // Role, seat and mute state come from the authoritative Mic Pass
+            // events; accepting the invitation does not enable the microphone.
           }}
         />
       )}
@@ -3772,12 +3957,12 @@ export default function VoiceRoomScreen() {
               <Text style={{ color: '#f59e0b', fontSize: 12, fontWeight: '600' }}>Mute All</Text>
               <Text style={{ color: '#6b7280', fontSize: 9 }}>Silence speakers on stage</Text>
             </TouchableOpacity>
-            {/* Unmute All */}
+            {/* Release room-wide mute; each speaker opts in locally */}
             <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#22c55e22', borderWidth: 1, borderColor: '#22c55e44', borderRadius: 12, padding: 12, alignItems: 'center', gap: 4 }}
               onPress={handleUnmuteAll}>
               <Ionicons name="mic" size={22} color="#22c55e" />
-              <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '600' }}>Unmute All</Text>
-              <Text style={{ color: '#6b7280', fontSize: 9 }}>Unsilence speakers on stage</Text>
+              <Text style={{ color: '#22c55e', fontSize: 12, fontWeight: '600' }}>Release Mute All</Text>
+              <Text style={{ color: '#6b7280', fontSize: 9 }}>Speakers turn on their own mic</Text>
             </TouchableOpacity>
             <TouchableOpacity style={{ flex: 1, minWidth: '45%', backgroundColor: '#10b98122', borderWidth: 1, borderColor: '#10b98144', borderRadius: 12, padding: 12, alignItems: 'center', gap: 4 }}
               onPress={handleApproveQueue}>
@@ -3887,7 +4072,10 @@ export default function VoiceRoomScreen() {
               const roleColor = p.role === 'HOST' ? '#f59e0b' : p.role === 'MODERATOR' ? '#10b981' : p.role === 'SPEAKER' ? '#6366f1' : '#6b7280';
               return (
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#1e1e3a', borderRadius: 12, padding: 10 }}>
-                  <Image source={{ uri: avatarUrl(p.avatar, p.name) }} style={{ width: 36, height: 36, borderRadius: 18 }} />
+                  {isLowData
+                    ? <View style={[styles.avatarPlaceholder, { width: 36, height: 36, borderRadius: 18 }]}><Text style={styles.avatarInitials}>{getInitials(p.name)}</Text></View>
+                    : <Image source={{ uri: avatarUrl(p.avatar, p.name) }} style={{ width: 36, height: 36, borderRadius: 18 }} />
+                  }
                   <View style={{ flex: 1 }}>
                     <Text style={{ color: '#e5e7eb', fontSize: 14, fontWeight: '600' }}>{p.name}{isMe ? ' (you)' : ''}</Text>
                     <Text style={{ color: roleColor, fontSize: 11, fontWeight: '700' }}>{p.role}{p.handRaised ? ' · ✋' : ''}</Text>
@@ -4509,6 +4697,9 @@ const styles = StyleSheet.create({
   tileSpeaking:     { borderWidth: 2, borderColor: '#4f46e5' },
   tileAvatarWrap:   { position: 'relative', marginBottom: 6 },
   tileAvatar:       { width: 52, height: 52, borderRadius: 26, backgroundColor: '#374151' },
+  // Low-data mode: initials placeholder replaces avatar Image to save bandwidth
+  avatarPlaceholder:{ alignItems: 'center', justifyContent: 'center', backgroundColor: '#374151' },
+  avatarInitials:   { color: '#e5e7eb', fontSize: 16, fontWeight: '700' },
   speakingRing:     { position: 'absolute', top: -4, left: -4, right: -4, bottom: -4, borderRadius: 30, borderWidth: 2, borderColor: '#4f46e5' },
   handBadge:        { position: 'absolute', bottom: -4, right: -4, backgroundColor: '#fff', borderRadius: 8, padding: 2 },
   tileName:         { color: '#e5e7eb', fontSize: 11, fontWeight: '600', textAlign: 'center' },
@@ -5173,9 +5364,6 @@ const mobStyles = StyleSheet.create({
     fontWeight: '600',
   },
 });
-
-
-
 
 
 

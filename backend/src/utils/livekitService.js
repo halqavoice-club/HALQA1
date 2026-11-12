@@ -69,7 +69,7 @@ async function sfuEvict(roomName, identity, logPrefix = '[livekit]') {
 }
 
 /**
- * PH17-001/003/004 FIX: Best-effort SFU capability revocation on demotion/mute.
+ * PH17-001/003/004 FIX + PHASE F2-A: SFU capability revocation with enforcement reporting.
  *
  * Calls updateParticipant() to set canPublish=false on the live SFU participant.
  * This means a demoted SPEAKER or muted AUDIENCE member cannot publish audio
@@ -79,16 +79,28 @@ async function sfuEvict(roomName, identity, logPrefix = '[livekit]') {
  * When the participant later gets promoted again, a fresh token request will
  * issue canPublish:true and updateParticipant() with canPublish:true restores it.
  *
- * Best-effort: LiveKit API failures are logged and swallowed.
+ * PHASE F2-A: Now returns explicit enforcement status so callers can detect
+ * SFU update failures and handle them appropriately (e.g., logging, monitoring,
+ * or fallback enforcement via token revocation).
  *
  * @param {string}  roomName    — LiveKit room name
  * @param {string}  identity    — participant identity (= userId)
  * @param {boolean} canPublish  — true to restore, false to revoke
  * @param {string}  logPrefix   — log context prefix
+ * @returns {Promise<{enforced: boolean, reason: string}>}
+ *   - { enforced: true, reason: 'UPDATED' }         — SFU permission successfully changed
+ *   - { enforced: true, reason: 'NOT_CONFIGURED' }  — LiveKit not configured (acceptable in dev)
+ *   - { enforced: false, reason: 'NOT_FOUND' }      — Participant or room not found at SFU
+ *   - { enforced: false, reason: 'TIMEOUT' }        — SFU API timeout
+ *   - { enforced: false, reason: 'UPDATE_FAILED' }  — Other LiveKit SDK errors
  */
 async function sfuRevokePublish(roomName, identity, canPublish, logPrefix = '[livekit]') {
   const svc = getLivekitRoomService();
-  if (!svc) return; // LiveKit not configured — skip gracefully
+  if (!svc) {
+    // LiveKit not configured — acceptable in dev environments
+    return { enforced: true, reason: 'NOT_CONFIGURED' };
+  }
+
   try {
     await svc.updateParticipant(roomName, identity, undefined, {
       canPublish:     canPublish,
@@ -96,8 +108,14 @@ async function sfuRevokePublish(roomName, identity, canPublish, logPrefix = '[li
       canPublishData: canPublish,
     });
     logger.info(`${logPrefix} SFU canPublish=${canPublish} set for ${identity} in ${roomName}`);
+    return { enforced: true, reason: 'UPDATED' };
   } catch (err) {
+    // LiveKit SDK errors: participant not found, room not found, timeout, etc.
+    const reason = err.message?.toLowerCase().includes('not found') ? 'NOT_FOUND'
+                 : err.message?.toLowerCase().includes('timeout') ? 'TIMEOUT'
+                 : 'UPDATE_FAILED';
     logger.warn(`${logPrefix} SFU updateParticipant failed for ${identity} in ${roomName}: ${err.message}`);
+    return { enforced: false, reason };
   }
 }
 

@@ -37,7 +37,7 @@ export interface LiveKitAudioState {
   connect:      (url: string, token: string, startMuted?: boolean, roomId?: string, tokenFetcher?: () => Promise<string>) => Promise<void>;
   disconnect:   (reason?: DisconnectReason) => void;
   toggleMic:    () => Promise<void>;
-  enableMic:    () => Promise<void>;
+  enableMic:    () => Promise<boolean>;
   disableMic:   () => Promise<void>;
   // Phase 7: force reconnect (used after background resume)
   reconnect:    () => Promise<void>;
@@ -59,6 +59,7 @@ const BASE_RETRY_DELAY_MS    = 1000;
 export function useLiveKitAudio(): LiveKitAudioState {
   const [connected,  setConnected]  = useState(false);
   const [micEnabled, setMicEnabled] = useState(false);
+  const micEnabledRef = useRef<boolean>(false);
 
   // Network quality (Phase 1) — drives auto bitrate (Phase 2)
   const { quality, isOffline } = useNetworkQuality();
@@ -79,18 +80,25 @@ export function useLiveKitAudio(): LiveKitAudioState {
   const isUnmountedRef      = useRef<boolean>(false);
   const isConnectingRef     = useRef<boolean>(false);
   const appStateRef         = useRef<AppStateStatus>(AppState.currentState);
+  // Consent fence: every explicit OFF invalidates all earlier asynchronous ON
+  // operations. A late LiveKit enable completion must never restore capture.
+  const micOperationRef     = useRef<number>(0);
 
-  // Phase 2: auto-adapt bitrate when quality changes while connected
+  // Phase 2: auto-adapt bitrate when quality changes while connected.
+  // Re-publishes the mic track with updated publish options so the bitrate
+  // change takes effect on the current connection (not just future publishes).
+  // setMicrophoneEnabled(true, opts) re-negotiates the existing track with
+  // the new audioBitrate/dtx/red settings — the correct LiveKit RN API for
+  // runtime adaptation. setTrackSubscriptionPermissions is a receiver-side
+  // permission API and has no effect on local publish quality.
   useEffect(() => {
     if (!roomRef.current || !connected) return;
-    const bitrate = qualityToAudioBitrate(quality);
     try {
-      // Set audio publish options dynamically
       const opts = buildPublishOptions(quality);
-      roomRef.current.localParticipant?.setTrackSubscriptionPermissions?.(true);
-      // LiveKit RN: use setMicrophoneEnabled to restart with new options
-      // Only applies to future publishes — current track keeps old bitrate
-      // This is the safest way without disconnecting
+      const lp = roomRef.current.localParticipant;
+      if (lp && lp.isMicrophoneEnabled) {
+        lp.setMicrophoneEnabled(true, opts).catch(() => {});
+      }
     } catch { /* non-fatal */ }
   }, [quality, connected]);
 
@@ -213,7 +221,10 @@ export function useLiveKitAudio(): LiveKitAudioState {
                   return;
                 }
               }
-              connect(lastUrlRef.current, reconnectToken, lastStartMutedRef.current);
+              // DEF-E FIX: preserve user's current mic-off intent on reconnect.
+              // FIX-02: Always start muted on auto-reconnect — require explicit user unmute
+              const reconnectStartMuted = true;
+              connect(lastUrlRef.current, reconnectToken, reconnectStartMuted);
             }
           }, delay);
         }
@@ -257,8 +268,11 @@ export function useLiveKitAudio(): LiveKitAudioState {
 
       // Phase 4: publish mic with quality-aware options
       const pubOpts = buildPublishOptions(currentQuality);
-      await room.localParticipant.setMicrophoneEnabled(!startMuted, pubOpts);
-      setMicEnabled(!startMuted);
+      const canPublish = room.localParticipant?.permissions?.canPublish === true;
+      const shouldEnable = !startMuted && canPublish;
+      await room.localParticipant.setMicrophoneEnabled(shouldEnable, pubOpts);
+      setMicEnabled(shouldEnable);
+      micEnabledRef.current = shouldEnable;
 
     } catch (err: any) {
       if (!isUnmountedRef.current) {
@@ -284,7 +298,8 @@ export function useLiveKitAudio(): LiveKitAudioState {
                   return;
                 }
               }
-              connect(lastUrlRef.current, retryToken, lastStartMutedRef.current);
+              const reconnectStartMuted = true;  // FIX-02: Always start muted on error-retry reconnect
+              connect(lastUrlRef.current, retryToken, reconnectStartMuted);
             }
           }, delay);
         } else {
@@ -322,11 +337,13 @@ export function useLiveKitAudio(): LiveKitAudioState {
       }
     }
     if (!freshToken) return; // no token available at all — give up
-    await connect(lastUrlRef.current, freshToken, lastStartMutedRef.current);
+    const reconnectStartMuted = true;  // FIX-02: Always start muted on background recovery
+    await connect(lastUrlRef.current, freshToken, reconnectStartMuted);
   }, [connect]);
 
   // ─── Disconnect ───────────────────────────────────────────────────────────
   const disconnect = useCallback((reason: DisconnectReason = 'user') => {
+    micOperationRef.current += 1;
     clearReconnectTimer();
     reconnectCountRef.current = 0;
     isConnectingRef.current   = false;
@@ -336,28 +353,46 @@ export function useLiveKitAudio(): LiveKitAudioState {
     }
     setConnected(false);
     setMicEnabled(false);
+    micEnabledRef.current = false;
   }, []);
 
   // ─── Mic controls ─────────────────────────────────────────────────────────
-  const enableMic = useCallback(async () => {
-    if (!roomRef.current) return;
-    // MIC-02: Guard against publishing when the SFU token has canPublish:false.
-    // Without this, a student without a speakerSlot could call enableMic() and
-    // silently fail at the SFU, or succeed if the token was not yet restricted.
+  const enableMic = useCallback(async (): Promise<boolean> => {
+    if (!roomRef.current) return false;
+    // DEF-A: Guard against publishing when SFU publishing permission is not granted.
+    // Missing permissions or canPublish !== true must be treated as denied.
     const perms = roomRef.current.localParticipant?.permissions;
-    if (perms && perms.canPublish === false) return;
+    if (!perms || perms.canPublish !== true) return false;
+    const operation = ++micOperationRef.current;
     try {
       const pubOpts = buildPublishOptions(quality);
       await roomRef.current.localParticipant.setMicrophoneEnabled(true, pubOpts);
+      if (operation !== micOperationRef.current) {
+        // OFF won while LiveKit was enabling. Revoke the stale publication
+        // before exposing any enabled state to callers or React.
+        await roomRef.current?.localParticipant?.setMicrophoneEnabled(false).catch(() => {});
+        setMicEnabled(false);
+        micEnabledRef.current = false;
+        return false;
+      }
       setMicEnabled(true);
-    } catch {}
+      micEnabledRef.current = true;
+      return true;
+    } catch {
+      setMicEnabled(false);
+      micEnabledRef.current = false;
+      return false;
+    }
   }, [quality]);
 
   const disableMic = useCallback(async () => {
+    // Invalidate pending ON synchronously, before any SDK await.
+    micOperationRef.current += 1;
+    setMicEnabled(false);
+    micEnabledRef.current = false;
     if (!roomRef.current) return;
     try {
       await roomRef.current.localParticipant.setMicrophoneEnabled(false);
-      setMicEnabled(false);
     } catch {}
   }, []);
 

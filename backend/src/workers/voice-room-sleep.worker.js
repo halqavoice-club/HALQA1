@@ -61,16 +61,19 @@ async function runRoomSleep(roomId) {
     return;
   }
 
-  // 3. Transition LIVE → IDLE (permanent room sleep — NOT terminal)
-  //    Do NOT set endedAt. Do NOT mark status=ENDED.
-  await prisma.voiceRoom.update({
-    where: { id: roomId },
-    data: {
-      status:         STATUS_IDLE,
-      lastActivityAt: new Date(),
-      updatedAt:       new Date(),
-    },
-  });
+  // 3. Conditional-update: only transition LIVE → IDLE if the room is still LIVE.
+  //    A concurrent endRoom() transaction may have set status=ENDED between step 2 and here.
+  //    The WHERE status='LIVE' guard prevents overwriting a terminal ENDED state.
+  //    INV-001-7C: $executeRaw returns affected row count — 0 means status changed before us.
+  const updateResult = await prisma.$executeRaw`
+    UPDATE voice_rooms
+    SET status = 'IDLE', lastActivityAt = ${new Date()}, updatedAt = ${new Date()}
+    WHERE id = ${roomId} AND status = 'LIVE'
+  `;
+  if (Number(updateResult) !== 1) {
+    logger.debug(`[voice-sleep] Room ${roomId} — status changed before sleep transition (skipping side-effects)`);
+    return;
+  }
 
   // 4. Clear any stale FIFO queue entries for this room
   try { await clearQueue(roomId); } catch (err) {
@@ -123,4 +126,4 @@ function createVoiceRoomSleepWorker(connection) {
   return worker;
 }
 
-module.exports = { createVoiceRoomSleepWorker };
+module.exports = { createVoiceRoomSleepWorker, runRoomSleep };

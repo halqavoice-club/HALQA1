@@ -6,13 +6,14 @@ import { useRouter } from 'next/navigation'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVoiceStore, VoiceParticipant, MEMBER_LEVEL_META, ROOM_LEVEL_CAPACITY } from '@/store/voice.store'
 import { useVoiceRoom, canModerate, canSpeak, VOICE_ROLES } from '@/hooks/useVoiceRoom'
+import { useToast } from '@/components/ui/use-toast'
 import { useLiveKit } from '@/hooks/useLiveKit'
 import { useAuthStore } from '@/store/auth.store'
 import { useThemeStore } from '@/store/theme.store'
 import { getAvatarUrl, getFileUrl } from '@/lib/avatar'
 import api from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { ConnectionState } from 'livekit-client'
+import { ConnectionState, ConnectionQuality } from 'livekit-client'
 import './voice-room.css'
 import './voice-room-dark.css'
 import './mic-emoji.css'
@@ -80,7 +81,7 @@ function AvatarCircle({
 
       <div className="vc-avatar-img">
         {src
-          ? <img src={src} alt={firstName} />
+          ? <img src={src} alt={`${firstName} ${lastName}`} />
           : <span className="vc-initials">{initials}</span>
         }
       </div>
@@ -328,6 +329,7 @@ function AudienceAvatar({
 export function VoiceRoomView({ onLeave }: Props) {
   const { user } = useAuthStore()
   const router = useRouter()
+  const { toast } = useToast()
   const { theme, setTheme } = useThemeStore()
   const isDark = theme === 'dark' || (theme === 'system' && typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches)
   const {
@@ -343,6 +345,7 @@ export function VoiceRoomView({ onLeave }: Props) {
   const {
     myParticipant,
     toggleMute,
+    checkMicAuthorization,
     sendMessage,
     promoteUser,
     kickUser,
@@ -370,6 +373,7 @@ export function VoiceRoomView({ onLeave }: Props) {
 
   const {
     connectionState,
+    connectionQuality,
     isMicEnabled,
     activeSpeakers,
     connect,
@@ -389,6 +393,9 @@ export function VoiceRoomView({ onLeave }: Props) {
   const [volume, setVolume] = useState(100)
 
   // Phase 1+9: Network quality -> Low Data Mode auto-toggle
+  // Note: useNetworkQuality() is now also called inside useLiveKit (for bitrate
+  // adaptation). The two calls are independent — React deduplicates event
+  // listeners within the same component tree via the hook's own effect cleanup.
   const netQuality     = useNetworkQuality()
   const { setAutoEnabled } = useLowDataMode()
   const isLowData      = useLowData()
@@ -405,6 +412,16 @@ export function VoiceRoomView({ onLeave }: Props) {
     const vol = volume / 100
     document.dispatchEvent(new CustomEvent('vc:volume', { detail: vol }))
   }, [volume])
+
+  // FIX-03: MediaSession toast event listener — headset button feedback
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { title, description } = (e as CustomEvent).detail
+      toast({ title, description })
+    }
+    document.addEventListener('vc:toast', handler)
+    return () => document.removeEventListener('vc:toast', handler)
+  }, [toast])
 
   const [sendingMsg, setSendingMsg] = useState(false)
   const [showEmojis, setShowEmojis] = useState(false)
@@ -750,21 +767,13 @@ export function VoiceRoomView({ onLeave }: Props) {
     }
   }, [roomId]) // ← roomId only — activePKMatchId deliberately excluded
 
-  // Sync LiveKit mic with stage presence.
-  // HOST/MOD: on stage = unmuted (enableMic). Dropped to audience = muted (disableMic).
-  // SPEAKER: always enabled when role=SPEAKER.
-  // "Turn Off Mic" in the popup calls toggleMute() which sets isMuted=true in DB,
-  // which triggers this effect to disableMic(). HOST stays in stage grid if they
-  // want to stay on stage — they should use "Mute" (local only) for that.
-  // "End Mic" calls dropMic() which also sets isMuted=true → host moves to audience.
-  // The distinction is that "End Mic" is the intended "leave stage" action.
+  // Server state may revoke local capture, but must never activate hardware.
+  // Enabling the microphone is reserved for an explicit local button action.
   useEffect(() => {
     if (!roomId || !myParticipant) return
-    const onStage = myParticipant.role === VOICE_ROLES.SPEAKER ||
+    const mayKeepMicEnabled = (myParticipant.role === VOICE_ROLES.SPEAKER && !myParticipant.isMuted) ||
       ((myParticipant.role === VOICE_ROLES.HOST || myParticipant.role === VOICE_ROLES.MODERATOR) && !myParticipant.isMuted)
-    if (onStage) {
-      enableMic().catch(() => {})
-    } else {
+    if (!mayKeepMicEnabled) {
       disableMic().catch(() => {})
     }
   }, [myParticipant?.role, myParticipant?.isMuted]) // eslint-disable-line
@@ -869,7 +878,7 @@ export function VoiceRoomView({ onLeave }: Props) {
   }
 
   return (
-    <div className="vc-root">
+    <div className="vc-root" role="region" aria-label="Voice Room">
 
       {/* Mic pass offer modal (shown to receiver) */}
       {roomId && <MicPassModal roomId={roomId} />}
@@ -1121,7 +1130,7 @@ export function VoiceRoomView({ onLeave }: Props) {
             <span className="vc-header-emoji">{activeRoom.coverEmoji ?? '🎙️'}</span>
           )}
           <div className="vc-header-text">
-            <h2 className="vc-title">{activeRoom.title}</h2>
+            <h1 className="vc-title">{activeRoom.title}</h1>
             {/* "● Live Room" subtitle — matches target design */}
             <div className="vc-live-subtitle">
               <span className="vc-live-subtitle-dot" />
@@ -1131,7 +1140,20 @@ export function VoiceRoomView({ onLeave }: Props) {
         </div>
         <div className="vc-header-right">
           {isDisconnected && !micError && (
-            <button className="vc-reconnect-btn" onClick={() => connect()} title="Reconnect audio">🔄</button>
+            <button className="vc-reconnect-btn" onClick={() => connect()} title="Reconnect audio" aria-label="Reconnect audio">🔄</button>
+          )}
+          {/* LB-P1-3: minimal connection quality indicator — only shown while connected
+              and when quality is degraded (poor/lost). Non-intrusive: hidden on good/excellent. */}
+          {isConnected && (connectionQuality === ConnectionQuality.Poor || connectionQuality === ConnectionQuality.Lost) && (
+            <span
+              className="vc-conn-quality-warn"
+              title={connectionQuality === ConnectionQuality.Lost ? 'Connection lost' : 'Poor connection — audio may be degraded'}
+              aria-label={connectionQuality === ConnectionQuality.Lost ? 'Connection lost' : 'Poor connection'}
+              role="status"
+              style={{ fontSize: 13, lineHeight: 1, cursor: 'default', flexShrink: 0 }}
+            >
+              {connectionQuality === ConnectionQuality.Lost ? '❌' : '⚠️'}
+            </span>
           )}
           <span className={cn(
             'vc-conn-dot',
@@ -1156,7 +1178,7 @@ export function VoiceRoomView({ onLeave }: Props) {
             background: '#f5f3ff', color: '#5b21b6', border: '1px solid #ddd6fe', flexShrink: 0 }}>
             Lv{activeRoom.roomLevel ?? 1}
           </span>
-          <button className="vc-settings-btn" onClick={() => setShowDotMenu(v => !v)} title="Room options">⋮</button>
+          <button className="vc-settings-btn" onClick={() => setShowDotMenu(v => !v)} title="Room options" aria-label="Room options">⋮</button>
         </div>
       </div>
 
@@ -1274,7 +1296,7 @@ export function VoiceRoomView({ onLeave }: Props) {
                     </div>
                   </button>
 
-                  {/* Unmute All */}
+                  {/* Release room-wide mute; each speaker opts in locally */}
                   <button
                     onClick={() => { unmuteAll(); setShowDotMenu(false) }}
                     style={{
@@ -1287,8 +1309,8 @@ export function VoiceRoomView({ onLeave }: Props) {
                   >
                     <span style={{ fontSize: 18, width: 24, textAlign: 'center' }}>🔊</span>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: '#16a34a' }}>Unmute All</div>
-                      <div style={{ fontSize: 11, color: '#94a3b8' }}>Allow all speakers</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: '#16a34a' }}>Release Mute All</div>
+                      <div style={{ fontSize: 11, color: '#94a3b8' }}>Speakers may turn on their mic</div>
                     </div>
                   </button>
 
@@ -1438,7 +1460,7 @@ export function VoiceRoomView({ onLeave }: Props) {
             className="vc-participant-search-input"
           />
           {participantSearch && (
-            <button onClick={() => setParticipantSearch('')} className="vc-participant-search-clear">✕</button>
+            <button onClick={() => setParticipantSearch('')} className="vc-participant-search-clear" aria-label="Clear search">✕</button>
           )}
         </div>
       )}
@@ -1487,7 +1509,7 @@ export function VoiceRoomView({ onLeave }: Props) {
                   ✋ Hands {handQueue.length > 0 && <span className="vc-tab-badge">{handQueue.length}</span>}
                 </button>
               )}
-              <button className="vc-drawer-close" onClick={() => { if (isChatOpen) toggleChat(); if (isHandQueueOpen) toggleHandQueue() }}>✕</button>
+              <button className="vc-drawer-close" onClick={() => { if (isChatOpen) toggleChat(); if (isHandQueueOpen) toggleHandQueue() }} aria-label="Close">✕</button>
             </div>
 
             {isChatOpen && (
@@ -1512,6 +1534,7 @@ export function VoiceRoomView({ onLeave }: Props) {
                         <button
                           className="vc-msg-delete"
                           title="Delete message"
+                          aria-label="Delete message"
                           onClick={async () => {
                             try { await api.delete(`/voice/${roomId}/messages/${msg.id}`) } catch {}
                           }}
@@ -1703,13 +1726,43 @@ export function VoiceRoomView({ onLeave }: Props) {
               {/* Turn On / Turn Off Mic — LOCAL ONLY — stays on stage */}
               <button className="mic-menu-item" onClick={async () => {
                 setShowMicMenu(false)
-                // LOCAL mic toggle only — does NOT call backend, does NOT move HOST to audience.
-                // HOST remains visible in the speakers grid with muted badge.
-                // Use "End Mic" (below) to actually leave the stage.
                 if (isMicEnabled) {
                   await disableMic().catch(() => {})
                 } else {
-                  await enableMic().catch(() => {})
+                  // M1-B-7K-P8: Backend authorization check before hardware activation
+                  // Step 1: Check if user can unmute (role, moderator mute state)
+                  const canUnmute = await checkMicAuthorization()
+                  if (!canUnmute) {
+                    toast({
+                      title: 'Cannot unmute',
+                      description: 'You are muted by a moderator or do not have speaker permissions.',
+                      variant: 'destructive',
+                    })
+                    return
+                  }
+
+                  // Step 2: Activate hardware with authorization callback
+                  // Re-check authorization just before hardware activation to prevent race
+                  // (moderator could mute between step 1 and step 2)
+                  try {
+                    const ok = await enableMic(async () => {
+                      return await checkMicAuthorization()
+                    })
+
+                    if (!ok) {
+                      toast({
+                        title: 'Unable to enable microphone',
+                        description: 'Microphone permission or connection is not ready. Tap to retry.',
+                        variant: 'destructive',
+                      })
+                    }
+                  } catch (err: any) {
+                    toast({
+                      title: 'Microphone activation failed',
+                      description: err?.message || 'Could not access microphone hardware. Check browser permissions.',
+                      variant: 'destructive',
+                    })
+                  }
                 }
               }}>
                 <span className="mic-menu-icon">

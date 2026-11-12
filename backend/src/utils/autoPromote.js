@@ -2,21 +2,22 @@
  * autoPromote — shared helper
  * ─────────────────────────────────────────────────────────────────────────────
  * Called whenever a speaker slot is freed (drop mic, leave room, disconnect).
- * Pops the next user from the FIFO queue and promotes them to SPEAKER.
+ * Seats the next queued user muted, then removes their completed queue entry.
  * Broadcasts role_changed + queue_updated to the room.
  *
- * SEAT 1 RULE: Auto-promoted users always get role=SPEAKER (not HOST/MODERATOR).
- * The layout engine (computeStageLayout) places SPEAKER participants in Seats 2–12.
- * Seat 1 remains empty if no HOST/MOD is on stage — it is NEVER filled by
- * a normal user via auto-promotion.
+ * SEAT 1 RULE: AUDIENCE becomes SPEAKER and can use only Seats 2–12.
+ * Queued MODERATOR retains their role and existing Seat 1 eligibility.
  *
  * Returns the promoted user's userId, or null if queue was empty.
  */
 
-const { popNext, getQueue, requeue } = require('./voiceQueue');
+const { peekNext, requeue, dequeue, getQueue } = require('./voiceQueue');
 const { deleteCache, isRedisReady } = require('./redis');
 const { getNextStageVersion } = require('./voiceRoomCache');
 const logger = require('./logger');
+
+// INV-002: Sleep helper for exponential backoff in seat allocation retry loop
+const _sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const roomCacheKey = (roomId) => `voice:room:${roomId}`;
 
@@ -42,14 +43,14 @@ async function autoPromoteNext(roomId, io) {
 
   // PHASE 5 FIX: Use room.maxSpeakers as the authoritative capacity.
   // Normal users promoted here get role=SPEAKER and land in Seats 2–12.
-  // Seat 1 is only filled by HOST/MOD when they call grabMic/unmute themselves.
+  // A normal SPEAKER cannot occupy Seat 1.
   if (speakerCount >= (room.maxSpeakers || 12)) return null; // all seats full
 
-  // Pop next from queue (Redis-safe: fall back to DB handRaised)
+  // Peek without consuming: failed seat assignment must retain FIFO priority.
   let next = null;
   if (isRedisReady()) {
-    try { next = await popNext(roomId); } catch (err) {
-      logger.warn(`[autoPromote] Redis popNext failed: ${err.message}`);
+    try { next = await peekNext(roomId); } catch (err) {
+      logger.warn(`[autoPromote] Redis peekNext failed: ${err.message}`);
     }
   }
   if (!next) {
@@ -61,6 +62,7 @@ async function autoPromoteNext(roomId, io) {
         roomId,
         isActive: true,
         handRaised: true,
+        wasKicked: false,
         // AUDIENCE participants OR muted MODERATOR participants (in audience state)
         OR: [
           { role: 'AUDIENCE' },
@@ -84,6 +86,12 @@ async function autoPromoteNext(roomId, io) {
   }
 
   const { userId } = next;
+  async function skipStaleEntry() {
+    await dequeue(roomId, userId);
+    // dequeue is best-effort. Do not recurse forever on an unchanged Redis head.
+    if (isRedisReady() && (await peekNext(roomId))?.userId === userId) return null;
+    return autoPromoteNext(roomId, io);
+  }
 
   // Verify they're still active in the room
   const participant = await prisma.voiceParticipant.findUnique({
@@ -92,14 +100,14 @@ async function autoPromoteNext(roomId, io) {
 
   if (!participant || !participant.isActive) {
     // They left — try the next one recursively
-    return autoPromoteNext(roomId, io);
+    return skipStaleEntry();
   }
 
   // PH24C-007 FIX: Skip kicked participants — they must not be auto-promoted.
   // wasKicked=true means the host explicitly removed them; auto-promotion would
   // silently re-grant stage access, violating the kick contract.
-  if (participant.wasKicked) {
-    return autoPromoteNext(roomId, io);
+  if (participant.wasKicked || !participant.handRaised) {
+    return skipStaleEntry();
   }
 
   // QUEUE FIFO FIX: Accept both AUDIENCE and muted MODERATOR participants from the queue.
@@ -107,144 +115,178 @@ async function autoPromoteNext(roomId, io) {
   // If the participant is already on stage (seatNumber != null), skip them and try next.
   if (participant.seatNumber != null) {
     // Already on stage — clean up stale queue entry and try the next person
-    try {
-      await prisma.voiceParticipant.update({
-        where: { roomId_userId: { roomId, userId } },
-        data: { handRaised: false, handRaisedAt: null, updatedAt: new Date() }
-      });
-    } catch { /* non-fatal */ }
+    const cleaned = await prisma.voiceParticipant.updateMany({
+      where: { roomId, userId, isActive: true, role: participant.role, seatNumber: participant.seatNumber },
+      data: { handRaised: false, handRaisedAt: null, updatedAt: new Date() }
+    });
+    if (cleaned.count !== 1) return null;
     if (io) {
       io.to(`voice:${roomId}`).emit('voice:hand_raised', { roomId, userId, raised: false });
     }
-    return autoPromoteNext(roomId, io);
+    return skipStaleEntry();
   }
   const isQueueEligible = participant.role === 'AUDIENCE' ||
     (participant.role === 'MODERATOR' && participant.isMuted) ||
     (participant.role === 'SPEAKER' && participant.seatNumber == null); // ghost SPEAKER
   if (!isQueueEligible) {
     // They already got promoted or changed state — try next
-    return autoPromoteNext(roomId, io);
+    return skipStaleEntry();
   }
 
-  // Promote: AUDIENCE → SPEAKER with an assigned seat; muted MODERATOR → unmuted MODERATOR with a seat
-  const isMod = participant.role === 'MODERATOR';
-
-  // Find the lowest available seat for the promoted user
-  const occupiedRows = await prisma.$queryRaw`
-    SELECT seatNumber FROM voice_participants
-    WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
-  `;
-  const occupiedSet = new Set(occupiedRows.map(r => Number(r.seatNumber)));
-  const maxSp = room.maxSpeakers || 12;
-
-  // FIX-001: locked seats block new occupants (lockedSeats stored as 0-based indices → 1-based)
-  let _lockedSeats = room?.lockedSeats;
-  if (typeof _lockedSeats === 'string') { try { _lockedSeats = JSON.parse(_lockedSeats); } catch { _lockedSeats = []; } }
-  const lockedSet = new Set((Array.isArray(_lockedSeats) ? _lockedSeats : []).map(s => s + 1));
-
-  // SPEAKER gets Seats 2–12; MODERATOR can also get Seat 1 if empty (first available)
+  // Approval is seat consent only; microphone consent stays with self-unmute.
   let promotedSeat = null;
-  for (let s = 1; s <= maxSp; s++) {
-    if (occupiedSet.has(s)) continue;
-    if (lockedSet.has(s)) continue; // FIX-001: skip locked seats
-    if (s === 1 && !isMod) continue; // SPEAKER cannot take Seat 1
-    promotedSeat = s;
-    break;
-  }
+  let promotedRole;
+  let promotedModeratorMute;
 
-  if (promotedSeat === null) {
-    // FIX-001: no unlocked seat available (all free seats locked, or rare race) — do NOT recurse.
-    // Recursing would pop+drop every remaining queued user because locked seats stay locked.
-    // Instead, restore the just-popped user to the queue with their ORIGINAL FIFO score so they
-    // don't lose their place. Their DB handRaised flag remains regardless, so even if Redis is
-    // unavailable (requeue is then a safe no-op) the getQueue DB fallback / re-hydration still
-    // lists them. Callers ignore the return value; returning null signals "no promotion happened".
+  // INV-002: Retry loop for seat allocation race condition
+  const INV002_MAX_ATTEMPTS = 3;
+  const INV002_BACKOFF_MS = [50, 150];
+
+  for (let _attempt = 0; _attempt < INV002_MAX_ATTEMPTS; _attempt++) {
+    promotedSeat = null; // INV-002: reset before each attempt so stale values never pass the null guard
     try {
-      if (next && next.userId) {
-        await requeue(roomId, { userId: next.userId, firstName: next.firstName, lastName: next.lastName, avatarUrl: next.avatarUrl, raisedAt: next.raisedAt });
-      }
-    } catch { /* non-fatal — DB handRaised is the durable fallback */ }
-    return null;
-  }
-
-  // PH24C-004 FIX: Wrap seat assignment in try/catch to handle concurrent seat collision.
-  // Two simultaneous autoPromoteNext calls (e.g. two speakers drop at once) could both
-  // select the same lowest free seat, then race to write it. The @@unique([roomId,seatNumber])
-  // constraint catches the second write as P2002/ER_DUP_ENTRY. Previously this error
-  // propagated uncaught. Now: detect the collision, clean up the stale queue entry,
-  // and recurse to try the next eligible user — matching the existing grabMic pattern.
-  try {
-    if (isMod) {
-      // MODERATOR is exempt from allMuted — isMuted stays 0
-      await prisma.$executeRaw`
-        UPDATE voice_participants
-        SET seatNumber = ${promotedSeat}, isMuted = 0,
-            handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
-        WHERE roomId = ${roomId} AND userId = ${userId}
-      `;
-    } else {
-      // DEF-002: auto-promoted SPEAKERs respect the room-wide mute policy
-      const autoAllMuted = Boolean(room.allMuted);
-      await prisma.$executeRaw`
-        UPDATE voice_participants
-        SET seatNumber = ${promotedSeat}, role = 'SPEAKER', isMuted = ${autoAllMuted ? 1 : 0},
-            handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
-        WHERE roomId = ${roomId} AND userId = ${userId}
-      `;
-    }
-  } catch (assignErr) {
-    // PH24C-004: Detect duplicate-seat race (P2002 Prisma / ER_DUP_ENTRY MySQL)
-    const isDupSeat = assignErr.code === 'P2002' ||
-      (assignErr.message && (
-        assignErr.message.includes('Duplicate entry') ||
-        assignErr.message.includes('ER_DUP_ENTRY') ||
-        assignErr.message.includes('voice_participants_roomId_seatNumber_key')
-      ));
-    if (isDupSeat) {
-      logger.warn(`[autoPromote] Seat race for userId=${userId} room=${roomId} seat=${promotedSeat} — skipping to next in queue`);
-      // Clean up the stale handRaised flag so the host queue display is accurate
-      try {
-        await prisma.voiceParticipant.update({
-          where: { roomId_userId: { roomId, userId } },
-          data: { handRaised: false, handRaisedAt: null, updatedAt: new Date() }
+      await prisma.$transaction(async (tx) => {
+        const current = await tx.voiceParticipant.findUnique({ where: { roomId_userId: { roomId, userId } } });
+        const txRoom = await tx.voiceRoom.findUnique({ where: { id: roomId } });
+        const eligible = current?.role === 'AUDIENCE' ||
+          (current?.role === 'MODERATOR' && current.isMuted) || current?.role === 'SPEAKER';
+        if (!current?.isActive || current.wasKicked || !current.handRaised || current.seatNumber != null || !eligible) {
+          const err = new Error('Participant state changed during queue promotion'); err.statusCode = 409; throw err;
+        }
+        if (!txRoom || txRoom.deletedAt || txRoom.status === 'ENDED' || txRoom.micLocked) {
+          const err = new Error('The stage is unavailable for queue promotion'); err.statusCode = 403; throw err;
+        }
+        const occupiedRows = await tx.$queryRaw`
+          SELECT seatNumber FROM voice_participants
+          WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
+        `;
+        const occupiedSet = new Set(occupiedRows.map(r => Number(r.seatNumber)));
+        let lockedSeats = txRoom.lockedSeats;
+        if (typeof lockedSeats === 'string') { try { lockedSeats = JSON.parse(lockedSeats); } catch { lockedSeats = []; } }
+        const lockedSet = new Set((Array.isArray(lockedSeats) ? lockedSeats : []).map(s => s + 1));
+        const isMod = current.role === 'MODERATOR';
+        for (let s = 1; s <= (txRoom.maxSpeakers || 12); s++) {
+          if (occupiedSet.has(s) || lockedSet.has(s) || (s === 1 && !isMod)) continue;
+          promotedSeat = s; break;
+        }
+        if (promotedSeat === null) {
+          const err = new Error('No unlocked seat available'); err.statusCode = 409; throw err;
+        }
+        const updated = isMod
+          ? await tx.$executeRaw`
+              UPDATE voice_participants
+              SET seatNumber = ${promotedSeat}, isMuted = 1,
+                  handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
+              WHERE roomId = ${roomId} AND userId = ${userId}
+                AND isActive = 1 AND wasKicked = 0 AND role = ${current.role}
+                AND seatNumber IS NULL AND handRaised = 1
+            `
+          : await tx.$executeRaw`
+              UPDATE voice_participants
+              SET seatNumber = ${promotedSeat}, role = 'SPEAKER', isMuted = 1,
+                  handRaised = 0, handRaisedAt = NULL, updatedAt = NOW()
+              WHERE roomId = ${roomId} AND userId = ${userId}
+                AND isActive = 1 AND wasKicked = 0 AND role = ${current.role}
+                AND seatNumber IS NULL AND handRaised = 1
+            `;
+        if (Number(updated) !== 1) {
+          const err = new Error('Participant state changed during queue promotion'); err.statusCode = 409; throw err;
+        }
+        promotedRole = isMod ? 'MODERATOR' : 'SPEAKER';
+        const approved = await tx.voiceParticipant.findUnique({
+          where: { roomId_userId: { roomId, userId } }, select: { mutedByModerator: true },
         });
-      } catch { /* non-fatal */ }
-      if (io) {
-        io.to(`voice:${roomId}`).emit('voice:hand_raised', { roomId, userId, raised: false });
+        if (!approved) {
+          const err = new Error('Participant state changed during queue promotion'); err.statusCode = 409; throw err;
+        }
+        promotedModeratorMute = Boolean(approved.mutedByModerator);
+      });
+      // Success — exit retry loop
+      break;
+    } catch (assignErr) {
+      // INV-002: Detect duplicate-seat race (P2002 Prisma / ER_DUP_ENTRY MySQL)
+      const isDupSeat = assignErr.code === 'P2002' || assignErr.code === 'ER_DUP_ENTRY' ||
+        String(assignErr.meta?.code) === '1062' ||
+        (assignErr.message && (
+          assignErr.message.includes('Duplicate entry') ||
+          assignErr.message.includes('ER_DUP_ENTRY') ||
+          assignErr.message.includes('voice_participants_roomId_seatNumber_key')
+        ));
+      if (isDupSeat) {
+        logger.warn(`[autoPromote] Seat race attempt ${_attempt + 1}/${INV002_MAX_ATTEMPTS} for userId=${userId} room=${roomId} seat=${promotedSeat}`);
+        if (_attempt < INV002_MAX_ATTEMPTS - 1) {
+          // Recalculate seat availability before retry
+          const freshCount = await prisma.$queryRaw`
+            SELECT COUNT(*) as cnt FROM voice_participants
+            WHERE roomId = ${roomId} AND isActive = 1 AND seatNumber IS NOT NULL
+          `.then(rows => Number(rows[0]?.cnt ?? 0));
+          if (freshCount >= (room.maxSpeakers || 12)) {
+            logger.warn(`[autoPromote] No seats available after race, skipping retry (userId=${userId})`);
+            return null;
+          }
+          await _sleep(INV002_BACKOFF_MS[_attempt]);
+          continue;
+        }
+        // All attempts exhausted — retain queue position
+        logger.warn(`[autoPromote] Seat race exhausted retries for userId=${userId} room=${roomId} — retaining queue position`);
+        return null;
       }
-      // Recurse to try next in queue — autoPromoteNext already has existing recursion
-      // with termination conditions (empty queue returns null), so infinite loop is impossible.
-      return autoPromoteNext(roomId, io);
+      if (assignErr.statusCode === 403 || assignErr.statusCode === 409) {
+        // F5E (T-AUTO): on locked-seat 409, requeue the user with their original FIFO
+        // score so they stay at the front of the queue for the next available slot.
+        // We already called popNext (not peek), so the entry was consumed; we must
+        // restore it. The 403 path (mic locked / room ended) drops the user intentionally.
+        if (assignErr.statusCode === 409 &&
+            assignErr.message === 'No unlocked seat available' &&
+            next?.raisedAt) {
+          try {
+            await requeue(roomId, {
+              userId,
+              firstName: next.firstName ?? null,
+              lastName:  next.lastName  ?? null,
+              avatarUrl: next.avatarUrl ?? null,
+              raisedAt:  next.raisedAt,
+            });
+          } catch (requeueErr) {
+            logger.warn(`[autoPromote] requeue failed for userId=${userId}: ${requeueErr.message}`);
+          }
+        }
+        return null;
+      }
+      // Non-seat-race error — re-throw so callers see it
+      throw assignErr;
     }
-    // Non-seat-race error — re-throw so callers see it
-    throw assignErr;
   }
 
+  await dequeue(roomId, userId);
   try { await deleteCache(roomCacheKey(roomId)); } catch (err) { /* ignore */ }
 
   if (io) {
-    const isMod = participant.role === 'MODERATOR';
+    const isMod = promotedRole === 'MODERATOR';
     if (isMod) {
       // MODERATOR returns to stage — emit mute_changed + seatNumber
       io.to(`voice:${roomId}`).emit('voice:mute_changed', {
-        roomId, userId, isMuted: false, seatNumber: promotedSeat
+        roomId, userId, role: promotedRole, isMuted: true, mutedByModerator: promotedModeratorMute, seatNumber: promotedSeat
       });
     } else {
       // AUDIENCE → SPEAKER — emit role_changed with seatNumber
       io.to(`voice:${roomId}`).emit('voice:role_changed', {
-        roomId, userId, role: 'SPEAKER', seatNumber: promotedSeat
+        roomId, userId, role: promotedRole, isMuted: true, mutedByModerator: promotedModeratorMute, seatNumber: promotedSeat
       });
     }
     io.to(`user:${userId}`).emit('voice:promoted_to_speaker', {
       roomId,
+      role: promotedRole,
+      isMuted: true,
+      mutedByModerator: promotedModeratorMute,
       seatNumber: promotedSeat,
-      message: `🎙️ You're on stage at Seat ${promotedSeat}!`
+      handRaised: false,
+      message: `🎙️ You're on stage at Seat ${promotedSeat}. Tap the microphone to speak.`
     });
+    io.to(`voice:${roomId}`).emit('voice:hand_raised', { roomId, userId, raised: false });
     // Broadcast updated queue
     let q = [];
-    if (isRedisReady()) {
-      try { q = await getQueue(roomId); } catch (err) { /* ignore */ }
-    }
+    try { q = await getQueue(roomId); } catch (err) { /* DB fallback is provided by getQueue */ }
     io.to(`voice:${roomId}`).emit('voice:queue_updated', {
       roomId, queue: q, queueLength: q.length
     });

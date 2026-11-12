@@ -1,49 +1,31 @@
 const { AccessToken } = require('livekit-server-sdk');
 const prisma = require('../utils/prisma');
+const { Prisma } = require('@prisma/client');
 const { successResponse, errorResponse } = require('../utils/response');
+const { getVoiceAudioPermission } = require('../utils/voiceAudioPermission');
 
 /**
  * POST /voice/rooms/:id/livekit-token
  *
  * Issues a LiveKit access token for the caller.
  *
- * ALL participants get canPublish: true — LiveKit does not enforce mic access.
- * The backend controls who actually speaks via Socket.IO (voice:role_changed).
- * The frontend enables/disables the mic track based on role, never reconnects.
- *
- * This gives ONE stable WebRTC connection per session regardless of role changes.
+ * Publish permission is derived from fresh room and participant state. Socket.IO
+ * and client UI are synchronization layers, never authorization boundaries.
  */
 async function getLiveKitToken(req, res, next) {
   try {
     const { id: roomId } = req.params;
     const userId = req.user.id;
 
-    // ── Validate room ──────────────────────────────────────────────────────
-    const room = await prisma.voiceRoom.findUnique({
-      where: { id: roomId },
-      select: { status: true, deletedAt: true, micLocked: true, allMuted: true }  // DEF-001/V3: include allMuted
-    });
-    if (!room || room.deletedAt) return errorResponse(res, 'Room not found', 404);
-    // PERMANENT ROOMS: Only archived rooms (ENDED) cannot issue tokens.
-    // IDLE rooms can issue tokens — joining them re-activates them to LIVE.
-    if (room.status === 'ENDED') return errorResponse(res, 'This room has been archived', 400);
+    const apiKey    = process.env.LIVEKIT_API_KEY;
+    const apiSecret = process.env.LIVEKIT_API_SECRET;
 
-    // ── Validate participant ───────────────────────────────────────────────
-    const participant = await prisma.voiceParticipant.findUnique({
-      where: { roomId_userId: { roomId, userId } },
-      select: { role: true, isActive: true, isMuted: true }  // V3: include isMuted for canPublish logic
-    });
-    if (!participant || !participant.isActive) {
-      return errorResponse(res, 'You are not an active participant in this room', 403);
+    if (!apiKey || !apiSecret) {
+      return errorResponse(res, 'LiveKit is not configured on this server', 503);
     }
 
-    // SEC-BAN-01: Banned users must not receive new LiveKit tokens.
-    // Tokens are long-lived (1h) so a ban applied after token issue won't take effect
-    // until expiry — but we can at least block new token requests immediately.
-    // The platform-ban flow (report-block.controller.js) sets user.status='BANNED'
-    // but does NOT deactivate VoiceParticipant, so the participant check above is
-    // insufficient on its own. Query fresh from DB — req.user is JWT-derived and
-    // may be stale if the ban was applied after the current access token was issued.
+    // SEC-BAN-01: fast pre-check before acquiring any lock.
+    // req.user is JWT-derived and may be stale — always query fresh from DB.
     const freshUser = await prisma.user.findUnique({
       where:  { id: userId },
       select: { status: true },
@@ -52,80 +34,93 @@ async function getLiveKitToken(req, res, next) {
       return errorResponse(res, 'Your account has been suspended', 403);
     }
 
-    const role = participant.role; // HOST | MODERATOR | SPEAKER | AUDIENCE
+    // INV-001-7C: DB lifecycle lock serializes token signing against room termination.
+    // NOTE: This lock orders token signing against concurrent termination.
+    // It does NOT cryptographically revoke JWTs already signed before this call.
+    // Self-hosted LiveKit has no server-side token revocation capability.
+    let tokenResult;
+    try {
+      tokenResult = await prisma.$transaction(
+        async (tx) => {
+          // 1. Acquire room row lock — same order as joinRoom() and terminateVoiceRoom().
+          await tx.$queryRaw`SELECT id FROM voice_rooms WHERE id = ${roomId} FOR UPDATE`;
 
-    // ── Build LiveKit token ────────────────────────────────────────────────
-    const apiKey    = process.env.LIVEKIT_API_KEY;
-    const apiSecret = process.env.LIVEKIT_API_SECRET;
+          // 2. Re-read room state inside the lock.
+          const room = await tx.voiceRoom.findUnique({
+            where: { id: roomId },
+            select: { status: true, deletedAt: true, micLocked: true, allMuted: true },
+          });
+          if (!room || room.deletedAt) {
+            const err = new Error('Room not found');
+            err.statusCode = 404;
+            throw err;
+          }
+          // PERMANENT ROOMS: only archived rooms (ENDED) cannot issue tokens.
+          if (room.status === 'ENDED') {
+            const err = new Error('This room has been archived');
+            err.statusCode = 400;
+            throw err;
+          }
 
-    if (!apiKey || !apiSecret) {
-      return errorResponse(res, 'LiveKit is not configured on this server', 503);
+          // 3. Re-read participant inside the lock.
+          const participant = await tx.voiceParticipant.findUnique({
+            where: { roomId_userId: { roomId, userId } },
+            select: {
+              role: true,
+              isActive: true,
+              isMuted: true,
+              mutedByModerator: true,
+              seatNumber: true,
+            },
+          });
+          if (!participant || !participant.isActive) {
+            const err = new Error('You are not an active participant in this room');
+            err.statusCode = 403;
+            throw err;
+          }
+
+          // 4. Sign JWT while the lifecycle lock is held.
+          const at = new AccessToken(apiKey, apiSecret, {
+            identity: userId,
+            name: `${req.user.firstName} ${req.user.lastName}`,
+            // INV-001: Voice Club token TTL reduced 1h → 10m (room ends revoke SFU).
+            ttl: '10m',
+          });
+
+          const permission = getVoiceAudioPermission({ participant, room });
+          at.addGrant({
+            roomJoin:             true,
+            room:                 roomId,
+            canPublish:           permission.canPublishAudio,
+            canSubscribe:         true,
+            canPublishData:       true,
+            canUpdateOwnMetadata: true,
+          });
+
+          const token = await at.toJwt();
+          return {
+            token,
+            role:                 participant.role,
+            micEnabled:           permission.canPublishAudio,
+            audioPermissionReason: permission.reason,
+          };
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }
+      );
+    } catch (txErr) {
+      if (txErr.statusCode === 404) return errorResponse(res, 'Room not found', 404);
+      if (txErr.statusCode === 400) return errorResponse(res, 'This room has been archived', 400);
+      if (txErr.statusCode === 403) return errorResponse(res, txErr.message, 403);
+      throw txErr;
     }
-
-    const at = new AccessToken(apiKey, apiSecret, {
-      identity: userId,
-      name: `${req.user.firstName} ${req.user.lastName}`,
-      // LV-002: Reduced TTL from 8h → 1h.
-      ttl: '1h'
-    });
-
-    // PH17-001 / mic-lock token gate + DEF-001/V3 allMuted + individual isMuted:
-    //
-    // Policy hierarchy (highest priority first):
-    //   1. micLocked  → only HOST/MOD can publish (stage hardware lock)
-    //   2. allMuted   → only HOST/MOD can publish (room-wide mute policy, DEF-001)
-    //   3. isMuted    → SPEAKER individually muted cannot publish (V3 fix)
-    //   4. default    → canPublish:true
-    //
-    // HOST and MODERATOR are EXEMPT from allMuted and individual isMuted checks.
-    // They retain full publish capability unless micLocked (which also applies to them — 
-    // actually micLocked only restricts non-privileged: see original logic below).
-    //
-    // Original micLocked contract preserved: when locked, only HOST/MOD can publish.
-    const isPrivileged = role === 'HOST' || role === 'MODERATOR';
-    const micLocked = Boolean(room.micLocked);
-    const allMuted  = Boolean(room.allMuted);
-
-    let canPublishAudio;
-    if (micLocked) {
-      // Mic lock: only HOST/MOD can publish (original PH17-001 behaviour preserved)
-      canPublishAudio = isPrivileged;
-    } else if (allMuted) {
-      // Room-wide mute (DEF-001): only HOST/MOD can publish
-      canPublishAudio = isPrivileged;
-    } else if (participant.isMuted && !isPrivileged) {
-      // Individual mute (V3): muted SPEAKER cannot publish via token
-      // HOST/MOD control their own isMuted independently — they stay publishable
-      canPublishAudio = false;
-    } else {
-      canPublishAudio = true;
-    }
-
-    at.addGrant({
-      roomJoin:             true,
-      room:                 roomId,
-      canPublish:           canPublishAudio,
-      canSubscribe:         true,
-      canPublishData:       true,
-      canUpdateOwnMetadata: true
-    });
-
-    const token = await at.toJwt();
-
-    // Tell the frontend whether to start with mic ON or OFF.
-    // HOST/MOD start muted (in audience state) — they unmute by calling grabMic/drop-mic.
-    // SPEAKER is always on stage with mic active.
-    // This is the initial mic state hint only; the client uses Socket.IO role events
-    // to enable/disable the mic track throughout the session.
-    const micEnabled = role === 'SPEAKER' ||
-      ((role === 'HOST' || role === 'MODERATOR') && !participant.isMuted);
 
     return successResponse(res, {
-      token,
-      livekitUrl: process.env.LIVEKIT_URL || 'wss://your-livekit-server.livekit.cloud',
+      token:                 tokenResult.token,
+      livekitUrl:            process.env.LIVEKIT_URL || 'wss://your-livekit-server.livekit.cloud',
       roomId,
-      role,
-      micEnabled   // frontend uses this to set initial mic state, not canPublish
+      role:                  tokenResult.role,
+      micEnabled:            tokenResult.micEnabled,
+      audioPermissionReason: tokenResult.audioPermissionReason,
     });
   } catch (error) {
     next(error);
@@ -254,64 +249,110 @@ async function generateToken(req, res, next) {
     //
     // Non-voice, non-liveclass rooms (e.g. PK rooms, custom rooms) are NOT
     // subject to this check — they use their own authorization paths.
+    // INV-001: hoist voiceRoom so the TTL decision below can read it.
+    let voiceRoom = null;
     if (roomId && !roomId.startsWith('liveclass-')) {
       // Check if this is a voice room by looking it up in the DB
       // Only apply restriction when the room exists in the voice_rooms table
-      let voiceRoom = null;
       try {
         voiceRoom = await prisma.voiceRoom.findUnique({
           where: { id: roomId },
           select: { id: true, status: true, deletedAt: true },
         });
-      } catch {
-        // DB lookup failed — skip voice room check (graceful degradation)
-        // The dedicated /voice/:id/livekit-token endpoint is always the recommended path
-        voiceRoom = null;
+      } catch (dbErr) {
+        // INV-001: fail-closed — a DB outage must not mint tokens for unknown rooms.
+        return errorResponse(res, 'Unable to verify room status', 503);
       }
 
       if (voiceRoom) {
-        // It IS a voice room — enforce active participant check
-        if (voiceRoom.deletedAt) {
-          return errorResponse(res, 'Room not found', 404);
-        }
-        if (voiceRoom.status === 'ENDED') {
-          return errorResponse(res, 'Room has ended', 400);
-        }
-
-        let voiceParticipant = null;
+        // It IS a voice room — wrap participant check + JWT signing in lifecycle lock.
+        // INV-001-7C: DB lock serializes token signing against termination.
+        // It does NOT revoke already-issued JWTs. Self-hosted LiveKit has no token revocation.
+        let voiceTokenResult;
         try {
-          voiceParticipant = await prisma.voiceParticipant.findUnique({
-            where: { roomId_userId: { roomId, userId } },
-            select: { isActive: true },
-          });
-        } catch {
-          voiceParticipant = null;
-        }
-
-        if (!voiceParticipant?.isActive) {
-          return errorResponse(
-            res,
-            'You are not an active participant in this voice room. Use POST /voice/:id/livekit-token instead.',
-            403
+          voiceTokenResult = await prisma.$transaction(
+            async (tx) => {
+              // 1. Acquire room row lock — same order as joinRoom() and terminateVoiceRoom().
+              await tx.$queryRaw`SELECT id FROM voice_rooms WHERE id = ${roomId} FOR UPDATE`;
+              // 2. Re-read room inside lock.
+              const lockedRoom = await tx.voiceRoom.findUnique({
+                where: { id: roomId },
+                select: { status: true, deletedAt: true },
+              });
+              if (!lockedRoom || lockedRoom.deletedAt) {
+                const err = new Error('Room not found');
+                err.statusCode = 404;
+                throw err;
+              }
+              if (lockedRoom.status === 'ENDED') {
+                const err = new Error('Room has ended');
+                err.statusCode = 400;
+                throw err;
+              }
+              // 3. Re-read participant inside lock.
+              let voiceParticipant = null;
+              try {
+                voiceParticipant = await tx.voiceParticipant.findUnique({
+                  where: { roomId_userId: { roomId, userId } },
+                  select: { isActive: true },
+                });
+              } catch (dbErr) {
+                // INV-001-7E: fail-closed — DB error must not silently issue a token.
+                const err = new Error('Unable to verify participant status');
+                err.statusCode = 503;
+                throw err;
+              }
+              if (!voiceParticipant?.isActive) {
+                const err = new Error('You are not an active participant in this voice room. Use POST /voice/:id/livekit-token instead.');
+                err.statusCode = 403;
+                throw err;
+              }
+              // 4. Sign token inside lock — ttl is '10m' for voice rooms (INV-001).
+              const at = new AccessToken(apiKey, apiSecret, {
+                identity: userId,
+                name:     `${req.user.firstName} ${req.user.lastName}`,
+                ttl:      '10m',
+              });
+              at.addGrant({
+                roomJoin:             true,
+                room:                 roomId,
+                canPublish:           false,              // P24M-01: subscribe-only for generic endpoint
+                canSubscribe:         Boolean(canSubscribe),
+                canPublishData:       false,
+                canUpdateOwnMetadata: true,
+              });
+              const token = await at.toJwt();
+              return { token };
+            },
+            { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }
           );
+        } catch (txErr) {
+          if (txErr.statusCode === 404) return errorResponse(res, 'Room not found', 404);
+          if (txErr.statusCode === 400) return errorResponse(res, txErr.message, 400);
+          if (txErr.statusCode === 403) return errorResponse(res, txErr.message, 403);
+          if (txErr.statusCode === 503) return errorResponse(res, txErr.message, 503);
+          throw txErr;
         }
+        return successResponse(res, {
+          token:      voiceTokenResult.token,
+          livekitUrl: process.env.LIVEKIT_URL || 'wss://your-livekit-server.livekit.cloud',
+          roomId,
+          identity:   userId,
+        });
       }
       // Not a voice room (PK, custom, etc.) — allow through (no DB restriction applies)
     }
 
+    // Non-voice room path (PK, custom, etc.) — existing behavior unchanged, no lock.
     const at = new AccessToken(apiKey, apiSecret, {
       identity: userId,
       name:     `${req.user.firstName} ${req.user.lastName}`,
-      // LV-002: 1h TTL — consistent with the room-specific token above.
+      // INV-001: Voice Club rooms get 10m TTL; all others stay 1h.
+      // Voice rooms return early above — this path is for non-voice rooms only.
       ttl:      '1h',
     });
 
     // P24M-01 FIX: Never honor client-supplied canPublish for unknown/non-HALQA room types.
-    // Publish capability requires explicit server-side authorization, which only the
-    // dedicated room-type-specific checks above (liveclass-* and voice UUID paths) provide.
-    // For any room that did not go through an authorized path (e.g. custom PK/external rooms),
-    // default to subscribe-only so a client cannot self-elevate by sending canPublish:true.
-    // canSubscribe remains client-controllable since it does not grant broadcast capability.
     at.addGrant({
       roomJoin:             true,
       room:                 roomId,

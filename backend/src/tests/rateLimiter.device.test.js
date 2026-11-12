@@ -126,7 +126,6 @@ describe('Lazy-initialization behavior (proxy exports)', () => {
 
     const loggerModule = require('../utils/logger');
     const warnSpy = jest.spyOn(loggerModule, 'warn');
-
     require('../middleware/rateLimiter.device');
 
     const deviceWarns = warnSpy.mock.calls.filter(
@@ -176,6 +175,7 @@ describe('Lazy-initialization behavior (proxy exports)', () => {
 
   test('warn fires at first request (not module load) when Redis unavailable', async () => {
     jest.resetModules();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     jest.mock('../utils/redis', () => ({
       isRedisReady: jest.fn().mockReturnValue(false),
@@ -204,6 +204,7 @@ describe('Lazy-initialization behavior (proxy exports)', () => {
       (args) => typeof args[0] === 'string' && args[0].includes('[deviceRateLimiter] Redis unavailable')
     );
     expect(warnsAfterRequest.length).toBeGreaterThanOrEqual(1);
+    expect(errorSpy.mock.calls.flat().join(' ')).not.toContain('ERR_ERL_CREATED_IN_REQUEST_HANDLER');
 
     jest.resetModules();
     jest.unmock('../utils/redis');
@@ -223,6 +224,7 @@ describe('Lazy-initialization behavior (proxy exports)', () => {
     app.use(express.json());
     app.get('/test', moderateDeviceLimiter, (_req, res) => res.json({ ok: true }));
 
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     const res = await request(app).get('/test').set(DEVICE_HEADERS);
     expect([200, 429]).toContain(res.status);
 
@@ -234,8 +236,91 @@ describe('Lazy-initialization behavior (proxy exports)', () => {
         (args) => typeof args[0] === 'string' && args[0].includes('[deviceRateLimiter] Redis unavailable')
       )
     ).toHaveLength(0);
+    expect(errorSpy.mock.calls.flat().join(' ')).not.toContain('ERR_ERL_CREATED_IN_REQUEST_HANDLER');
 
     jest.resetModules();
     jest.unmock('../utils/redis');
+  });
+
+  test('caches the first-request memory selection without switching to Redis', async () => {
+    jest.resetModules();
+    const mockIsRedisReady = jest.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    const mockGetCache = jest.fn();
+    jest.doMock('../utils/redis', () => ({
+      isRedisReady: mockIsRedisReady,
+      getCache: mockGetCache,
+      setCache: jest.fn(),
+    }));
+
+    const { strictDeviceLimiter } = require('../middleware/rateLimiter.device');
+    const app = express();
+    app.get('/test', strictDeviceLimiter, (_req, res) => res.json({ ok: true }));
+    await request(app).get('/test').set(DEVICE_HEADERS);
+    await request(app).get('/test').set(DEVICE_HEADERS);
+
+    expect(mockIsRedisReady).toHaveBeenCalledTimes(1);
+    expect(mockGetCache).not.toHaveBeenCalled();
+    jest.resetModules();
+    jest.unmock('../utils/redis');
+  });
+
+  test('preserves Redis device and per-user key formats', async () => {
+    jest.resetModules();
+    const mockGetCache = jest.fn().mockResolvedValue(null);
+    const mockSetCache = jest.fn().mockResolvedValue('OK');
+    jest.doMock('../utils/redis', () => ({
+      isRedisReady: jest.fn().mockReturnValue(true),
+      getCache: mockGetCache,
+      setCache: mockSetCache,
+    }));
+
+    const { strictDeviceLimiter, generateDeviceFingerprint } = require('../middleware/rateLimiter.device');
+    const app = express();
+    app.use((req, _res, next) => { req.user = { id: 'device-user' }; next(); });
+    app.get('/test', strictDeviceLimiter, (_req, res) => res.json({ ok: true }));
+    expect((await request(app).get('/test').set(DEVICE_HEADERS)).status).toBe(200);
+
+    const fingerprint = generateDeviceFingerprint({ headers: DEVICE_HEADERS });
+    expect(mockGetCache).toHaveBeenCalledWith(`ratelimit:device:${fingerprint}`);
+    expect(mockGetCache).toHaveBeenCalledWith('ratelimit:user:devices:device-user');
+    jest.resetModules();
+    jest.unmock('../utils/redis');
+  });
+});
+
+describe('Device limiter policy parity', () => {
+  test('independent configured stores do not share counters', async () => {
+    const first = createDeviceRateLimiter({ max: 1 });
+    const second = createDeviceRateLimiter({ max: 1 });
+    const app = express();
+    app.get('/first', first, (_req, res) => res.json({ ok: true }));
+    app.get('/second', second, (_req, res) => res.json({ ok: true }));
+    expect((await request(app).get('/first').set(DEVICE_HEADERS)).status).toBe(200);
+    expect((await request(app).get('/second').set(DEVICE_HEADERS)).status).toBe(200);
+    expect((await request(app).get('/first').set(DEVICE_HEADERS)).status).toBe(429);
+    expect((await request(app).get('/second').set(DEVICE_HEADERS)).status).toBe(429);
+  });
+
+  test('production strict device threshold remains three requests', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    jest.resetModules();
+    jest.doMock('../utils/redis', () => ({
+      isRedisReady: jest.fn().mockReturnValue(false), getCache: jest.fn(), setCache: jest.fn(),
+    }));
+    try {
+      const { strictDeviceLimiter } = require('../middleware/rateLimiter.device');
+      const app = express();
+      app.get('/test', strictDeviceLimiter, (_req, res) => res.json({ ok: true }));
+      for (let i = 0; i < 3; i++) {
+        expect((await request(app).get('/test').set(DEVICE_HEADERS)).status).toBe(200);
+      }
+      expect((await request(app).get('/test').set(DEVICE_HEADERS)).status).toBe(429);
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      jest.resetModules();
+      jest.unmock('../utils/redis');
+    }
   });
 });

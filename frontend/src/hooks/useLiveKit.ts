@@ -21,23 +21,29 @@ import {
   RemoteParticipant,
   RemoteTrackPublication,
   ConnectionState,
+  ConnectionQuality,
   DisconnectReason,
   type RemoteAudioTrack,
 } from 'livekit-client'
 import api from '@/lib/api'
 import { useVoiceStore } from '@/store/voice.store'
 import { getSocket } from '@/lib/socket'
+import { useNetworkQuality, qualityToAudioBitrate } from '@/hooks/useNetworkQuality'
 
 export interface LiveKitState {
   room: Room | null
   connectionState: ConnectionState
+  // LB-P1-1: self connection quality from LiveKit RoomEvent.ConnectionQualityChanged
+  connectionQuality: ConnectionQuality
   isMicEnabled: boolean
+  isMicPending: boolean  // SEC01-WEB-P1-R2: mic activation in progress (hardware capture pending)
   activeSpeakers: Set<string>
   connect: () => Promise<void>
   disconnect: () => void
   toggleMic: () => Promise<void>
   // Called by useVoiceRoom when Socket.IO says role changed — no reconnect needed
-  enableMic: () => Promise<void>
+  // SEC01-WEB-P1-R2: MANDATORY authorize callback - backend permission check required before hardware activation
+  enableMic: (authorize: () => Promise<boolean>) => Promise<boolean>
   disableMic: () => Promise<void>
 }
 
@@ -90,15 +96,32 @@ function detachAllAudio() {
 export function useLiveKit(roomId: string | null): LiveKitState {
   const { setSpeaking } = useVoiceStore()
 
-  const roomRef           = useRef<Room | null>(null)
-  const reconnectTimer    = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const reconnectAttempts = useRef(0)
-  const isUnmounted       = useRef(false)
-  const isConnecting      = useRef(false)
+  // LB-CHANGE-001: network quality drives audio bitrate adaptation (mirrors mobile Phase 2)
+  const { quality } = useNetworkQuality()
 
-  const [connectionState, setConnectionState] = useState<ConnectionState>(ConnectionState.Disconnected)
-  const [isMicEnabled, setIsMicEnabled]       = useState(false)
-  const [activeSpeakers, setActiveSpeakers]   = useState<Set<string>>(new Set())
+  const roomRef                = useRef<Room | null>(null)
+  const reconnectTimer         = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const tokenRefreshTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const reconnectAttempts      = useRef(0)
+  const isUnmounted            = useRef(false)
+  const isConnecting           = useRef(false)
+  const isInitialConnectionRef = useRef(true)   // FIX-01: distinguish initial from reconnect
+  const localMicIntentRef      = useRef(false)  // FIX-01: track user's current mic intent
+  
+  // SEC01-WEB-P1-R2: Monotonic operation versioning for race protection
+  interface MicOperation {
+    id: string
+    type: 'ENABLE' | 'DISABLE'
+    timestamp: number
+    aborted: boolean
+  }
+  const pendingMicOpRef = useRef<MicOperation | null>(null)
+
+  const [connectionState,   setConnectionState]   = useState<ConnectionState>(ConnectionState.Disconnected)
+  const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>(ConnectionQuality.Unknown)
+  const [isMicEnabled, setIsMicEnabled]           = useState(false)
+  const [isMicPending, setIsMicPending]           = useState(false)  // SEC01-WEB-P1-R2: mic activation in progress
+  const [activeSpeakers, setActiveSpeakers]       = useState<Set<string>>(new Set())
   const activeSpeakersRef = useRef<Set<string>>(new Set())
 
   const clearReconnectTimer = useCallback(() => {
@@ -181,6 +204,17 @@ export function useLiveKit(roomId: string | null): LiveKitState {
         }
       })
 
+      // LB-P1-3: track local participant's connection quality from the SFU.
+      // Used by VoiceRoomView to show a minimal quality indicator in the header.
+      room.on(RoomEvent.ConnectionQualityChanged, (qual: ConnectionQuality, participant) => {
+        if (isUnmounted.current) return
+        // Only track our own quality (local participant identity may not be set yet at
+        // subscribe time, so also accept when participant matches the local participant)
+        if (participant === room.localParticipant) {
+          setConnectionQuality(qual)
+        }
+      })
+
       room.on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
         if (isUnmounted.current) return
         setIsMicEnabled(false)
@@ -189,8 +223,9 @@ export function useLiveKit(roomId: string | null): LiveKitState {
         detachAllAudio()
 
         // Clear any pending token refresh timer
-        if ((roomRef.current as any)?._tokenRefreshTimer) {
-          clearTimeout((roomRef.current as any)._tokenRefreshTimer)
+        if (tokenRefreshTimerRef.current) {
+          clearTimeout(tokenRefreshTimerRef.current)
+          tokenRefreshTimerRef.current = null
         }
 
         const shouldReconnect = reason === undefined || !NO_RECONNECT_REASONS.has(reason)
@@ -206,7 +241,7 @@ export function useLiveKit(roomId: string | null): LiveKitState {
       // The LiveKit token TTL is 1h. At 55 min we gracefully reconnect so the
       // user never sees a forced disconnection from token expiry.
       const TOKEN_REFRESH_MS = 55 * 60 * 1000 // 55 minutes
-      const tokenRefreshTimer = setTimeout(() => {
+      tokenRefreshTimerRef.current = setTimeout(() => {
         if (isUnmounted.current) return
         const r = roomRef.current
         if (r && r.state === ConnectionState.Connected) {
@@ -216,7 +251,6 @@ export function useLiveKit(roomId: string | null): LiveKitState {
           r.disconnect() // triggers Disconnected → connect() with a new token
         }
       }, TOKEN_REFRESH_MS)
-      ;(room as any)._tokenRefreshTimer = tokenRefreshTimer
 
       room.on(RoomEvent.Reconnecting, () => {
         if (!isUnmounted.current) setConnectionState(ConnectionState.Reconnecting)
@@ -246,14 +280,20 @@ export function useLiveKit(roomId: string | null): LiveKitState {
 
       room.on(RoomEvent.TrackMuted, (pub, participant) => {
         if (participant.identity === room.localParticipant.identity) {
-          if (pub.source === Track.Source.Microphone) setIsMicEnabled(false)
+          if (pub.source === Track.Source.Microphone) {
+            setIsMicEnabled(false)
+            localMicIntentRef.current = false  // FIX-01: track SDK-driven state changes
+          }
         }
         // Remote track mute/unmute is handled by LiveKit internally via track.attach()
       })
 
       room.on(RoomEvent.TrackUnmuted, (pub, participant) => {
         if (participant.identity === room.localParticipant.identity) {
-          if (pub.source === Track.Source.Microphone) setIsMicEnabled(true)
+          if (pub.source === Track.Source.Microphone) {
+            setIsMicEnabled(true)
+            localMicIntentRef.current = true  // FIX-01: track SDK-driven state changes
+          }
         }
       })
 
@@ -295,9 +335,21 @@ export function useLiveKit(roomId: string | null): LiveKitState {
         })
       })
 
-      // Set initial mic state based on role — no reconnect ever needed for role changes
-      await room.localParticipant.setMicrophoneEnabled(!!micEnabled)
-      setIsMicEnabled(!!micEnabled)
+      // FIX-01 + C1A: On initial connection, always start listening-only. On reconnection, preserve local intent.
+      if (isInitialConnectionRef.current) {
+        // C1A: Always start listening-only on initial connection for security
+        // Ignore backend micEnabled hint to prevent unauthorized mic activation
+        await room.localParticipant.setMicrophoneEnabled(false)
+        setIsMicEnabled(false)
+        localMicIntentRef.current = false
+        isInitialConnectionRef.current = false
+      } else {
+        // Reconnection: user's CURRENT local intent is authoritative
+        // (preserves explicit OFF if user muted before disconnect,
+        //  preserves explicit ON if user was actively speaking)
+        await room.localParticipant.setMicrophoneEnabled(localMicIntentRef.current)
+        setIsMicEnabled(localMicIntentRef.current)
+      }
 
     } catch (err: any) {
       const isTransient =
@@ -319,13 +371,21 @@ export function useLiveKit(roomId: string | null): LiveKitState {
 
   // ── Explicit disconnect (user-initiated) ──────────────────────────────────
   const disconnect = useCallback(() => {
+    // SEC01-WEB-P1-R2: Abort any pending microphone operations on disconnect
+    if (pendingMicOpRef.current?.type === 'ENABLE') {
+      pendingMicOpRef.current.aborted = true
+    }
+    
     clearReconnectTimer()
     reconnectAttempts.current = 0
     isConnecting.current = false
+    isInitialConnectionRef.current = true   // FIX-01: reset for next connection
+    localMicIntentRef.current = false       // FIX-01: reset mic intent
     if (roomRef.current) {
       // Clear token refresh timer before disconnecting
-      if ((roomRef.current as any)._tokenRefreshTimer) {
-        clearTimeout((roomRef.current as any)._tokenRefreshTimer)
+      if (tokenRefreshTimerRef.current) {
+        clearTimeout(tokenRefreshTimerRef.current)
+        tokenRefreshTimerRef.current = null
       }
       roomRef.current.removeAllListeners()
       roomRef.current.disconnect()
@@ -340,18 +400,136 @@ export function useLiveKit(roomId: string | null): LiveKitState {
 
   // ── Mic controls — called by useVoiceRoom on role change via Socket.IO ────
   // These never reconnect. They just enable/disable the local mic track.
-  const enableMic = useCallback(async () => {
+  // SEC01-WEB-P1-R2: Mandatory authorize callback with operation versioning
+  const enableMic = useCallback(async (authorize: () => Promise<boolean>): Promise<boolean> => {
     const room = roomRef.current
-    if (!room || room.state !== ConnectionState.Connected) return
-    await room.localParticipant.setMicrophoneEnabled(true)
-    setIsMicEnabled(true)
+    if (!room || room.state !== ConnectionState.Connected) {
+      console.warn('[useLiveKit] Cannot enable microphone: Room not connected')
+      return false
+    }
+    
+    // SEC01-WEB-P1-R2: Create unique operation ID for this ENABLE attempt
+    const op: MicOperation = {
+      id: crypto.randomUUID(),
+      type: 'ENABLE',
+      timestamp: Date.now(),
+      aborted: false
+    }
+    pendingMicOpRef.current = op
+    
+    // M1-B-7F: Set pending state at operation start
+    setIsMicPending(true)
+    
+    // SEC01-WEB-P1-R2: MANDATORY backend authorization check
+    let authorized = false
+    try {
+      authorized = await authorize()
+      if (!authorized) {
+        console.warn('[useLiveKit] Backend authorization denied microphone access')
+        // M1-B-7F: Clear pending state on authorization failure (operation-ID check)
+        if (pendingMicOpRef.current?.id === op.id) {
+          setIsMicPending(false)
+        }
+        return false
+      }
+    } catch (err) {
+      console.warn('[useLiveKit] Backend authorization check failed:', err)
+      // M1-B-7F: Clear pending state on authorization error (operation-ID check)
+      if (pendingMicOpRef.current?.id === op.id) {
+        setIsMicPending(false)
+      }
+      return false
+    }
+    
+    // SEC01-WEB-P1-R2: Check if THIS operation was superseded or aborted during authorization
+    if (op.aborted || pendingMicOpRef.current?.id !== op.id) {
+      console.warn('[useLiveKit] Microphone enable cancelled: superseded by newer operation')
+      // M1-B-7F: Clear pending state on abort detection (operation-ID check)
+      if (pendingMicOpRef.current?.id === op.id) {
+        setIsMicPending(false)
+      }
+      return false
+    }
+    
+    // M1-B-7K Issue #2: Check MediaSession PAUSE state — OFF-wins contract
+    // If user pressed headset PAUSE button, block microphone activation
+    // even if backend authorization succeeded. User pause intent is
+    // authoritative and supersedes delayed backend approval.
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      if (navigator.mediaSession.playbackState === 'paused') {
+        console.warn('[useLiveKit] Microphone enable blocked: MediaSession is paused (OFF-wins contract)')
+        if (pendingMicOpRef.current?.id === op.id) {
+          setIsMicPending(false)
+        }
+        return false
+      }
+    }
+    
+    const perms = room.localParticipant?.permissions
+    if (!perms || perms.canPublish !== true) {
+      console.warn('[useLiveKit] Cannot enable microphone: SFU publishing permission not granted')
+      // M1-B-7F: Clear pending state on SFU permission failure (operation-ID check)
+      if (pendingMicOpRef.current?.id === op.id) {
+        setIsMicPending(false)
+      }
+      return false
+    }
+    
+    try {
+      await room.localParticipant.setMicrophoneEnabled(true)
+      
+      // SEC01-WEB-P1-R2: Final check - if aborted during SDK call, force disable
+      if (op.aborted || pendingMicOpRef.current?.id !== op.id) {
+        console.warn('[useLiveKit] Microphone enable aborted after SDK activation - forcing disable')
+        await room.localParticipant.setMicrophoneEnabled(false).catch(() => {})
+        setIsMicEnabled(false)
+        // M1-B-7F: Clear pending state on post-SDK abort (operation-ID check)
+        if (pendingMicOpRef.current?.id === op.id) {
+          setIsMicPending(false)
+        }
+        return false
+      }
+      
+      setIsMicEnabled(true)
+      localMicIntentRef.current = true
+      // M1-B-7F: Clear pending state on success (operation-ID check)
+      if (pendingMicOpRef.current?.id === op.id) {
+        setIsMicPending(false)
+      }
+      return true
+    } catch (err) {
+      console.warn('[useLiveKit] Failed to enable microphone:', err)
+      setIsMicEnabled(false)
+      // M1-B-7F: Clear pending state on SDK failure (operation-ID check)
+      if (pendingMicOpRef.current?.id === op.id) {
+        setIsMicPending(false)
+      }
+      throw err
+    }
   }, [])
 
   const disableMic = useCallback(async () => {
     const room = roomRef.current
     if (!room || room.state !== ConnectionState.Connected) return
+    
+    // SEC01-WEB-P1-R2: Abort any pending ENABLE operation
+    if (pendingMicOpRef.current?.type === 'ENABLE') {
+      pendingMicOpRef.current.aborted = true
+      // M1-B-7G: Clear pending state when aborting ENABLE — disableMic owns the transition
+      if (!isUnmounted.current) setIsMicPending(false)
+    }
+    
+    // SEC01-WEB-P1-R2: Create DISABLE operation
+    pendingMicOpRef.current = {
+      id: crypto.randomUUID(),
+      type: 'DISABLE',
+      timestamp: Date.now(),
+      aborted: false
+    }
+    
     await room.localParticipant.setMicrophoneEnabled(false)
     setIsMicEnabled(false)
+    localMicIntentRef.current = false
   }, [])
 
   // ── Toggle mic (user-initiated mute button) ────────────────────────────────
@@ -361,7 +539,43 @@ export function useLiveKit(roomId: string | null): LiveKitState {
     const next = !room.localParticipant.isMicrophoneEnabled
     await room.localParticipant.setMicrophoneEnabled(next)
     setIsMicEnabled(next)
+    localMicIntentRef.current = next  // FIX-01: track explicit user intent
   }, [])
+
+  // ── LB-CHANGE-001: Adaptive audio bitrate based on network quality ────────
+  // Mirrors mobile useLiveKitAudio.ts Phase 2 pattern.
+  // When the measured network quality changes and the room is connected, update
+  // the local participant's audio publish bitrate to the appropriate tier.
+  // qualityToAudioBitrate: excellent=96k, good=64k, fair=32k, poor/offline=16k.
+  //
+  // Uses RTCRtpSender.setParameters() via LocalTrack.sender getter (confirmed
+  // present as a public getter in livekit-client 2.5.4 — see LocalTrack.d.ts
+  // line 10: `get sender(): RTCRtpSender | undefined`).
+  // This modifies the in-flight encoder parameters of the active mic track,
+  // which is the correct mechanism for runtime bitrate adaptation in 2.5.4.
+  useEffect(() => {
+    const room = roomRef.current
+    if (!room || room.state !== ConnectionState.Connected) return
+    const newBitrate = qualityToAudioBitrate(quality)
+    // Find the local mic publication and access its RTCRtpSender
+    // LocalTrack.sender is available in livekit-client 2.5.4 (see LocalTrack.d.ts)
+    try {
+      let micPub: any = null
+      room.localParticipant.audioTrackPublications.forEach((pub) => {
+        if (pub.source === Track.Source.Microphone) micPub = pub
+      })
+      const track = micPub?.track as any
+      const sender: RTCRtpSender | undefined = track?.sender
+      if (!sender) return
+      const params = sender.getParameters()
+      if (params.encodings?.length) {
+        params.encodings[0].maxBitrate = newBitrate
+        sender.setParameters(params).catch(() => {})
+      }
+    } catch (e) {
+      console.debug('[useLiveKit] RTCRtpSender.setParameters unavailable:', e)
+    }
+  }, [quality]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Volume control ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -393,19 +607,32 @@ export function useLiveKit(roomId: string | null): LiveKitState {
       artwork: [{ src: '/icon-192x192.png', sizes: '192x192', type: 'image/png' }],
     })
 
-    // Play/pause (headset button) → toggle mic mute
+    // Play/pause (headset button) → FIX-03: play does NOT activate mic (consent bypass)
     navigator.mediaSession.setActionHandler('play', () => {
       const room = roomRef.current
       if (!room || room.state !== ConnectionState.Connected) return
-      room.localParticipant.setMicrophoneEnabled(true).catch(() => {})
-      setIsMicEnabled(true)
+      // Show toast: headset button pressed, but mic requires explicit UI action
+      if (typeof window !== 'undefined' && !room.localParticipant.isMicrophoneEnabled) {
+        // Use custom event to avoid importing toast directly in the hook
+        const event = new CustomEvent('vc:toast', {
+          detail: {
+            title: '🎧 Headset button pressed',
+            description: 'Use the on-screen button to unmute your microphone.',
+          },
+        })
+        document.dispatchEvent(event)
+      }
     })
 
     navigator.mediaSession.setActionHandler('pause', () => {
       const room = roomRef.current
       if (!room || room.state !== ConnectionState.Connected) return
-      room.localParticipant.setMicrophoneEnabled(false).catch(() => {})
-      setIsMicEnabled(false)
+      // FIX-03: Pause only if mic is actually enabled (defensive check)
+      if (room.localParticipant.isMicrophoneEnabled) {
+        room.localParticipant.setMicrophoneEnabled(false).catch(() => {})
+        setIsMicEnabled(false)
+        localMicIntentRef.current = false  // FIX-01: update intent ref
+      }
     })
 
     // Next/previous track not applicable — clear them
@@ -434,8 +661,9 @@ export function useLiveKit(roomId: string | null): LiveKitState {
       clearReconnectTimer()
       if (roomRef.current) {
         // Clear the token refresh timer on unmount
-        if ((roomRef.current as any)._tokenRefreshTimer) {
-          clearTimeout((roomRef.current as any)._tokenRefreshTimer)
+        if (tokenRefreshTimerRef.current) {
+          clearTimeout(tokenRefreshTimerRef.current)
+          tokenRefreshTimerRef.current = null
         }
         roomRef.current.removeAllListeners()
         roomRef.current.disconnect()
@@ -448,7 +676,9 @@ export function useLiveKit(roomId: string | null): LiveKitState {
   return {
     room: roomRef.current,
     connectionState,
+    connectionQuality,
     isMicEnabled,
+    isMicPending,
     activeSpeakers,
     connect,
     disconnect,

@@ -59,7 +59,7 @@ jest.mock('../sockets',       () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/notification.service', () => ({ notify: jest.fn(), notifySchool: jest.fn() }));
 jest.mock('../utils/email',   () => ({ sendEmail: jest.fn() }));
 jest.mock('../utils/storage', () => ({ saveFile: jest.fn(), deleteFile: jest.fn(), STORAGE_TYPE: 'local' }));
-jest.mock('file-type',        () => ({ fileTypeFromBuffer: jest.fn().mockResolvedValue({ mime: 'image/jpeg', ext: 'jpg' }) }));
+// file-type mock moved to global jest.unit.config.js moduleNameMapper
 jest.mock('../utils/clamav',  () => ({ isEnabled: jest.fn(() => false), scanBuffer: jest.fn() }));
 
 const { generateAccessToken } = require('../utils/jwt');

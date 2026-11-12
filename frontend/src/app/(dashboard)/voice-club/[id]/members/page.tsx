@@ -136,7 +136,7 @@ function MemberRow({ member, myRole, roomId, onAction }: {
           <RoleBadge role={member.role} />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3 }}>
-          <span style={{ fontSize: 11, color: member.isOnline ? '#22c55e' : '#94a3b8' }}>
+          <span style={{ fontSize: 11, color: member.isOnline ? '#22c55e' : '#64748b' }}>
             👤 {member.lastActiveLabel ?? (member.isOnline ? 'Active' : 'Offline')}
           </span>
           {member.contribution > 0 && (
@@ -149,6 +149,7 @@ function MemberRow({ member, myRole, roomId, onAction }: {
       {canManage && (
         <div style={{ position: 'relative' }}>
           <button onClick={() => setMenuOpen(v => !v)}
+            aria-label={`Member options for ${name}`}
             style={{ width: 32, height: 32, borderRadius: 16, border: 'none', background: 'transparent',
               cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8' }}>
             <MoreHorizontal size={18} />
@@ -222,7 +223,7 @@ function PendingRow({ req, roomId }: { req: any; roomId: string }) {
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: '#1e293b' }}>{req.user.firstName} {req.user.lastName}</p>
-        <p style={{ margin: 0, fontSize: 11, color: '#94a3b8' }}>Wants to join</p>
+        <p style={{ margin: 0, fontSize: 11, color: '#64748b' }}>Wants to join</p>
       </div>
       <div style={{ display: 'flex', gap: 6 }}>
         <button onClick={() => act(`/voice/${roomId}/members/${req.userId}/approve`, 'post', '✅ Approved')}
@@ -312,7 +313,7 @@ function MembersTab({ roomId, myRole }: { roomId: string; myRole: string }) {
           <div style={{ flex: 1, textAlign: 'left' }}>
             <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: '#1e293b' }}>Member request</p>
             {pending.length > 0 && (
-              <p style={{ margin: 0, fontSize: 12, color: '#94a3b8' }}>{pending.length} pending</p>
+              <p style={{ margin: 0, fontSize: 12, color: '#64748b' }}>{pending.length} pending</p>
             )}
           </div>
           {pending.length > 0 && (
@@ -373,7 +374,7 @@ function MembersTab({ roomId, myRole }: { roomId: string; myRole: string }) {
 
       {/* Member list */}
       {members.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: 40, color: '#94a3b8' }}>
+        <div style={{ textAlign: 'center', padding: 40, color: '#64748b' }}>
           <p style={{ fontSize: 32 }}>👥</p>
           <p style={{ fontSize: 14, fontWeight: 600, color: '#64748b' }}>No members yet</p>
           <p style={{ fontSize: 12 }}>Be the first to join this room permanently</p>
@@ -411,7 +412,7 @@ function DetailsTab({ room, roomId, onOpenSettings }: { room: any; roomId: strin
   const Card = ({ label, value, onClick }: { label: string; value: React.ReactNode; onClick?: () => void }) => (
     <div onClick={onClick} style={{ background: '#fff', borderRadius: 14, padding: '16px 18px', marginBottom: 10, border: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: onClick ? 'pointer' : 'default' }}>
       <div>
-        <p style={{ margin: 0, fontSize: 12, color: '#94a3b8', marginBottom: 4 }}>{label}</p>
+        <p style={{ margin: 0, fontSize: 12, color: '#64748b', marginBottom: 4 }}>{label}</p>
         <div style={{ fontSize: 22, fontWeight: 800, color: '#1e293b' }}>{value}</div>
       </div>
       {onClick && <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>}
@@ -422,7 +423,7 @@ function DetailsTab({ room, roomId, onOpenSettings }: { room: any; roomId: strin
     <div style={{ padding: '16px', background: '#f8fafc', minHeight: '100%' }}>
       {/* Room Owner */}
       <div style={{ background: '#fff', borderRadius: 14, padding: '14px 18px', marginBottom: 10, border: '1px solid #f1f5f9' }}>
-        <p style={{ margin: '0 0 10px', fontSize: 12, color: '#94a3b8' }}>Room Owner</p>
+        <p style={{ margin: '0 0 10px', fontSize: 12, color: '#64748b' }}>Room Owner</p>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{ width: 48, height: 48, borderRadius: 24, overflow: 'hidden', background: '#e0e7ff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, fontWeight: 700, color: '#6366f1', flexShrink: 0 }}>
@@ -456,7 +457,7 @@ function DetailsTab({ room, roomId, onOpenSettings }: { room: any; roomId: strin
       {/* Room description */}
       {room?.description && (
         <div style={{ background: '#fff', borderRadius: 14, padding: '14px 18px', border: '1px solid #f1f5f9' }}>
-          <p style={{ margin: 0, fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>About</p>
+          <p style={{ margin: 0, fontSize: 12, color: '#64748b', marginBottom: 6 }}>About</p>
           <p style={{ margin: 0, fontSize: 14, color: '#374151', lineHeight: 1.6 }}>{room.description}</p>
         </div>
       )}
@@ -465,7 +466,7 @@ function DetailsTab({ room, roomId, onOpenSettings }: { room: any; roomId: strin
 }
 function EventsTab({ roomId }: { roomId: string }) {
   return (
-    <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>
+    <div style={{ padding: 40, textAlign: 'center', color: '#64748b' }}>
       <p style={{ fontSize: 32 }}>📅</p>
       <p style={{ fontSize: 14, fontWeight: 600, color: '#64748b' }}>No events yet</p>
       <p style={{ fontSize: 12 }}>Room events and announcements will appear here</p>
@@ -565,6 +566,7 @@ export default function RoomMembersPage() {
         <button
           onClick={() => setShowSettings(true)}
           title="Room Management Center"
+          aria-label="Room Management Center"
           style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 4, fontSize: 20, lineHeight: 1 }}
         >
           ⚙️
@@ -577,7 +579,7 @@ export default function RoomMembersPage() {
           <button key={t} onClick={() => setTab(t)}
             style={{ flex: 1, padding: '12px 0', border: 'none', background: 'transparent', cursor: 'pointer',
               fontSize: 14, fontWeight: tab === t ? 700 : 400,
-              color: tab === t ? '#1e293b' : '#94a3b8',
+              color: tab === t ? '#1e293b' : '#64748b',
               borderBottom: tab === t ? '2px solid #1e293b' : '2px solid transparent',
               marginBottom: -1, textTransform: 'capitalize' }}>
             {t === 'details' ? 'Room Details' : t === 'events' ? 'Event' : 'Member'}

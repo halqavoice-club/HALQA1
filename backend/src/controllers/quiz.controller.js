@@ -27,14 +27,12 @@
  *     POST   /quizzes/:id/submit               submitAttempt
  *     GET    /quizzes/:id/my-result            getMyResult
  */
-const { PrismaClient } = require('@prisma/client');
+const prisma = require('../utils/prisma');
 const { successResponse, errorResponse } = require('../utils/response');
 const { getIo } = require('../sockets');
 const { queueBulkNotifications } = require('../services/queue.service');
 const quizService = require('../services/quiz.service');
 const logger = require('../utils/logger');
-
-const prisma = new PrismaClient();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

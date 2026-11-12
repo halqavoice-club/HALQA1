@@ -52,6 +52,35 @@ jest.mock('../utils/livekitService', () => ({
   sfuEvict:              jest.fn().mockResolvedValue(undefined),
   sfuRevokePublish:      jest.fn().mockResolvedValue(undefined),
 }));
+
+// Phase 16c: getLiveKitToken now calls getVoiceAudioPermission to determine canPublish
+jest.mock('../utils/voiceAudioPermission', () => ({
+  getVoiceAudioPermission: jest.fn(),
+}));
+
+jest.mock('../utils/response', () => ({
+  successResponse: (res, data, message) => {
+    return res.status(200).json({
+      success: true,
+      data,
+      message: message || 'Success',
+    });
+  },
+  errorResponse: (res, message, statusCode) => {
+    return res.status(statusCode || 400).json({
+      success: false,
+      error: message,
+      message,
+    });
+  },
+}));
+
+jest.mock('../utils/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+}));
 jest.mock('livekit-server-sdk', () => ({
   AccessToken: jest.fn().mockImplementation(() => ({
     addGrant: jest.fn(),
@@ -66,6 +95,7 @@ const cookieParser = require('cookie-parser');
 const prisma = require('../utils/prisma');
 const { verifyAccessToken } = require('../utils/jwt');
 const { sfuEvict, sfuRevokePublish } = require('../utils/livekitService');
+const { getVoiceAudioPermission } = require('../utils/voiceAudioPermission');
 const { AccessToken } = require('livekit-server-sdk');
 const fs   = require('fs');
 const path = require('path');
@@ -126,6 +156,14 @@ beforeEach(() => {
 
   sfuEvict.mockClear();
   sfuRevokePublish.mockClear();
+  getVoiceAudioPermission.mockClear();
+  
+  // Phase 16c: Default getVoiceAudioPermission to allow publication
+  // Individual tests override as needed
+  getVoiceAudioPermission.mockReturnValue({
+    canPublishAudio: true,
+    reason: 'ALLOWED',
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -182,6 +220,12 @@ describe('PH17-001: Role-based canPublish at token issuance (voice)', () => {
     // Use LOCKED_ROOM: when micLocked=true, AUDIENCE gets canPublish:false
     prisma.voiceRoom.findUnique        = jest.fn().mockResolvedValue(LOCKED_ROOM);
     prisma.voiceParticipant.findUnique = jest.fn().mockResolvedValue({ isActive: true, role: 'AUDIENCE' });
+    
+    // Phase 16c: Mock getVoiceAudioPermission to return false for mic-locked AUDIENCE
+    getVoiceAudioPermission.mockReturnValueOnce({
+      canPublishAudio: false,
+      reason: 'MIC_LOCKED',
+    });
 
     const res = await request(app).get(`/voice/${ROOM_ID}/livekit-token`).set('Authorization', tok(USER_ID));
     expect(res.status).toBe(200);
@@ -206,6 +250,12 @@ describe('PH17-001: Role-based canPublish at token issuance (voice)', () => {
     asUser(USER_ID);
     prisma.voiceRoom.findUnique        = jest.fn().mockResolvedValue(LIVE_ROOM);
     prisma.voiceParticipant.findUnique = jest.fn().mockResolvedValue({ isActive: false, role: 'AUDIENCE' });
+    
+    // Phase 16c: Mock getVoiceAudioPermission to return false for inactive participant
+    getVoiceAudioPermission.mockReturnValueOnce({
+      canPublishAudio: false,
+      reason: 'INACTIVE',
+    });
 
     const res = await request(app).get(`/voice/${ROOM_ID}/livekit-token`).set('Authorization', tok(USER_ID));
     expect(res.status).toBe(403);
@@ -358,16 +408,14 @@ describe('PH22-002: canPublish enforced at SFU level in voice token', () => {
       path.join(__dirname, '../controllers/livekit.controller.js'), 'utf8'
     );
     const fn = extractFn(src, 'getLiveKitToken', 'generateToken');
-    // canPublishAudio derives from the micLocked gate:
-    //   locked  → only HOST and MODERATOR get canPublish:true
-    //   unlocked → all roles get canPublish:true (original contract)
+    // Phase 16c: canPublishAudio now comes from getVoiceAudioPermission utility
+    expect(fn).toMatch(/getVoiceAudioPermission/);
     expect(fn).toMatch(/canPublishAudio/);
-    // The grant uses the derived variable, not a hardcoded literal
-    expect(fn).toMatch(/canPublish\s*:\s*canPublishAudio/);
+    // The grant uses permission.canPublishAudio (Phase 16c pattern, may span lines)
+    expect(fn).toMatch(/canPublish\s*:\s*permission\.canPublishAudio/);
     // micLocked is read from the room before computing the grant
     expect(fn).toMatch(/micLocked/);
-    // When locked, only HOST/MODERATOR are privileged
-    expect(fn).toMatch(/HOST.*MODERATOR|MODERATOR.*HOST/);
+    // HOST/MODERATOR privilege logic now in voiceAudioPermission utility (Phase 16c)
   });
 });
 

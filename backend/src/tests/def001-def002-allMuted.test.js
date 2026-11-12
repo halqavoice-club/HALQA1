@@ -334,6 +334,9 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
 
     prisma.voiceParticipant.update.mockResolvedValue({});
     prisma.voiceParticipant.updateMany.mockResolvedValue({ count: 0 });
+    // Default findMany to empty array so broadcastQueue / stage-snapshot calls inside
+    // promoteParticipant and approveUser don't block on an unresolved mock.
+    prisma.voiceParticipant.findMany.mockResolvedValue([]);
     prisma.$transaction.mockImplementation(async (fn) => fn(prisma));
     prisma.$executeRaw.mockResolvedValue(0);
   });
@@ -366,7 +369,9 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
         userId: 'target-id', isActive: true, role: 'AUDIENCE', seatNumber: null,
         user: { firstName: 'T', lastName: 'U' }
       })
-      // Inside tx: re-read target
+      // Inside tx: re-read requester (currentRequester revalidation — added for promoteParticipant tx guard)
+      .mockResolvedValueOnce({ role: 'HOST', isActive: true })
+      // Inside tx: re-read target (current)
       .mockResolvedValueOnce({ role: 'AUDIENCE', isActive: true });
 
     // Outer room fetch (micLocked, maxSpeakers, allMuted)
@@ -384,6 +389,9 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
       .mockResolvedValueOnce([{ cnt: 0 }])   // outer stage count (pre-check)
       .mockResolvedValueOnce([{ cnt: 0 }])   // tx stage count
       .mockResolvedValueOnce([]);             // tx occupied seats → seat 2 will be assigned
+
+    // $executeRaw must return 1 (row affected) so the guard `Number(updated) !== 1` passes
+    prisma.$executeRaw.mockResolvedValue(1);
 
     const req = makeReq({
       params: { id: 'room-1' },
@@ -418,6 +426,9 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
         userId: 'target-id', isActive: true, role: 'AUDIENCE', seatNumber: null,
         user: { firstName: 'T', lastName: 'U' }
       })
+      // Inside tx: re-read requester (currentRequester revalidation)
+      .mockResolvedValueOnce({ role: 'HOST', isActive: true })
+      // Inside tx: re-read target (current)
       .mockResolvedValueOnce({ role: 'AUDIENCE', isActive: true });
 
     prisma.voiceRoom.findUnique
@@ -428,6 +439,9 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
       .mockResolvedValueOnce([{ cnt: 0 }])
       .mockResolvedValueOnce([{ cnt: 0 }])
       .mockResolvedValueOnce([]);
+
+    // $executeRaw must return 1 (row affected) so the guard `Number(updated) !== 1` passes
+    prisma.$executeRaw.mockResolvedValue(1);
 
     const req = makeReq({
       params: { id: 'room-1' },
@@ -486,6 +500,7 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
     const roomObj = {
       id: 'room-1', status: 'LIVE', deletedAt: null,
       micLocked: false, maxSpeakers: 12, allMuted: true, isOpenMic: false,
+      lockedSeats: [],
     };
 
     // voiceParticipant.findUnique call sequence
@@ -501,11 +516,18 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
       })
       // 4. userRow (role/isMuted check in _promoteUser pre-tx)
       .mockResolvedValueOnce({ role: 'AUDIENCE', isMuted: true, isActive: true })
-      // 5. inside tx: current
-      .mockResolvedValueOnce({ role: 'AUDIENCE', isActive: true, isMuted: true });
+      // 5. inside tx: current (Fix F: expanded select includes wasKicked, handRaised)
+      .mockResolvedValueOnce({ role: 'AUDIENCE', isActive: true, isMuted: true, wasKicked: false, handRaised: true })
+      // 6. inside tx: approver re-read (Fix G: TOCTOU approver consent check)
+      .mockResolvedValueOnce({ role: 'HOST', isActive: true })
+      // 7. inside tx: post-write mutedByModerator read (Fix B)
+      .mockResolvedValueOnce({ mutedByModerator: false });
 
-    // voiceRoom.findUnique — single call in approveUser
+    // voiceRoom.findUnique — returns for approveUser + in-tx txRoom (Fix H)
     prisma.voiceRoom.findUnique.mockResolvedValue(roomObj);
+
+    // $executeRaw: return 1 (1 row affected) so the writeCount guard passes
+    prisma.$executeRaw.mockResolvedValue(1);
 
     // $queryRaw chain:
     //   1. countSpeakers (approveUser)          → [{cnt: 0}]
@@ -533,9 +555,10 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
     const execCalls = prisma.$executeRaw.mock.calls;
     expect(execCalls.length).toBeGreaterThanOrEqual(1);
 
-    // Promotion SQL: SET seatNumber=${seat}, role='SPEAKER', isMuted=${allMuted?1:0},...
-    // call[1]=seat, call[2]=isMuted → must be 1 when allMuted=true
-    const hasAllMutedWrite = execCalls.some(call => tplValues(call)[1] === 1);
+    // DEF-002 consent-first: isMuted = 1 is now a SQL literal (not an interpolated
+    // parameter), so we match the SQL text string rather than tplValues().
+    // e.g. SET seatNumber=?, role='SPEAKER', isMuted = 1, ...
+    const hasAllMutedWrite = execCalls.some(call => /isMuted\s*=\s*1/.test(call[0].join('?')));
     expect(hasAllMutedWrite).toBe(true);
   });
 
@@ -602,62 +625,75 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
   test('T12 — autoPromoteNext() with allMuted=true → raw SQL has isMuted=1', async () => {
     const autoPromote = jest.requireActual('../utils/autoPromote');
 
-    // autoPromoteNext fetches room first
+    // autoPromoteNext (real module; prisma is mocked) happy-path call sequence
+    // when Redis is unavailable (isRedisReady()=false) and it is invoked without
+    // an io instance (so the post-transaction broadcast block is skipped):
+    //   1. voiceRoom.findUnique        → room (status, micLocked, maxSpeakers, allMuted, lockedSeats)
+    //   2. $queryRaw COUNT(*)          → [{cnt:0}]   (speakerCount < maxSpeakers)
+    //   3. voiceParticipant.findFirst  → waiting queued user (DB fallback for the queue head)
+    //   4. voiceParticipant.findUnique   → participant revalidation (must be active/eligible,
+    //                                    otherwise skipStaleEntry() recurses without the Redis
+    //                                    guard and exhausts the heap)
+    //   5. $transaction(callback) — tx proxy is the same mocked prisma:
+    //      a. voiceParticipant.findUnique → current (in-tx revalidation)
+    //      b. voiceRoom.findUnique        → txRoom (deletedAt, status, micLocked, lockedSeats)
+    //      c. $queryRaw occupied seats    → []   (seat 2 is free)
+    //      d. $executeRaw UPDATE           → 1    (promotion; isMuted = 1 is a SQL literal)
+    //      e. voiceParticipant.findUnique → approved (mutedByModerator select)
     prisma.voiceRoom.findUnique.mockResolvedValue({
-      id: 'room-1', status: 'LIVE', micLocked: false, maxSpeakers: 12, allMuted: true,
+      id: 'room-1', status: 'LIVE', deletedAt: null,
+      micLocked: false, maxSpeakers: 12, allMuted: true, lockedSeats: [],
     });
 
-    // findFirst: one AUDIENCE user in queue (handRaised=true, handRaisedAt set)
     prisma.voiceParticipant.findFirst.mockResolvedValue({
       userId: 'queued-user', role: 'AUDIENCE', isMuted: true,
       handRaised: true, handRaisedAt: new Date(),
     });
 
-    // findMany for stage state (who is currently on stage)
-    prisma.voiceParticipant.findMany.mockResolvedValue([]);
+    const eligibleParticipant = {
+      userId: 'queued-user', isActive: true, wasKicked: false,
+      handRaised: true, seatNumber: null, role: 'AUDIENCE', isMuted: true,
+    };
+    prisma.voiceParticipant.findUnique
+      .mockResolvedValueOnce(eligibleParticipant)   // 4. outer revalidation
+      .mockResolvedValueOnce(eligibleParticipant)   // 5a. in-tx current
+      .mockResolvedValueOnce({ mutedByModerator: false }); // 5e. approved
 
-    // count for seat availability
-    prisma.voiceParticipant.count.mockResolvedValue(0);
-
-    // $queryRaw chain inside autoPromoteNext:
-    //   1. occupied seats pre-tx check
-    //   (then inside tx:)
-    //   2. current seatRow check
-    //   3. occupied seats tx re-check
     prisma.$queryRaw
-      .mockResolvedValueOnce([])              // pre-tx occupied seats
-      .mockResolvedValueOnce([{ seatNumber: null }]) // tx: seatRow
-      .mockResolvedValueOnce([]);             // tx: occupiedTx
+      .mockResolvedValueOnce([{ cnt: 0 }]) // 2. stage COUNT
+      .mockResolvedValueOnce([]);          // 5c. occupied seats (seat 2 free)
+
+    // $executeRaw returns 1 so the "Number(updated) !== 1" guard passes and the
+    // promotion is committed. autoPromote writes isMuted = 1 as a SQL literal.
+    prisma.$executeRaw.mockResolvedValue(1);
 
     await autoPromote.autoPromoteNext('room-1');
 
     const execCalls = prisma.$executeRaw.mock.calls;
-    if (execCalls.length > 0) {
-      // Promotion SQL: SET seatNumber=${seat}, role='SPEAKER', isMuted=${allMuted?1:0},...
-      // call[1]=seat, call[2]=isMuted → must be 1 when allMuted=true
-      const hasAllMutedWrite = execCalls.some(call => tplValues(call)[1] === 1);
-      expect(hasAllMutedWrite).toBe(true);
-    } else {
-      // Auto-promote may bail out at a pre-condition (e.g. no io available).
-      // Log the skip so it's visible in output.
-      console.log('  ℹ  T12: autoPromoteNext did not reach $executeRaw — pre-condition not met in mock env');
-    }
+    expect(execCalls.length).toBeGreaterThanOrEqual(1);
+
+    // autoPromote's promotion SQL uses `isMuted = 1` as a literal (not an
+    // interpolated ${...} param), so assert against the SQL text rather than the
+    // interpolated tplValues (whose 2nd value is roomId, not isMuted).
+    const hasAllMutedWrite = execCalls.some(call => /isMuted\s*=\s*1/.test(call[0].join('?')));
+    expect(hasAllMutedWrite).toBe(true);
   });
 
   // ── T13: acceptMicOffer() with allMuted=true → new SPEAKER gets isMuted=1 ─
   //
-  // acceptMicOffer() flow:
+  // acceptMicOffer() flow (callback-style $transaction after Blocker D fix):
   //   - Loads offer from Redis cache (mock getCache to return a valid offer)
   //   - voiceRoom.findUnique (micLocked, status) → 1st call
   //   - voiceParticipant.findUnique x2 (passer + acceptor in Promise.all)
+  //   - Pre-tx recipient validation (role/seatNumber check on loaded target)
   //   - voiceRoom.findUnique (maxSpeakers, allMuted) → 2nd call
-  //   - $queryRaw: passerRow seatNumber
-  //   - (if HOST passer) $queryRaw: occupied seats
-  //   - $executeRaw x2: passer drop + target assign  ← target has isMuted=${allMuted?1:0}
-  //     Passer SQL:  SET seatNumber=NULL, role='AUDIENCE', isMuted=1,...
-  //     Target SQL:  SET seatNumber=${seat}, role='SPEAKER', isMuted=${allMuted?1:0},...
-  //     Target interpolated: [targetSeat, isMuted, roomId, acceptorId]
-  //     → call[1]=targetSeat, call[2]=isMuted
+  //   - $queryRaw: passerRow — SELECT seatNumber, role FROM voice_participants
+  //   - $transaction(callback): inside tx:
+  //       a. voiceParticipant.findUnique → target revalidation
+  //       b. $executeRaw → passer seat release (SPEAKER→AUDIENCE with guarded SQL)
+  //       c. $executeRaw → target seat assignment (isMuted = 1 always for new SPEAKER)
+  //   - sfuRevokePublish → SFU call outside tx (mocked)
+  //   - getNextStageVersion → stage version for snapshot event
   test('T13 — acceptMicOffer() with allMuted=true → target SPEAKER raw SQL has isMuted=1', async () => {
     const micCtrl = require('../controllers/voice-mic.controller');
     const { getCache } = require('../utils/redis');
@@ -674,12 +710,15 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
 
     // voiceRoom.findUnique call sequence:
     //   1. P2-1 micLocked check (select micLocked, status)
-    //   2. DEF-002 allMuted check (select maxSpeakers, allMuted)
+    //   2. DEF-002 allMuted check (select maxSpeakers, allMuted, lockedSeats)
     prisma.voiceRoom.findUnique
       .mockResolvedValueOnce({ micLocked: false, status: 'LIVE' })
-      .mockResolvedValueOnce({ maxSpeakers: 12, allMuted: true });
+      .mockResolvedValueOnce({ maxSpeakers: 12, allMuted: true, lockedSeats: [] });
 
-    // voiceParticipant.findUnique x2 in Promise.all (passer, acceptor)
+    // voiceParticipant.findUnique calls:
+    //   1. passer (in Promise.all)
+    //   2. target/acceptor (in Promise.all)
+    //   3. inside tx: target revalidation
     prisma.voiceParticipant.findUnique
       .mockResolvedValueOnce({
         userId: passerId, isActive: true, role: 'SPEAKER', seatNumber: 3,
@@ -688,11 +727,15 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
       .mockResolvedValueOnce({
         userId: 'acceptor-id', isActive: true, role: 'AUDIENCE', seatNumber: null,
         user: { id: 'acceptor-id', firstName: 'B', lastName: 'C' }
-      });
+      })
+      // Inside tx: target revalidation (Blocker D fix — callback-style tx)
+      .mockResolvedValueOnce({ role: 'AUDIENCE', isActive: true, seatNumber: null });
 
-    // $queryRaw: passer's seatNumber row
-    // For non-HOST passer: targetSeat = passerSeat (seat swap)
-    prisma.$queryRaw.mockResolvedValueOnce([{ seatNumber: 3 }]);
+    // $queryRaw: passer's seatNumber + role row (Blocker D fix: SELECT seatNumber, role FROM)
+    prisma.$queryRaw.mockResolvedValueOnce([{ seatNumber: 3, role: 'SPEAKER' }]);
+
+    // $executeRaw must return 1 (row affected) so guarded SQL guards pass
+    prisma.$executeRaw.mockResolvedValue(1);
 
     const req = makeReq({
       params: { id: 'room-1', offerId },
@@ -707,13 +750,13 @@ describe('DEF-002 — Promotion paths respect room-wide allMuted policy [MOCKED]
     const execCalls = prisma.$executeRaw.mock.calls;
     expect(execCalls.length).toBeGreaterThanOrEqual(1);
 
-    // The target's SPEAKER assignment SQL: [targetSeat, isMuted, roomId, acceptorId]
-    // When allMuted=true: isMuted=1
-    // Note: passer's drop SQL also fires (isMuted=1 always for demoted passer),
-    // so we look specifically for the call where val[0] (seat) is truthy and val[1]=1.
-    // Both calls have isMuted=1 in this scenario (passer demoted + allMuted=true),
-    // so we just confirm at least one exec call binds isMuted=1.
-    const hasAllMutedWrite = execCalls.some(call => tplValues(call)[1] === 1);
+    // The target's SPEAKER assignment SQL always writes isMuted = 1 (literal, not interpolated).
+    // Confirm at least one $executeRaw call contains the literal isMuted = 1 in the SQL text.
+    // (New SPEAKER always starts muted — hardcoded literal rather than interpolated param.)
+    const hasAllMutedWrite = execCalls.some(call => {
+      const sqlText = call[0].join('?');
+      return /isMuted = 1/.test(sqlText);
+    });
     expect(hasAllMutedWrite).toBe(true);
   });
 
@@ -752,6 +795,7 @@ describe('V3 — getLiveKitToken() gates canPublish on allMuted + isMuted [MOCKE
     });
     prisma.voiceParticipant.findUnique.mockResolvedValue({
       role: 'SPEAKER', isActive: true, isMuted: false,
+      seatNumber: 2, mutedByModerator: false,  // T14 FIX: seatNumber required by voiceAudioPermission; mutedByModerator must be boolean
     });
 
     const req = makeReq({ params: { id: 'room-1' }, user: { id: 'speaker-id', firstName: 'S', lastName: 'P' } });
@@ -771,6 +815,7 @@ describe('V3 — getLiveKitToken() gates canPublish on allMuted + isMuted [MOCKE
     });
     prisma.voiceParticipant.findUnique.mockResolvedValue({
       role: 'HOST', isActive: true, isMuted: false,
+      seatNumber: 1, mutedByModerator: false,  // T15 FIX: seatNumber + mutedByModerator required by voiceAudioPermission
     });
 
     const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
@@ -790,6 +835,7 @@ describe('V3 — getLiveKitToken() gates canPublish on allMuted + isMuted [MOCKE
     });
     prisma.voiceParticipant.findUnique.mockResolvedValue({
       role: 'MODERATOR', isActive: true, isMuted: false,
+      seatNumber: 1, mutedByModerator: false,  // T16 FIX: seatNumber + mutedByModerator required by voiceAudioPermission
     });
 
     const req = makeReq({ params: { id: 'room-1' }, user: { id: 'mod-id', firstName: 'M', lastName: 'D' } });
@@ -809,6 +855,7 @@ describe('V3 — getLiveKitToken() gates canPublish on allMuted + isMuted [MOCKE
     });
     prisma.voiceParticipant.findUnique.mockResolvedValue({
       role: 'SPEAKER', isActive: true, isMuted: false,
+      seatNumber: 2, mutedByModerator: false,  // T17 FIX: seatNumber + mutedByModerator required by voiceAudioPermission
     });
 
     const req = makeReq({ params: { id: 'room-1' }, user: { id: 'speaker-id', firstName: 'S', lastName: 'P' } });
@@ -828,6 +875,7 @@ describe('V3 — getLiveKitToken() gates canPublish on allMuted + isMuted [MOCKE
     });
     prisma.voiceParticipant.findUnique.mockResolvedValue({
       role: 'SPEAKER', isActive: true, isMuted: true,
+      seatNumber: 2, mutedByModerator: false,  // T18 FIX: seatNumber + mutedByModerator required by voiceAudioPermission
     });
 
     const req = makeReq({ params: { id: 'room-1' }, user: { id: 'speaker-id', firstName: 'S', lastName: 'P' } });

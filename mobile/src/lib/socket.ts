@@ -9,7 +9,7 @@ import { getSocketURL } from '@/lib/api';
 let socket: Socket | null = null;
 
 export function initSocket(token: string): Socket {
-  if (socket?.connected) return socket;
+  if (socket?.connected || socket?.active) return socket;
 
   // Always read the current socket URL (supports runtime override)
   socket = io(getSocketURL(), {
@@ -57,12 +57,21 @@ export function updateSocketToken(token: string): void {
   // Mutate auth in-place — Socket.IO reads it on each reconnect attempt.
   // Do NOT log the token value.
   socket.auth = { ...(socket.auth as object), token };
-  // If the socket is currently disconnected and not actively reconnecting,
-  // reconnect immediately with the fresh token instead of waiting for
-  // the next reconnection delay.
-  if (!socket.connected && !socket.active) {
+
+  if (socket.active && !socket.connected) {
+    // Socket is mid-reconnect with a stale token. Interrupt the current
+    // reconnect cycle, apply the fresh token, and restart the handshake
+    // immediately — otherwise all in-flight reconnect attempts will be
+    // rejected by the server auth middleware until the cycle naturally
+    // completes and picks up the new auth (mirrors FIX-2 web behaviour).
+    socket.disconnect();
+    socket.connect();
+  } else if (!socket.connected && !socket.active) {
+    // Socket is fully stopped — reconnect immediately with the fresh token.
     socket.connect();
   }
+  // If socket.connected === true: auth is already updated in-place above.
+  // The current session is valid; no reconnect needed.
 }
 
 export function disconnectSocket() {

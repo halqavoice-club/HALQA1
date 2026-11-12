@@ -115,7 +115,7 @@ jest.mock('../utils/logger', () => ({
 
 const prisma  = require('../utils/prisma');
 const logger  = require('../utils/logger');
-const { getLivekitRoomService } = require('../utils/livekitService');
+const { getLivekitRoomService, sfuRevokePublish } = require('../utils/livekitService');
 
 // Load controllers under test
 const { toggleMicLock } = require('../controllers/voice.controller');
@@ -154,35 +154,30 @@ describe('toggleMicLock — Layer 1: LiveKit SFU enforcement', () => {
     // Default: env vars present so livekitService returns the mock svc
     getLivekitRoomService.mockReturnValue(mockSvc);
     mockUpdateParticipant.mockResolvedValue({});
+    // Phase F2-A: sfuRevokePublish must return a valid enforcement result object
+    sfuRevokePublish.mockResolvedValue({ enforced: true, reason: 'UPDATED' });
   });
 
   // ── LOCK tests ────────────────────────────────────────────────────────────
 
   test('LOCK: calls updateParticipant(canPublish:false) for each active SPEAKER', async () => {
-    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: false });
+    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: false, allMuted: false });
     prisma.voiceRoom.update.mockResolvedValue({});
-    // Two active SPEAKERs
+    // Two active SPEAKERs (Phase F2-A: sfuRevokePublish used instead of direct updateParticipant)
     prisma.voiceParticipant.findMany.mockResolvedValue([
-      { userId: 'spk-1', role: 'SPEAKER' },
-      { userId: 'spk-2', role: 'SPEAKER' },
+      { userId: 'spk-1', role: 'SPEAKER', isActive: true, seatNumber: null, isMuted: false, mutedByModerator: false },
+      { userId: 'spk-2', role: 'SPEAKER', isActive: true, seatNumber: null, isMuted: false, mutedByModerator: false },
     ]);
 
     const req = makeLockReq('room-1', 'host-1', true);
     const res = makeRes();
     await toggleMicLock(req, res, jest.fn());
 
-    // Give the fire-and-continue async operation time to run
-    await new Promise(r => setTimeout(r, 20));
-
     expect(res._body.data.micLocked).toBe(true);
-    expect(mockUpdateParticipant).toHaveBeenCalledTimes(2);
-
-    expect(mockUpdateParticipant).toHaveBeenCalledWith('room-1', 'spk-1', {
-      permission: { canPublish: false, canSubscribe: true, canPublishData: true },
-    });
-    expect(mockUpdateParticipant).toHaveBeenCalledWith('room-1', 'spk-2', {
-      permission: { canPublish: false, canSubscribe: true, canPublishData: true },
-    });
+    // Phase F2-A: toggleMicLock delegates to sfuRevokePublish, not direct updateParticipant
+    expect(sfuRevokePublish).toHaveBeenCalledTimes(2);
+    expect(sfuRevokePublish).toHaveBeenCalledWith('room-1', 'spk-1', false, '[voice:mic-lock]');
+    expect(sfuRevokePublish).toHaveBeenCalledWith('room-1', 'spk-2', false, '[voice:mic-lock]');
   });
 
   test('LOCK: HOST participants are excluded from revocation', async () => {
@@ -246,60 +241,51 @@ describe('toggleMicLock — Layer 1: LiveKit SFU enforcement', () => {
   // ── UNLOCK tests ──────────────────────────────────────────────────────────
 
   test('UNLOCK: active seated SPEAKER gets canPublish:true', async () => {
-    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true });
+    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true, allMuted: false });
     prisma.voiceRoom.update.mockResolvedValue({});
-    // Unlock query returns seated SPEAKER
+    // Phase F2-A: full participant fields needed for voiceAudioPermission evaluation
     prisma.voiceParticipant.findMany.mockResolvedValue([
-      { userId: 'spk-1', role: 'SPEAKER', seatNumber: 3 },
+      { userId: 'spk-1', role: 'SPEAKER', isActive: true, seatNumber: 3, isMuted: false, mutedByModerator: false },
     ]);
 
     const req = makeLockReq('room-1', 'host-1', false);
     const res = makeRes();
     await toggleMicLock(req, res, jest.fn());
-    await new Promise(r => setTimeout(r, 20));
 
     expect(res._body.data.micLocked).toBe(false);
-    expect(mockUpdateParticipant).toHaveBeenCalledWith('room-1', 'spk-1', {
-      permission: { canPublish: true, canSubscribe: true, canPublishData: true },
-    });
+    expect(sfuRevokePublish).toHaveBeenCalledWith('room-1', 'spk-1', true, '[voice:mic-unlock]');
   });
 
   test('UNLOCK: active HOST gets canPublish:true', async () => {
-    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true });
+    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true, allMuted: false });
     prisma.voiceRoom.update.mockResolvedValue({});
     prisma.voiceParticipant.findMany.mockResolvedValue([
-      { userId: 'host-1', role: 'HOST', seatNumber: 1 },
+      { userId: 'host-1', role: 'HOST', isActive: true, seatNumber: 1, isMuted: false, mutedByModerator: false },
     ]);
 
     const req = makeLockReq('room-1', 'host-1', false);
     const res = makeRes();
     await toggleMicLock(req, res, jest.fn());
-    await new Promise(r => setTimeout(r, 20));
 
-    expect(mockUpdateParticipant).toHaveBeenCalledWith('room-1', 'host-1', {
-      permission: { canPublish: true, canSubscribe: true, canPublishData: true },
-    });
+    expect(sfuRevokePublish).toHaveBeenCalledWith('room-1', 'host-1', true, '[voice:mic-unlock]');
   });
 
   test('UNLOCK: active MODERATOR gets canPublish:true', async () => {
-    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true });
+    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true, allMuted: false });
     prisma.voiceRoom.update.mockResolvedValue({});
     prisma.voiceParticipant.findMany.mockResolvedValue([
-      { userId: 'mod-1', role: 'MODERATOR', seatNumber: 2 },
+      { userId: 'mod-1', role: 'MODERATOR', isActive: true, seatNumber: 2, isMuted: false, mutedByModerator: false },
     ]);
 
     const req = makeLockReq('room-1', 'host-1', false);
     const res = makeRes();
     await toggleMicLock(req, res, jest.fn());
-    await new Promise(r => setTimeout(r, 20));
 
-    expect(mockUpdateParticipant).toHaveBeenCalledWith('room-1', 'mod-1', {
-      permission: { canPublish: true, canSubscribe: true, canPublishData: true },
-    });
+    expect(sfuRevokePublish).toHaveBeenCalledWith('room-1', 'mod-1', true, '[voice:mic-unlock]');
   });
 
   test('UNLOCK: unseated SPEAKER (seatNumber=null) does NOT get canPublish:true', async () => {
-    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true });
+    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true, allMuted: false });
     prisma.voiceRoom.update.mockResolvedValue({});
     // The unlock query uses seatNumber: { not: null } — unseated SPEAKERs not returned
     prisma.voiceParticipant.findMany.mockResolvedValue([]);
@@ -307,13 +293,12 @@ describe('toggleMicLock — Layer 1: LiveKit SFU enforcement', () => {
     const req = makeLockReq('room-1', 'host-1', false);
     const res = makeRes();
     await toggleMicLock(req, res, jest.fn());
-    await new Promise(r => setTimeout(r, 20));
 
-    expect(mockUpdateParticipant).not.toHaveBeenCalled();
+    expect(sfuRevokePublish).not.toHaveBeenCalled();
   });
 
   test('UNLOCK: inactive participants are not restored', async () => {
-    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true });
+    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true, allMuted: false });
     prisma.voiceRoom.update.mockResolvedValue({});
     // isActive:true filter excludes inactive — findMany returns []
     prisma.voiceParticipant.findMany.mockResolvedValue([]);
@@ -321,32 +306,33 @@ describe('toggleMicLock — Layer 1: LiveKit SFU enforcement', () => {
     const req = makeLockReq('room-1', 'host-1', false);
     const res = makeRes();
     await toggleMicLock(req, res, jest.fn());
-    await new Promise(r => setTimeout(r, 20));
 
-    expect(mockUpdateParticipant).not.toHaveBeenCalled();
+    expect(sfuRevokePublish).not.toHaveBeenCalled();
   });
 
   // ── FAILURE tests ─────────────────────────────────────────────────────────
+  // Phase F2-A: toggleMicLock delegates to sfuRevokePublish, which returns
+  // { enforced: boolean, reason: string }. Failures are surfaced via the
+  // return value (not exceptions), so the HTTP response always succeeds.
 
   test('LOCK FAILURE: LiveKit error is logged with structured context; HTTP still returns micLocked:true', async () => {
-    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: false });
+    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: false, allMuted: false });
     prisma.voiceRoom.update.mockResolvedValue({});
     prisma.voiceParticipant.findMany.mockResolvedValue([
-      { userId: 'spk-1', role: 'SPEAKER' },
+      { userId: 'spk-1', role: 'SPEAKER', isActive: true, seatNumber: null, isMuted: false, mutedByModerator: false },
     ]);
-    // Simulate LiveKit being unreachable
-    mockUpdateParticipant.mockRejectedValue(new Error('LiveKit connection refused'));
+    // Simulate SFU enforcement failure (Phase F2-A sfuRevokePublish returns enforced:false)
+    sfuRevokePublish.mockResolvedValue({ enforced: false, reason: 'UPDATE_FAILED' });
 
     const req = makeLockReq('room-1', 'host-1', true);
     const res = makeRes();
     await toggleMicLock(req, res, jest.fn());
-    await new Promise(r => setTimeout(r, 40));
 
     // HTTP response must succeed with correct DB state
     expect(res._status).toBe(200);
     expect(res._body.data.micLocked).toBe(true);
 
-    // Error must be logged with structured context
+    // Failure logged via logger.warn (togglMicLock logs incomplete enforcement)
     expect(logger.warn).toHaveBeenCalled();
     const warnCall = logger.warn.mock.calls.find(c =>
       typeof c[0] === 'string' && c[0].includes('mic-lock')
@@ -355,57 +341,56 @@ describe('toggleMicLock — Layer 1: LiveKit SFU enforcement', () => {
   });
 
   test('LOCK FAILURE: LiveKit not configured — no error thrown, micLocked persisted correctly', async () => {
-    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: false });
+    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: false, allMuted: false });
     prisma.voiceRoom.update.mockResolvedValue({});
     prisma.voiceParticipant.findMany.mockResolvedValue([
-      { userId: 'spk-1', role: 'SPEAKER' },
+      { userId: 'spk-1', role: 'SPEAKER', isActive: true, seatNumber: null, isMuted: false, mutedByModerator: false },
     ]);
-    // Simulate LiveKit not configured (returns null)
-    getLivekitRoomService.mockReturnValue(null);
+    // Phase F2-A: NOT_CONFIGURED is enforced:true — no warning logged
+    sfuRevokePublish.mockResolvedValue({ enforced: true, reason: 'NOT_CONFIGURED' });
 
     const req = makeLockReq('room-1', 'host-1', true);
     const res = makeRes();
     await toggleMicLock(req, res, jest.fn());
-    await new Promise(r => setTimeout(r, 20));
 
     expect(res._status).toBe(200);
     expect(res._body.data.micLocked).toBe(true);
-    // No updateParticipant call since svc is null
+    // sfuRevokePublish was called; direct updateParticipant was not
+    expect(sfuRevokePublish).toHaveBeenCalled();
     expect(mockUpdateParticipant).not.toHaveBeenCalled();
   });
 
   test('UNLOCK FAILURE: per-participant LiveKit error is logged; other participants still processed', async () => {
-    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true });
+    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: true, allMuted: false });
     prisma.voiceRoom.update.mockResolvedValue({});
     prisma.voiceParticipant.findMany.mockResolvedValue([
-      { userId: 'host-1', role: 'HOST',    seatNumber: 1 },
-      { userId: 'spk-1',  role: 'SPEAKER', seatNumber: 3 },
+      { userId: 'host-1', role: 'HOST',    isActive: true, seatNumber: 1, isMuted: false, mutedByModerator: false },
+      { userId: 'spk-1',  role: 'SPEAKER', isActive: true, seatNumber: 3, isMuted: false, mutedByModerator: false },
     ]);
-    // First call fails, second succeeds
-    mockUpdateParticipant
-      .mockRejectedValueOnce(new Error('Request failed with status 404: Not Found'))
-      .mockResolvedValueOnce({});
+    // First call fails (not_found), second succeeds
+    sfuRevokePublish
+      .mockResolvedValueOnce({ enforced: false, reason: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ enforced: true,  reason: 'UPDATED' });
 
     const req = makeLockReq('room-1', 'host-1', false);
     const res = makeRes();
     await toggleMicLock(req, res, jest.fn());
-    await new Promise(r => setTimeout(r, 40));
 
     expect(res._status).toBe(200);
     expect(res._body.data.micLocked).toBe(false);
-    // Both participants were attempted
-    expect(mockUpdateParticipant).toHaveBeenCalledTimes(2);
-    // Failure logged with structured context
+    // Both participants were attempted via sfuRevokePublish
+    expect(sfuRevokePublish).toHaveBeenCalledTimes(2);
+    // Failure for first participant logged
     expect(logger.warn).toHaveBeenCalled();
   });
 
   test('DB state is consistent even when LiveKit fails: micLocked persisted before SFU call', async () => {
-    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: false });
+    prisma.voiceRoom.findUnique.mockResolvedValue({ micLocked: false, allMuted: false });
     prisma.voiceRoom.update.mockResolvedValue({});
     prisma.voiceParticipant.findMany.mockResolvedValue([
-      { userId: 'spk-1', role: 'SPEAKER' },
+      { userId: 'spk-1', role: 'SPEAKER', isActive: true, seatNumber: null, isMuted: false, mutedByModerator: false },
     ]);
-    mockUpdateParticipant.mockRejectedValue(new Error('timeout'));
+    sfuRevokePublish.mockResolvedValue({ enforced: false, reason: 'TIMEOUT' });
 
     const req = makeLockReq('room-1', 'host-1', true);
     const res = makeRes();
@@ -435,14 +420,21 @@ describe('getLiveKitToken — Layer 2: canPublish token gate', () => {
   }
 
   function setupRoom(micLocked) {
+    // Phase 16c: voiceAudioPermission strict validator requires micLocked and allMuted as booleans
     prisma.voiceRoom.findUnique.mockResolvedValue({
-      id: 'room-1', status: 'LIVE', deletedAt: null, micLocked,
+      id: 'room-1', status: 'LIVE', deletedAt: null, micLocked, allMuted: false,
     });
   }
 
   function setupParticipant(role) {
+    // Phase 16c: voiceAudioPermission strict validator requires isMuted and
+    // mutedByModerator as booleans. seatNumber=1 gives HOST/MOD/SPEAKER stage presence.
+    const isAudience = role === 'AUDIENCE';
     prisma.voiceParticipant.findUnique.mockResolvedValue({
       roomId: 'room-1', userId: 'user-1', role, isActive: true,
+      seatNumber: isAudience ? null : 1,
+      isMuted: false,
+      mutedByModerator: false,
     });
   }
 
@@ -519,7 +511,7 @@ describe('getLiveKitToken — Layer 2: canPublish token gate', () => {
     expect(grant.canPublish).toBe(true);
   });
 
-  test('TOKEN unlocked + AUDIENCE → canPublish:true (existing contract)', async () => {
+  test('TOKEN unlocked + AUDIENCE → canPublish:false (Phase 16c: AUDIENCE not eligible to publish)', async () => {
     setupRoom(false);
     setupParticipant('AUDIENCE');
 
@@ -529,7 +521,8 @@ describe('getLiveKitToken — Layer 2: canPublish token gate', () => {
 
     expect(res._status).toBe(200);
     const grant = getCapturedGrant();
-    expect(grant.canPublish).toBe(true);
+    // Phase 16c hardening: AUDIENCE role is not eligible to publish audio (ROLE_NOT_ELIGIBLE)
+    expect(grant.canPublish).toBe(false);
   });
 
   test('TOKEN unlocked + HOST → canPublish:true', async () => {
@@ -574,15 +567,15 @@ describe('getLiveKitToken — Layer 2: canPublish token gate', () => {
   });
 
   test('TOKEN: response still includes role and micEnabled hint', async () => {
-    setupRoom(true);
-    setupParticipant('SPEAKER');
+    setupRoom(false);
+    setupParticipant('HOST');
 
     const req = makeTokenReq('room-1', 'user-1');
     const res = makeRes();
     await getLiveKitToken(req, res, jest.fn());
 
-    expect(res._body.data.role).toBe('SPEAKER');
-    // micEnabled is UI hint — SPEAKER is still shown as mic-capable in UI
+    expect(res._body.data.role).toBe('HOST');
+    // micEnabled is UI hint — HOST on unlocked room has mic capability
     expect(res._body.data.micEnabled).toBe(true);
     expect(res._body.data.token).toBe('mock-jwt-token');
   });

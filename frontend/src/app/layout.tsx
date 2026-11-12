@@ -4,7 +4,6 @@ import './globals.css'
 import { Providers } from '@/components/providers'
 import { Toaster } from '@/components/ui/toaster'
 
-export const dynamic = 'force-dynamic'
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter' })
 const notoArabic = Noto_Sans_Arabic({
@@ -33,7 +32,6 @@ export const viewport: Viewport = {
   themeColor: '#1e40af',
   width: 'device-width',
   initialScale: 1,
-  maximumScale: 1
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

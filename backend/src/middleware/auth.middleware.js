@@ -96,6 +96,14 @@ async function authenticate(req, res, next) {
     const token = authHeader.split(' ')[1];
     const decoded = verifyAccessToken(token);
 
+    // VC-29 FIX: Reject any token whose type field is present and not 'access'.
+    // Access tokens have no 'type' field (undefined). 2FA challenge tokens have
+    // type: '2fa_challenge'. Any future typed token that is not 'access' is also
+    // rejected, matching the stronger guard in app.js io.use() middleware.
+    if (decoded.type && decoded.type !== 'access') {
+      return errorResponse(res, 'Invalid token type', 401);
+    }
+
     // 1. Try cache first
     let user = await getUserFromCache(decoded.userId);
 

@@ -60,8 +60,22 @@ const updateLiveClassSchema = z.object({
   maxSpeakers: z.number().int().min(1).max(50).optional(),
 }).passthrough();
 
+// ─── Microphone authorization schema (SEC01-G-BE02) ───────────────────────────
+// Validates the PATCH /live-classes/:id/microphone request body.
+// - enabled: required boolean (not coerced from string)
+// - expectedVersion: required, accepts number, BigInt, or numeric string (coerced to BigInt)
+// - strict mode: no extra fields allowed (userId injection is rejected)
+const liveClassMicrophoneSchema = z.object({
+  enabled: z.boolean(),
+  expectedVersion: z.coerce.bigint().refine(
+    (v) => v >= 0n,
+    { message: 'expectedVersion must be a non-negative integer' }
+  ),
+}).strict();
+
 module.exports = {
   validateZod,
   createLiveClassSchema,
   updateLiveClassSchema,
+  liveClassMicrophoneSchema,
 };

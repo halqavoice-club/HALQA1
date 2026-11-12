@@ -51,11 +51,30 @@ export function useAppLifecycle() {
       useNotificationsStore.getState().incrementUnread();
     };
 
+    // Register the event listener for the current connection.
     socket.on('school:join_request', handler);
-    return () => { socket.off('school:join_request', handler); };
-  // Re-subscribe whenever socket reconnects
+
+    // On every reconnect, re-register the listener so it remains live
+    // after the socket re-establishes. Socket.IO removes listeners only on
+    // socket.off() — they survive a disconnect/reconnect on the SAME instance.
+    // However, if initSocket() was called with a new instance, this effect's
+    // closure still holds the original socket ref. The 'connect' listener below
+    // ensures the handler re-attaches correctly on that instance.
+    const onConnect = () => {
+      socket.off('school:join_request', handler);
+      socket.on('school:join_request', handler);
+    };
+    socket.on('connect', onConnect);
+
+    return () => {
+      socket.off('connect', onConnect);
+      socket.off('school:join_request', handler);
+    };
+  // Run once on mount — socket ref is captured via getSocket() at call time.
+  // getSocket() in the dep array would evaluate at render and change every time
+  // initSocket() creates a new socket, causing the effect to re-run and churn listeners.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [getSocket()]);
+  }, []);
 }
 
 export async function requireBiometricLogin(): Promise<boolean> {

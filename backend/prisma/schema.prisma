@@ -1735,6 +1735,30 @@ enum LiveClassAttendanceStatus {
   ABSENT
 }
 
+enum LiveClassMicrophoneAuthorizationMode {
+  LEGACY
+  SFU_AUTHORITATIVE
+}
+
+enum LiveClassMicrophoneIntent {
+  UNKNOWN
+  OFF
+  ON
+}
+
+enum LiveClassMicrophoneSfuState {
+  UNKNOWN
+  MUTED
+  LIVE
+}
+
+enum LiveClassMicrophoneOperationStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REJECTED
+}
+
 model LiveClass {
   id                 String          @id @default(uuid())
   // ── Stream type ──────────────────────────────────────────────────────────
@@ -1783,12 +1807,17 @@ model LiveClass {
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
 
+  // ── Microphone authorization mode (SEC01-G-BE02) ──────────────────────────
+  microphoneAuthorizationMode  LiveClassMicrophoneAuthorizationMode @default(SFU_AUTHORITATIVE) @map("microphone_authorization_mode")
+  microphoneModeEstablishedAt  DateTime?                            @map("microphone_mode_established_at")
+
   participants  LiveClassParticipant[]
   messages      LiveClassMessage[]
   handQueue     LiveClassHandQueue[]
   attendance    LiveClassAttendance[]
   polls             LiveClassPoll[]
   whiteboardSnapshot LiveClassWhiteboardSnapshot?
+  microphoneOperations LiveClassMicrophoneOperation[]
 
   @@index([streamType])
   @@index([schoolId])
@@ -1830,6 +1859,16 @@ model LiveClassParticipant {
   createdAt     DateTime                 @default(now())
   updatedAt     DateTime                 @updatedAt
 
+  // ── Microphone authorization fields (SEC01-G-BE02) ────────────────────────
+  microphoneIntent              LiveClassMicrophoneIntent   @default(UNKNOWN)  @map("microphone_intent")
+  microphoneModeratorRevoked    Boolean                     @default(false)    @map("microphone_moderator_revoked")
+  microphoneAuthorizationVersion BigInt                     @default(0)        @map("microphone_authorization_version")
+  microphoneSfuVersion          BigInt                      @default(0)        @map("microphone_sfu_version")
+  microphoneSfuState            LiveClassMicrophoneSfuState @default(UNKNOWN)  @map("microphone_sfu_state")
+  microphoneSfuReason           String?                                        @map("microphone_sfu_reason")
+
+  microphoneOperations          LiveClassMicrophoneOperation[]
+
   @@unique([liveClassId, userId])
   @@index([liveClassId])
   @@index([userId])
@@ -1839,6 +1878,31 @@ model LiveClassParticipant {
   // (speakerSlot=NULL) remain valid. Only non-null slot values are deduplicated.
   @@unique([liveClassId, speakerSlot], name: "unique_liveclass_speaker_slot")
   @@map("live_class_participants")
+}
+
+model LiveClassMicrophoneOperation {
+  id                  String                              @id @default(cuid())
+  liveClassId         String                              @map("live_class_id")
+  liveClass           LiveClass                           @relation(fields: [liveClassId], references: [id], onDelete: Cascade)
+  participantId       String                              @map("participant_id")
+  participant         LiveClassParticipant                @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  actorUserId         String                              @map("actor_user_id")
+  targetUserId        String                              @map("target_user_id")
+  idempotencyKey      String                              @map("idempotency_key")
+  requestFingerprint  String                              @map("request_fingerprint") @db.Char(64)
+  requestedEnabled    Boolean                             @default(false)             @map("requested_enabled")
+  expectedVersion     BigInt                              @default(0)                 @map("expected_version")
+  status              LiveClassMicrophoneOperationStatus  @default(PENDING)
+  canPublishAudio     Boolean                             @default(false)             @map("can_publish_audio")
+  sfuEnforced         Boolean                             @default(false)             @map("sfu_enforced")
+  createdAt           DateTime                            @default(now())
+  updatedAt           DateTime                            @updatedAt
+
+  @@unique([liveClassId, actorUserId, idempotencyKey], name: "liveclass_mic_operation_idempotency")
+  @@index([liveClassId])
+  @@index([participantId])
+  @@index([actorUserId])
+  @@map("live_class_microphone_operations")
 }
 
 model LiveClassMessage {
