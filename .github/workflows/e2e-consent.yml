@@ -89,8 +89,7 @@ jobs:
       livekit:
         image: livekit/livekit-server:v1.9.10
         ports: ['7880:7880', '7881:7881']
-        env:
-          LIVEKIT_KEYS: "devkey: secret"
+        options: --network host
       mysql:
         image: mysql:8.0
         ports: ['3306:3306']
@@ -173,7 +172,7 @@ jobs:
         working-directory: frontend
       
       - name: Run real consent suite
-        run: npx playwright test e2e/voice-consent.spec.ts
+        run: npx playwright test e2e/voice.spec.ts
         working-directory: frontend
         env:
           CI: 'true'
