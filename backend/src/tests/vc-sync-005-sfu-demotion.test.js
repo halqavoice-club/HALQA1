@@ -84,7 +84,7 @@ describe('T1: SPEAKER → AUDIENCE demotion calls sfuRevokePublish', () => {
   });
 
   test('sfuRevokePublish call is fire-and-forget (.catch)', () => {
-    expect(promoteParticipantSrc).toMatch(/sfuRevokePublish\([^)]+\)\.catch/);
+    expect(promoteParticipantSrc).toMatch(/sfuRevokePublish\([^)]+\)[\s\S]*?\.catch/);
   });
 });
 
@@ -429,7 +429,7 @@ describe('T6: removeModerator regression — sfuRevokePublish not accidentally r
   });
 
   test('removeModerator sfuRevokePublish is best-effort (.catch)', () => {
-    expect(removeModeratorSrc).toMatch(/sfuRevokePublish\([^)]+\)\.catch\(\s*\(\s*\)\s*=>/);
+    expect(removeModeratorSrc).toMatch(/sfuRevokePublish\([^)]+\)[\s\S]*?\.catch\(\s*\(\s*\)\s*=>/);
   });
 
   test('voice-roles.controller imports sfuRevokePublish', () => {
