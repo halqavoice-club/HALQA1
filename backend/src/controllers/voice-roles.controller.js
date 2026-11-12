@@ -166,7 +166,9 @@ async function removeModerator(req, res, next) {
     // The demoted user's existing token may still have canPublish:true from
     // when they were assigned moderator. sfuRevokePublish forces canPublish=false
     // on the live SFU connection immediately — no reconnect needed.
-    sfuRevokePublish(roomId, targetUserId, false, '[voice:remove-mod]').catch(() => {});
+    sfuRevokePublish(roomId, targetUserId, false, '[voice:remove-mod]')
+      .then(r => { if (r && !r.enforced) logger.warn('[voice:remove-mod] SFU enforcement gap', { roomId, userId: targetUserId, reason: r.reason }); })
+      .catch(() => {});
 
     const io = getIo();
     if (io) {
@@ -418,7 +420,9 @@ async function muteAll(req, res, next) {
     // token expires. sfuRevokePublish sets canPublish=false on the live SFU
     // connection immediately so the revocation takes effect without token expiry.
     actuallyMuted.forEach(t => {
-      sfuRevokePublish(roomId, t.userId, false, '[voice:mute-all]').catch(() => {});
+      sfuRevokePublish(roomId, t.userId, false, '[voice:mute-all]')
+        .then(r => { if (r && !r.enforced) logger.warn('[voice:mute-all] SFU enforcement gap', { roomId, userId: t.userId, reason: r.reason }); })
+        .catch(() => {});
     });
 
     return successResponse(res, { mutedCount, allMuted: true },
@@ -530,7 +534,9 @@ async function unmuteAll(req, res, next) {
     // this restore, those participants cannot publish until their token expires (~1h).
     // Best-effort only — catch swallows SFU errors.
     actuallyUnmuted.forEach(t => {
-      sfuRevokePublish(roomId, t.userId, true, '[voice:unmute-all]').catch(() => {});
+      sfuRevokePublish(roomId, t.userId, true, '[voice:unmute-all]')
+        .then(r => { if (r && !r.enforced) logger.warn('[voice:unmute-all] SFU enforcement gap', { roomId, userId: t.userId, reason: r.reason }); })
+        .catch(() => {});
     });
 
     _rolesAudit(callerId, 'UNMUTE_ALL', roomId, { unmutedCount });
