@@ -1362,7 +1362,8 @@ async function toggleMute(req, res, next) {
           isMuted: participant.isMuted,
           ...(newMuted ? {} : { mutedByModerator: false }),
         },
-        data: { isMuted: newMuted },
+        // Self-mute: preserve mutedByRoom=false (this is not a room-wide mute)
+        data: { isMuted: newMuted, mutedByRoom: false },
       });
 
       if (updateResult.count !== 1) {
