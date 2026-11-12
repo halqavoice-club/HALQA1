@@ -314,7 +314,9 @@ describe('PH17-003: sfuRevokePublish on moderator removal and muteAll', () => {
     const src = fs.readFileSync(
       path.join(__dirname, '../controllers/voice-roles.controller.js'), 'utf8'
     );
-    const fn = extractFn(src, 'muteAll', 'unmuteAll');
+    // Use 'async function unmuteAll' as the boundary to avoid cutting at inline
+    // references to 'unmuteAll' in comments within muteAll().
+    const fn = extractFn(src, 'muteAll', 'async function unmuteAll');
     expect(fn).toMatch(/sfuRevokePublish\s*\(/);
     expect(fn).toMatch(/false.*\[voice:mute-all\]|\[voice:mute-all\].*false/);
     // Must be inside a forEach over the actually-muted participants (R1 fix: re-read after updateMany)
