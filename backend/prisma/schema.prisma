@@ -1281,6 +1281,7 @@ model VoiceParticipant {
   role         VoiceParticipantRole @default(AUDIENCE)
   isMuted      Boolean              @default(true)
   mutedByModerator Boolean          @default(false)  // P1-2: when true, only HOST/MOD can unmute
+  mutedByRoom      Boolean          @default(false)   // ARCH-GAP-C1: true when muted via muteAll(); false for self-mute
   handRaised   Boolean              @default(false)
   handRaisedAt DateTime?
   isPinned     Boolean              @default(false)   // pinned to top of stage grid by host/mod

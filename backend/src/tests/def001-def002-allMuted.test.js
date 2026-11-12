@@ -1640,3 +1640,157 @@ describe('R1 + P3a — unmuteAll socket accuracy and SFU restore [MOCKED]', () =
   });
 
 });
+
+// ─── ARCH-GAP-C1 — mutedByRoom regression ────────────────────────────────────
+//
+// ARCH-GAP-C1 adds a mutedByRoom boolean column to voice_participants.
+// muteAll()   sets mutedByRoom=true on targeted participants.
+// unmuteAll() targets mutedByRoom=true only, so self-muted (mutedByRoom=false)
+// and moderator-muted (mutedByModerator=true) participants are never touched.
+// toggleMute() self-mute explicitly writes mutedByRoom=false.
+//
+// All tests are MOCKED — no real DB, Redis, or LiveKit required.
+
+describe('ARCH-GAP-C1 — mutedByRoom regression [MOCKED]', () => {
+
+  const prisma               = require('../utils/prisma');
+  const { sfuRevokePublish } = require('../utils/livekitService');
+  const { getIo }            = require('../sockets');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    const emitFn = jest.fn();
+    const toFn   = jest.fn().mockReturnValue({ emit: emitFn });
+    getIo.mockReturnValue({ to: toFn, emit: emitFn });
+    sfuRevokePublish.mockResolvedValue(undefined);
+    prisma.voiceParticipant.update.mockResolvedValue({});
+    prisma.voiceParticipant.updateMany.mockResolvedValue({ count: 1 });
+    prisma.$transaction.mockImplementation(async (fn) => fn(prisma));
+  });
+
+  // ── C1-T1: muteAll() sets mutedByRoom=true on targeted participants ────────
+  test('C1-T1 — muteAll() sets mutedByRoom=true on targeted participants', async () => {
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([
+      { id: 'p1', userId: 'u1' },
+      { id: 'p2', userId: 'u2' },
+    ]);
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 2 });
+    // actuallyMuted re-read (R1 fix)
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([
+      { userId: 'u1' }, { userId: 'u2' },
+    ]);
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.muteAll(req, res, next);
+
+    expect(res.statusCode).toBe(200);
+    expect(prisma.voiceParticipant.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ isMuted: true, mutedByRoom: true, mutedByModerator: false }),
+      })
+    );
+  });
+
+  // ── C1-T2: unmuteAll() only restores mutedByRoom=true participants ─────────
+  test('C1-T2 — unmuteAll() findMany where clause includes mutedByRoom: true', async () => {
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([]);
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    const findManyCalls = prisma.voiceParticipant.findMany.mock.calls;
+    expect(findManyCalls.length).toBeGreaterThanOrEqual(1);
+    expect(findManyCalls[0][0].where).toHaveProperty('mutedByRoom', true);
+  });
+
+  // ── C1-T3: self-muted participant (mutedByRoom=false) is NOT restored by unmuteAll ──
+  test('C1-T3 — self-muted participant (mutedByRoom=false) is NOT restored by unmuteAll()', async () => {
+    // findMany returns empty because self-muted participant has mutedByRoom=false
+    // and the unmuteAll filter requires mutedByRoom=true
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([]);
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    // No participant updates — self-muted participant was excluded by mutedByRoom=true filter
+    expect(res.body.data.unmutedCount).toBe(0);
+    expect(prisma.voiceParticipant.updateMany).not.toHaveBeenCalled();
+  });
+
+  // ── C1-T4: moderator-muted participant (mutedByModerator=true) is NOT restored ──
+  test('C1-T4 — moderator-muted participant (mutedByModerator=true) is NOT restored by unmuteAll()', async () => {
+    // findMany returns empty — mutedByModerator=true participant excluded by DEF-003 filter
+    prisma.voiceParticipant.findMany.mockResolvedValueOnce([]);
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    // findMany where clause must exclude moderator-muted participants
+    const findManyCalls = prisma.voiceParticipant.findMany.mock.calls;
+    expect(findManyCalls.length).toBeGreaterThanOrEqual(1);
+    expect(findManyCalls[0][0].where).toHaveProperty('mutedByModerator', false);
+    expect(res.body.data.unmutedCount).toBe(0);
+  });
+
+  // ── C1-T5: mutedByRoom cleared to false after participant restored by unmuteAll ──
+  test('C1-T5 — mutedByRoom is set to false after participant is restored by unmuteAll()', async () => {
+    prisma.voiceParticipant.findMany
+      .mockResolvedValueOnce([{ id: 'p1', userId: 'u1' }]) // findMany targets
+      .mockResolvedValueOnce([{ userId: 'u1' }]);           // actuallyUnmuted re-read
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 1 });
+
+    const req = makeReq({ params: { id: 'room-1' }, user: { id: 'host-id', firstName: 'H', lastName: 'H' } });
+    const res = makeRes();
+    await rolesCtrl.unmuteAll(req, res, next);
+
+    expect(res.statusCode).toBe(200);
+    // updateMany data must clear mutedByRoom=false when restoring
+    expect(prisma.voiceParticipant.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ isMuted: false, mutedByRoom: false, mutedByModerator: false }),
+      })
+    );
+  });
+
+  // ── C1-T6: toggleMute() self-mute does NOT set mutedByRoom=true ───────────
+  test('C1-T6 — toggleMute() self-mute explicitly writes mutedByRoom=false', async () => {
+    // Participant is currently unmuted, self-muting to true
+    prisma.voiceParticipant.findUnique
+      .mockResolvedValueOnce({
+        userId: 'speaker-id', isActive: true, role: 'SPEAKER',
+        isMuted: false, mutedByModerator: false, seatNumber: 2,
+      })
+      // post-update re-read for socket event
+      .mockResolvedValueOnce({
+        userId: 'speaker-id', isActive: true, role: 'SPEAKER',
+        isMuted: true, mutedByModerator: false, seatNumber: 2,
+      });
+    prisma.voiceParticipant.updateMany.mockResolvedValueOnce({ count: 1 });
+
+    const req = makeReq({
+      params: { id: 'room-1' },
+      body:   { isMuted: true },
+      user:   { id: 'speaker-id', firstName: 'S', lastName: 'P' },
+    });
+    const res = makeRes();
+    await voiceCtrl.toggleMute(req, res, next);
+
+    expect(res.statusCode).toBe(200);
+    // Self-mute must write mutedByRoom=false (not a room-wide mute)
+    expect(prisma.voiceParticipant.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ isMuted: true, mutedByRoom: false }),
+      })
+    );
+    // Confirm mutedByRoom=true was NOT written
+    const updateManyCalls = prisma.voiceParticipant.updateMany.mock.calls;
+    updateManyCalls.forEach(call => {
+      expect(call[0].data).not.toHaveProperty('mutedByRoom', true);
+    });
+  });
+
+});

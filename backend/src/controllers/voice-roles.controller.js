@@ -361,7 +361,9 @@ async function muteAll(req, res, next) {
           // F-04 Race B: re-check isMuted=false at write time so a concurrent
           // unmute between findMany and updateMany is not overwritten.
           where: { id: { in: targets.map(t => t.id) }, isMuted: false },
-          data: { isMuted: true, mutedByModerator: false, updatedAt: new Date() }
+          // ARCH-GAP-C1 FIX: set mutedByRoom=true so unmuteAll() can distinguish
+          // room-muted participants from self-muted ones and preserve self-mute state.
+          data: { isMuted: true, mutedByRoom: true, mutedByModerator: false, updatedAt: new Date() }
         });
         mutedCount = updateResult.count;
         // R1 FIX: Log when concurrent state change caused some rows to be skipped.
@@ -458,18 +460,15 @@ async function unmuteAll(req, res, next) {
     await prisma.$transaction(async (tx) => {
       // DEF-003 FIX: Filter on mutedByModerator=false so individually muted
       // participants are excluded from the room-wide unmute.
-      // ARCH-GAP-C1: self-muted (isMuted=true, mutedByModerator=false set by toggleMute())
-      // and room-muted (muteAll → isMuted=true, mutedByModerator=false) are indistinguishable
-      // in the current schema. A participant who self-muted while room-wide mute was active
-      // will have the same DB state as one muted only by muteAll(), so unmuteAll() will
-      // inadvertently restore them. Resolution requires a dedicated mutedByRoom boolean column
-      // (default false): muteAll() sets it true; unmuteAll() targets mutedByRoom=true only.
-      // This schema change is out of scope for F3.1 — tracked as ARCH-GAP-C1.
+      // ARCH-GAP-C1 FIX: also filter mutedByRoom=true so only participants muted
+      // via muteAll() are targeted. Self-muted participants (mutedByRoom=false) are
+      // excluded — their voluntary mute state is preserved across unmuteAll().
       targets = await tx.voiceParticipant.findMany({
         where: {
           roomId,
           isActive:         true,
           isMuted:          true,
+          mutedByRoom:      true,    // ARCH-GAP-C1: only room-muted via muteAll()
           mutedByModerator: false,   // DEF-003: skip individually mod-muted participants
           userId:           { not: callerId },
           role:             { in: [VOICE_ROLES.SPEAKER, VOICE_ROLES.MODERATOR] }
@@ -479,13 +478,13 @@ async function unmuteAll(req, res, next) {
 
       if (targets.length > 0) {
         const updateResult = await tx.voiceParticipant.updateMany({
-          // F-04 Race B: re-check mutedByModerator=false at write time so a
-          // concurrent individual toggleMute() between findMany and updateMany
-          // is NOT overwritten. If toggleMute sets mutedByModerator=true before
+          // F-04 Race B: re-check at write time so concurrent state changes are
+          // not overwritten. If toggleMute sets mutedByModerator=true before
           // this updateMany runs, the WHERE clause won't match that row, and
           // the individual disciplinary mute is preserved.
-          where: { id: { in: targets.map(t => t.id) }, mutedByModerator: false },
-          data: { isMuted: false, mutedByModerator: false, updatedAt: new Date() }
+          where: { id: { in: targets.map(t => t.id) }, mutedByRoom: true, mutedByModerator: false },
+          // ARCH-GAP-C1: also clear mutedByRoom when restoring participants
+          data: { isMuted: false, mutedByRoom: false, mutedByModerator: false, updatedAt: new Date() }
         });
         unmutedCount = updateResult.count;
       }
