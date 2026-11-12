@@ -89,7 +89,8 @@ jobs:
       livekit:
         image: livekit/livekit-server:v1.9.10
         ports: ['7880:7880', '7881:7881']
-        options: --network host
+        env:
+          LIVEKIT_KEYS: "devkey: secret"
       mysql:
         image: mysql:8.0
         ports: ['3306:3306']
