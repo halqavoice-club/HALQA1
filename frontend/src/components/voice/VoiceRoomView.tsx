@@ -545,6 +545,11 @@ export function VoiceRoomView({ onLeave }: Props) {
   const isReconnecting = connectionState === ConnectionState.Reconnecting
   const isDisconnected = connectionState === ConnectionState.Disconnected
 
+  // Suppress banner flash on initial mount (before first successful connection).
+  // The banner is only meaningful after the room has connected at least once.
+  const hasConnectedOnceRef = useRef(false)
+  if (isConnected) hasConnectedOnceRef.current = true
+
   useEffect(() => {
     if (roomId) {
       connect().catch((err: any) => {
@@ -1099,7 +1104,7 @@ export function VoiceRoomView({ onLeave }: Props) {
 
       {/* Disconnected banner — shown when all retries exhausted */}
       <AnimatePresence>
-        {isDisconnected && !micError && !isConnecting && !isReconnecting && (
+        {isDisconnected && !micError && !isConnecting && !isReconnecting && hasConnectedOnceRef.current && (
           <motion.div
             className="vc-mic-error"
             initial={{ opacity: 0, y: -10 }}
@@ -1139,7 +1144,7 @@ export function VoiceRoomView({ onLeave }: Props) {
           </div>
         </div>
         <div className="vc-header-right">
-          {isDisconnected && !micError && (
+          {isDisconnected && !micError && hasConnectedOnceRef.current && (
             <button className="vc-reconnect-btn" onClick={() => connect()} title="Reconnect audio" aria-label="Reconnect audio">🔄</button>
           )}
           {/* LB-P1-3: minimal connection quality indicator — only shown while connected
