@@ -24,7 +24,7 @@ const schema = z.object({
   category:    z.string().optional(),
   rules:       z.string().max(5000).optional(),
 })
-type Form = z.infer<typeof schema>
+type Form = z.input<typeof schema>
 
 function CreateModal({ onClose }: { onClose: () => void }) {
   const { toast }   = useToast()

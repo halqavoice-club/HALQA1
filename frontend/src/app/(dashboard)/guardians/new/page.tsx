@@ -35,7 +35,7 @@ const RELATIONSHIPS = ['parent', 'guardian', 'grandparent', 'uncle', 'aunt', 'si
 const schema = z.object({
   relationship: z.string().default('parent'),
 })
-type Form = z.infer<typeof schema>
+type Form = z.input<typeof schema>
 
 type Friend = {
   id: string
