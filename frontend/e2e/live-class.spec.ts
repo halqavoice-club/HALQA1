@@ -8,14 +8,17 @@ import { test, expect } from '@playwright/test';
  *         -> submit -> assert live class appears in list
  */
 test.describe('Live Class', () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    // Skip entire suite if no real test credentials are configured.
+    const email = process.env.E2E_TEACHER_EMAIL || process.env.E2E_TEST_EMAIL;
+    const password = process.env.E2E_TEACHER_PASSWORD || process.env.E2E_TEST_PASSWORD;
+    if (!email || !password || email === 'teacher@halqa.app' || email === 'test@halqa.app') {
+      testInfo.skip(true, 'E2E credentials not configured — skipping live-class E2E suite');
+      return;
+    }
     await page.goto('/login');
-    await page.locator('input[type="email"], input[name="email"]').first().fill(
-      process.env.E2E_TEACHER_EMAIL || process.env.E2E_TEST_EMAIL || 'teacher@halqa.app'
-    );
-    await page.locator('input[type="password"], input[name="password"]').first().fill(
-      process.env.E2E_TEACHER_PASSWORD || process.env.E2E_TEST_PASSWORD || 'Test1234!'
-    );
+    await page.locator('input[type="email"], input[name="email"]').first().fill(email);
+    await page.locator('input[type="password"], input[name="password"]').first().fill(password);
     await page.locator('button[type="submit"]').first().click();
     // Wait until we leave /login -- different roles land on different routes (/feed, /admin etc.)
     await page.waitForURL(url => !url.pathname.includes('/login'), { timeout: 15000 });
