@@ -117,7 +117,9 @@ export function useLiveKit(roomId: string | null): LiveKitState {
   }
   const pendingMicOpRef = useRef<MicOperation | null>(null)
 
-  const [connectionState,   setConnectionState]   = useState<ConnectionState>(ConnectionState.Disconnected)
+  // Start as Connecting so the banner doesn't flash before the first connect() completes.
+  // Once connect() fails or the room reports Disconnected, state transitions correctly.
+  const [connectionState,   setConnectionState]   = useState<ConnectionState>(ConnectionState.Connecting)
   const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>(ConnectionQuality.Unknown)
   const [isMicEnabled, setIsMicEnabled]           = useState(false)
   const [isMicPending, setIsMicPending]           = useState(false)  // SEC01-WEB-P1-R2: mic activation in progress
@@ -237,10 +239,11 @@ export function useLiveKit(roomId: string | null): LiveKitState {
         }
       })
 
-      // ── Token refresh: proactive reconnect 5 min before 1-hour token expires ──
-      // The LiveKit token TTL is 1h. At 55 min we gracefully reconnect so the
-      // user never sees a forced disconnection from token expiry.
-      const TOKEN_REFRESH_MS = 55 * 60 * 1000 // 55 minutes
+      // ── Token refresh: proactive reconnect 2 min before 10-minute token expires ──
+      // The LiveKit token TTL is 10m (INV-001). At 8 min we gracefully reconnect
+      // so the user never sees a forced disconnection from token expiry.
+      // 2-minute buffer provides margin for clock drift and network latency.
+      const TOKEN_REFRESH_MS = 8 * 60 * 1000 // 8 minutes — proactive refresh 2 min before 10m TTL expiry
       tokenRefreshTimerRef.current = setTimeout(() => {
         if (isUnmounted.current) return
         const r = roomRef.current
