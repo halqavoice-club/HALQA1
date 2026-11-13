@@ -25,7 +25,7 @@ const schema = z.object({
   room: z.string().optional(),
   capacity: z.coerce.number().min(1).max(200).default(30),
 })
-type Form = z.infer<typeof schema>
+type Form = z.input<typeof schema>
 
 export default function EditClassPage() {
   const { id } = useParams<{ id: string }>()
