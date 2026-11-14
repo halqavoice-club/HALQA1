@@ -16,6 +16,7 @@
  */
 
 import React from 'react'
+import Link from 'next/link'
 import { LiveClassRoomPage } from './LiveClassRoomImpl'
 import { Radio, RefreshCw, LogOut } from 'lucide-react'
 
@@ -67,13 +68,13 @@ class LiveClassErrorBoundary extends React.Component<
                 <RefreshCw className="w-4 h-4" />
                 Reconnect
               </button>
-              <a
+              <Link
                 href="/live-class"
                 className="flex items-center gap-2 px-4 py-2 bg-gray-800 text-gray-200 rounded-lg text-sm font-medium hover:bg-gray-700 transition-colors"
               >
                 <LogOut className="w-4 h-4" />
                 Leave
-              </a>
+              </Link>
             </div>
           </div>
         </div>
