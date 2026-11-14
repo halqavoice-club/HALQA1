@@ -19,6 +19,9 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   /* Retry on CI */
   retries: process.env.CI ? 2 : 0,
+  /* Per-test timeout — two full page navigations (login + voice-club) can take
+   * up to 30s each on a loaded CI runner; default 30s is too tight. */
+  timeout: process.env.CI ? 60000 : 30000,
   /* Workers */
   workers: process.env.CI ? 1 : undefined,
   /* Reporter */
