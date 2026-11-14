@@ -45,7 +45,8 @@ const eslintConfig = defineConfig([
       'react-hooks/static-components': 'error',
       'react-hooks/unsupported-syntax': 'error',
       'react-hooks/use-memo': 'error',
-      // Still off — violations exist and are addressed in later FEATs:
+      // All 12 rules below are enabled — 12 of 14 total compiler rules.
+      // 2 remain 'off' with justifications at the bottom of this block.
       'react-hooks/purity': 'error',
       'react-hooks/refs': 'error',
       'react-hooks/set-state-in-effect': 'error',
