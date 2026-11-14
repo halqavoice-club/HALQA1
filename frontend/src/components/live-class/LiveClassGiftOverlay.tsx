@@ -13,7 +13,7 @@
  *   animationType='video' OR videoUrl set → VideoGiftAnimation — plays MP4/WebM fullscreen
  */
 
-import { useEffect, useState, useRef } from 'react'
+import { useState, useRef, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useVoiceStore, type GiftEvent } from '@/store/voice.store'
 import { getAvatarUrl } from '@/lib/avatar'
@@ -350,17 +350,15 @@ function CinematicRouter({ event, onDone }: { event: GiftEvent; onDone: () => vo
 // ─── Main overlay ─────────────────────────────────────────────────────────────
 
 export function LiveClassGiftOverlay({ isLowEnd = false }: { isLowEnd?: boolean }) {
-  const { activeGiftEvents } = useVoiceStore()
-  const [cinematicEvent, setCinematicEvent] = useState<GiftEvent | null>(null)
+  const { activeGiftEvents, removeGiftEvent } = useVoiceStore()
 
-  // Pick the latest cinematic/video event to show fullscreen
-  useEffect(() => {
-    if (isLowEnd) return
-    const next = activeGiftEvents.find(e => isCinematic(e) || isVideoGift(e))
-    if (next && next.id !== cinematicEvent?.id) {
-      setCinematicEvent(next) // eslint-disable-line react-hooks/set-state-in-effect
-    }
-  }, [activeGiftEvents, isLowEnd, cinematicEvent?.id])
+  // Derive the current cinematic/video event directly — no state sync needed.
+  const cinematicEvent = useMemo(
+    () => !isLowEnd
+      ? (activeGiftEvents.find(e => isCinematic(e) || isVideoGift(e)) ?? null)
+      : null,
+    [activeGiftEvents, isLowEnd],
+  )
 
   // Normal events (non-cinematic) stacked bottom-right
   const normalEvents = activeGiftEvents.filter(e => !isCinematic(e) && !isVideoGift(e))
@@ -373,7 +371,7 @@ export function LiveClassGiftOverlay({ isLowEnd = false }: { isLowEnd?: boolean 
           <CinematicRouter
             key={cinematicEvent.id}
             event={cinematicEvent}
-            onDone={() => setCinematicEvent(null)}
+            onDone={() => removeGiftEvent(cinematicEvent.id)}
           />
         )}
       </AnimatePresence>

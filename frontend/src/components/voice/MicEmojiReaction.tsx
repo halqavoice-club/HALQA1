@@ -309,7 +309,7 @@ export function useSpeakingLevel(
   const rafRef      = useRef<number | null>(null)
 
   useEffect(() => {
-    if (!isSpeaking) { setLevel('low'); return } // eslint-disable-line react-hooks/set-state-in-effect
+    if (!isSpeaking) return
 
     // Try to get audio level from the local mic track via Web Audio API
     let stream: MediaStream | null = null
@@ -337,7 +337,7 @@ export function useSpeakingLevel(
         rafRef.current = requestAnimationFrame(tick)
       } catch {
         // Mic access denied or not available — default to medium when speaking
-        setLevel('medium') // eslint-disable-line react-hooks/set-state-in-effect
+        setLevel('medium')
       }
     }
 
@@ -348,6 +348,8 @@ export function useSpeakingLevel(
       stream?.getTracks().forEach(t => t.stop())
       ctx?.close()
       analyserRef.current = null
+      // Reset level when isSpeaking goes false or component unmounts
+      setLevel('low')
     }
   }, [isSpeaking])
 

@@ -49,7 +49,13 @@ const eslintConfig = defineConfig([
       'react-hooks/purity': 'error',
       'react-hooks/refs': 'error',
       'react-hooks/set-state-in-effect': 'error',
+      // react-hook-form's watch() API is structurally incompatible with the
+      // React Compiler — it subscribes to form state outside React's
+      // reconciliation model. Re-enable when react-hook-form is replaced.
       'react-hooks/incompatible-library': 'off',
+      // Zustand stores use direct mutation inside set() callbacks (the standard
+      // Zustand pattern). This triggers false positives across all store files.
+      // Re-enable after a dedicated Zustand audit and migration sprint.
       'react-hooks/immutability': 'off',
     },
   },

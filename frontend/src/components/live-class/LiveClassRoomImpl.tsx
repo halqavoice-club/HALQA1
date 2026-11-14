@@ -454,23 +454,11 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   const [viewMode,         setViewMode]         = useState<ViewMode>('video')
   // Participant interaction popup (click on a tile)
   const [participantPopup, setParticipantPopup] = useState<ParticipantPopup | null>(null)
-  // Open mic mode (all students can publish freely)
-  const [isOpenMic,        setIsOpenMic]        = useState(false)
-
   // ── Spotlight / individual participant maximize ────────────────────────────
   // PRESENTATION ONLY — local UI state. Does NOT change LiveKit connections,
   // speaker slots, roles, maxSpeakers, or any backend state.
   // Each viewer independently selects their own primary participant.
   const [selectedParticipantId, setSelectedParticipantId] = useState<string | null>(null)
-
-  // Auto-clear spotlight when the selected participant leaves or is removed
-  useEffect(() => {
-    if (!selectedParticipantId) return
-    const still = stageParticipants.find(p => p.userId === selectedParticipantId)
-    if (!still) setSelectedParticipantId(null) // eslint-disable-line react-hooks/set-state-in-effect
-  // stageParticipants is recomputed from participants — this safely tracks leaves
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [participants, selectedParticipantId])
 
   // ── New feature state ─────────────────────────────────────────────────────
   // Sidebar tab (extended)
@@ -576,15 +564,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   const canManage = isHost || isModerator
 
   // Sync isOpenMic from server data
-  useEffect(() => {
-    if (lc) setIsOpenMic(lc.isOpenMic) // eslint-disable-line react-hooks/set-state-in-effect
-  }, [lc?.isOpenMic])
-
-  // Clamp videoPage when participants leave and totalVideoPages shrinks
-  useEffect(() => {
-    const pages = Math.ceil(Math.max(participants.length, 1) / 16)
-    setVideoPage(p => Math.min(p, Math.max(0, pages - 1))) // eslint-disable-line react-hooks/set-state-in-effect
-  }, [participants.length])
+  const isOpenMic = lc?.isOpenMic ?? false
 
   // ── Sync live class participants → useDynamicLayoutStore (for SpeakerGrid in audio mode) ──
   // MIC-02: Only sync on-stage participants (HOST, MODERATOR, or speakerSlot assigned).
@@ -661,7 +641,10 @@ export function LiveClassRoomPage({ id }: { id: string }) {
     // The backend emits liveclass:grant_mic instead. Removed to avoid confusion.
     // If you see this comment in 2027+, check if the backend was updated to emit it.
     const onOpenMicChanged = (d: any) => {
-      setIsOpenMic(d.isOpenMic)
+      // Update the query cache so isOpenMic (derived from lc?.isOpenMic) reacts immediately.
+      queryClient.setQueryData(['live-class', id], (old: LiveClass | undefined) =>
+        old ? { ...old, isOpenMic: d.isOpenMic } : old
+      )
       if (d.isOpenMic) {
         toast({ title: '🎙 Open mic — raise your hand to speak instantly!' })
         // MIC-02: Open mic means raise-hand auto-approves (no host click needed).
@@ -1749,9 +1732,18 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   )
 
   const totalVideoPages = Math.ceil(Math.max(stageParticipants.length, 1) / PAGE_SIZE)
+  // Clamp videoPage in render — if participants leave and reduce the page count,
+  // use the clamped value everywhere instead of syncing state from an effect.
+  const clampedVideoPage = Math.min(videoPage, Math.max(0, totalVideoPages - 1))
+  // Derive effective spotlight: if the selected participant has left the stage,
+  // treat it as no spotlight without syncing state from an effect.
+  const effectiveSelectedId = selectedParticipantId &&
+    stageParticipants.some(p => p.userId === selectedParticipantId)
+    ? selectedParticipantId
+    : null
   const pagedParticipants = stageParticipants.slice(
-    videoPage * PAGE_SIZE,
-    videoPage * PAGE_SIZE + PAGE_SIZE,
+    clampedVideoPage * PAGE_SIZE,
+    clampedVideoPage * PAGE_SIZE + PAGE_SIZE,
   )
 
   const n = stageParticipants.length
@@ -1895,15 +1887,15 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   }}
                   className={cn(
                     'w-full text-left text-xs px-3 py-2 rounded-lg transition-colors flex items-center gap-2',
-                    selectedParticipantId === participantPopup.participant.userId
+                    effectiveSelectedId === participantPopup.participant.userId
                       ? 'text-indigo-300 hover:text-white hover:bg-gray-700 font-semibold'
                       : 'text-indigo-400 hover:text-indigo-300 hover:bg-gray-700',
                   )}
                 >
                   <span className="text-[13px]">
-                    {selectedParticipantId === participantPopup.participant.userId ? '⊠' : '⊡'}
+                    {effectiveSelectedId === participantPopup.participant.userId ? '⊠' : '⊡'}
                   </span>
-                  {selectedParticipantId === participantPopup.participant.userId
+                  {effectiveSelectedId === participantPopup.participant.userId
                     ? 'Remove spotlight (back to grid)'
                     : 'Spotlight (make primary video)'}
                 </button>
@@ -2498,21 +2490,21 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               </div>
 
               {/* Participant video grid — on-stage speakers only
-                  ── SPOTLIGHT MODE: if selectedParticipantId is set, shows one
+                  ── SPOTLIGHT MODE: if effectiveSelectedId is set, shows one
                      primary tile + horizontal secondary strip.
                   ── GRID MODE: flat auto-sizing grid (existing behavior).
                   Single click on any tile → opens participant popup (original behavior).
                   Popup includes "Spotlight" action for the Host.
                   Primary tile has a dedicated "✕ Back to grid" button for the Host. */}
-              {selectedParticipantId && stageParticipants.find(p => p.userId === selectedParticipantId) ? (() => {
+              {effectiveSelectedId && stageParticipants.find(p => p.userId === effectiveSelectedId) ? (() => {
                 // ── SPOTLIGHT LAYOUT ─────────────────────────────────────────
-                const primary = stageParticipants.find(p => p.userId === selectedParticipantId)!
-                const secondaries = stageParticipants.filter(p => p.userId !== selectedParticipantId)
+                const primary = stageParticipants.find(p => p.userId === effectiveSelectedId)!
+                const secondaries = stageParticipants.filter(p => p.userId !== effectiveSelectedId)
 
                 const renderTile = (p: LCParticipant, isLarge: boolean) => {
                   const isMe = p.userId === user?.id
                   const track = isMe ? null : (remoteVideoTracks.get(p.userId) ?? null)
-                  const isSelected = p.userId === selectedParticipantId
+                  const isSelected = p.userId === effectiveSelectedId
                   return (
                     <div
                       key={p.userId}
@@ -2659,7 +2651,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                 <div className="flex items-center justify-center gap-3 py-2">
                   <button
                     onClick={() => setVideoPage(p => Math.max(0, p - 1))}
-                    disabled={videoPage === 0}
+                    disabled={clampedVideoPage === 0}
                     className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-gray-800 text-gray-300 disabled:opacity-30 hover:bg-gray-700 transition-colors"
                   >
                     ← Prev
@@ -2672,7 +2664,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                         aria-label={`Page ${i + 1}`}
                         className={cn(
                           'transition-all rounded-full',
-                          i === videoPage
+                          i === clampedVideoPage
                             ? 'w-4 h-2 bg-indigo-500'
                             : 'w-2 h-2 bg-gray-600 hover:bg-gray-500'
                         )}
@@ -2681,13 +2673,13 @@ export function LiveClassRoomPage({ id }: { id: string }) {
                   </div>
                   <button
                     onClick={() => setVideoPage(p => Math.min(totalVideoPages - 1, p + 1))}
-                    disabled={videoPage === totalVideoPages - 1}
+                    disabled={clampedVideoPage === totalVideoPages - 1}
                     className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-gray-800 text-gray-300 disabled:opacity-30 hover:bg-gray-700 transition-colors"
                   >
                     Next →
                   </button>
                   <span className="text-xs text-gray-500">
-                    Page {videoPage + 1} of {totalVideoPages} · {participants.length} participants
+                    Page {clampedVideoPage + 1} of {totalVideoPages} · {participants.length} participants
                   </span>
                 </div>
               )}
