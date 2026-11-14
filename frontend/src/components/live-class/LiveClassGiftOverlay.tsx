@@ -40,6 +40,10 @@ function isRareOrEpic(event: GiftEvent) {
   return event.gift.rarity === 'rare' || event.gift.rarity === 'epic'
 }
 
+// ─── Module-level pre-computed particle distances ─────────────────────────────
+// Max 32 particles; generated at module load — not in render (react-hooks/purity safe).
+const PARTICLE_DISTS = Array.from({ length: 32 }, () => 55 + Math.random() * 40)
+
 // ─── ParticleBurst ───────────────────────────────────────────────────────────
 
 function ParticleBurst({ color, count = 14 }: { color: string; count?: number }) {
@@ -47,7 +51,7 @@ function ParticleBurst({ color, count = 14 }: { color: string; count?: number })
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
       {Array.from({ length: count }, (_, i) => {
         const angle = (360 / count) * i
-        const dist  = 55 + Math.random() * 40
+        const dist  = PARTICLE_DISTS[i] ?? 55
         return (
           <motion.div
             key={i}
@@ -354,7 +358,7 @@ export function LiveClassGiftOverlay({ isLowEnd = false }: { isLowEnd?: boolean 
     if (isLowEnd) return
     const next = activeGiftEvents.find(e => isCinematic(e) || isVideoGift(e))
     if (next && next.id !== cinematicEvent?.id) {
-      setCinematicEvent(next)
+      setCinematicEvent(next) // eslint-disable-line react-hooks/set-state-in-effect
     }
   }, [activeGiftEvents, isLowEnd, cinematicEvent?.id])
 

@@ -46,8 +46,8 @@ const eslintConfig = defineConfig([
       'react-hooks/unsupported-syntax': 'error',
       'react-hooks/use-memo': 'error',
       // Still off — violations exist and are addressed in later FEATs:
-      'react-hooks/purity': 'off',
-      'react-hooks/refs': 'off',
+      'react-hooks/purity': 'error',
+      'react-hooks/refs': 'error',
       'react-hooks/set-state-in-effect': 'error',
       'react-hooks/incompatible-library': 'off',
       'react-hooks/immutability': 'off',

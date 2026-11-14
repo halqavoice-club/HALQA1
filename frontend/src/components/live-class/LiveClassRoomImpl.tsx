@@ -368,6 +368,12 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   // roomConnected state — triggers re-render of LocalVideoTile when LiveKit connects,
   // so the useEffect(room, videoOn) in LocalVideoTile runs with a non-null room.
   const [roomConnected,  setRoomConnected]  = useState<Room | null>(null)
+  // localIdentity — the identity of the local LiveKit participant after connect.
+  // Stored in state so it is available in render without reading roomRef.current.
+  const [localIdentity, setLocalIdentity] = useState<string | null>(null)
+  // canPublishMic — whether the local participant's token allows mic publishing.
+  // Stored in state so JSX doesn't need to read roomRef.current in render.
+  const [canPublishMic, setCanPublishMic] = useState(false)
 
   // ── Full Screen presentation mode ─────────────────────────────────────────
   // LAYOUT-ONLY STATE — this controls how the existing 1–20 speaker grid is
@@ -461,7 +467,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
   useEffect(() => {
     if (!selectedParticipantId) return
     const still = stageParticipants.find(p => p.userId === selectedParticipantId)
-    if (!still) setSelectedParticipantId(null)
+    if (!still) setSelectedParticipantId(null) // eslint-disable-line react-hooks/set-state-in-effect
   // stageParticipants is recomputed from participants — this safely tracks leaves
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [participants, selectedParticipantId])
@@ -571,13 +577,13 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
   // Sync isOpenMic from server data
   useEffect(() => {
-    if (lc) setIsOpenMic(lc.isOpenMic)
+    if (lc) setIsOpenMic(lc.isOpenMic) // eslint-disable-line react-hooks/set-state-in-effect
   }, [lc?.isOpenMic])
 
   // Clamp videoPage when participants leave and totalVideoPages shrinks
   useEffect(() => {
     const pages = Math.ceil(Math.max(participants.length, 1) / 16)
-    setVideoPage(p => Math.min(p, Math.max(0, pages - 1)))
+    setVideoPage(p => Math.min(p, Math.max(0, pages - 1))) // eslint-disable-line react-hooks/set-state-in-effect
   }, [participants.length])
 
   // ── Sync live class participants → useDynamicLayoutStore (for SpeakerGrid in audio mode) ──
@@ -1110,6 +1116,10 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
       await room.connect(livekitUrl, token)
       if (isUnmounted.current) { room.disconnect(); detachAllAudio(); return }
+      if (!isUnmounted.current) {
+        setLocalIdentity(room.localParticipant.identity)
+        setCanPublishMic(!!room.localParticipant.permissions?.canPublish)
+      }
 
       room.remoteParticipants.forEach((p) => {
         p.audioTrackPublications.forEach((pub) => {
@@ -1228,6 +1238,8 @@ export function LiveClassRoomPage({ id }: { id: string }) {
         reconnectTimerRef.current = null
       }
       roomRef.current?.disconnect()
+      setLocalIdentity(null)
+      setCanPublishMic(false)
       detachAllAudio(setAudioTrackCount)
       setLocalScreenTrack(null)
     }
@@ -1366,6 +1378,8 @@ export function LiveClassRoomPage({ id }: { id: string }) {
       reconnectTimerRef.current = null
     }
     roomRef.current?.disconnect()
+    setLocalIdentity(null)
+    setCanPublishMic(false)
     detachAllAudio(setAudioTrackCount)
     setLocalScreenTrack(null)
     await api.post('/live-classes/' + id + '/leave').catch(() => {})
@@ -1696,7 +1710,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
   const myParticipant = participants.find(p => p.userId === user?.id)
   const isConnected   = connState === ConnectionState.Connected
-  const iAmSharing    = screenOn && screenSharer === roomRef.current?.localParticipant?.identity
+  const iAmSharing    = screenOn && screenSharer === localIdentity
 
   // ── SPRINT-4: Share + Follow state (all stream types) ────────────────────
   const isPublicStream = lc?.streamType === 'PUBLIC'
@@ -2801,9 +2815,9 @@ export function LiveClassRoomPage({ id }: { id: string }) {
               {/* Dynamic Speaker Grid — replaces the manual AudioTile flex-wrap grid.
                   Wrapped in LiveKitRoom so SpeakerGrid's useDynamicLayout hook can
                   call useRoomContext() to subscribe to LiveKit participant events.
-                  roomRef.current is the already-connected Room instance. */}
-              {roomRef.current ? (
-                <LiveKitRoom room={roomRef.current} serverUrl="" token="">
+                  roomConnected is the already-connected Room instance. */}
+              {roomConnected ? (
+                <LiveKitRoom room={roomConnected} serverUrl="" token="">
                   <SpeakerGrid
                     roomId={id}
                     isHost={isHost}
@@ -2954,7 +2968,7 @@ export function LiveClassRoomPage({ id }: { id: string }) {
 
                 {/* Mic — shows raise-hand prompt for students awaiting permission */}
                 {(() => {
-                  const canPublish = isHost || !!roomRef.current?.localParticipant?.permissions?.canPublish
+                  const canPublish = isHost || canPublishMic
                   if (!canPublish && !isHost) {
                     // Student has a listen-only token — show raise hand button instead
                     return (
