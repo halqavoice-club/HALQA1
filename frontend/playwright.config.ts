@@ -33,6 +33,10 @@ export default defineConfig({
     trace: 'on-first-retry',
     /* Screenshot on failure */
     screenshot: 'only-on-failure',
+    /* Next.js 16 is slower at initial hydration than 14; bump default
+     * action/navigation timeouts to avoid flaky failures on first render. */
+    actionTimeout: 20000,
+    navigationTimeout: 30000,
   },
 
   projects: [

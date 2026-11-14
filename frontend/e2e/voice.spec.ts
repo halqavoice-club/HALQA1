@@ -42,7 +42,7 @@ test.describe('Voice Club', () => {
     const roomsOrEmpty = page.locator(
       '[data-testid="voice-room-card"], [data-testid="empty-state"], .vc-room-card, button:has-text("Start Room"), button:has-text("Start a Room")'
     );
-    await expect(roomsOrEmpty.first()).toBeVisible({ timeout: 10000 });
+    await expect(roomsOrEmpty.first()).toBeVisible({ timeout: 20000 });
   });
 
   test('user can join and leave a voice room', async ({ page }) => {
