@@ -48,7 +48,7 @@ const eslintConfig = defineConfig([
       // Still off — violations exist and are addressed in later FEATs:
       'react-hooks/purity': 'off',
       'react-hooks/refs': 'off',
-      'react-hooks/set-state-in-effect': 'off',
+      'react-hooks/set-state-in-effect': 'error',
       'react-hooks/incompatible-library': 'off',
       'react-hooks/immutability': 'off',
     },
