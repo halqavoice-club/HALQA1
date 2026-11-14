@@ -33,24 +33,24 @@ const eslintConfig = defineConfig([
       'react/no-unescaped-entities': 'warn',
 
       // ─── React Compiler rules (eslint-plugin-react-hooks v7) ─────────────
-      // Disabled for this sprint: codebase was written for React 18 and does
-      // not yet comply with React Compiler constraints. The build passes, all
-      // tests pass, and the app runs correctly. These rules will be addressed
-      // in a dedicated React Compiler migration sprint.
-      'react-hooks/config': 'off',
-      'react-hooks/error-boundaries': 'off',
-      'react-hooks/gating': 'off',
-      'react-hooks/globals': 'off',
-      'react-hooks/immutability': 'off',
-      'react-hooks/incompatible-library': 'off',
-      'react-hooks/preserve-manual-memoization': 'off',
+      // 9 rules with zero violations re-enabled as part of the React Compiler
+      // migration sprint (FEAT-001). The remaining 5 rules stay off until
+      // their violations are fixed in later FEATs.
+      'react-hooks/config': 'error',
+      'react-hooks/error-boundaries': 'error',
+      'react-hooks/gating': 'error',
+      'react-hooks/globals': 'error',
+      'react-hooks/preserve-manual-memoization': 'error',
+      'react-hooks/set-state-in-render': 'error',
+      'react-hooks/static-components': 'error',
+      'react-hooks/unsupported-syntax': 'error',
+      'react-hooks/use-memo': 'error',
+      // Still off — violations exist and are addressed in later FEATs:
       'react-hooks/purity': 'off',
       'react-hooks/refs': 'off',
       'react-hooks/set-state-in-effect': 'off',
-      'react-hooks/set-state-in-render': 'off',
-      'react-hooks/static-components': 'off',
-      'react-hooks/unsupported-syntax': 'off',
-      'react-hooks/use-memo': 'off',
+      'react-hooks/incompatible-library': 'off',
+      'react-hooks/immutability': 'off',
     },
   },
 ])

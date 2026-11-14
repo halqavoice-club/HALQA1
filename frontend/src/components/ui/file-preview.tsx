@@ -1,5 +1,6 @@
 'use client'
 
+import { createElement } from 'react'
 import { FileText, Image, Music, Video, File, X, Download, Eye } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -29,7 +30,7 @@ function formatSize(bytes?: number) {
 }
 
 export function FilePreview({ name, size, type, url, onRemove, className }: FilePreviewProps) {
-  const Icon = getIcon(type)
+  const iconType = getIcon(type)
   const isImage = type?.startsWith('image/')
 
   return (
@@ -42,7 +43,7 @@ export function FilePreview({ name, size, type, url, onRemove, className }: File
         {isImage && url ? (
           <img src={url} alt={name} className="w-full h-full object-cover" />
         ) : (
-          <Icon className="w-5 h-5 text-gray-400" />
+          createElement(iconType, { className: 'w-5 h-5 text-gray-400' })
         )}
       </div>
 

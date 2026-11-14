@@ -15,7 +15,7 @@
  * Used by both the DM page Bubble component and any future media gallery.
  */
 
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, createElement } from 'react'
 import { Paperclip, Play, Pause, Download, Volume2, FileText, FileSpreadsheet, FileVideo } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getFileUrl } from '@/lib/avatar'
@@ -270,7 +270,7 @@ export function DmMediaBubble({ msg, isMe }: Props) {
 
     case 'FILE': {
       if (!mediaUrl) return null
-      const Icon = fileIcon(mimeType)
+      const iconType = fileIcon(mimeType)
       return (
         <a
           href={mediaUrl}
@@ -285,7 +285,7 @@ export function DmMediaBubble({ msg, isMe }: Props) {
           <div className={cn('w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0',
             isMe ? 'bg-green-600 text-white' : 'bg-gray-300 text-gray-700'
           )}>
-            <Icon className="w-4 h-4" />
+            {createElement(iconType, { className: 'w-4 h-4' })}
           </div>
           <div className="flex-1 min-w-0">
             <p className={cn('text-xs font-semibold truncate', isMe ? 'text-gray-900' : 'text-gray-800')}>
