@@ -674,7 +674,7 @@ export default function GroupChatPage() {
   const [groupSearchQuery, setGroupSearchQuery] = useState('')
   const [groupSearchResults, setGroupSearchResults] = useState<GcMessage[]>([])
   const [groupSearchLoading, setGroupSearchLoading] = useState(false)
-  const groupSearchTimer = useRef<ReturnType<typeof setTimeout>>()
+  const groupSearchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   // Create group form
   const [groupName, setGroupName] = useState('')

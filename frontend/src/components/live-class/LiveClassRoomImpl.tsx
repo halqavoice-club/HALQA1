@@ -236,7 +236,7 @@ function LocalScreenTile({ track }: { track: import('livekit-client').LocalVideo
 function LocalVideoTile({ p, isSpeaking, videoRef, videoOn, room }: {
   p: LCParticipant
   isSpeaking: boolean
-  videoRef: React.RefObject<HTMLVideoElement>
+  videoRef: React.RefObject<HTMLVideoElement | null>
   videoOn: boolean
   room: Room | null
 }) {

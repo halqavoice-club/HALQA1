@@ -26,7 +26,7 @@ export function StoryViewer({ groups, initialGroup, onClose }: Props) {
   const [progress, setProgress] = useState(0)
   const [paused,   setPaused]   = useState(false)
   const [showReact, setShowReact] = useState(false)
-  const intervalRef = useRef<NodeJS.Timeout>()
+  const intervalRef = useRef<NodeJS.Timeout | undefined>(undefined)
 
   const group   = groups[groupIdx]
   const story   = group?.stories[storyIdx]
