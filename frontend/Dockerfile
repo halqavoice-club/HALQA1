@@ -25,9 +25,6 @@ ARG NEXT_PUBLIC_LIVEKIT_URL=
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_SOCKET_URL=$NEXT_PUBLIC_SOCKET_URL
 ENV NEXT_PUBLIC_LIVEKIT_URL=$NEXT_PUBLIC_LIVEKIT_URL
-# Disable next-pwa during Docker builds — next-pwa 5.x is incompatible with
-# output: 'standalone' inside Docker (CopyPlugin path resolution fails).
-ENV DISABLE_PWA=true
 
 RUN npm run build
 
