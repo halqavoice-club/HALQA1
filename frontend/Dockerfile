@@ -1,9 +1,12 @@
-FROM node:20 AS deps
+FROM node:24 AS deps
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+# --legacy-peer-deps required: lucide-react@0.323.0 and react-window@1.8.10
+# declare peer deps for React <=18 but we run React 19. The packages work fine
+# at runtime; this flag only relaxes npm's install-time peer dep check.
+RUN npm ci --legacy-peer-deps
 
-FROM node:20 AS builder
+FROM node:24 AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -28,7 +31,7 @@ ENV DISABLE_PWA=true
 
 RUN npm run build
 
-FROM node:20 AS runner
+FROM node:24 AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 

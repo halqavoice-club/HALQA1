@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from 'react'
 
-export function useFocusTrap(containerRef: React.RefObject<HTMLElement>) {
+export function useFocusTrap(containerRef: React.RefObject<HTMLElement | null>) {
   const previousActiveElement = useRef<HTMLElement | null>(null)
 
   const activate = useCallback(() => {

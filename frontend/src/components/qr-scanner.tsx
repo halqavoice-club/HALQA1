@@ -15,7 +15,7 @@ export function QrScanner({ onScan, onError, className }: QrScannerProps) {
   const [status, setStatus] = useState<'idle' | 'loading' | 'scanning' | 'error'>('idle')
   const [errorMsg, setErrorMsg] = useState('')
   const streamRef = useRef<MediaStream | null>(null)
-  const animRef = useRef<number>()
+  const animRef = useRef<number | undefined>(undefined)
 
   const startCamera = async () => {
     setStatus('loading')

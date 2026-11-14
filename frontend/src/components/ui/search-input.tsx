@@ -24,7 +24,7 @@ export function SearchInput({
   onFocus
 }: SearchInputProps) {
   const [localValue, setLocalValue] = useState(value)
-  const timerRef = useRef<ReturnType<typeof setTimeout>>()
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   useEffect(() => {
     setLocalValue(value)

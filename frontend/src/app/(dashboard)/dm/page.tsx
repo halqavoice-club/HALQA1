@@ -424,9 +424,9 @@ function ChatContent() {
 
   const chatEndRef    = useRef<HTMLDivElement>(null)
   const inputRef      = useRef<HTMLInputElement>(null)
-  const typingTimer   = useRef<ReturnType<typeof setTimeout>>()
+  const typingTimer   = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const fileInputRef  = useRef<HTMLInputElement>(null)
-  const msgSearchTimer = useRef<ReturnType<typeof setTimeout>>()
+  const msgSearchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   // ── Load conversations ─────────────────────────────────────────────────────
   const { isLoading: convsLoading } = useQuery({

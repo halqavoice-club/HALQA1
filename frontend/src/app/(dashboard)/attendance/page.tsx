@@ -74,7 +74,7 @@ function StudentRow({ student, index, isSelected, onSelect, onLongPress, debounc
   const { attendance, savingStates } = useAttendanceStore()
   const status = (attendance[student.id] || 'PRESENT') as AttendanceStatus
   const cfg = STATUS_CONFIG[status]
-  const longPressTimer = useRef<ReturnType<typeof setTimeout>>()
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const currentStatus = attendance[student.id]
   useEffect(() => { if (currentStatus) debouncedSync(student.id, currentStatus) }, [currentStatus, student.id, debouncedSync])
   const handleTouchStart = () => { longPressTimer.current = setTimeout(onLongPress, 600) }

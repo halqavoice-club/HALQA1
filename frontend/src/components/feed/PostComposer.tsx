@@ -81,7 +81,7 @@ export function PostComposer({
   const [linkPreview,      setLinkPreview]      = useState<{ url: string; title: string | null; description: string | null; image: string | null } | null>(null)
   const [linkFetching,     setLinkFetching]     = useState(false)
   const [linkDismissed,    setLinkDismissed]    = useState<string | null>(null)  // URL user has dismissed
-  const linkDebounceRef = useRef<ReturnType<typeof setTimeout>>()
+  const linkDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   // SA-COMPOSER-01: SUPER_ADMIN = Platform Administration ONLY.
   // Platform admins must not create social content.
