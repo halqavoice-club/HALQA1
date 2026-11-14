@@ -13,7 +13,7 @@
  *   animationType='video' OR videoUrl set → VideoGiftAnimation — plays MP4/WebM fullscreen
  */
 
-import { useState, useRef, useMemo } from 'react'
+import { useState, useRef, useMemo, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useVoiceStore, type GiftEvent } from '@/store/voice.store'
 import { getAvatarUrl } from '@/lib/avatar'
