@@ -19,7 +19,6 @@ const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
   images: {
-    domains: ['localhost', 'res.cloudinary.com', 's3.amazonaws.com'],
     // REQ-14.5: Explicit R2 / Cloudflare remote patterns so Next.js Image
     // does not emit "hostname not configured" warnings for those domains.
     remotePatterns: [
@@ -41,7 +40,6 @@ const nextConfig = {
     NEXT_PUBLIC_LIVEKIT_URL: process.env.NEXT_PUBLIC_LIVEKIT_URL || '',
   },
   // Performance optimizations
-  swcMinify: true,
   compress: true,
   // Code splitting
   experimental: {
