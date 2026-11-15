@@ -31,7 +31,7 @@ export function ReactionPicker({ postId, current, count, onReact, disabled }: Pr
   const [open,    setOpen]    = useState(false)
   const [hovered, setHovered] = useState<ReactionType | null>(null)
   const btnRef   = useRef<HTMLButtonElement>(null)
-  const timerRef = useRef<ReturnType<typeof setTimeout>>()
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const [pickerPos, setPickerPos] = useState({ top: 0, left: 0 })
 
   // Open picker after 300ms hover

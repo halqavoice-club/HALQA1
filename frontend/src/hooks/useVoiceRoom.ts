@@ -487,7 +487,14 @@ export function useVoiceRoom(roomId: string | null) {
     }
 
     const onReaction = (data: { userId: string; emoji: string }) => {
-      addReaction({ userId: data.userId, emoji: data.emoji, id: Date.now() + Math.random() })
+      addReaction({
+        userId: data.userId, emoji: data.emoji, id: Date.now() + Math.random(),
+        animX:      10 + Math.random() * 60,
+        animDriftX: Math.random() * 50 - 25,
+        animSize:   28 + Math.random() * 10,
+        animDur:    2.4 + Math.random() * 0.8,
+        animRot:    Math.random() * 16 - 8,
+      })
     }
 
     const onRoomEnded = (data: { roomId: string }) => {

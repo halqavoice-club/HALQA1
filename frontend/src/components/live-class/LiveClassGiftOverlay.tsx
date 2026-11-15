@@ -13,7 +13,7 @@
  *   animationType='video' OR videoUrl set → VideoGiftAnimation — plays MP4/WebM fullscreen
  */
 
-import { useEffect, useState, useRef } from 'react'
+import { useState, useRef, useMemo, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useVoiceStore, type GiftEvent } from '@/store/voice.store'
 import { getAvatarUrl } from '@/lib/avatar'
@@ -40,6 +40,10 @@ function isRareOrEpic(event: GiftEvent) {
   return event.gift.rarity === 'rare' || event.gift.rarity === 'epic'
 }
 
+// ─── Module-level pre-computed particle distances ─────────────────────────────
+// Max 32 particles; generated at module load — not in render (react-hooks/purity safe).
+const PARTICLE_DISTS = Array.from({ length: 32 }, () => 55 + Math.random() * 40)
+
 // ─── ParticleBurst ───────────────────────────────────────────────────────────
 
 function ParticleBurst({ color, count = 14 }: { color: string; count?: number }) {
@@ -47,7 +51,7 @@ function ParticleBurst({ color, count = 14 }: { color: string; count?: number })
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
       {Array.from({ length: count }, (_, i) => {
         const angle = (360 / count) * i
-        const dist  = 55 + Math.random() * 40
+        const dist  = PARTICLE_DISTS[i] ?? 55
         return (
           <motion.div
             key={i}
@@ -346,17 +350,15 @@ function CinematicRouter({ event, onDone }: { event: GiftEvent; onDone: () => vo
 // ─── Main overlay ─────────────────────────────────────────────────────────────
 
 export function LiveClassGiftOverlay({ isLowEnd = false }: { isLowEnd?: boolean }) {
-  const { activeGiftEvents } = useVoiceStore()
-  const [cinematicEvent, setCinematicEvent] = useState<GiftEvent | null>(null)
+  const { activeGiftEvents, removeGiftEvent } = useVoiceStore()
 
-  // Pick the latest cinematic/video event to show fullscreen
-  useEffect(() => {
-    if (isLowEnd) return
-    const next = activeGiftEvents.find(e => isCinematic(e) || isVideoGift(e))
-    if (next && next.id !== cinematicEvent?.id) {
-      setCinematicEvent(next)
-    }
-  }, [activeGiftEvents, isLowEnd, cinematicEvent?.id])
+  // Derive the current cinematic/video event directly — no state sync needed.
+  const cinematicEvent = useMemo(
+    () => !isLowEnd
+      ? (activeGiftEvents.find(e => isCinematic(e) || isVideoGift(e)) ?? null)
+      : null,
+    [activeGiftEvents, isLowEnd],
+  )
 
   // Normal events (non-cinematic) stacked bottom-right
   const normalEvents = activeGiftEvents.filter(e => !isCinematic(e) && !isVideoGift(e))
@@ -369,7 +371,7 @@ export function LiveClassGiftOverlay({ isLowEnd = false }: { isLowEnd?: boolean 
           <CinematicRouter
             key={cinematicEvent.id}
             event={cinematicEvent}
-            onDone={() => setCinematicEvent(null)}
+            onDone={() => removeGiftEvent(cinematicEvent.id)}
           />
         )}
       </AnimatePresence>

@@ -61,7 +61,20 @@ const INITIAL: NetworkQualityState = {
 }
 
 export function useNetworkQuality(): NetworkQualityState {
-  const [state, setState] = useState<NetworkQualityState>(INITIAL)
+  const [state, setState] = useState<NetworkQualityState>(() => {
+    if (typeof navigator === 'undefined') return INITIAL
+    const conn = getConnection()
+    const quality = measureQuality()
+    return {
+      quality,
+      isOnline: navigator.onLine,
+      effectiveType: conn?.effectiveType ?? 'unknown',
+      rtt: conn?.rtt ?? null,
+      downlink: conn?.downlink ?? null,
+      lowDataMode: quality === 'poor' || quality === 'offline',
+      saveData: conn?.saveData ?? false,
+    }
+  })
 
   const refresh = () => {
     const conn = getConnection()
@@ -78,7 +91,6 @@ export function useNetworkQuality(): NetworkQualityState {
   }
 
   useEffect(() => {
-    refresh()
     const conn = getConnection()
     conn?.addEventListener('change', refresh)
     window.addEventListener('online',  refresh)
@@ -88,7 +100,7 @@ export function useNetworkQuality(): NetworkQualityState {
       window.removeEventListener('online',  refresh)
       window.removeEventListener('offline', refresh)
     }
-  }, []) // eslint-disable-line
+  }, [])
 
   return state
 }

@@ -44,6 +44,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* Legacy iOS Safari tag — kept for backward compat with older iOS */}
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+        {/* Register service worker for offline support */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('/sw.js')})}`,
+          }}
+        />
       </head>
       <body className={`${inter.variable} ${notoArabic.variable} font-sans`}>
         <Providers>

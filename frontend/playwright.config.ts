@@ -19,6 +19,9 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   /* Retry on CI */
   retries: process.env.CI ? 2 : 0,
+  /* Per-test timeout — two full page navigations (login + voice-club) can take
+   * up to 30s each on a loaded CI runner; default 30s is too tight. */
+  timeout: process.env.CI ? 60000 : 30000,
   /* Workers */
   workers: process.env.CI ? 1 : undefined,
   /* Reporter */
@@ -33,6 +36,10 @@ export default defineConfig({
     trace: 'on-first-retry',
     /* Screenshot on failure */
     screenshot: 'only-on-failure',
+    /* Next.js 16 is slower at initial hydration than 14; bump default
+     * action/navigation timeouts to avoid flaky failures on first render. */
+    actionTimeout: 20000,
+    navigationTimeout: 30000,
   },
 
   projects: [

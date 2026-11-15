@@ -34,6 +34,24 @@ const TYPE_COLORS: Record<string, string> = {
   MEMORIZATION: '#8b5cf6', ORAL_TEST: '#10b981', PROJECT: '#f97316', PARTICIPATION: '#6b7280'
 }
 
+function CustomTooltip({ active, payload }: any) {
+  if (!active || !payload?.length) return null
+  const d = payload[0].payload
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl shadow-xl p-3 text-xs">
+      <p className="font-semibold text-gray-900">{d.title}</p>
+      <p className="text-gray-500">{d.fullDate} · {d.class}</p>
+      <p className="text-gray-500">{d.type}</p>
+      <div className="flex items-center gap-2 mt-1">
+        <span className="font-bold text-base" style={{ color: d.pct >= 90 ? '#16a34a' : d.pct >= 70 ? '#2563eb' : d.pct >= 60 ? '#d97706' : '#dc2626' }}>
+          {d.letter} · {d.pct}%
+        </span>
+        <span className="text-gray-400">{d.score}/{d.maxScore}</span>
+      </div>
+    </div>
+  )
+}
+
 export function StudentProgressChart({ studentId, studentName, compact = false }: StudentProgressChartProps) {
   const { data, isLoading } = useQuery({
     queryKey: ['grades-progress', studentId],
@@ -94,24 +112,6 @@ export function StudentProgressChart({ studentId, studentName, compact = false }
       <div className="text-center py-8 text-gray-400">
         <TrendingUp className="w-8 h-8 mx-auto mb-2 text-gray-200" />
         <p className="text-sm">No grades yet to show progress</p>
-      </div>
-    )
-  }
-
-  const CustomTooltip = ({ active, payload }: any) => {
-    if (!active || !payload?.length) return null
-    const d = payload[0].payload
-    return (
-      <div className="bg-white border border-gray-200 rounded-xl shadow-xl p-3 text-xs">
-        <p className="font-semibold text-gray-900">{d.title}</p>
-        <p className="text-gray-500">{d.fullDate} · {d.class}</p>
-        <p className="text-gray-500">{d.type}</p>
-        <div className="flex items-center gap-2 mt-1">
-          <span className="font-bold text-base" style={{ color: d.pct >= 90 ? '#16a34a' : d.pct >= 70 ? '#2563eb' : d.pct >= 60 ? '#d97706' : '#dc2626' }}>
-            {d.letter} · {d.pct}%
-          </span>
-          <span className="text-gray-400">{d.score}/{d.maxScore}</span>
-        </div>
       </div>
     )
   }

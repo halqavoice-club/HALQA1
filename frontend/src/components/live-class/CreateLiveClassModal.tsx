@@ -48,7 +48,7 @@ const schema = z.object({
   isRecorded:         z.boolean().default(false),
 })
 
-type Form = z.infer<typeof schema>
+type Form = z.input<typeof schema>
 
 interface Props {
   onClose: () => void

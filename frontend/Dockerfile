@@ -1,9 +1,9 @@
-FROM node:20 AS deps
+FROM node:24 AS deps
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 
-FROM node:20 AS builder
+FROM node:24 AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -22,13 +22,10 @@ ARG NEXT_PUBLIC_LIVEKIT_URL=
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_SOCKET_URL=$NEXT_PUBLIC_SOCKET_URL
 ENV NEXT_PUBLIC_LIVEKIT_URL=$NEXT_PUBLIC_LIVEKIT_URL
-# Disable next-pwa during Docker builds — next-pwa 5.x is incompatible with
-# output: 'standalone' inside Docker (CopyPlugin path resolution fails).
-ENV DISABLE_PWA=true
 
 RUN npm run build
 
-FROM node:20 AS runner
+FROM node:24 AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 

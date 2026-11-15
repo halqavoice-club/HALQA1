@@ -519,7 +519,7 @@ jobs:
           NEXT_PUBLIC_LIVEKIT_URL: 'wss://placeholder.livekit.cloud'
 
       - name: Start frontend server
-        run: npm start &
+        run: npm run start:ci &
         working-directory: frontend
         env:
           PORT: '3000'

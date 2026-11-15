@@ -322,18 +322,19 @@ function normalizeDmMessage(raw: any): DmMessage {
   }
 }
 function DateSep({ date }: { date: string }) {
+  let label: string
   try {
     const d = new Date(date)
     if (isNaN(d.getTime())) return null
-    const label = isToday(d) ? 'Today' : isYesterday(d) ? 'Yesterday' : format(d, 'MMMM d, yyyy')
-    return (
-      <div className="flex justify-center my-3">
-        <span className="bg-[#e1f2fb] text-[#54656f] text-[11px] font-medium px-3 py-1 rounded-full shadow-sm">
-          {label}
-        </span>
-      </div>
-    )
+    label = isToday(d) ? 'Today' : isYesterday(d) ? 'Yesterday' : format(d, 'MMMM d, yyyy')
   } catch { return null }
+  return (
+    <div className="flex justify-center my-3">
+      <span className="bg-[#e1f2fb] text-[#54656f] text-[11px] font-medium px-3 py-1 rounded-full shadow-sm">
+        {label}
+      </span>
+    </div>
+  )
 }
 
 // ─── Typing dots ──────────────────────────────────────────────────────────────
@@ -424,9 +425,9 @@ function ChatContent() {
 
   const chatEndRef    = useRef<HTMLDivElement>(null)
   const inputRef      = useRef<HTMLInputElement>(null)
-  const typingTimer   = useRef<ReturnType<typeof setTimeout>>()
+  const typingTimer   = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const fileInputRef  = useRef<HTMLInputElement>(null)
-  const msgSearchTimer = useRef<ReturnType<typeof setTimeout>>()
+  const msgSearchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   // ── Load conversations ─────────────────────────────────────────────────────
   const { isLoading: convsLoading } = useQuery({

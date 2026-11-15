@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useCallback } from 'react'
 
-export function useFocusTrap(containerRef: React.RefObject<HTMLElement>) {
+export function useFocusTrap(containerRef: React.RefObject<HTMLElement | null>) {
   const previousActiveElement = useRef<HTMLElement | null>(null)
 
   const activate = useCallback(() => {
@@ -55,8 +55,3 @@ export function useFocusTrap(containerRef: React.RefObject<HTMLElement>) {
   return { activate, deactivate }
 }
 
-function useCallback<T extends (...args: any[]) => any>(fn: T, deps: any[]) {
-  const ref = useRef(fn)
-  ref.current = fn
-  return (...args: Parameters<T>) => ref.current(...args)
-}

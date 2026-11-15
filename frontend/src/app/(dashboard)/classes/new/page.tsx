@@ -54,7 +54,7 @@ const newTeacherSchema = z.object({
   employeeId:     z.string().optional(),
 })
 
-type ClassForm    = z.infer<typeof classSchema>
+type ClassForm    = z.input<typeof classSchema>
 type NewTeacherForm = z.infer<typeof newTeacherSchema>
 
 // ─── Step indicator ───────────────────────────────────────────────────────────

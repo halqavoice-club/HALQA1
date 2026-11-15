@@ -62,7 +62,7 @@ const SECURITY_HEADERS: Record<string, string> = {
   ].join('; '),
 }
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
 
   // Allow public routes
@@ -84,7 +84,7 @@ export function middleware(request: NextRequest) {
 
   // Check for auth token in cookies (set by the backend)
   // Note: Full role-based access control is handled client-side in the layout
-  // This middleware only handles the basic auth redirect
+  // This proxy only handles the basic auth redirect
   const token = request.cookies.get('refreshToken')
 
   // If accessing any dashboard route without a token, redirect to login

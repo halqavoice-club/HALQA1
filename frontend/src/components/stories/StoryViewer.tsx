@@ -26,7 +26,7 @@ export function StoryViewer({ groups, initialGroup, onClose }: Props) {
   const [progress, setProgress] = useState(0)
   const [paused,   setPaused]   = useState(false)
   const [showReact, setShowReact] = useState(false)
-  const intervalRef = useRef<NodeJS.Timeout>()
+  const intervalRef = useRef<NodeJS.Timeout | undefined>(undefined)
 
   const group   = groups[groupIdx]
   const story   = group?.stories[storyIdx]
@@ -46,6 +46,8 @@ export function StoryViewer({ groups, initialGroup, onClose }: Props) {
     onSuccess:  () => { queryClient.invalidateQueries({ queryKey: ['stories-feed'] }); advance() }
   })
 
+  const storyCount = group?.stories?.length ?? 0
+  const groupCount = groups?.length ?? 0
   const advance = useCallback(() => {
     if (storyIdx < group.stories.length - 1) {
       setStoryIdx(i => i + 1); setProgress(0)
@@ -54,7 +56,7 @@ export function StoryViewer({ groups, initialGroup, onClose }: Props) {
     } else {
       onClose()
     }
-  }, [storyIdx, groupIdx, group?.stories?.length, groups?.length, onClose])
+  }, [storyIdx, groupIdx, storyCount, groupCount, onClose])
 
   // Auto-advance timer
   useEffect(() => {

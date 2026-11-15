@@ -23,7 +23,7 @@ export function useDmVoiceRecorder() {
 
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef   = useRef<BlobEvent['data'][]>([])
-  const timerRef    = useRef<ReturnType<typeof setInterval>>()
+  const timerRef    = useRef<ReturnType<typeof setInterval> | undefined>(undefined)
   const startTimeRef = useRef<number>(0)
 
   const start = useCallback(async () => {

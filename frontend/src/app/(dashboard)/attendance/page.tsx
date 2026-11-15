@@ -74,7 +74,7 @@ function StudentRow({ student, index, isSelected, onSelect, onLongPress, debounc
   const { attendance, savingStates } = useAttendanceStore()
   const status = (attendance[student.id] || 'PRESENT') as AttendanceStatus
   const cfg = STATUS_CONFIG[status]
-  const longPressTimer = useRef<ReturnType<typeof setTimeout>>()
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const currentStatus = attendance[student.id]
   useEffect(() => { if (currentStatus) debouncedSync(student.id, currentStatus) }, [currentStatus, student.id, debouncedSync])
   const handleTouchStart = () => { longPressTimer.current = setTimeout(onLongPress, 600) }
@@ -127,7 +127,7 @@ function TeacherAttendancePage() {
   const queryClient = useQueryClient()
   const { classId, date, attendance, selectedStudents, setClass, setDate, markAll, clearAll, selectAll, clearSelection, applyToSelected, loadExisting, offlineQueue, toggleSelect } = useAttendanceStore()
   const [multiSelect, setMultiSelect] = useState(false)
-  const [isOnline, setIsOnline] = useState(true)
+  const [isOnline, setIsOnline] = useState(() => typeof navigator !== 'undefined' ? navigator.onLine : true)
   const [showMoreMenu, setShowMoreMenu] = useState(false)
   const [showSortFilter, setShowSortFilter] = useState(false)
   const [isBulkSaving, setIsBulkSaving] = useState(false)
@@ -153,7 +153,6 @@ function TeacherAttendancePage() {
   useEffect(() => {
     const onOnline = () => setIsOnline(true)
     const onOffline = () => setIsOnline(false)
-    setIsOnline(navigator.onLine)
     window.addEventListener('online', onOnline)
     window.addEventListener('offline', onOffline)
     return () => { window.removeEventListener('online', onOnline); window.removeEventListener('offline', onOffline) }
