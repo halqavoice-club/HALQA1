@@ -167,6 +167,7 @@ const writeLimiter = createCachedUserRateLimiter('writeLimiter', {
 
 module.exports = {
   createUserRateLimiter,
+  createCachedUserRateLimiter,
   strictLimiter,
   moderateLimiter,
   lenientLimiter,

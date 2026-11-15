@@ -224,8 +224,19 @@ function expectNoExternalMutation() {
 describe("Phase 3A-3B1B: actual Mic Pass recipient consent and role safety", () => {
   beforeEach(() => {
     jest.resetAllMocks();
+    const channelEmits = {};
     const toEmit = jest.fn();
-    const io = { emit: jest.fn(), to: jest.fn().mockReturnValue({ emit: toEmit }), toEmit };
+    const io = {
+      emit: jest.fn(),
+      to: jest.fn().mockImplementation((channel) => {
+        if (!channelEmits[channel]) {
+          channelEmits[channel] = jest.fn((...args) => toEmit(...args));
+        }
+        return { emit: channelEmits[channel] };
+      }),
+      channelEmits,
+      toEmit,
+    };
     getIo.mockReturnValue(io);
   });
 
@@ -282,6 +293,14 @@ describe("Phase 3A-3B1B: actual Mic Pass recipient consent and role safety", () 
       "voice:mic_received",
       expect.objectContaining({ seatNumber: 3, isMuted: true }),
     );
+    // Channel routing assertion: mic_received must go to the user channel, not the room channel
+    const ACCEPTOR_ID = 'acceptor-1';
+    const ROOM_ID = 'room-1';
+    expect(io.to).toHaveBeenCalledWith(`user:${ACCEPTOR_ID}`);
+    expect(io.channelEmits[`user:${ACCEPTOR_ID}`]).toHaveBeenCalledWith(
+      'voice:mic_received',
+      expect.objectContaining({ roomId: ROOM_ID }),
+    );
     expect(io.toEmit).toHaveBeenCalledWith(
       "voice:mic_passed",
       expect.objectContaining({
@@ -289,6 +308,12 @@ describe("Phase 3A-3B1B: actual Mic Pass recipient consent and role safety", () 
         seatNumber: 3,
         isMuted: true,
       }),
+    );
+    // Room-scoped events must go to the room channel, not the user channel
+    expect(io.to).toHaveBeenCalledWith(`voice:${ROOM_ID}`);
+    expect(io.channelEmits[`voice:${ROOM_ID}`]).toHaveBeenCalledWith(
+      'voice:mic_passed',
+      expect.any(Object),
     );
     const snapshot = io.toEmit.mock.calls.find(
       ([event]) => event === "voice:stage_state",

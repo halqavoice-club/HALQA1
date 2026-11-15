@@ -285,7 +285,20 @@ export function UserProfileSheet({
               title="Ban Participant"
               message={`Ban ${participant.firstName} ${participant.lastName} from this room? They will not be able to rejoin.`}
               confirmLabel="Ban"
-              onConfirm={() => { modAction(onBan, `⛔ ${participant.firstName} banned`)(); setBanDialogOpen(false) }}
+              onConfirm={async () => {
+                try {
+                  await onBan?.();
+                  toast({ title: `⛔ ${participant.firstName} banned` });
+                  setBanDialogOpen(false);
+                  onClose();
+                } catch (e: any) {
+                  toast({
+                    title: e?.response?.data?.message || 'Failed to ban participant',
+                    variant: 'destructive',
+                  });
+                  setBanDialogOpen(false);
+                }
+              }}
               onCancel={() => setBanDialogOpen(false)}
             />
           )}

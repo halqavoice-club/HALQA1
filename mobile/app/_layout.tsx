@@ -16,6 +16,9 @@
  *   halqa://story/[userId]        → app/story/[userId].tsx
  *   halqa://hashtag/[tag]         → app/hashtag/[tag].tsx
  */
+// registerGlobals() must be called before any other imports to patch WebRTC
+// globals into the JS environment before React Native modules initialize.
+// See: https://docs.livekit.io/client-sdk-react-native
 import { registerGlobals } from '@livekit/react-native';
 registerGlobals();
 

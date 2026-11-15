@@ -12,7 +12,7 @@ const multer = require('multer');
 const path   = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { saveFile } = require('../utils/storage');
-const { moderateLimiter, writeLimiter, createUserRateLimiter } = require('../middleware/rateLimiter.user');
+const { moderateLimiter, writeLimiter, createCachedUserRateLimiter } = require('../middleware/rateLimiter.user');
 const { moderateDeviceLimiter } = require('../middleware/rateLimiter.device');
 const { middleware: idempotency } = require('../middleware/idempotency');
 const {
@@ -166,12 +166,12 @@ router.delete('/:id', deleteRoom);
 router.post('/:id/cover', coverUpload.single('cover'), validateCoverImage, uploadRoomCover);
 
 // ─── PARTICIPANT RATE LIMITERS ────────────────────────────────────────────────
-const joinRateLimiter = createUserRateLimiter({
+const joinRateLimiter = createCachedUserRateLimiter('joinRateLimiter', {
   windowMs: 60 * 1000,
   max: 10,
   message: 'Too many join attempts, please slow down'
 });
-const livekitTokenRateLimiter = createUserRateLimiter({
+const livekitTokenRateLimiter = createCachedUserRateLimiter('livekitTokenRateLimiter', {
   windowMs: 60 * 1000,
   max: 20,
   message: 'Too many LiveKit token requests, please slow down'
