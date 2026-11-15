@@ -389,6 +389,18 @@ function MembersTab({ roomId, myRole }: { roomId: string; myRole: string }) {
 }
 
 // ─── ROOM DETAILS TAB (BIGO-style) ─────────────────────────────────────────
+function StatsCard({ label, value, onClick }: { label: string; value: React.ReactNode; onClick?: () => void }) {
+  return (
+    <div onClick={onClick} style={{ background: '#fff', borderRadius: 14, padding: '16px 18px', marginBottom: 10, border: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: onClick ? 'pointer' : 'default' }}>
+      <div>
+        <p style={{ margin: 0, fontSize: 12, color: '#64748b', marginBottom: 4 }}>{label}</p>
+        <div style={{ fontSize: 22, fontWeight: 800, color: '#1e293b' }}>{value}</div>
+      </div>
+      {onClick && <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>}
+    </div>
+  )
+}
+
 function DetailsTab({ room, roomId, onOpenSettings }: { room: any; roomId: string; onOpenSettings: () => void }) {
   const { data: statsData } = useQuery({
     queryKey: ['room-level-stats', roomId],
@@ -408,16 +420,6 @@ function DetailsTab({ room, roomId, onOpenSettings }: { room: any; roomId: strin
   const host = room?.host;
   const hostName = host ? `${host.firstName} ${host.lastName}` : 'Unknown';
   const hostSrc = host?.avatarUrl ? getAvatarUrl(host.avatarUrl) : null;
-
-  const Card = ({ label, value, onClick }: { label: string; value: React.ReactNode; onClick?: () => void }) => (
-    <div onClick={onClick} style={{ background: '#fff', borderRadius: 14, padding: '16px 18px', marginBottom: 10, border: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: onClick ? 'pointer' : 'default' }}>
-      <div>
-        <p style={{ margin: 0, fontSize: 12, color: '#64748b', marginBottom: 4 }}>{label}</p>
-        <div style={{ fontSize: 22, fontWeight: 800, color: '#1e293b' }}>{value}</div>
-      </div>
-      {onClick && <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>}
-    </div>
-  );
 
   return (
     <div style={{ padding: '16px', background: '#f8fafc', minHeight: '100%' }}>
@@ -446,13 +448,13 @@ function DetailsTab({ room, roomId, onOpenSettings }: { room: any; roomId: strin
       </div>
 
       {/* Room Level */}
-      <Card label="Room Level" value={`Lv.${room?.roomLevel ?? 1}`} onClick={() => {}} />
+      <StatsCard label="Room Level" value={`Lv.${room?.roomLevel ?? 1}`} onClick={() => {}} />
 
       {/* Members */}
-      <Card label="Members" value={totalMembers.toLocaleString()} />
+      <StatsCard label="Members" value={totalMembers.toLocaleString()} />
 
       {/* Followers of host */}
-      <Card label="Followers" value={followers.toLocaleString()} />
+      <StatsCard label="Followers" value={followers.toLocaleString()} />
 
       {/* Room description */}
       {room?.description && (
@@ -525,23 +527,25 @@ export default function RoomMembersPage() {
     }
   }, [roomId, toast])
 
+  const isOpenMic = room?.isOpenMic ?? false
   const handleToggleOpenMic = useCallback(async () => {
     try {
-      await api.patch(`/voice/${roomId}/open-mic`, { enabled: !(room?.isOpenMic ?? false) })
+      await api.patch(`/voice/${roomId}/open-mic`, { enabled: !isOpenMic })
       refetchRoom()
     } catch (e: any) {
       toast({ title: e?.response?.data?.message || 'Failed', variant: 'destructive' })
     }
-  }, [roomId, room?.isOpenMic, refetchRoom, toast])
+  }, [roomId, isOpenMic, refetchRoom, toast])
 
+  const micLocked = room?.micLocked ?? false
   const handleToggleMicLock = useCallback(async () => {
     try {
-      await api.patch(`/voice/${roomId}/mic-lock`, { locked: !(room?.micLocked ?? false) })
+      await api.patch(`/voice/${roomId}/mic-lock`, { locked: !micLocked })
       refetchRoom()
     } catch (e: any) {
       toast({ title: e?.response?.data?.message || 'Failed', variant: 'destructive' })
     }
-  }, [roomId, room?.micLocked, refetchRoom, toast])
+  }, [roomId, micLocked, refetchRoom, toast])
 
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', minHeight: '100vh', background: '#fff', display: 'flex', flexDirection: 'column' }}>

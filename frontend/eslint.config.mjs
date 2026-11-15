@@ -33,24 +33,35 @@ const eslintConfig = defineConfig([
       'react/no-unescaped-entities': 'warn',
 
       // ─── React Compiler rules (eslint-plugin-react-hooks v7) ─────────────
-      // Disabled for this sprint: codebase was written for React 18 and does
-      // not yet comply with React Compiler constraints. The build passes, all
-      // tests pass, and the app runs correctly. These rules will be addressed
-      // in a dedicated React Compiler migration sprint.
-      'react-hooks/config': 'off',
-      'react-hooks/error-boundaries': 'off',
-      'react-hooks/gating': 'off',
-      'react-hooks/globals': 'off',
-      'react-hooks/immutability': 'off',
+      // 9 rules with zero violations re-enabled as part of the React Compiler
+      // migration sprint (FEAT-001). The remaining 5 rules stay off until
+      // their violations are fixed in later FEATs.
+      'react-hooks/config': 'error',
+      'react-hooks/error-boundaries': 'error',
+      'react-hooks/gating': 'error',
+      'react-hooks/globals': 'error',
+      'react-hooks/preserve-manual-memoization': 'error',
+      'react-hooks/set-state-in-render': 'error',
+      'react-hooks/static-components': 'error',
+      'react-hooks/unsupported-syntax': 'error',
+      'react-hooks/use-memo': 'error',
+      // All 12 rules below are enabled — 12 of 14 total compiler rules.
+      // 2 remain 'off' with justifications at the bottom of this block.
+      // purity, refs, set-state-in-effect: 'warn' (not 'error') because
+      // the codebase still has violations in files outside this sprint's
+      // scope. Violations are visible and tracked; promote to 'error' in
+      // a follow-up sprint after fixing remaining files.
+      'react-hooks/purity': 'warn',
+      'react-hooks/refs': 'warn',
+      'react-hooks/set-state-in-effect': 'warn',
+      // react-hook-form's watch() API is structurally incompatible with the
+      // React Compiler — it subscribes to form state outside React's
+      // reconciliation model. Re-enable when react-hook-form is replaced.
       'react-hooks/incompatible-library': 'off',
-      'react-hooks/preserve-manual-memoization': 'off',
-      'react-hooks/purity': 'off',
-      'react-hooks/refs': 'off',
-      'react-hooks/set-state-in-effect': 'off',
-      'react-hooks/set-state-in-render': 'off',
-      'react-hooks/static-components': 'off',
-      'react-hooks/unsupported-syntax': 'off',
-      'react-hooks/use-memo': 'off',
+      // Zustand stores use direct mutation inside set() callbacks (the standard
+      // Zustand pattern). This triggers false positives across all store files.
+      // Re-enable after a dedicated Zustand audit and migration sprint.
+      'react-hooks/immutability': 'off',
     },
   },
 ])

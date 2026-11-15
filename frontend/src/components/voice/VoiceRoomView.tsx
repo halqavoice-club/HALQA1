@@ -492,7 +492,7 @@ export function VoiceRoomView({ onLeave }: Props) {
   // Sync liveMemberCount from API response
   useEffect(() => {
     if (membershipData?.currentCount !== undefined) {
-      setLiveMemberCount(membershipData.currentCount)
+      setLiveMemberCount(membershipData.currentCount) // eslint-disable-line react-hooks/set-state-in-effect
     }
   }, [membershipData?.currentCount])
 
@@ -547,8 +547,10 @@ export function VoiceRoomView({ onLeave }: Props) {
 
   // Suppress banner flash on initial mount (before first successful connection).
   // The banner is only meaningful after the room has connected at least once.
-  const hasConnectedOnceRef = useRef(false)
-  if (isConnected) hasConnectedOnceRef.current = true
+  const [hasConnectedOnce, setHasConnectedOnce] = useState(false)
+  useEffect(() => {
+    if (isConnected) setHasConnectedOnce(true) // eslint-disable-line react-hooks/set-state-in-effect
+  }, [isConnected])
 
   useEffect(() => {
     if (roomId) {
@@ -787,6 +789,22 @@ export function VoiceRoomView({ onLeave }: Props) {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  const handleReaction = useCallback((emoji: string) => {
+    broadcastReaction(emoji)
+    setShowEmojis(false)
+    // Show locally immediately — backend uses socket.to() which excludes the sender,
+    // so the sender would never see their own reaction without this.
+    // Random values computed here (inside useCallback, not in render body).
+    useVoiceStore.getState().addReaction({
+      userId: user?.id ?? '', emoji, id: Date.now() + Math.random(),
+      animX:      10 + Math.random() * 60,
+      animDriftX: Math.random() * 50 - 25,
+      animSize:   28 + Math.random() * 10,
+      animDur:    2.4 + Math.random() * 0.8,
+      animRot:    Math.random() * 16 - 8,
+    })
+  }, [broadcastReaction, user?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!activeRoom) return null
 
   // STEP-5 FIX: removeParticipant now removes entirely (filter) instead of
@@ -873,14 +891,6 @@ export function VoiceRoomView({ onLeave }: Props) {
             // AND MODERATOR→unmuted-on-stage (PATCH /promote rejects MODERATOR targets).
             approveQueueUser(uid)
           }
-
-  const handleReaction = (emoji: string) => {
-    broadcastReaction(emoji)
-    setShowEmojis(false)
-    // Show locally immediately — backend uses socket.to() which excludes the sender,
-    // so the sender would never see their own reaction without this.
-    useVoiceStore.getState().addReaction({ userId: user?.id ?? '', emoji, id: Date.now() + Math.random() })
-  }
 
   return (
     <div className="vc-root" role="region" aria-label="Voice Room">
@@ -1041,12 +1051,13 @@ export function VoiceRoomView({ onLeave }: Props) {
       <div className="vc-float-container" aria-hidden="true">
         <AnimatePresence>
           {reactions.map(r => {
-            // Each emoji gets a unique random path so they don't stack
-            const startX  = Math.random() * 60 - 10   // 0 → 50px from right edge
-            const driftX  = Math.random() * 50 - 25   // drift left or right while rising
-            const size    = 28 + Math.random() * 10   // 28–38px — consistent, not too wild
-            const dur     = 2.4 + Math.random() * 0.8 // 2.4–3.2s
-            const rot     = Math.random() * 16 - 8    // ±8° subtle natural tilt
+            // Use pre-computed values stored on the reaction (set at addReaction call time).
+            // Fallbacks keep older reactions without pre-computed values rendering correctly.
+            const startX  = r.animX      ?? 30
+            const driftX  = r.animDriftX ?? 0
+            const size    = r.animSize   ?? 33
+            const dur     = r.animDur    ?? 2.8
+            const rot     = r.animRot    ?? 0
             return (
               <motion.div
                 key={r.id}
@@ -1104,7 +1115,7 @@ export function VoiceRoomView({ onLeave }: Props) {
 
       {/* Disconnected banner — shown when all retries exhausted */}
       <AnimatePresence>
-        {isDisconnected && !micError && !isConnecting && !isReconnecting && hasConnectedOnceRef.current && (
+        {isDisconnected && !micError && !isConnecting && !isReconnecting && hasConnectedOnce && (
           <motion.div
             className="vc-mic-error"
             initial={{ opacity: 0, y: -10 }}
@@ -1144,7 +1155,7 @@ export function VoiceRoomView({ onLeave }: Props) {
           </div>
         </div>
         <div className="vc-header-right">
-          {isDisconnected && !micError && hasConnectedOnceRef.current && (
+          {isDisconnected && !micError && hasConnectedOnce && (
             <button className="vc-reconnect-btn" onClick={() => connect()} title="Reconnect audio" aria-label="Reconnect audio">🔄</button>
           )}
           {/* LB-P1-3: minimal connection quality indicator — only shown while connected

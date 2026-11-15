@@ -127,7 +127,7 @@ function TeacherAttendancePage() {
   const queryClient = useQueryClient()
   const { classId, date, attendance, selectedStudents, setClass, setDate, markAll, clearAll, selectAll, clearSelection, applyToSelected, loadExisting, offlineQueue, toggleSelect } = useAttendanceStore()
   const [multiSelect, setMultiSelect] = useState(false)
-  const [isOnline, setIsOnline] = useState(true)
+  const [isOnline, setIsOnline] = useState(() => typeof navigator !== 'undefined' ? navigator.onLine : true)
   const [showMoreMenu, setShowMoreMenu] = useState(false)
   const [showSortFilter, setShowSortFilter] = useState(false)
   const [isBulkSaving, setIsBulkSaving] = useState(false)
@@ -153,7 +153,6 @@ function TeacherAttendancePage() {
   useEffect(() => {
     const onOnline = () => setIsOnline(true)
     const onOffline = () => setIsOnline(false)
-    setIsOnline(navigator.onLine)
     window.addEventListener('online', onOnline)
     window.addEventListener('offline', onOffline)
     return () => { window.removeEventListener('online', onOnline); window.removeEventListener('offline', onOffline) }

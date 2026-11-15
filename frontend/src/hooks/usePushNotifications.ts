@@ -7,15 +7,8 @@ export type PushPermission = 'default' | 'granted' | 'denied'
 
 export function usePushNotifications() {
   const { isAuthenticated } = useAuthStore()
-  const [permission, setPermission] = useState<PushPermission>('default')
-  const [supported, setSupported] = useState(false)
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    const ok = 'Notification' in window && 'serviceWorker' in navigator
-    setSupported(ok)
-    if (ok) setPermission(Notification.permission as PushPermission)
-  }, [])
+  const [supported, setSupported] = useState(() => typeof window !== 'undefined' && 'Notification' in window && 'serviceWorker' in navigator)
+  const [permission, setPermission] = useState<PushPermission>(() => typeof window !== 'undefined' && 'Notification' in window ? Notification.permission as PushPermission : 'default')
 
   const requestPermission = useCallback(async () => {
     if (!supported) return 'denied' as PushPermission
