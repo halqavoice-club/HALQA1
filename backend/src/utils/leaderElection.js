@@ -27,7 +27,7 @@
  */
 
 const { v4: uuidv4 } = require('uuid');
-const { getCache, setCache, deleteCache } = require('./redis');
+const { getCache, setCache, deleteCache, getRedis } = require('./redis');
 const logger = require('./logger');
 const { alertCritical } = require('./alerting');
 
@@ -118,7 +118,7 @@ async function acquireLeadership() {
     if (!isRedisReady()) return false;
 
     // Try to set lock with NX (only if not exists)
-    const result = await setCache(leaderLockKey, nodeId, ttl / 1000, 'NX');
+    const result = await getRedis().set(leaderLockKey, nodeId, 'EX', Math.ceil(ttl / 1000), 'NX');
 
     if (result === 'OK') {
       return true;
@@ -128,7 +128,7 @@ async function acquireLeadership() {
     const currentLeader = await getCache(leaderLockKey);
     if (!currentLeader) {
       // Leader lock expired, try to acquire
-      const retryResult = await setCache(leaderLockKey, nodeId, ttl / 1000, 'NX');
+      const retryResult = await getRedis().set(leaderLockKey, nodeId, 'EX', Math.ceil(ttl / 1000), 'NX');
       return retryResult === 'OK';
     }
 

@@ -31,6 +31,7 @@ import { useAuthStore } from '@/store/auth.store'
 import { cn } from '@/lib/utils'
 import { MessageSquare, Loader2, X, Users, UserCheck, Mic, ShieldCheck, UserMinus, Crown } from 'lucide-react'
 import Link from 'next/link'
+import { AlertDialog } from '@/components/ui/alert-dialog'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -140,6 +141,7 @@ export function UserProfileSheet({
 
   const [followLoading, setFollowLoading] = useState(false)
   const [friendLoading, setFriendLoading] = useState(false)
+  const [banDialogOpen, setBanDialogOpen] = useState(false)
 
   // Optimistic local state — starts from server data, updates instantly on action
   const [localCounts, setLocalCounts] = useState<SocialCounts | null>(null)
@@ -275,6 +277,18 @@ export function UserProfileSheet({
     <AnimatePresence>
       {isOpen && (
         <>
+          {/* Ban confirmation dialog */}
+          {participant && onBan && (
+            <AlertDialog
+              open={banDialogOpen}
+              variant="danger"
+              title="Ban Participant"
+              message={`Ban ${participant.firstName} ${participant.lastName} from this room? They will not be able to rejoin.`}
+              confirmLabel="Ban"
+              onConfirm={() => { modAction(onBan, `⛔ ${participant.firstName} banned`)(); setBanDialogOpen(false) }}
+              onCancel={() => setBanDialogOpen(false)}
+            />
+          )}
           {/* Backdrop */}
           <motion.div
             className="ups-backdrop"
@@ -472,11 +486,7 @@ export function UserProfileSheet({
                   {!isTargetHost && !(isTargetMod && !amHost) && onBan && (
                     <button
                       className="ups-mod-btn danger"
-                      onClick={() => {
-                        if (confirm(`Ban ${participant.firstName} ${participant.lastName} from this room? They will not be able to rejoin.`)) {
-                          modAction(onBan, `⛔ ${participant.firstName} banned`)()
-                        }
-                      }}
+                      onClick={() => setBanDialogOpen(true)}
                     >
                       ⛔ Ban from Room
                     </button>

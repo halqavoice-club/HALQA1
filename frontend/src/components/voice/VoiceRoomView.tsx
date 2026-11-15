@@ -39,6 +39,7 @@ import { VoiceShareSheet } from './VoiceShareSheet'
 import { VoiceRoomPKPanel } from './VoiceRoomPKPanel'
 import { VoiceRoomPKBanner } from './VoiceRoomPKBanner'
 import { PKChallengeIncoming } from './PKChallengeIncoming'
+import { AlertDialog } from '@/components/ui/alert-dialog'
 
 const MAX_SPEAKERS = 12
 const REACTIONS = ['❤️', '😂', '😮', '👏', '🔥', '🌹', '✅', '🎉']
@@ -434,6 +435,7 @@ export function VoiceRoomView({ onLeave }: Props) {
   const dotMenuRef = useRef<HTMLDivElement>(null)
   const [participantSearch, setParticipantSearch] = useState('')
   const [profileSheet, setProfileSheet] = useState<SheetParticipant | null>(null)
+  const [seatLockDialog, setSeatLockDialog] = useState<{ open: boolean; seatIdx: number | null; isSeatLocked: boolean; lockBody: string }>({ open: false, seatIdx: null, isSeatLocked: false, lockBody: '' })
 
   // ── PK integration ────────────────────────────────────────────────────────
   const [showPKPanel,  setShowPKPanel]  = useState(false)
@@ -925,6 +927,20 @@ export function VoiceRoomView({ onLeave }: Props) {
       {user && (
         <PKChallengeIncoming myUserId={user.id} />
       )}
+
+      {/* Seat lock confirmation dialog */}
+      <AlertDialog
+        open={seatLockDialog.open}
+        variant="warning"
+        title={`${seatLockDialog.isSeatLocked ? '🔓 Unlock' : '🔒 Lock'} Seat ${seatLockDialog.seatIdx != null ? seatLockDialog.seatIdx + 1 : ''}`}
+        message={seatLockDialog.lockBody}
+        confirmLabel={seatLockDialog.isSeatLocked ? 'Unlock Seat' : 'Lock Seat'}
+        onConfirm={() => {
+          if (seatLockDialog.seatIdx != null) toggleSeatLock(seatLockDialog.seatIdx)
+          setSeatLockDialog({ open: false, seatIdx: null, isSeatLocked: false, lockBody: '' })
+        }}
+        onCancel={() => setSeatLockDialog({ open: false, seatIdx: null, isSeatLocked: false, lockBody: '' })}
+      />
 
       {/* User profile sheet — shown when any avatar is tapped */}
       <UserProfileSheet
@@ -1429,8 +1445,6 @@ export function VoiceRoomView({ onLeave }: Props) {
               amModerating={amModerating}
               onLockToggle={(seatIdx) => {
                 const isSeatLocked = (activeRoom.lockedSeats ?? []).includes(i)
-                // Seat 1 is host/mod only — locking the only remaining SPEAKER-eligible
-                // seat (common when maxSpeakers=2 and locking Seat 2) blocks all speakers.
                 const maxSp = activeRoom?.maxSpeakers ?? MAX_SPEAKERS
                 const lockingOnlySpeakerSeat =
                   !isSeatLocked && seatIdx >= 2 && maxSp <= 2
@@ -1439,9 +1453,7 @@ export function VoiceRoomView({ onLeave }: Props) {
                   : lockingOnlySpeakerSeat
                     ? 'Speakers cannot use Seat 1. Locking this seat may block all speaker joins.'
                     : 'Nobody can take this seat until you unlock it.'
-                if (window.confirm(`${isSeatLocked ? '🔓 Unlock' : '🔒 Lock'} Seat ${seatIdx}?\n\n${lockBody}`)) {
-                  toggleSeatLock(i)
-                }
+                setSeatLockDialog({ open: true, seatIdx: i, isSeatLocked, lockBody })
               }}
             />
           )

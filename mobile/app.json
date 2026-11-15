@@ -25,7 +25,8 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Required for profile photos and story creation",
         "NSMicrophoneUsageDescription": "Required for voice rooms and live classes",
-        "NSPhotoLibraryUsageDescription": "Required for uploading media"
+        "NSPhotoLibraryUsageDescription": "Required for uploading media",
+        "UIBackgroundModes": ["audio"]
       }
     },
     "android": {
@@ -53,6 +54,8 @@
     },
     "plugins": [
       "expo-router",
+      "@livekit/react-native-expo-plugin",
+      "@config-plugins/react-native-webrtc",
       "expo-font",
       "expo-document-picker",
       "./plugins/withAndroidScaling",

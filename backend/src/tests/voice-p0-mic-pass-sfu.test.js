@@ -224,8 +224,8 @@ function expectNoExternalMutation() {
 describe("Phase 3A-3B1B: actual Mic Pass recipient consent and role safety", () => {
   beforeEach(() => {
     jest.resetAllMocks();
-    const io = { emit: jest.fn(), to: jest.fn() };
-    io.to.mockReturnValue({ emit: io.emit });
+    const toEmit = jest.fn();
+    const io = { emit: jest.fn(), to: jest.fn().mockReturnValue({ emit: toEmit }), toEmit };
     getIo.mockReturnValue(io);
   });
 
@@ -260,7 +260,8 @@ describe("Phase 3A-3B1B: actual Mic Pass recipient consent and role safety", () 
     expect(sqlText(targetWrite)).toMatch(/role = 'AUDIENCE'/);
     expect(sqlText(targetWrite)).toMatch(/seatNumber IS NULL/);
     const io = getIo();
-    expect(io.emit).toHaveBeenCalledWith(
+    expect(io.emit).not.toHaveBeenCalled();
+    expect(io.toEmit).toHaveBeenCalledWith(
       "voice:role_changed",
       expect.objectContaining({
         userId: "acceptor-1",
@@ -269,7 +270,7 @@ describe("Phase 3A-3B1B: actual Mic Pass recipient consent and role safety", () 
         isMuted: true,
       }),
     );
-    expect(io.emit).toHaveBeenCalledWith(
+    expect(io.toEmit).toHaveBeenCalledWith(
       "voice:mute_changed",
       expect.objectContaining({
         userId: "acceptor-1",
@@ -277,11 +278,11 @@ describe("Phase 3A-3B1B: actual Mic Pass recipient consent and role safety", () 
         isMuted: true,
       }),
     );
-    expect(io.emit).toHaveBeenCalledWith(
+    expect(io.toEmit).toHaveBeenCalledWith(
       "voice:mic_received",
       expect.objectContaining({ seatNumber: 3, isMuted: true }),
     );
-    expect(io.emit).toHaveBeenCalledWith(
+    expect(io.toEmit).toHaveBeenCalledWith(
       "voice:mic_passed",
       expect.objectContaining({
         targetId: "acceptor-1",
@@ -289,7 +290,7 @@ describe("Phase 3A-3B1B: actual Mic Pass recipient consent and role safety", () 
         isMuted: true,
       }),
     );
-    const snapshot = io.emit.mock.calls.find(
+    const snapshot = io.toEmit.mock.calls.find(
       ([event]) => event === "voice:stage_state",
     )[1];
     expect(snapshot).toEqual(
@@ -334,7 +335,8 @@ describe("Phase 3A-3B1B: actual Mic Pass recipient consent and role safety", () 
     expect(sqlText(call)).toMatch(/AND role = \?/);
     expect(sqlText(call)).toMatch(/AND seatNumber = \?/);
     expect(call).toEqual(expect.arrayContaining(["SPEAKER", 3]));
-    expect(getIo().emit).toHaveBeenCalledWith(
+    expect(getIo().emit).not.toHaveBeenCalled();
+    expect(getIo().toEmit).toHaveBeenCalledWith(
       "voice:mute_changed",
       expect.objectContaining({
         userId: "passer-1",
@@ -359,7 +361,8 @@ describe("Phase 3A-3B1B: actual Mic Pass recipient consent and role safety", () 
     expect(sqlText(prisma.$executeRaw.mock.calls[0])).not.toContain(
       "role = 'AUDIENCE'",
     );
-    expect(getIo().emit).toHaveBeenCalledWith(
+    expect(getIo().emit).not.toHaveBeenCalled();
+    expect(getIo().toEmit).toHaveBeenCalledWith(
       "voice:role_changed",
       expect.objectContaining({
         userId: "passer-1",

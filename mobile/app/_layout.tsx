@@ -16,6 +16,9 @@
  *   halqa://story/[userId]        → app/story/[userId].tsx
  *   halqa://hashtag/[tag]         → app/hashtag/[tag].tsx
  */
+import { registerGlobals } from '@livekit/react-native';
+registerGlobals();
+
 import { useEffect } from 'react';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';

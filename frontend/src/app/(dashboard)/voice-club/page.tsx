@@ -22,6 +22,7 @@ import {
 import Link from 'next/link'
 import { cn } from '@/lib/utils'
 import { EmptyState } from '@/components/ui/empty-state'
+import { AlertDialog } from '@/components/ui/alert-dialog'
 
 // ─── Scheduled Room Countdown ─────────────────────────────────────────────────
 function ScheduledCountdown({ scheduledAt }: { scheduledAt: string }) {
@@ -98,6 +99,7 @@ export default function VoiceClubPage() {
   const [joiningId, setJoiningId]       = useState<string | null>(null)
   const [deletingId, setDeletingId]     = useState<string | null>(null)
   const [searchQuery, setSearchQuery]   = useState('')
+  const [archiveDialog, setArchiveDialog] = useState<{ open: boolean; room: VoiceRoom | null }>({ open: false, room: null })
   const debouncedSearch = useDebounce(searchQuery, 350)
 
   // Active-session conflict state — shown when user tries to join while in another room
@@ -308,9 +310,13 @@ export default function VoiceClubPage() {
   }
 
   const handleDelete = async (room: VoiceRoom) => {
-    // Rooms are permanent — "delete" here is an explicit archive action by the owner.
-    // The room is soft-deleted (deletedAt set) and can no longer be joined.
-    if (!confirm(`Archive "${room.title}"?\n\nThis will permanently archive the room. Members can no longer join it. This cannot be undone.`)) return
+    setArchiveDialog({ open: true, room })
+  }
+
+  const handleArchiveConfirm = async () => {
+    const room = archiveDialog.room
+    if (!room) return
+    setArchiveDialog({ open: false, room: null })
     setDeletingId(room.id)
     try {
       await api.delete(`/voice/${room.id}`)
@@ -339,6 +345,18 @@ export default function VoiceClubPage() {
 
   return (
     <div className="max-w-2xl mx-auto space-y-5">
+
+      {/* ── Archive room confirmation dialog ───────────────────────────────── */}
+      <AlertDialog
+        open={archiveDialog.open}
+        variant="danger"
+        title="Archive Room"
+        message={archiveDialog.room ? `Archive "${archiveDialog.room.title}"? This will permanently archive the room. Members can no longer join it. This cannot be undone.` : ''}
+        confirmLabel="Archive Room"
+        loading={archiveDialog.room ? deletingId === archiveDialog.room.id : false}
+        onConfirm={handleArchiveConfirm}
+        onCancel={() => setArchiveDialog({ open: false, room: null })}
+      />
 
       {/* ── Active-session conflict dialog ─────────────────────────────────── */}
       {conflictRoom && (

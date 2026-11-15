@@ -45,7 +45,7 @@ async function initialize() {
 
   try {
     const { NodeTracerProvider } = require('@opentelemetry/sdk-trace-node');
-    const { Resource } = require('@opentelemetry/resources');
+    const { resourceFromAttributes } = require('@opentelemetry/resources');
     const { SemanticResourceAttributes } = require('@opentelemetry/semantic-conventions');
     const { BatchSpanProcessor } = require('@opentelemetry/sdk-trace-base');
     const { HttpInstrumentation } = require('@opentelemetry/instrumentation-http');
@@ -62,7 +62,7 @@ async function initialize() {
 
     // Create tracer provider
     const provider = new NodeTracerProvider({
-      resource: new Resource({
+      resource: resourceFromAttributes({
         [SemanticResourceAttributes.SERVICE_NAME]: process.env.OTEL_SERVICE_NAME || 'halqa-backend',
         [SemanticResourceAttributes.SERVICE_VERSION]: process.env.npm_package_version || '1.0.0',
         [SemanticResourceAttributes.DEPLOYMENT_ENVIRONMENT]: process.env.NODE_ENV || 'development',

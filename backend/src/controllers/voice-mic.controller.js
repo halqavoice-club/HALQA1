@@ -393,7 +393,7 @@ async function acceptMicOffer(req, res, next) {
     const io = getIo();
     if (io) {
       // Tell the room the mic was passed
-      io.emit('voice:mic_passed', {
+      io.to(`voice:${roomId}`).emit('voice:mic_passed', {
         roomId,
         passerId:   offer.passerId,
         passerName: `${passer.user.firstName} ${passer.user.lastName}`,
@@ -406,25 +406,25 @@ async function acceptMicOffer(req, res, next) {
 
       // Role + mute events for passer (unless HOST who stays on stage)
       if (offer.passerRole !== VOICE_ROLES.HOST) {
-        io.emit('voice:role_changed', {
+        io.to(`voice:${roomId}`).emit('voice:role_changed', {
           roomId, userId: offer.passerId, role: finalPasserRole, seatNumber: null
         });
-        io.emit('voice:mute_changed', {
+        io.to(`voice:${roomId}`).emit('voice:mute_changed', {
           roomId, userId: offer.passerId, isMuted: true, seatNumber: null
         });
       }
 
       // Role + mute events for new SPEAKER (always muted on join)
-      io.emit('voice:role_changed', {
+      io.to(`voice:${roomId}`).emit('voice:role_changed', {
         roomId, userId: acceptorId, role: VOICE_ROLES.SPEAKER,
         seatNumber: targetSeat, isMuted: true
       });
-      io.emit('voice:mute_changed', {
+      io.to(`voice:${roomId}`).emit('voice:mute_changed', {
         roomId, userId: acceptorId, seatNumber: targetSeat, isMuted: true
       });
 
       // Tell the new speaker directly
-      io.emit('voice:mic_received', {
+      io.to(`user:${acceptorId}`).emit('voice:mic_received', {
         roomId,
         seatNumber: targetSeat,
         isMuted:    true, // new SPEAKER always starts muted
@@ -441,7 +441,7 @@ async function acceptMicOffer(req, res, next) {
         seatNumber: p.seatNumber,
         isMuted:    p.isMuted,
       }));
-      io.emit('voice:stage_state', {
+      io.to(`voice:${roomId}`).emit('voice:stage_state', {
         roomId,
         stateVersion,
         stageParticipants,

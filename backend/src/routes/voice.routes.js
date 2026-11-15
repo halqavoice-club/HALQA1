@@ -165,6 +165,18 @@ router.delete('/:id', deleteRoom);
 // Upload room cover image (host only)
 router.post('/:id/cover', coverUpload.single('cover'), validateCoverImage, uploadRoomCover);
 
+// ─── PARTICIPANT RATE LIMITERS ────────────────────────────────────────────────
+const joinRateLimiter = createUserRateLimiter({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: 'Too many join attempts, please slow down'
+});
+const livekitTokenRateLimiter = createUserRateLimiter({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: 'Too many LiveKit token requests, please slow down'
+});
+
 router.post('/:id/join',
   // SA-VOICE-JOIN-01: SUPER_ADMIN = Platform Administration ONLY.
   // Platform admins cannot join voice rooms as participants.
@@ -178,6 +190,7 @@ router.post('/:id/join',
     }
     return next();
   },
+  joinRateLimiter,
   joinRoom
 );
 router.post('/:id/leave', leaveRoom);
@@ -347,7 +360,7 @@ router.delete('/:id/messages/:msgId', deleteMessage);
 router.get('/:id/hand-queue', getHandQueue);
 
 // ─── LIVEKIT TOKEN ────────────────────────────────────────────────────────────
-router.post('/:id/livekit-token', getLiveKitToken);
+router.post('/:id/livekit-token', livekitTokenRateLimiter, getLiveKitToken);
 
 // M1-B-7K-P8: Check if current user can unmute microphone (backend authorization)
 const { getMicStatus } = require('../controllers/voice.controller');
