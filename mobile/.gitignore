@@ -2,7 +2,7 @@ node_modules/
 .expo/
 dist/
 build/
-android/
+# android/ — tracked in git so EAS cloud builds preserve LiveKitReactNative.setup() in MainApplication.kt
 ios/
 *.jks
 *.p8
