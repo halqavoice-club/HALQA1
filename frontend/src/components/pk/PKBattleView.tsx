@@ -62,7 +62,7 @@ export function PKBattleView({ pkMatchId }: PKBattleViewProps) {
     <div className="relative w-full flex flex-col items-center gap-4 bg-gradient-to-b from-slate-900 to-slate-950 rounded-2xl p-4 min-h-[400px]">
       {/* Countdown overlay */}
       {countdownSeconds !== null && countdownSeconds > 0 && (
-        <PKCountdown seconds={countdownSeconds} onDone={() => usePKStore.getState().setCountdown(null)} />
+        <PKCountdown key={countdownSeconds} seconds={countdownSeconds} onDone={() => usePKStore.getState().setCountdown(null)} />
       )}
 
       {/* Winner overlay */}

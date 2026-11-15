@@ -107,6 +107,11 @@ export interface VoiceReaction {
   id: number
   userId: string
   emoji: string
+  animX?: number
+  animDriftX?: number
+  animSize?: number
+  animDur?: number
+  animRot?: number
 }
 
 // ─── Gift types ───────────────────────────────────────────────────────────────

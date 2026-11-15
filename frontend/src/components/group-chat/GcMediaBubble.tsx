@@ -7,7 +7,7 @@
  * TEXT | IMAGE | VIDEO | GIF | VOICE | AUDIO | FILE | DOCUMENT
  */
 
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, createElement } from 'react'
 import { Paperclip, Play, Pause, Download, Volume2, FileText, FileSpreadsheet, FileVideo } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getFileUrl } from '@/lib/avatar'
@@ -230,7 +230,7 @@ export function GcMediaBubble({ msg, isOwn }: Props) {
     case 'FILE':
     case 'DOCUMENT': {
       if (!mediaUrl) return null
-      const Icon = fileIcon(mimeType)
+      const iconType = fileIcon(mimeType)
       return (
         <a href={mediaUrl} target="_blank" rel="noopener noreferrer" download={fileName || true}
           className={cn(
@@ -238,7 +238,7 @@ export function GcMediaBubble({ msg, isOwn }: Props) {
             isOwn ? 'bg-white/10 hover:bg-white/20' : 'bg-white/10 hover:bg-white/20'
           )}>
           <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 bg-white/20">
-            <Icon className="w-4 h-4 text-white" />
+            {createElement(iconType, { className: 'w-4 h-4 text-white' })}
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-xs font-semibold truncate text-white">{fileName || 'File'}</p>

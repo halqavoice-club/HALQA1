@@ -12,7 +12,6 @@ export function PKCountdown({ seconds, onDone }: PKCountdownProps) {
   const [count, setCount] = useState(seconds)
 
   useEffect(() => {
-    setCount(seconds)
     if (seconds <= 0) { onDone?.(); return }
     const t = setInterval(() => {
       setCount(c => {

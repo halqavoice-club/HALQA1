@@ -50,6 +50,7 @@ interface RemoteReaction {
   userId:   string
   emojiId:  MicEmojiId
   x:        number
+  rot:      number
 }
 
 // ─── Hook: mic reaction logic ─────────────────────────────────────────────────
@@ -79,6 +80,7 @@ export function useMicReaction(roomId: string | null) {
         userId:  data.userId,
         emojiId: data.emojiId,
         x:       Math.random() * 40 - 20,
+        rot:     Math.random() * 20 - 10,
       }
       setRemoteEmojis(prev => [...prev.slice(-9), reaction])
       setTimeout(() => {
@@ -247,7 +249,7 @@ export function AvatarReactionBubble({ reactions, userId, localEmojis = [] }: Av
       id:    r.id,
       emoji: MIC_EMOJIS.find(e => e.id === r.emojiId) ?? MIC_EMOJIS[0],
       x:     r.x,
-      rot:   Math.random() * 20 - 10,
+      rot:   r.rot ?? 0,
     })),
     ...localEmojis.map(e => ({
       id:    e.id,
@@ -307,7 +309,7 @@ export function useSpeakingLevel(
   const rafRef      = useRef<number | null>(null)
 
   useEffect(() => {
-    if (!isSpeaking) { setLevel('low'); return }
+    if (!isSpeaking) return
 
     // Try to get audio level from the local mic track via Web Audio API
     let stream: MediaStream | null = null
@@ -346,6 +348,8 @@ export function useSpeakingLevel(
       stream?.getTracks().forEach(t => t.stop())
       ctx?.close()
       analyserRef.current = null
+      // Reset level when isSpeaking goes false or component unmounts
+      setLevel('low')
     }
   }, [isSpeaking])
 
