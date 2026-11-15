@@ -203,7 +203,7 @@ router.patch('/:id/end',
 // ─── PARTICIPANT CONTROLS ─────────────────────────────────────────────────────
 // MUTE-FIX-001: Add rate limiter (30 req/60s) to prevent mute/unmute spam attacks.
 // MUTE-FIX-002: Add UUID format + length validation for targetUserId.
-const muteRateLimiter = createUserRateLimiter({
+const muteRateLimiter = createCachedUserRateLimiter('muteRateLimiter', {
   windowMs: 60 * 1000,
   max: 30,
   message: 'Too many mute requests, please slow down'
