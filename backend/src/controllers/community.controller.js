@@ -202,6 +202,13 @@ async function deleteCommunity(req, res, next) {
       return errorResponse(res, 'Only owner can delete', 403);
     }
 
+    // CF-08 INVARIANT: Community deletion MUST remain soft-delete only (set deletedAt).
+    // NEVER use prisma.community.delete() here. The Post.community relation uses
+    // onDelete: SetNull — a hard delete would null out communityId on all posts in
+    // that community, silently converting private/invite-only community posts into
+    // unaffiliated public-feed posts. The soft-delete path keeps the Community row
+    // in the DB (deletedAt IS NOT NULL), leaving post.communityId intact so posts
+    // remain correctly scoped and invisible via the deletedAt filter in visibilityFilter().
     await prisma.community.update({ where: { id: community.id }, data: { deletedAt: new Date() } });
 
     // Evict all sockets from the community room so no one continues receiving events

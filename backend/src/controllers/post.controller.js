@@ -7,6 +7,7 @@
  */
 const { v4: uuidv4 } = require('uuid');
 const prisma = require('../utils/prisma');
+const { Prisma } = require('@prisma/client');
 const { getIo } = require('../sockets');
 const { successResponse, errorResponse, getPagination, buildPaginationMeta } = require('../utils/response');
 const { notify } = require('../services/notification.service');
@@ -1570,29 +1571,39 @@ async function reportPost(req, res, next) {
       return errorResponse(res, 'Cannot report your own post', 400);
     }
 
-    // REPORT-POST-DB FIX: Persist report to DB before emitting socket event.
-    // Previously only emitted a socket event — if no admin was online the report
-    // was permanently lost. Now mirrors the reportUser() pattern exactly.
-    //
-    // Duplicate guard: one PENDING report per reporter+post pair at a time.
-    const pendingReport = await prisma.postReport.findFirst({
-      where: { reporterId: req.user.id, postId: post.id, status: 'PENDING' },
-      select: { id: true },
-    });
-    if (pendingReport) {
-      return errorResponse(res, 'You already have a pending report on this post. Wait for it to be reviewed.', 409);
+    // CF-03 FIX: Wrap duplicate guard + create in a Serializable transaction to
+    // close the TOCTOU race window. Two concurrent requests from the same reporter
+    // for the same post could both pass the findFirst guard and both create a
+    // PENDING row. Serializable isolation ensures only one succeeds.
+    let report;
+    try {
+      report = await prisma.$transaction(async (tx) => {
+        const existing = await tx.postReport.findFirst({
+          where: { reporterId: req.user.id, postId: post.id, status: 'PENDING' },
+          select: { id: true }
+        });
+        if (existing) {
+          const err = new Error('DUPLICATE_REPORT');
+          err.code = 'DUPLICATE_REPORT';
+          throw err;
+        }
+        return tx.postReport.create({
+          data: {
+            id:          uuidv4(),
+            reporterId:  req.user.id,
+            postId:      post.id,
+            reason,
+            description: description?.trim() || null,
+            status:      'PENDING',
+          }
+        });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (err) {
+      if (err.code === 'DUPLICATE_REPORT') {
+        return errorResponse(res, 'You already have a pending report on this post. Wait for it to be reviewed.', 409);
+      }
+      throw err;
     }
-
-    const report = await prisma.postReport.create({
-      data: {
-        id:          uuidv4(),
-        reporterId:  req.user.id,
-        postId:      post.id,
-        reason,
-        description: description?.trim() || null,
-        status:      'PENDING',
-      },
-    });
 
     const reportPayload = {
       type:        'post_reported',
