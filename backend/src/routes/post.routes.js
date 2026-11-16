@@ -53,10 +53,21 @@ router.use(authenticate);
 
 // ─── Feed ─────────────────────────────────────────────────────────────────────
 // SA-FEED-READ: SUPER_ADMIN cannot access public social content (reads or writes).
+// CF-04 FIX: Rate limit search to prevent scraping/enumeration abuse.
+// Keyed by user ID (not IP) so authenticated users share one bucket per account.
+const searchLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  keyGenerator: req => req.user?.id || req.ip,
+  message: { success: false, message: 'Too many search requests. Please wait before searching again.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 router.get('/feed',     denyIfSuperAdmin, ctrl.getFeed);
 router.get('/live',     denyIfSuperAdmin, ctrl.getLiveSessions);
 router.get('/trending', denyIfSuperAdmin, ctrl.getTrendingHashtags);
-router.get('/search',   denyIfSuperAdmin, ctrl.searchPosts);
+router.get('/search',   denyIfSuperAdmin, searchLimit, ctrl.searchPosts);
 router.get('/reels',    denyIfSuperAdmin, ctrl.getReels);
 
 // ─── User posts ───────────────────────────────────────────────────────────────

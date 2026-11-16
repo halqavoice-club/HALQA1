@@ -15,6 +15,14 @@ const USER_SELECT = {
   avatarUrl: true, role: true, schoolId: true, bio: true
 };
 
+// CF-10 FIX: Public user select — omits email for list endpoints (followers/following).
+// Email must not be exposed to arbitrary callers who can enumerate followers.
+// Friend/search endpoints retain USER_SELECT (email intentionally included there).
+const PUBLIC_USER_SELECT = {
+  id: true, firstName: true, lastName: true,
+  avatarUrl: true, role: true, schoolId: true, bio: true
+};
+
 function emitToUser(userId, event, data) {
   const io = getIo();
   if (io) io.to(`user:${userId}`).emit(event, data);
@@ -73,7 +81,7 @@ async function getFollowers(req, res, next) {
 
     const rows = await prisma.follow.findMany({
       where,
-      include: { follower: { select: USER_SELECT } },
+      include: { follower: { select: PUBLIC_USER_SELECT } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1
     });
@@ -116,7 +124,7 @@ async function getFollowing(req, res, next) {
 
     const rows = await prisma.follow.findMany({
       where,
-      include: { following: { select: USER_SELECT } },
+      include: { following: { select: PUBLIC_USER_SELECT } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1
     });
