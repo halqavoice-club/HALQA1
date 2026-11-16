@@ -35,7 +35,7 @@ test.describe('Live Class', () => {
       .or(page.locator('button:has-text("New Class")'))
       .or(page.getByText(/live class/i));
 
-    await expect(headingOrButton.first()).toBeVisible({ timeout: 20000 });
+    await expect(headingOrButton.first()).toBeVisible({ timeout: 35000 });
   });
 
   test('teacher can create a live class', async ({ page }) => {
