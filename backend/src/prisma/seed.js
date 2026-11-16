@@ -175,15 +175,25 @@ async function main() {
         }
       });
 
-      const student = await prisma.student.create({
-        data: {
-          userId: sUser.id,
-          schoolId: school.id,
-          studentId: sd.studentId,
-          gradeLevel: sd.gradeLevel || null,
-          qrCode: `QR-${uuidv4().split('-')[0].toUpperCase()}`
-        }
-      });
+      // gradeLevel column may not exist in all DB states (migration gap).
+      // Probe the information schema first, then insert accordingly.
+      const colCheck = await prisma.$queryRaw`
+        SELECT COUNT(*) as cnt FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = 'students'
+          AND COLUMN_NAME  = 'gradeLevel'
+      `;
+      const hasGradeLevel = Number(colCheck[0].cnt) > 0;
+      const studentId = uuidv4();
+      const qrCode = `QR-${uuidv4().split('-')[0].toUpperCase()}`;
+      if (hasGradeLevel) {
+        await prisma.$executeRaw`INSERT INTO students (id, userId, schoolId, studentId, gradeLevel, qrCode, enrollmentDate, createdAt, updatedAt, deletedAt)
+          VALUES (${studentId}, ${sUser.id}, ${school.id}, ${sd.studentId}, ${sd.gradeLevel || null}, ${qrCode}, ${new Date()}, ${new Date()}, ${new Date()}, ${null})`;
+      } else {
+        await prisma.$executeRaw`INSERT INTO students (id, userId, schoolId, studentId, qrCode, enrollmentDate, createdAt, updatedAt, deletedAt)
+          VALUES (${studentId}, ${sUser.id}, ${school.id}, ${sd.studentId}, ${qrCode}, ${new Date()}, ${new Date()}, ${new Date()}, ${null})`;
+      }
+      const student = { id: studentId, userId: sUser.id, schoolId: school.id, studentId: sd.studentId, qrCode };
 
       await prisma.enrollment.create({
         data: { studentId: student.id, classId: class1.id }
