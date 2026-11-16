@@ -1,4 +1,5 @@
 'use strict';
+const logger = require('./logger');
 /**
  * Post Access Authorization Utility
  * ─────────────────────────────────────────────────────────────────────────────
@@ -147,8 +148,10 @@ async function assertPostAccessible(postId, viewerId, prismaClient) {
         });
         hasSubscription = !!sub;
       }
-    } catch {
-      // Non-fatal — if subscription check fails, treat as no subscription
+    } catch (err) {
+      // Non-fatal — if subscription check fails, treat as no subscription.
+      // Log at warn so a DB connectivity issue surfaces in monitoring.
+      logger.warn('assertPostAccessible: subscription check failed', { postId, viewerId, err: err?.message });
     }
     if (!hasSubscription) {
       return { post: null, error: { status: 404, message: 'Post not found' } };
@@ -174,6 +177,10 @@ async function assertPostAccessible(postId, viewerId, prismaClient) {
         select: { id: true },
       });
       if (ban) {
+        // Intentional: community ban returns 403 (not 404) to allow clients to distinguish
+        // "you are banned from this community" from "post not found". The oracle risk is
+        // low — a banned viewer learns only that the post exists and they are banned,
+        // not the post's content. See CF-18 plan decision in cf18-plan.md.
         return { post: null, error: { status: 403, message: 'You cannot access this content' } };
       }
 

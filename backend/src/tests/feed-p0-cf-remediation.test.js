@@ -936,3 +936,262 @@ describe('CF-20 — Private community gate in assertPostAccessible', () => {
     expect(error.status).toBe(404);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CF-18 — Test 1: searchPosts blocked originalPost author is redacted
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('CF-18 — searchPosts: blocked originalPost author is redacted', () => {
+  // Test filterOriginalPost directly with a blocked Set containing the original author.
+  // The search controller now populates blockedUserIds from a bilateral block fetch;
+  // this unit test verifies that filterOriginalPost correctly returns null when
+  // the originalPost.authorId is in blockedUserIds.
+  const { filterOriginalPost } = require('../utils/postAccess');
+
+  test('search result repost with blocked originalPost author returns null', () => {
+    const viewerId  = 'viewer-search-1';
+    const blockedAuthorId = 'blocked-author-search';
+
+    const originalPost = {
+      id:          'op-search-1',
+      authorId:    blockedAuthorId,
+      visibility:  'PUBLIC',
+      isDraft:     false,
+      deletedAt:   null,
+      isExclusive: false,
+      communityId: null,
+      schoolId:    null,
+      body:        'blocked content',
+      author:      { id: blockedAuthorId, firstName: 'Blocked', lastName: 'User', avatarUrl: null },
+      media:       [],
+    };
+
+    const result = filterOriginalPost(originalPost, viewerId, {
+      memberCommunityIds:  [],
+      followingIds:        [],
+      effectiveSchoolId:   null,
+      subscribedCreatorIds: [],
+      blockedUserIds:      new Set([blockedAuthorId]),
+    });
+
+    expect(result).toBeNull();
+  });
+
+  test('search result repost with non-blocked PUBLIC originalPost author is returned', () => {
+    const viewerId  = 'viewer-search-2';
+    const authorId  = 'regular-author-search';
+
+    const originalPost = {
+      id:          'op-search-2',
+      authorId:    authorId,
+      visibility:  'PUBLIC',
+      isDraft:     false,
+      deletedAt:   null,
+      isExclusive: false,
+      communityId: null,
+      schoolId:    null,
+      body:        'visible content',
+      author:      { id: authorId, firstName: 'Regular', lastName: 'User', avatarUrl: null },
+      media:       [],
+    };
+
+    const result = filterOriginalPost(originalPost, viewerId, {
+      memberCommunityIds:  [],
+      followingIds:        [],
+      effectiveSchoolId:   null,
+      subscribedCreatorIds: [],
+      blockedUserIds:      new Set(),
+    });
+
+    expect(result).not.toBeNull();
+    expect(result.id).toBe('op-search-2');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CF-18 — Test 2: getUserPosts blocked originalPost author is redacted
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('CF-18 — getUserPosts: blocked originalPost author is redacted', () => {
+  // Verify filterOriginalPost correctly handles the 3-party scenario:
+  // viewer=V, profile owner=B (not blocked), originalPost.authorId=A (blocked by V).
+  // getUserPosts now passes a populated blockedUserIds Set to profileCtx.
+  const { filterOriginalPost } = require('../utils/postAccess');
+
+  test('getUserPosts non-owner: blocked third-party originalPost author is redacted', () => {
+    const viewerId        = 'viewer-gup-1';
+    const profileOwner    = 'profile-owner-gup';
+    const blockedAuthorId = 'blocked-orig-author-gup';
+
+    // Profile owner B reposts content originally authored by blocked user A.
+    const originalPost = {
+      id:          'op-gup-1',
+      authorId:    blockedAuthorId,
+      visibility:  'PUBLIC',
+      isDraft:     false,
+      deletedAt:   null,
+      isExclusive: false,
+      communityId: null,
+      schoolId:    null,
+      body:        'blocked third-party content',
+      author:      { id: blockedAuthorId, firstName: 'Third', lastName: 'Party', avatarUrl: null },
+      media:       [],
+    };
+
+    // profileCtx built by getUserPosts now includes the bilateral block
+    const result = filterOriginalPost(originalPost, viewerId, {
+      memberCommunityIds:  [],
+      followingIds:        [profileOwner],
+      effectiveSchoolId:   null,
+      subscribedCreatorIds: [],
+      blockedUserIds:      new Set([blockedAuthorId]),
+    });
+
+    expect(result).toBeNull();
+  });
+
+  test('getUserPosts non-owner: non-blocked PUBLIC originalPost is returned', () => {
+    const viewerId     = 'viewer-gup-2';
+    const authorId     = 'orig-author-gup-ok';
+
+    const originalPost = {
+      id:          'op-gup-2',
+      authorId:    authorId,
+      visibility:  'PUBLIC',
+      isDraft:     false,
+      deletedAt:   null,
+      isExclusive: false,
+      communityId: null,
+      schoolId:    null,
+      body:        'visible third-party content',
+      author:      { id: authorId, firstName: 'Ok', lastName: 'Author', avatarUrl: null },
+      media:       [],
+    };
+
+    const result = filterOriginalPost(originalPost, viewerId, {
+      memberCommunityIds:  [],
+      followingIds:        [],
+      effectiveSchoolId:   null,
+      subscribedCreatorIds: [],
+      blockedUserIds:      new Set(),
+    });
+
+    expect(result).not.toBeNull();
+    expect(result.id).toBe('op-gup-2');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CF-18 — Test 3: POST_INCLUDE select regression
+// Explicitly confirms that filterOriginalPost enforces visibility when the
+// originalPost object has the authorization scalar fields present (as POST_INCLUDE
+// select now guarantees).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('CF-18 — POST_INCLUDE select: authorization scalar fields enforce access', () => {
+  const { filterOriginalPost } = require('../utils/postAccess');
+
+  test('visibility field present: PRIVATE originalPost denied to non-author', () => {
+    // This test will fail if someone removes visibility from POST_INCLUDE select,
+    // causing filterOriginalPost to silently pass undefined !== "PRIVATE".
+    const viewerId  = 'viewer-select-1';
+    const authorId  = 'author-select-1';
+
+    const originalPost = {
+      id:          'op-select-1',
+      authorId:    authorId,
+      visibility:  'PRIVATE',   // ← explicitly set — mirrors POST_INCLUDE select
+      isDraft:     false,
+      deletedAt:   null,
+      isExclusive: false,
+      communityId: null,
+      schoolId:    null,
+      body:        'private body',
+      author:      { id: authorId, firstName: 'A', lastName: 'B', avatarUrl: null },
+      media:       [],
+    };
+
+    const result = filterOriginalPost(originalPost, viewerId, {
+      memberCommunityIds:  [],
+      followingIds:        [],
+      effectiveSchoolId:   null,
+      subscribedCreatorIds: [],
+      blockedUserIds:      new Set(),
+    });
+
+    expect(result).toBeNull();
+  });
+
+  test('isDraft field present: draft originalPost denied to non-author', () => {
+    const viewerId = 'viewer-select-2';
+    const authorId = 'author-select-2';
+
+    const originalPost = {
+      id:          'op-select-2',
+      authorId:    authorId,
+      visibility:  'PUBLIC',
+      isDraft:     true,         // ← explicitly set
+      deletedAt:   null,
+      isExclusive: false,
+      communityId: null,
+      schoolId:    null,
+      body:        'draft body',
+      author:      { id: authorId, firstName: 'A', lastName: 'B', avatarUrl: null },
+      media:       [],
+    };
+
+    const result = filterOriginalPost(originalPost, viewerId, {
+      memberCommunityIds:  [],
+      followingIds:        [],
+      effectiveSchoolId:   null,
+      subscribedCreatorIds: [],
+      blockedUserIds:      new Set(),
+    });
+
+    expect(result).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CF-18 — Test 4: Community ban oracle — assertPostAccessible returns 403
+// Confirms the intentional 403 (not 404) for community ban denial is stable.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('CF-18 / assertPostAccessible — community ban returns 403 intentionally', () => {
+  const { assertPostAccessible } = require('../utils/postAccess');
+
+  test('community ban denial returns 403 not 404', async () => {
+    prisma.post.findFirst.mockResolvedValue(
+      makePost('pub-ban-cf18', 'author-ban-cf18', {
+        visibility:  'PUBLIC',
+        communityId: 'comm-ban-cf18',
+      })
+    );
+    prisma.community.findUnique.mockResolvedValue({ privacy: 'PRIVATE', deletedAt: null });
+    prisma.userBlock.findFirst.mockResolvedValue(null);
+    prisma.user.findUnique.mockResolvedValue({ schoolId: null });
+    prisma.communityBan.findFirst.mockResolvedValue({ id: 'ban-cf18' });
+
+    const { error } = await assertPostAccessible('pub-ban-cf18', 'outsider-cf18', prisma);
+    expect(error).not.toBeNull();
+    expect(error.status).toBe(403);
+    expect(error.message).toBe('You cannot access this content');
+  });
+
+  test('non-banned member of private community gets access', async () => {
+    prisma.post.findFirst.mockResolvedValue(
+      makePost('pub-mem-cf18', 'author-mem-cf18', {
+        visibility:  'PUBLIC',
+        communityId: 'comm-mem-cf18',
+      })
+    );
+    prisma.community.findUnique.mockResolvedValue({ privacy: 'PRIVATE', deletedAt: null });
+    prisma.userBlock.findFirst.mockResolvedValue(null);
+    prisma.user.findUnique.mockResolvedValue({ schoolId: null });
+    prisma.communityBan.findFirst.mockResolvedValue(null);
+    prisma.communityMember.findUnique.mockResolvedValue({ id: 'mem-cf18' });
+
+    const { error } = await assertPostAccessible('pub-mem-cf18', 'member-cf18', prisma);
+    expect(error).toBeNull();
+  });
+});

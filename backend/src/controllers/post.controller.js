@@ -28,9 +28,29 @@ const POST_INCLUDE = (/** @param {string|number|null} viewerId */ viewerId) => (
   reactions: viewerId ? { where: { userId: viewerId }, select: { type: true } } : false,
   bookmarks: viewerId ? { where: { userId: viewerId }, select: { id: true } } : false,
   originalPost: {
-    include: {
+    select: {
+      // ── Authorization scalars (required by filterOriginalPost) ───────────
+      id:          true,
+      authorId:    true,
+      visibility:  true,
+      isDraft:     true,
+      deletedAt:   true,
+      isExclusive: true,
+      communityId: true,
+      schoolId:    true,
+      // ── Display scalars (required by web/mobile clients) ─────────────────
+      type:            true,
+      body:            true,
+      quotedBody:      true,
+      linkUrl:         true,
+      linkTitle:       true,
+      linkDescription: true,
+      linkImage:       true,
+      pollData:        true,
+      createdAt:       true,
+      // ── Relations ─────────────────────────────────────────────────────────
       author: { select: AUTHOR_SELECT },
-      media: { orderBy: { orderIndex: 'asc' } },
+      media:  { orderBy: { orderIndex: 'asc' } },
     }
   }
 });
@@ -946,7 +966,7 @@ async function getUserPosts(req, res, next) {
     // on the author's profile to any viewer. The owner sees all their own posts.
     let profileCtx = null;
     if (!isOwner) {
-      const [memberCommunities, publicCommunities, communityBans, following, activeSubs, schoolMembership] = await Promise.all([
+      const [memberCommunities, publicCommunities, communityBans, following, activeSubs, schoolMembership, profileBlocks] = await Promise.all([
         prisma.communityMember.findMany({
           where: { userId: viewerId, community: { deletedAt: null } },
           select: { communityId: true }
@@ -969,6 +989,12 @@ async function getUserPosts(req, res, next) {
           where: { userId: viewerId, status: 'ACTIVE', deletedAt: null },
           select: { schoolId: true }
         }).catch(() => null),
+        // CF-18 FIX: Bilateral block set for filterOriginalPost — prevents a blocked
+        // user's originalPost content from leaking in reposts on an accessible profile.
+        prisma.userBlock.findMany({
+          where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
+          select: { blockerId: true, blockedId: true }
+        }).catch(() => []),
       ]);
       const bannedCommunityIds = new Set((communityBans || []).map(b => b.communityId));
       const accessibleMemberIds = (memberCommunities || [])
@@ -1000,9 +1026,14 @@ async function getUserPosts(req, res, next) {
       const viewerUser = await prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } }).catch(() => null);
       const effectiveSchoolId = viewerUser?.schoolId ?? schoolMembership?.schoolId ?? null;
       const followingIds = following.map(f => f.followingId);
-      // Block set already checked at profile level above; reuse empty set here
-      // (blocked profiles are rejected before this point).
-      profileCtx = { followingIds, effectiveSchoolId, subscribedCreatorIds, allowedCommunityIds, blockedUserIds: new Set() };
+      // CF-18 FIX: Build bilateral block set from profileBlocks so filterOriginalPost
+      // can redact originalPost content from a blocked third-party author appearing in
+      // reposts on this profile. (The profile owner bilateral block is already rejected
+      // upstream; this covers unrelated blocked authors in nested originalPosts.)
+      const blockedUserIds = new Set(
+        (profileBlocks || []).flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== viewerId)
+      );
+      profileCtx = { followingIds, effectiveSchoolId, subscribedCreatorIds, allowedCommunityIds, blockedUserIds };
     }
 
     if (cursor) { where.createdAt = { lte: new Date(cursor.split('_')[0]) }; }
@@ -1361,7 +1392,7 @@ async function searchPosts(req, res, next) {
     // CF-20 FIX: Compute allowed community IDs before searching, so the search
     // utility can gate out posts from PRIVATE/INVITE_ONLY communities.
     // CF-18: also fetch context for filterOriginalPost on search results.
-    const [memberCommunities, publicCommunities, communityBans, following, activeSubs, schoolMembership] = await Promise.all([
+    const [memberCommunities, publicCommunities, communityBans, following, activeSubs, schoolMembership, blocks] = await Promise.all([
       prisma.communityMember.findMany({
         where: { userId: viewerId, community: { deletedAt: null } },
         select: { communityId: true }
@@ -1383,6 +1414,12 @@ async function searchPosts(req, res, next) {
         where: { userId: viewerId, status: 'ACTIVE', deletedAt: null },
         select: { schoolId: true }
       }).catch(() => null),
+      // CF-18 FIX: Bilateral block set for filterOriginalPost — prevents blocked-author
+      // originalPost content from leaking in repost search results.
+      prisma.userBlock.findMany({
+        where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
+        select: { blockerId: true, blockedId: true }
+      }).catch(() => []),
     ]);
 
     const bannedCommunityIds = new Set((communityBans || []).map(b => b.communityId));
@@ -1393,6 +1430,12 @@ async function searchPosts(req, res, next) {
       ...(publicCommunities || []).map(c => c.id),
       ...accessibleMemberIds,
     ])];
+
+    // CF-18 FIX: Build bilateral block set so filterOriginalPost can redact blocked-author
+    // content from nested originalPost on search results.
+    const blockedUserIds = new Set(
+      (blocks || []).flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== viewerId)
+    );
 
     const items = await ftSearchPosts(prisma, q.trim(), viewerId, { take, before, allowedCommunityIds });
 
@@ -1410,9 +1453,8 @@ async function searchPosts(req, res, next) {
     const viewerUser = await prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } }).catch(() => null);
     const effectiveSchoolId = viewerUser?.schoolId ?? schoolMembership?.schoolId ?? null;
     const followingIds = following.map(f => f.followingId);
-    // No block fetch here — search already excludes blocked authors via the existing
-    // visibilityFilter pattern; use empty set for filterOriginalPost block check.
-    const searchCtx = { followingIds, effectiveSchoolId, subscribedCreatorIds, allowedCommunityIds, blockedUserIds: new Set() };
+    // CF-18 FIX: blockedUserIds now populated from bilateral block fetch above.
+    const searchCtx = { followingIds, effectiveSchoolId, subscribedCreatorIds, allowedCommunityIds, blockedUserIds };
     const redacted = items.map(p => ({
       ...p,
       originalPost: p.originalPost
