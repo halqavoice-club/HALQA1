@@ -22,6 +22,7 @@ const SAFE_UNIT_TESTS = Object.freeze([
   'src/tests/erp-remediation.test.js',
   'src/tests/errors.test.js',
   'src/tests/feed-block-enforcement.test.js',
+  'src/tests/feed-p0-cf-remediation.test.js',
   'src/tests/fix001-seat-lock.test.js',
   'src/tests/gift.test.js',
   'src/tests/graphql-super-admin-boundary.test.js',

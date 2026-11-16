@@ -11,6 +11,8 @@ const { getIo } = require('../sockets');
 const { successResponse, errorResponse, getPagination, buildPaginationMeta } = require('../utils/response');
 const { notify } = require('../services/notification.service');
 const logger = require('../utils/logger');
+// CF-01, CF-02, CF-18: Centralized post authorization helpers (Feed P0 remediation)
+const { assertPostAccessible, filterOriginalPost } = require('../utils/postAccess');
 
 // ─── Shared selects ───────────────────────────────────────────────────────────
 const AUTHOR_SELECT = {
@@ -144,9 +146,16 @@ async function syncMentions(postId, commentId, body, authorId) {
 // Previously, UserBlock records were never consulted here. A user could still
 // see posts from someone they blocked (or who blocked them). Now both directions
 // are resolved and excluded via NOT authorId in [...].
+//
+// CF-20 FIX: Added private/invite-only community access gate.
+// A PUBLIC-visibility post belonging to a PRIVATE or INVITE_ONLY community was
+// previously returned to any viewer (it matched the PUBLIC OR branch). Now, posts
+// with communityId must also satisfy community access: either the community is
+// PUBLIC, or the viewer is a member and not banned.
 async function visibilityFilter(viewerId) {
-  // Run all 5 prerequisite queries in parallel — cuts latency from ~5× to ~1×
-  const [viewer, following, activeSubs, schoolMembership, blocks] = await Promise.all([
+  // Run all prerequisite queries in parallel — cuts latency from ~N× to ~1×
+  // CF-20: Added communityMember, community (public IDs), and communityBan queries.
+  const [viewer, following, activeSubs, schoolMembership, blocks, memberCommunities, publicCommunities, communityBans] = await Promise.all([
     prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } }),
     prisma.follow.findMany({ where: { followerId: viewerId }, select: { followingId: true } }),
     prisma.creatorSubscription.findMany({
@@ -167,7 +176,22 @@ async function visibilityFilter(viewerId) {
     prisma.userBlock.findMany({
       where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
       select: { blockerId: true, blockedId: true }
-    }).catch(() => [])  // non-fatal — degrade safely if query fails
+    }).catch(() => []),  // non-fatal — degrade safely if query fails
+    // CF-20: Viewer's community memberships (exclude deleted communities)
+    prisma.communityMember.findMany({
+      where: { userId: viewerId, community: { deletedAt: null } },
+      select: { communityId: true }
+    }).catch(() => []),
+    // CF-20: All non-deleted PUBLIC communities (so their posts pass the community gate)
+    prisma.community.findMany({
+      where: { privacy: 'PUBLIC', deletedAt: null },
+      select: { id: true }
+    }).catch(() => []),
+    // CF-20: Communities the viewer is banned from (banned members must not see posts)
+    prisma.communityBan.findMany({
+      where: { userId: viewerId },
+      select: { communityId: true }
+    }).catch(() => [])
   ]);
   const followingIds = following.map(f => f.followingId);
 
@@ -198,6 +222,22 @@ async function visibilityFilter(viewerId) {
     }
   }
 
+  // CF-20: Build the allowed community ID set.
+  // A community post is visible to the viewer if:
+  //   - The community is PUBLIC (all publicCommunityIds), OR
+  //   - The viewer is a member AND not banned.
+  // Personal posts (communityId: null) are always allowed through the community gate.
+  const bannedCommunityIds = new Set((communityBans || []).map(b => b.communityId));
+  const accessibleMemberCommunityIds = (memberCommunities || [])
+    .map(m => m.communityId)
+    .filter(id => !bannedCommunityIds.has(id));
+  const allowedCommunityIds = [
+    ...new Set([
+      ...(publicCommunities || []).map(c => c.id),
+      ...accessibleMemberCommunityIds,
+    ])
+  ];
+
   const filter = {
     deletedAt: null,
     isDraft:   false,
@@ -227,6 +267,33 @@ async function visibilityFilter(viewerId) {
   if (blockedAuthorIds.length > 0) {
     filter.NOT = { authorId: { in: blockedAuthorIds } };
   }
+
+  // CF-20: Community access gate (AND-wrapper).
+  // A post must satisfy BOTH the visibility OR branches above AND the community gate.
+  // Posts with communityId: null (personal posts) always pass the gate.
+  // Posts with a communityId must belong to an allowed community.
+  // The viewer's own posts (authorId: viewerId branch) bypass this gate so authors
+  // always see their own community posts even if banned/non-member.
+  filter.AND = [
+    {
+      OR: [
+        { communityId: null },
+        { communityId: { in: allowedCommunityIds } },
+        // Author always sees their own posts regardless of community membership
+        { authorId: viewerId },
+      ]
+    }
+  ];
+
+  // Also expose these context lists so callers can reuse them for CF-18 (filterOriginalPost)
+  // without additional queries.
+  filter._ctx = {
+    followingIds,
+    effectiveSchoolId,
+    subscribedCreatorIds,
+    allowedCommunityIds,
+    blockedAuthorIds,
+  };
 
   return filter;
 }
@@ -456,6 +523,43 @@ async function getPost(req, res, next) {
       }
     }
 
+    // CF-20 FIX: Enforce community membership for getPost (single-post endpoint).
+    // The existing checks above handle visibility, block, school, and exclusive.
+    // Community access was not checked — a non-member could retrieve PUBLIC posts
+    // belonging to PRIVATE/INVITE_ONLY communities by ID.
+    if (post.community?.id && requesterId !== post.authorId) {
+      const community = await prisma.community.findUnique({
+        where: { id: post.community.id },
+        select: { privacy: true, deletedAt: true }
+      });
+      if (!community || community.deletedAt !== null) {
+        return errorResponse(res, 'Post not found', 404);
+      }
+      if (community.privacy === 'PRIVATE' || community.privacy === 'INVITE_ONLY') {
+        const ban = await prisma.communityBan.findFirst({
+          where: { communityId: post.community.id, userId: requesterId },
+          select: { id: true }
+        });
+        if (ban) return errorResponse(res, 'Post not found', 404);
+        const membership = await prisma.communityMember.findUnique({
+          where: { communityId_userId: { communityId: post.community.id, userId: requesterId } },
+          select: { id: true }
+        });
+        if (!membership) return errorResponse(res, 'Post not found', 404);
+      }
+    }
+
+    // CF-18 FIX: Redact inaccessible nested originalPost for single-post endpoint.
+    // getPost uses assertPostAccessible pattern inline above. For the nested original,
+    // use assertPostAccessible independently since we have no pre-fetched context here.
+    let resultPost = post;
+    if (post.originalPost && post.originalPostId) {
+      const { error: origError } = await assertPostAccessible(post.originalPostId, requesterId, prisma);
+      if (origError) {
+        resultPost = { ...post, originalPost: null };
+      }
+    }
+
     // Record view (fire-and-forget).
     // VIEW-COUNT FIX: Use try/create/catch(P2002) so viewCount is only
     // incremented on the FIRST view from this user. The previous upsert+then
@@ -474,7 +578,7 @@ async function getPost(req, res, next) {
       });
     }
 
-    return successResponse(res, post);
+    return successResponse(res, resultPost);
   } catch (e) { next(e); }
 }
 
@@ -633,56 +737,115 @@ async function getFeed(req, res, next) {
     const viewerId = req.user.id;
 
     let where;
+    // CF-18: context for filterOriginalPost (reused from visibilityFilter to avoid extra queries)
+    let feedCtx = null;
 
     if (filter === 'following') {
       // Pure following feed: only posts from people the viewer follows + own posts
-      const [following, followingBlocks] = await Promise.all([
+      const [following, followingBlocks, memberCommunities, publicCommunities, communityBans, activeSubs, schoolMembership] = await Promise.all([
         prisma.follow.findMany({
           where: { followerId: viewerId },
           select: { followingId: true }
         }),
         // FOLLOW-BLOCK FIX: Apply bilateral block policy to the following feed.
-        // The main feed (filter=all) delegates to visibilityFilter() which already
-        // handles blocks. The following-feed branch built its own where clause
-        // without consulting UserBlock, allowing blocked/blocking followed users'
-        // posts to appear here. Mirrors the visibilityFilter() block-query pattern.
-        // SOC-P0-03 precedent: same fix applied to reportUser and all other social ops.
         prisma.userBlock.findMany({
           where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
           select: { blockerId: true, blockedId: true }
-        }).catch(() => [])  // non-fatal — degrade safely if query fails
+        }).catch(() => []),
+        // CF-20 + CF-18: community membership for following feed
+        prisma.communityMember.findMany({
+          where: { userId: viewerId, community: { deletedAt: null } },
+          select: { communityId: true }
+        }).catch(() => []),
+        prisma.community.findMany({
+          where: { privacy: 'PUBLIC', deletedAt: null },
+          select: { id: true }
+        }).catch(() => []),
+        prisma.communityBan.findMany({
+          where: { userId: viewerId },
+          select: { communityId: true }
+        }).catch(() => []),
+        // CF-18: subscriptions for filterOriginalPost
+        prisma.creatorSubscription.findMany({
+          where: { subscriberId: viewerId, status: 'ACTIVE', expiresAt: { gt: new Date() } },
+          select: { creatorId: true }
+        }).catch(() => []),
+        prisma.schoolMembership.findFirst({
+          where: { userId: viewerId, status: 'ACTIVE', deletedAt: null },
+          select: { schoolId: true }
+        }).catch(() => null),
       ]);
       const followingIds = following.map(f => f.followingId);
 
-      // Build set of all blocked user IDs (both directions), excluding the viewer's own ID.
-      // The viewer's own posts are always included via the { authorId: viewerId } OR branch,
-      // and UserBlock @@unique prevents self-blocks, so viewerId can never appear here.
       const blockedFollowingIds = new Set(
         followingBlocks
           .flatMap(b => [b.blockerId, b.blockedId])
           .filter(id => id !== viewerId)
       );
 
+      // CF-20: community gate for following feed
+      const bannedCommunityIds = new Set((communityBans || []).map(b => b.communityId));
+      const accessibleMemberIds = (memberCommunities || [])
+        .map(m => m.communityId)
+        .filter(id => !bannedCommunityIds.has(id));
+      const allowedCommunityIds = [...new Set([
+        ...(publicCommunities || []).map(c => c.id),
+        ...accessibleMemberIds,
+      ])];
+
       where = {
         deletedAt: null,
         isDraft:   false,
         OR: [
-          // Posts by people you follow (any visibility they've set)
           { authorId: { in: followingIds } },
-          // Your own posts
           { authorId: viewerId },
-        ]
+        ],
+        // CF-20: community gate
+        AND: [{
+          OR: [
+            { communityId: null },
+            { communityId: { in: allowedCommunityIds } },
+            { authorId: viewerId },
+          ]
+        }]
       };
 
-      // Inject block exclusion only when there are blocked users to avoid an
-      // unnecessary empty-set predicate that could affect query plans (same
-      // guard used in visibilityFilter()).
       if (blockedFollowingIds.size > 0) {
         where.NOT = { authorId: { in: [...blockedFollowingIds] } };
       }
+
+      // CF-18: resolve subscribedCreatorIds for filterOriginalPost
+      let subscribedCreatorIds = [];
+      if (activeSubs.length > 0) {
+        try {
+          const creatorProfiles = await prisma.creatorProfile.findMany({
+            where: { id: { in: activeSubs.map(s => s.creatorId) } },
+            select: { userId: true }
+          });
+          subscribedCreatorIds = creatorProfiles.map(p => p.userId);
+        } catch { /* non-fatal */ }
+      }
+      const viewerUser = await prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } }).catch(() => null);
+      const effectiveSchoolId = viewerUser?.schoolId ?? schoolMembership?.schoolId ?? null;
+      const blockedUserIds = new Set([...blockedFollowingIds]);
+
+      feedCtx = { followingIds, effectiveSchoolId, subscribedCreatorIds, allowedCommunityIds, blockedUserIds };
     } else {
       // Default: full public feed (existing behaviour)
       where = await visibilityFilter(viewerId);
+      // CF-18: reuse context computed by visibilityFilter (no extra queries)
+      if (where._ctx) {
+        const ctx = where._ctx;
+        delete where._ctx;
+        const blockedUserIds = new Set(ctx.blockedAuthorIds);
+        feedCtx = {
+          followingIds: ctx.followingIds,
+          effectiveSchoolId: ctx.effectiveSchoolId,
+          subscribedCreatorIds: ctx.subscribedCreatorIds,
+          allowedCommunityIds: ctx.allowedCommunityIds,
+          blockedUserIds,
+        };
+      }
     }
 
     // Cursor pagination (createdAt + id for stable sort)
@@ -707,6 +870,18 @@ async function getFeed(req, res, next) {
 
     const hasMore = posts.length > take;
     let items = hasMore ? posts.slice(0, take) : posts;
+
+    // CF-18 FIX: Redact inaccessible nested originalPost objects.
+    // POST_INCLUDE fetches originalPost unconditionally with no authorization check.
+    // Apply filterOriginalPost to nullify any originalPost the viewer cannot access.
+    if (feedCtx) {
+      items = items.map(p => ({
+        ...p,
+        originalPost: p.originalPost
+          ? filterOriginalPost(p.originalPost, viewerId, feedCtx)
+          : null,
+      }));
+    }
 
     items = await enrichLivePosts(items);
     items = await stampFollowing(items, viewerId);
@@ -766,6 +941,70 @@ async function getUserPosts(req, res, next) {
     if (tab === 'replies') where = { ...where, type: 'QUOTE', originalPostId: { not: null } };
     if (!isOwner) where.visibility = { not: 'PRIVATE' };
 
+    // CF-20 FIX: Apply community access gate for non-owner viewers.
+    // A PUBLIC post belonging to a PRIVATE community was previously visible
+    // on the author's profile to any viewer. The owner sees all their own posts.
+    let profileCtx = null;
+    if (!isOwner) {
+      const [memberCommunities, publicCommunities, communityBans, following, activeSubs, schoolMembership] = await Promise.all([
+        prisma.communityMember.findMany({
+          where: { userId: viewerId, community: { deletedAt: null } },
+          select: { communityId: true }
+        }).catch(() => []),
+        prisma.community.findMany({
+          where: { privacy: 'PUBLIC', deletedAt: null },
+          select: { id: true }
+        }).catch(() => []),
+        prisma.communityBan.findMany({
+          where: { userId: viewerId },
+          select: { communityId: true }
+        }).catch(() => []),
+        // CF-18: for filterOriginalPost
+        prisma.follow.findMany({ where: { followerId: viewerId }, select: { followingId: true } }).catch(() => []),
+        prisma.creatorSubscription.findMany({
+          where: { subscriberId: viewerId, status: 'ACTIVE', expiresAt: { gt: new Date() } },
+          select: { creatorId: true }
+        }).catch(() => []),
+        prisma.schoolMembership.findFirst({
+          where: { userId: viewerId, status: 'ACTIVE', deletedAt: null },
+          select: { schoolId: true }
+        }).catch(() => null),
+      ]);
+      const bannedCommunityIds = new Set((communityBans || []).map(b => b.communityId));
+      const accessibleMemberIds = (memberCommunities || [])
+        .map(m => m.communityId)
+        .filter(id => !bannedCommunityIds.has(id));
+      const allowedCommunityIds = [...new Set([
+        ...(publicCommunities || []).map(c => c.id),
+        ...accessibleMemberIds,
+      ])];
+
+      where.AND = [{
+        OR: [
+          { communityId: null },
+          { communityId: { in: allowedCommunityIds } },
+        ]
+      }];
+
+      // CF-18: build context for filterOriginalPost
+      let subscribedCreatorIds = [];
+      if (activeSubs.length > 0) {
+        try {
+          const creatorProfiles = await prisma.creatorProfile.findMany({
+            where: { id: { in: activeSubs.map(s => s.creatorId) } },
+            select: { userId: true }
+          });
+          subscribedCreatorIds = creatorProfiles.map(p => p.userId);
+        } catch { /* non-fatal */ }
+      }
+      const viewerUser = await prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } }).catch(() => null);
+      const effectiveSchoolId = viewerUser?.schoolId ?? schoolMembership?.schoolId ?? null;
+      const followingIds = following.map(f => f.followingId);
+      // Block set already checked at profile level above; reuse empty set here
+      // (blocked profiles are rejected before this point).
+      profileCtx = { followingIds, effectiveSchoolId, subscribedCreatorIds, allowedCommunityIds, blockedUserIds: new Set() };
+    }
+
     if (cursor) { where.createdAt = { lte: new Date(cursor.split('_')[0]) }; }
 
     const posts = await prisma.post.findMany({
@@ -776,7 +1015,18 @@ async function getUserPosts(req, res, next) {
     });
 
     const hasMore = posts.length > take;
-    const items   = hasMore ? posts.slice(0, take) : posts;
+    let items     = hasMore ? posts.slice(0, take) : posts;
+
+    // CF-18 FIX: Redact inaccessible nested originalPost objects for non-owner viewers.
+    if (profileCtx) {
+      items = items.map(p => ({
+        ...p,
+        originalPost: p.originalPost
+          ? filterOriginalPost(p.originalPost, viewerId, profileCtx)
+          : null,
+      }));
+    }
+
     const stamped = await stampFollowing(items, viewerId);
     const nextCursor = hasMore && stamped.length > 0 ? `${stamped[stamped.length - 1].createdAt.toISOString()}_${stamped[stamped.length - 1].id}` : null;
 
@@ -793,20 +1043,14 @@ async function reactToPost(req, res, next) {
     const VALID = ['LIKE','LOVE','CELEBRATE','SUPPORT','INSIGHTFUL','FUNNY'];
     if (!VALID.includes(type)) return errorResponse(res, 'Invalid reaction type', 400);
 
-    const post = await prisma.post.findFirst({ where: { id: postId, deletedAt: null } });
-    if (!post) return errorResponse(res, 'Post not found', 404);
-
-    // MF-001 FIX: Enforce bilateral block — a blocked user cannot react to posts.
-    // Covers: viewer blocked author OR author blocked viewer.
-    if (post.authorId !== userId) {
-      const block = await prisma.userBlock.findFirst({
-        where: { OR: [
-          { blockerId: userId,        blockedId: post.authorId },
-          { blockerId: post.authorId, blockedId: userId }
-        ]}
-      });
-      if (block) return errorResponse(res, 'You cannot interact with this content', 403);
-    }
+    // CF-02 FIX: Verify full post accessibility (all 8 dimensions) before mutating.
+    // Previously only a deletion check + bilateral block check existed. This missed
+    // PRIVATE, FOLLOWERS-only, SCHOOL_ONLY, and private-community visibility gates.
+    // assertPostAccessible subsumes the previous block check (dimension 3).
+    // NOTE: Response code for blocked interactions changes from 403 → 404 for
+    // oracle-attack prevention consistency (aligns with read-operation behavior).
+    const { post, error: accessError } = await assertPostAccessible(postId, userId, prisma);
+    if (accessError) return errorResponse(res, accessError.message, accessError.status);
 
     const existing = await prisma.postReaction.findUnique({
       where: { postId_userId: { postId, userId } }
@@ -898,20 +1142,14 @@ async function addComment(req, res, next) {
     const { id: postId } = req.params;
     if (!body?.trim()) return errorResponse(res, 'Comment body required', 400);
 
-    const post = await prisma.post.findFirst({ where: { id: postId, deletedAt: null } });
-    if (!post) return errorResponse(res, 'Post not found', 404);
-
-    // MF-001 FIX: Enforce bilateral block — a blocked user cannot comment on posts.
-    // Covers: commenter blocked author OR author blocked commenter.
-    if (post.authorId !== req.user.id) {
-      const block = await prisma.userBlock.findFirst({
-        where: { OR: [
-          { blockerId: req.user.id, blockedId: post.authorId },
-          { blockerId: post.authorId, blockedId: req.user.id }
-        ]}
-      });
-      if (block) return errorResponse(res, 'You cannot interact with this content', 403);
-    }
+    // CF-02 FIX: Verify full post accessibility (all 8 dimensions) before mutating.
+    // Previously only a deletion check + bilateral block check existed. This missed
+    // PRIVATE, FOLLOWERS-only, SCHOOL_ONLY, and private-community visibility gates.
+    // assertPostAccessible subsumes the previous block check (dimension 3).
+    // NOTE: Response code for blocked interactions changes from 403 → 404 for
+    // oracle-attack prevention consistency (aligns with read-operation behavior).
+    const { post, error: accessError } = await assertPostAccessible(postId, req.user.id, prisma);
+    if (accessError) return errorResponse(res, accessError.message, accessError.status);
 
     // Validate parentId belongs to this post
     if (parentId) {
@@ -1071,6 +1309,14 @@ async function toggleBookmark(req, res, next) {
   try {
     const { id: postId } = req.params;
     const userId = req.user.id;
+
+    // CF-01 FIX: Verify post accessibility before any bookmark mutation.
+    // Previously there was no post-existence or visibility check here, so a user
+    // could bookmark PRIVATE, FOLLOWERS-only, SCHOOL_ONLY, or community-restricted
+    // posts simply by knowing their UUID.
+    const { error: accessError } = await assertPostAccessible(postId, userId, prisma);
+    if (accessError) return errorResponse(res, accessError.message, accessError.status);
+
     const existing = await prisma.postBookmark.findUnique({ where: { postId_userId: { postId, userId } } });
     let action;
     if (existing) {
@@ -1109,14 +1355,76 @@ async function searchPosts(req, res, next) {
       return successResponse(res, { items: [], nextCursor: null, hasMore: false });
     }
     const take     = Math.min(50, parseInt(limit));
+    const viewerId = req.user.id;
     const { searchPosts: ftSearchPosts } = require('../utils/search');
 
-    const items = await ftSearchPosts(prisma, q.trim(), req.user.id, { take, before });
-    const nextCursor = items.length === take && items.length > 0
-      ? `${items[items.length - 1].createdAt.toISOString()}_${items[items.length - 1].id}`
+    // CF-20 FIX: Compute allowed community IDs before searching, so the search
+    // utility can gate out posts from PRIVATE/INVITE_ONLY communities.
+    // CF-18: also fetch context for filterOriginalPost on search results.
+    const [memberCommunities, publicCommunities, communityBans, following, activeSubs, schoolMembership] = await Promise.all([
+      prisma.communityMember.findMany({
+        where: { userId: viewerId, community: { deletedAt: null } },
+        select: { communityId: true }
+      }).catch(() => []),
+      prisma.community.findMany({
+        where: { privacy: 'PUBLIC', deletedAt: null },
+        select: { id: true }
+      }).catch(() => []),
+      prisma.communityBan.findMany({
+        where: { userId: viewerId },
+        select: { communityId: true }
+      }).catch(() => []),
+      prisma.follow.findMany({ where: { followerId: viewerId }, select: { followingId: true } }).catch(() => []),
+      prisma.creatorSubscription.findMany({
+        where: { subscriberId: viewerId, status: 'ACTIVE', expiresAt: { gt: new Date() } },
+        select: { creatorId: true }
+      }).catch(() => []),
+      prisma.schoolMembership.findFirst({
+        where: { userId: viewerId, status: 'ACTIVE', deletedAt: null },
+        select: { schoolId: true }
+      }).catch(() => null),
+    ]);
+
+    const bannedCommunityIds = new Set((communityBans || []).map(b => b.communityId));
+    const accessibleMemberIds = (memberCommunities || [])
+      .map(m => m.communityId)
+      .filter(id => !bannedCommunityIds.has(id));
+    const allowedCommunityIds = [...new Set([
+      ...(publicCommunities || []).map(c => c.id),
+      ...accessibleMemberIds,
+    ])];
+
+    const items = await ftSearchPosts(prisma, q.trim(), viewerId, { take, before, allowedCommunityIds });
+
+    // CF-18 FIX: Redact inaccessible nested originalPost on search results.
+    let subscribedCreatorIds = [];
+    if (activeSubs.length > 0) {
+      try {
+        const creatorProfiles = await prisma.creatorProfile.findMany({
+          where: { id: { in: activeSubs.map(s => s.creatorId) } },
+          select: { userId: true }
+        });
+        subscribedCreatorIds = creatorProfiles.map(p => p.userId);
+      } catch { /* non-fatal */ }
+    }
+    const viewerUser = await prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } }).catch(() => null);
+    const effectiveSchoolId = viewerUser?.schoolId ?? schoolMembership?.schoolId ?? null;
+    const followingIds = following.map(f => f.followingId);
+    // No block fetch here — search already excludes blocked authors via the existing
+    // visibilityFilter pattern; use empty set for filterOriginalPost block check.
+    const searchCtx = { followingIds, effectiveSchoolId, subscribedCreatorIds, allowedCommunityIds, blockedUserIds: new Set() };
+    const redacted = items.map(p => ({
+      ...p,
+      originalPost: p.originalPost
+        ? filterOriginalPost(p.originalPost, viewerId, searchCtx)
+        : null,
+    }));
+
+    const nextCursor = redacted.length === take && redacted.length > 0
+      ? `${redacted[redacted.length - 1].createdAt.toISOString()}_${redacted[redacted.length - 1].id}`
       : null;
 
-    return successResponse(res, { items, nextCursor, hasMore: !!nextCursor });
+    return successResponse(res, { items: redacted, nextCursor, hasMore: !!nextCursor });
   } catch (e) { next(e); }
 }
 
@@ -1312,8 +1620,8 @@ async function getReels(req, res, next) {
     const viewerId  = req.user.id;
 
     // MF-016 FIX: Include FOLLOWERS-only reels from people the viewer follows.
-    // Fetch the viewer's following set in the same Promise.all as blocks to avoid extra round-trip.
-    const [blocks, following] = await Promise.all([
+    // CF-18/CF-20: Added community membership and subscription queries.
+    const [blocks, following, memberCommunities, publicCommunities, communityBans, activeSubs, schoolMembership] = await Promise.all([
       prisma.userBlock.findMany({
         where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
         select: { blockerId: true, blockedId: true }
@@ -1322,6 +1630,28 @@ async function getReels(req, res, next) {
         where: { followerId: viewerId },
         select: { followingId: true }
       }).catch(() => []),
+      // CF-20: community membership for reels feed
+      prisma.communityMember.findMany({
+        where: { userId: viewerId, community: { deletedAt: null } },
+        select: { communityId: true }
+      }).catch(() => []),
+      prisma.community.findMany({
+        where: { privacy: 'PUBLIC', deletedAt: null },
+        select: { id: true }
+      }).catch(() => []),
+      prisma.communityBan.findMany({
+        where: { userId: viewerId },
+        select: { communityId: true }
+      }).catch(() => []),
+      // CF-18: for filterOriginalPost
+      prisma.creatorSubscription.findMany({
+        where: { subscriberId: viewerId, status: 'ACTIVE', expiresAt: { gt: new Date() } },
+        select: { creatorId: true }
+      }).catch(() => []),
+      prisma.schoolMembership.findFirst({
+        where: { userId: viewerId, status: 'ACTIVE', deletedAt: null },
+        select: { schoolId: true }
+      }).catch(() => null),
     ]);
 
     const blockedAuthorIds = [
@@ -1329,8 +1659,18 @@ async function getReels(req, res, next) {
     ];
     const followingIds = following.map(f => f.followingId);
 
+    // CF-20: community gate
+    const bannedCommunityIds = new Set((communityBans || []).map(b => b.communityId));
+    const accessibleMemberIds = (memberCommunities || [])
+      .map(m => m.communityId)
+      .filter(id => !bannedCommunityIds.has(id));
+    const allowedCommunityIds = [...new Set([
+      ...(publicCommunities || []).map(c => c.id),
+      ...accessibleMemberIds,
+    ])];
+
     // Build visibility filter: PUBLIC for all, OR FOLLOWERS for followed authors
-    const visibilityFilter = followingIds.length > 0
+    const reelsVisibilityFilter = followingIds.length > 0
       ? { OR: [
           { visibility: 'PUBLIC' },
           { visibility: 'FOLLOWERS', authorId: { in: followingIds } },
@@ -1340,9 +1680,17 @@ async function getReels(req, res, next) {
     const where = {
       deletedAt: null,
       isDraft:   false,
-      ...visibilityFilter,
+      ...reelsVisibilityFilter,
       // Must have at least one VIDEO media item
       media: { some: { type: 'VIDEO' } },
+      // CF-20: community gate
+      AND: [{
+        OR: [
+          { communityId: null },
+          { communityId: { in: allowedCommunityIds } },
+          { authorId: viewerId },
+        ]
+      }],
     };
 
     // BLOCK FIX: Apply block exclusion when there are blocked users.
@@ -1370,6 +1718,31 @@ async function getReels(req, res, next) {
 
     const hasMore = posts.length > take;
     let items = hasMore ? posts.slice(0, take) : posts;
+
+    // CF-18 FIX: Redact inaccessible nested originalPost objects in reels.
+    // Reuse community/follow/subscription context already fetched above.
+    let subscribedCreatorIds = [];
+    if (activeSubs.length > 0) {
+      try {
+        const creatorProfiles = await prisma.creatorProfile.findMany({
+          where: { id: { in: activeSubs.map(s => s.creatorId) } },
+          select: { userId: true }
+        });
+        subscribedCreatorIds = creatorProfiles.map(p => p.userId);
+      } catch { /* non-fatal */ }
+    }
+    const viewerUser = await prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } }).catch(() => null);
+    const effectiveSchoolId = viewerUser?.schoolId ?? schoolMembership?.schoolId ?? null;
+    const blockedUserIds = new Set(blockedAuthorIds);
+    const reelsCtx = { followingIds, effectiveSchoolId, subscribedCreatorIds, allowedCommunityIds, blockedUserIds };
+
+    items = items.map(p => ({
+      ...p,
+      originalPost: p.originalPost
+        ? filterOriginalPost(p.originalPost, viewerId, reelsCtx)
+        : null,
+    }));
+
     items = await stampFollowing(items, viewerId);
 
     const nextCursor = hasMore && items.length > 0
@@ -1736,6 +2109,16 @@ async function votePoll(req, res, next) {
 
     if (!optionId) return errorResponse(res, 'optionId required', 400);
 
+    // CF-02 FIX: Verify full post accessibility (all 8 dimensions) before recording vote.
+    // Previously there was no visibility gate at all — only a deletion + type check.
+    // A user could vote on PRIVATE, FOLLOWERS-only, SCHOOL_ONLY, or private-community
+    // polls simply by knowing the post UUID. assertPostAccessible enforces all dimensions.
+    const { error: accessError } = await assertPostAccessible(postId, userId, prisma);
+    if (accessError) return errorResponse(res, accessError.message, accessError.status);
+
+    // Post-authorization type check: confirm this post is actually a poll.
+    // assertPostAccessible does not validate post.type — that is a domain constraint,
+    // not an authorization dimension.
     const post = await prisma.post.findFirst({
       where: { id: postId, deletedAt: null, type: 'POLL' },
     });

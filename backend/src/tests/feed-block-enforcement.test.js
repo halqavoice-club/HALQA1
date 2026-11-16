@@ -142,6 +142,16 @@ beforeEach(function() {
   prisma.follow.findMany.mockResolvedValue([]);
   prisma.post.findMany.mockResolvedValue([]);
   prisma.hashtag.findMany.mockResolvedValue([]);
+  // CF-20: stubs for new community queries added to visibilityFilter
+  if (!prisma.communityMember) prisma.communityMember = {};
+  prisma.communityMember.findMany   = jest.fn().mockResolvedValue([]);
+  prisma.communityMember.findUnique = jest.fn().mockResolvedValue(null);
+  if (!prisma.community) prisma.community = {};
+  prisma.community.findMany   = jest.fn().mockResolvedValue([]);
+  prisma.community.findUnique = jest.fn().mockResolvedValue(null);
+  if (!prisma.communityBan) prisma.communityBan = {};
+  prisma.communityBan.findMany  = jest.fn().mockResolvedValue([]);
+  prisma.communityBan.findFirst = jest.fn().mockResolvedValue(null);
 });
 
 // ===========================================================================
