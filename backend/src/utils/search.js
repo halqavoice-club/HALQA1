@@ -113,7 +113,27 @@ async function searchPosts(prisma, term, viewerId, { take = 20, before, allowedC
         _count:       { select: { reactions: true, comments: true } },
         reactions:    { where: { userId: viewerId }, select: { type: true } },
         bookmarks:    { where: { userId: viewerId }, select: { id: true } },
-        originalPost: { include: {
+        originalPost: { select: {
+          // Authorization scalars (required by filterOriginalPost)
+          id:          true,
+          authorId:    true,
+          visibility:  true,
+          isDraft:     true,
+          deletedAt:   true,
+          isExclusive: true,
+          communityId: true,
+          schoolId:    true,
+          // Display scalars
+          type:            true,
+          body:            true,
+          quotedBody:      true,
+          linkUrl:         true,
+          linkTitle:       true,
+          linkDescription: true,
+          linkImage:       true,
+          pollData:        true,
+          createdAt:       true,
+          // Relations
           author: { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } },
           media:  { orderBy: { orderIndex: 'asc' } },
         }},
@@ -147,7 +167,27 @@ async function searchPosts(prisma, term, viewerId, { take = 20, before, allowedC
         _count:       { select: { reactions: true, comments: true } },
         reactions:    { where: { userId: viewerId }, select: { type: true } },
         bookmarks:    { where: { userId: viewerId }, select: { id: true } },
-        originalPost: { include: {
+        originalPost: { select: {
+          // Authorization scalars (required by filterOriginalPost)
+          id:          true,
+          authorId:    true,
+          visibility:  true,
+          isDraft:     true,
+          deletedAt:   true,
+          isExclusive: true,
+          communityId: true,
+          schoolId:    true,
+          // Display scalars
+          type:            true,
+          body:            true,
+          quotedBody:      true,
+          linkUrl:         true,
+          linkTitle:       true,
+          linkDescription: true,
+          linkImage:       true,
+          pollData:        true,
+          createdAt:       true,
+          // Relations
           author: { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } },
           media:  { orderBy: { orderIndex: 'asc' } },
         }},

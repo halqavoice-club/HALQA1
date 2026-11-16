@@ -763,29 +763,27 @@ describe('CF-18 extended — filterOriginalPost additional cases', () => {
     expect(result).toBeNull();
   });
 
-  // POST_INCLUDE gap documentation test
-  // The nested originalPost from POST_INCLUDE lacks visibility, isDraft, deletedAt,
-  // isExclusive, communityId, schoolId. filterOriginalPost receives undefined for
-  // these fields and silently passes all checks (undefined !== 'PRIVATE' is true).
-  // This test documents the confirmed gap from the security review.
-  test('POST_INCLUDE gap: originalPost with undefined scalar fields bypasses visibility checks (confirmed gap)', () => {
-    // Simulate what POST_INCLUDE actually returns: only author and media are included.
-    // All authorization-relevant scalars are undefined.
-    const incompleteOriginal = {
+  // POST_INCLUDE regression guard (CF-18 fix applied)
+  // POST_INCLUDE now includes all authorization scalars via explicit select:.
+  // This test verifies that a PRIVATE originalPost is correctly filtered out,
+  // which was the gap documented before the fix.
+  test('POST_INCLUDE fix: PRIVATE originalPost is filtered out for a non-author viewer', () => {
+    // Simulate what POST_INCLUDE now returns: all authorization scalars are present.
+    const privateOriginal = {
       id: 'orig-incomplete',
       authorId: 'other-author-gap',
-      // visibility: undefined — not in POST_INCLUDE
-      // isDraft: undefined — not in POST_INCLUDE
-      // isExclusive: undefined — not in POST_INCLUDE
-      // communityId: undefined — not in POST_INCLUDE
-      // schoolId: undefined — not in POST_INCLUDE
-      // deletedAt: undefined — not in POST_INCLUDE
+      visibility: 'PRIVATE',
+      isDraft: false,
+      isExclusive: false,
+      communityId: null,
+      schoolId: null,
+      deletedAt: null,
       body: 'Body',
       media: [],
       author: { id: 'other-author-gap', firstName: 'A', lastName: 'B', avatarUrl: null },
     };
 
-    const result = filterOriginalPost(incompleteOriginal, 'viewer-gap', {
+    const result = filterOriginalPost(privateOriginal, 'viewer-gap', {
       memberCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
@@ -793,17 +791,10 @@ describe('CF-18 extended — filterOriginalPost additional cases', () => {
       blockedUserIds: new Set(),
     });
 
-    // CONFIRMED GAP: returns non-null because undefined !== 'PRIVATE', undefined !== 'FOLLOWERS', etc.
-    // This test is expected to PASS (the gap behavior is real) — it documents that
-    // filterOriginalPost cannot enforce authorization when fields are undefined.
-    // Fix requires adding visibility/isDraft/deletedAt/isExclusive/communityId/schoolId
-    // to the nested originalPost include in POST_INCLUDE.
-    expect(result).not.toBeNull(); // gap: should be null for PRIVATE but cannot determine
-    expect(result.id).toBe('orig-incomplete');
+    // POST_INCLUDE now supplies visibility: 'PRIVATE', so filterOriginalPost
+    // correctly returns null for a non-author viewer.
+    expect(result).toBeNull();
   });
-
-  // After the POST_INCLUDE fix is applied, the above test should be updated to
-  // expect(result).toBeNull() for PRIVATE originals.
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
