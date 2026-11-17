@@ -2,6 +2,26 @@
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
+
+  // ── Backend API proxy ──────────────────────────────────────────────────────
+  // Rewrites /api/v1/* → backend at NEXT_PUBLIC_API_URL.
+  // This solves the SameSite=strict cookie problem: the backend sets the
+  // httpOnly refreshToken cookie with SameSite=strict, which the browser
+  // only sends to the same origin. By proxying auth/refresh through the
+  // Next.js server (same origin as the frontend), the cookie is forwarded
+  // correctly on page reload — allowing silent token refresh to work.
+  async rewrites() {
+    const apiBase = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api/v1')
+      .replace(/\/$/, '')
+    // Strip the /api/v1 suffix — rewrite destination includes it already
+    const backendOrigin = apiBase.replace(/\/api\/v1$/, '')
+    return [
+      {
+        source: '/api/v1/:path*',
+        destination: `${backendOrigin}/api/v1/:path*`,
+      },
+    ]
+  },
   images: {
     // REQ-14.5: Explicit R2 / Cloudflare remote patterns so Next.js Image
     // does not emit "hostname not configured" warnings for those domains.

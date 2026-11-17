@@ -509,12 +509,17 @@ jobs:
         working-directory: frontend
 
       - name: Build frontend
-        # NEXT_PUBLIC_* are set as host env vars here -- this is correct because
-        # npm run build runs directly on the runner (not inside Docker).
+        # NEXT_PUBLIC_API_URL is set to /api/v1 (relative) so ALL browser API
+        # calls go through the Next.js rewrite proxy on the same origin
+        # (localhost:3000/api/v1 → localhost:5000/api/v1). This is required for
+        # the httpOnly refreshToken cookie (SameSite=strict) to be forwarded
+        # correctly — the cookie is only sent to the same origin that set it.
+        # Without this, page.goto('/live-class') triggers a silent token refresh
+        # that fails (401) because the XHR goes cross-origin to port 5000.
         run: npm run build
         working-directory: frontend
         env:
-          NEXT_PUBLIC_API_URL: 'http://localhost:5000/api/v1'
+          NEXT_PUBLIC_API_URL: '/api/v1'
           NEXT_PUBLIC_SOCKET_URL: 'http://localhost:5000'
           NEXT_PUBLIC_LIVEKIT_URL: 'wss://placeholder.livekit.cloud'
 
