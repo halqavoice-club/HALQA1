@@ -113,12 +113,17 @@ export const useAuthStore = create<AuthState>()(
         set({ isLoading: true })
         try {
           const response = await api.post('/auth/login', { email, password })
-          const { user, accessToken, mustChangePassword = false } = response.data.data
+          const { user, accessToken, refreshToken, mustChangePassword = false } = response.data.data
           // Clear ALL cached queries before setting new user so stale data
           // from a previous session never leaks into the new account's view.
           getQueryClient()?.clear()
           // FE-001: store token in memory only, never in localStorage
           setMemoryToken(accessToken)
+          // Store refresh token in sessionStorage as fallback for environments
+          // where the httpOnly cookie is not forwarded (e.g. Next.js rewrites).
+          if (typeof window !== 'undefined' && refreshToken) {
+            sessionStorage.setItem('_rt_fallback', refreshToken)
+          }
           set({ user, isAuthenticated: true, isLoading: false, mustChangePassword })
         } catch (error: any) {
           set({ isLoading: false })
@@ -134,9 +139,12 @@ export const useAuthStore = create<AuthState>()(
         set({ isLoading: true })
         try {
           const response = await api.post('/auth/google', { credential })
-          const { user, accessToken, mustChangePassword = false, isNewUser = false } = response.data.data
+          const { user, accessToken, refreshToken, mustChangePassword = false, isNewUser = false } = response.data.data
           getQueryClient()?.clear()
           setMemoryToken(accessToken)
+          if (typeof window !== 'undefined' && refreshToken) {
+            sessionStorage.setItem('_rt_fallback', refreshToken)
+          }
           set({ user, isAuthenticated: true, isLoading: false, mustChangePassword })
           return { mustChangePassword, isNewUser, user }
         } catch (error: any) {
@@ -153,6 +161,10 @@ export const useAuthStore = create<AuthState>()(
         getQueryClient()?.clear()
         // FE-001: wipe memory token on logout
         setMemoryToken(null)
+        // Clear the sessionStorage RT fallback on logout
+        if (typeof window !== 'undefined') {
+          sessionStorage.removeItem('_rt_fallback')
+        }
         set({ user: null, isAuthenticated: false, mustChangePassword: false })
         // FE-R-005: notify other tabs to also log out via BroadcastChannel.
         // BroadcastChannel messages are only received by OTHER tabs/windows,
@@ -170,17 +182,47 @@ export const useAuthStore = create<AuthState>()(
       },
 
       refreshToken: async () => {
+        // Attempt 1: cookie-based refresh (primary path — works in production
+        // where the httpOnly cookie is forwarded correctly).
         try {
           const response = await api.post('/auth/refresh')
-          const { accessToken } = response.data.data
+          const { accessToken, refreshToken: newRt } = response.data.data
           // FE-001: new token goes to memory only
           setMemoryToken(accessToken)
           // FE-010: keep socket auth token in sync so reconnections use fresh token
           updateSocketToken(accessToken)
+          // Rotate the sessionStorage fallback if the server returned a new RT
+          if (typeof window !== 'undefined' && newRt) {
+            sessionStorage.setItem('_rt_fallback', newRt)
+          }
+          return
         } catch {
-          setMemoryToken(null)
-          set({ user: null, isAuthenticated: false })
+          // Cookie path failed — fall through to body-based fallback
         }
+
+        // Attempt 2: body-based refresh using the sessionStorage fallback.
+        // This covers the case where Next.js rewrites do not forward the Cookie
+        // header on their server-side hop to the backend (e.g. in CI/E2E).
+        const rt = typeof window !== 'undefined' ? sessionStorage.getItem('_rt_fallback') : null
+        if (rt) {
+          try {
+            const response = await api.post('/auth/refresh', { refreshToken: rt })
+            const { accessToken, refreshToken: newRt } = response.data.data
+            setMemoryToken(accessToken)
+            updateSocketToken(accessToken)
+            if (typeof window !== 'undefined' && newRt) {
+              sessionStorage.setItem('_rt_fallback', newRt)
+            }
+            set({ isAuthenticated: true })
+            return
+          } catch {
+            // Both paths failed — clear auth state; layout.tsx will redirect to /login
+          }
+        }
+
+        // Both attempts failed — clear auth (layout's useEffect redirects to /login)
+        setMemoryToken(null)
+        set({ user: null, isAuthenticated: false, isLoading: false })
       },
 
       fetchMe: async () => {
