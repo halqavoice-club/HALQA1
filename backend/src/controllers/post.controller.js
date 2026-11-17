@@ -1587,6 +1587,10 @@ async function reportPost(req, res, next) {
           err.code = 'DUPLICATE_REPORT';
           throw err;
         }
+        // CF-03: Set pendingKey to CONCAT(reporterId, '-', postId) so the DB-level
+        // UNIQUE KEY fires on a duplicate PENDING insert. The column is a regular
+        // nullable column (not generated) for MariaDB 10.11 compatibility.
+        // A status transition to any terminal status must set pendingKey = NULL.
         return tx.postReport.create({
           data: {
             id:          uuidv4(),
@@ -1595,11 +1599,20 @@ async function reportPost(req, res, next) {
             reason,
             description: description?.trim() || null,
             status:      'PENDING',
+            pendingKey:  `${req.user.id}-${post.id}`,
           }
         });
       }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (err) {
       if (err.code === 'DUPLICATE_REPORT') {
+        return errorResponse(res, 'You already have a pending report on this post. Wait for it to be reviewed.', 409);
+      }
+      // CF-03 DB-LEVEL GUARD: If two requests race past the findFirst check and both
+      // attempt tx.postReport.create simultaneously, the generated-column unique
+      // constraint (pendingKey) fires on the second insert and Prisma surfaces it as
+      // P2002. Map this to the same 409 the application-level guard produces so the
+      // response is consistent regardless of which layer catches the duplicate first.
+      if (err.code === 'P2002') {
         return errorResponse(res, 'You already have a pending report on this post. Wait for it to be reviewed.', 409);
       }
       throw err;

@@ -131,6 +131,7 @@ const SAFE_UNIT_TESTS = Object.freeze([
   'src/tests/test-safety/run-jest.test.js',
   'src/tests/unit/autoPromote.test.js',
   'src/tests/unit/community-cascade.test.js',
+  'src/tests/unit/community-softdelete-visibility.test.js',
   'src/tests/unit/inv001-end-room.test.js',
   'src/tests/unit/inv001-lifecycle-corrections.test.js',
   'src/tests/unit/liveclass-microphone-schema.test.js',

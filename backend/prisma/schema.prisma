@@ -1672,6 +1672,12 @@ model PostReport {
   reason      String    // spam | harassment | hate_speech | sexual_content | scam | impersonation | underage | other
   description String?   @db.Text
   status      String    @default("PENDING") // PENDING | REVIEWED | DISMISSED | ACTION_TAKEN
+  // CF-03: pendingKey is set to CONCAT(reporterId, '-', postId) when status=PENDING
+  // and cleared to NULL on status transition to any terminal status.
+  // The DB-level UNIQUE KEY on this column enforces one-PENDING-per-pair.
+  // NULL values do not conflict (MariaDB UNIQUE allows multiple NULLs).
+  // This replaces the STORED generated column which MariaDB 10.11 rejects (error 1901).
+  pendingKey  String?   @unique @map("pendingKey")
   reviewedBy  String?
   reviewedAt  DateTime?
   createdAt   DateTime  @default(now())

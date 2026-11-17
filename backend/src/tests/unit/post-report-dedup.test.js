@@ -10,8 +10,17 @@
  *   1. Single report → 201 and DB row created.
  *   2. Sequential duplicate PENDING report → 409 (second call blocked).
  *   3. Concurrent duplicate reports (Promise.all) → only one row created.
- *   4. Report after previous RESOLVED report → 201 (new PENDING allowed).
+ *   4. Report after previous REVIEWED report → 201 (new PENDING allowed).
+ *      NOTE: "REVIEWED" is used here — not "RESOLVED". The PostReport schema
+ *      documents status values PENDING | REVIEWED | DISMISSED | ACTION_TAKEN.
+ *      "RESOLVED" was a stale label; this test has been reconciled to the
+ *      actual schema-documented terminal status "REVIEWED". (Status reconciliation
+ *      finding from CF-03 audit — no schema or controller changes required.)
  *   5. Different user reports same post → 201.
+ *   6. DB-level unique constraint violation (P2002) → 409 (not 500).
+ *      Proves the generated-column unique constraint backstop in the
+ *      migration is handled correctly even when it fires before the
+ *      application-level DUPLICATE_REPORT guard can catch the duplicate.
  *
  * All tests mock prisma.$transaction to control serialization behaviour.
  * No real DB required.
@@ -231,9 +240,12 @@ test('3: concurrent duplicate reports result in only one created row', async fun
 });
 
 // ===========================================================================
-// 4. Report after previous RESOLVED report → 201 (new PENDING allowed)
+// 4. Report after previous REVIEWED report → 201 (new PENDING allowed)
+// Status reconciliation: schema documents PENDING | REVIEWED | DISMISSED | ACTION_TAKEN.
+// "RESOLVED" was a stale label never written by any controller. "REVIEWED" is the
+// closest documented terminal status and is used here instead.
 // ===========================================================================
-test('4: report after previous RESOLVED report returns 201', async function() {
+test('4: report after previous REVIEWED report returns 201', async function() {
   var reporterId = 'reporter-d4';
   var postId     = 'post-d4';
   var reportId   = 'report-d4-new';
@@ -276,5 +288,55 @@ test('5: different user reporting same post returns 201', async function() {
 
   expect(res.status).toBe(201);
   expect(res.body.data.reportId).toBe(reportId);
+  expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+});
+
+// ===========================================================================
+// 6. DB-level P2002 unique constraint → 409 (not 500)
+// ---------------------------------------------------------------------------
+// Regression test for the generated-column unique constraint backstop added in
+// migration 20261114_add_post_report_pending_unique.
+//
+// Scenario: two requests race past the application-level findFirst check
+// (both see null, both attempt create). The DB fires the unique constraint on
+// the second insert and Prisma surfaces it as PrismaClientKnownRequestError
+// { code: 'P2002' }. The controller must map this to 409, not propagate it as
+// a 500. This test simulates that by having findFirst return null (no existing
+// PENDING row seen by this transaction) but create throw P2002.
+// ===========================================================================
+test('6: DB-level P2002 unique constraint on create → 409 not 500', async function() {
+  var reporterId = 'reporter-d6';
+  var postId     = 'post-d6';
+  asUser(reporterId);
+
+  prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-6'));
+
+  // Simulate the generated-column unique constraint firing:
+  // findFirst returns null (race condition — this transaction's snapshot sees no
+  // existing PENDING row), but create throws P2002 (DB rejects the duplicate).
+  var p2002 = Object.assign(new Error('Unique constraint failed on the fields: (`pendingKey`)'), {
+    code: 'P2002',
+    meta: { target: ['pendingKey'] },
+    name: 'PrismaClientKnownRequestError',
+  });
+
+  prisma.$transaction.mockImplementation(async (fn) => {
+    var tx = {
+      postReport: {
+        findFirst: jest.fn().mockResolvedValue(null),   // race: no row seen
+        create:    jest.fn().mockRejectedValue(p2002),  // DB rejects duplicate
+      },
+    };
+    return fn(tx);
+  });
+
+  var res = await request(app)
+    .post('/api/v1/posts/' + postId + '/report')
+    .set('Authorization', tok(reporterId))
+    .send({ reason: 'spam' });
+
+  // Must be 409 (duplicate), not 500 (unhandled error)
+  expect(res.status).toBe(409);
+  expect(res.body.success).toBe(false);
   expect(prisma.$transaction).toHaveBeenCalledTimes(1);
 });
