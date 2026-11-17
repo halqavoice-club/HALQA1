@@ -27,6 +27,14 @@ test.describe('Live Class', () => {
   test('live class list page loads', async ({ page }) => {
     await page.goto('/live-class');
 
+    // Log current URL for debugging in CI
+    const currentUrl = page.url();
+    console.log('[E2E DEBUG] URL after goto(/live-class):', currentUrl);
+    const pageTitle = await page.title();
+    console.log('[E2E DEBUG] Page title:', pageTitle);
+    const bodyText = await page.locator('body').innerText().catch(() => '<body not found>');
+    console.log('[E2E DEBUG] Body text (first 200 chars):', bodyText.substring(0, 200));
+
     // Page should load -- either showing classes, a heading, or a create/empty state.
     // Use separate locators joined with .or() to avoid mixing CSS and text= syntax
     // in a single comma-separated string (causes Playwright parse errors).
