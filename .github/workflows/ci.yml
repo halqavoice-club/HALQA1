@@ -518,6 +518,15 @@ jobs:
           NEXT_PUBLIC_SOCKET_URL: 'http://localhost:5000'
           NEXT_PUBLIC_LIVEKIT_URL: 'wss://placeholder.livekit.cloud'
 
+      - name: Copy static assets for standalone server
+        # Next.js standalone output requires .next/static and public/ to be
+        # copied next to the server.js. Without this the standalone server starts
+        # but serves blank pages (no JS/CSS/assets are delivered to the browser).
+        run: |
+          cp -r .next/static .next/standalone/frontend/.next/static
+          cp -r public .next/standalone/frontend/public
+        working-directory: frontend
+
       - name: Start frontend server
         run: npm run start:ci &
         working-directory: frontend
