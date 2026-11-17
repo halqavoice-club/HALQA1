@@ -7,7 +7,7 @@
     "dev:https": "next dev --experimental-https",
     "build": "next build",
     "start": "node .next/standalone/server.js",
-    "start:ci": "next start",
+    "start:ci": "node .next/standalone/frontend/server.js",
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
     "test": "jest --passWithNoTests",
     "test:watch": "jest --watch",
