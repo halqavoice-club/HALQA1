@@ -170,21 +170,26 @@ async function assertPostAccessible(postId, viewerId, prismaClient) {
       return { post: null, error: { status: 404, message: 'Post not found' } };
     }
 
-    if (community.privacy === 'PRIVATE' || community.privacy === 'INVITE_ONLY') {
-      // Dimension 7: Community ban (checked before membership — a ban overrides membership)
-      const ban = await prismaClient.communityBan.findFirst({
-        where: { communityId: post.communityId, userId: viewerId },
-        select: { id: true },
-      });
-      if (ban) {
-        // Intentional: community ban returns 403 (not 404) to allow clients to distinguish
-        // "you are banned from this community" from "post not found". The oracle risk is
-        // low — a banned viewer learns only that the post exists and they are banned,
-        // not the post's content. See CF-18 plan decision in cf18-plan.md.
-        return { post: null, error: { status: 403, message: 'You cannot access this content' } };
-      }
+    // Dimension 7: Community ban — enforced for ALL community privacy types
+    // (PUBLIC, PRIVATE, INVITE_ONLY). A banned viewer must never see a community's
+    // posts regardless of the community's privacy setting (P1-01). Previously the
+    // ban check only ran for PRIVATE/INVITE_ONLY communities, so a viewer banned
+    // from a PUBLIC community could still retrieve that community's posts.
+    const ban = await prismaClient.communityBan.findFirst({
+      where: { communityId: post.communityId, userId: viewerId },
+      select: { id: true },
+    });
+    if (ban) {
+      // Intentional: community ban returns 403 (not 404) to allow clients to distinguish
+      // "you are banned from this community" from "post not found". The oracle risk is
+      // low — a banned viewer learns only that the post exists and they are banned,
+      // not the post's content. See CF-18 plan decision in cf18-plan.md.
+      return { post: null, error: { status: 403, message: 'You cannot access this content' } };
+    }
 
-      // Dimension 6: Community membership
+    // Dimension 6: Community membership — required only for PRIVATE/INVITE_ONLY
+    // communities. PUBLIC communities are open to everyone (ban already enforced above).
+    if (community.privacy === 'PRIVATE' || community.privacy === 'INVITE_ONLY') {
       const membership = await prismaClient.communityMember.findUnique({
         where: { communityId_userId: { communityId: post.communityId, userId: viewerId } },
         select: { id: true },
@@ -207,7 +212,10 @@ async function assertPostAccessible(postId, viewerId, prismaClient) {
  * @param {object|null} originalPost  — the nested originalPost object from POST_INCLUDE
  * @param {string}      viewerId
  * @param {object}      context
- * @param {string[]}    context.memberCommunityIds   — community IDs the viewer is a member of
+ * @param {string[]}    context.allowedCommunityIds   — community IDs the viewer may access
+ *                                                       (public communities + memberships the
+ *                                                       viewer is not banned from). All callers in
+ *                                                       post.controller.js pass this key.
  * @param {string[]}    context.followingIds          — user IDs the viewer follows
  * @param {string|null} context.effectiveSchoolId     — viewer's resolved school ID
  * @param {string[]}    context.subscribedCreatorIds  — author user IDs the viewer subscribes to
@@ -218,7 +226,7 @@ function filterOriginalPost(originalPost, viewerId, context) {
   if (!originalPost) return null;
 
   const {
-    memberCommunityIds = [],
+    allowedCommunityIds = [],
     followingIds = [],
     effectiveSchoolId = null,
     subscribedCreatorIds = [],
@@ -266,16 +274,12 @@ function filterOriginalPost(originalPost, viewerId, context) {
     }
   }
 
-  // 6. Community check using pre-fetched membership list
+  // 6. Community check using pre-fetched allowed-community list.
+  // Callers pass allowedCommunityIds = public communities + communities the viewer
+  // is a member of AND not banned from. If the original's community is not in
+  // that set, the viewer cannot access the original's content.
   if (originalPost.communityId) {
-    // communityPrivacy is not included in POST_INCLUDE's nested originalPost.
-    // The original post includes community: { id, slug, name, avatarUrl } only.
-    // We cannot determine privacy from included data, so we fall back to:
-    // if the viewer is not a member of the community, deny access.
-    // This is intentionally conservative: for PUBLIC communities the memberCommunityIds
-    // list includes public community IDs (computed with publicCommunityIds merged in
-    // the caller's visibilityFilter context).
-    if (!memberCommunityIds.includes(originalPost.communityId)) {
+    if (!allowedCommunityIds.includes(originalPost.communityId)) {
       return null;
     }
   }

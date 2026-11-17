@@ -68,7 +68,7 @@ function toBooleanQuery(term) {
  * @param {object}       opts              — { take, before, allowedCommunityIds }
  * @param {string[]}     opts.allowedCommunityIds — community IDs the viewer may access
  */
-async function searchPosts(prisma, term, viewerId, { take = 20, before, allowedCommunityIds = [] } = {}) {
+async function searchPosts(prisma, term, viewerId, { take = 20, before, allowedCommunityIds = [], blockedAuthorIds = [] } = {}) {
   const clean = sanitizeSearchTerm(term);
   if (!clean) return [];
 
@@ -84,6 +84,13 @@ async function searchPosts(prisma, term, viewerId, { take = 20, before, allowedC
     ? Prisma.sql`AND (communityId IS NULL OR communityId IN (${Prisma.join(allowedCommunityIds)}))`
     : Prisma.sql`AND communityId IS NULL`;
 
+  // P1-03: Exclude posts from blocked authors (both block directions resolved by
+  // the caller). Guarded so the clause is empty when there are no blocks, avoiding
+  // an invalid `IN ()` SQL expression. Applied to BOTH the FULLTEXT and LIKE paths.
+  const blockedAuthorClause = blockedAuthorIds.length > 0
+    ? Prisma.sql`AND authorId NOT IN (${Prisma.join(blockedAuthorIds)})`
+    : Prisma.sql``;
+
   try {
     // MATCH AGAINST with BOOLEAN MODE — uses FULLTEXT index
     const raw = await prisma.$queryRaw`
@@ -92,6 +99,7 @@ async function searchPosts(prisma, term, viewerId, { take = 20, before, allowedC
         AND isDraft = 0
         AND visibility = 'PUBLIC'
         ${communityClause}
+        ${blockedAuthorClause}
         AND MATCH(body) AGAINST(${boolQuery} IN BOOLEAN MODE)
         ${before ? Prisma.sql`AND createdAt < ${new Date(before)}` : Prisma.sql``}
       ORDER BY MATCH(body) AGAINST(${boolQuery} IN BOOLEAN MODE) DESC,
@@ -153,14 +161,20 @@ async function searchPosts(prisma, term, viewerId, { take = 20, before, allowedC
       ? { OR: [{ communityId: null }, { communityId: { in: allowedCommunityIds } }] }
       : { communityId: null };
 
+    // P1-03: Exclude blocked authors in the LIKE fallback (mirrors the FULLTEXT path).
+    const likeWhere = {
+      deletedAt:  null,
+      isDraft:    false,
+      visibility: 'PUBLIC',
+      body:       { contains: clean },
+      AND: [communityWhere],
+    };
+    if (blockedAuthorIds.length > 0) {
+      likeWhere.NOT = { authorId: { in: blockedAuthorIds } };
+    }
+
     return prisma.post.findMany({
-      where: {
-        deletedAt:  null,
-        isDraft:    false,
-        visibility: 'PUBLIC',
-        body:       { contains: clean },
-        AND: [communityWhere],
-      },
+      where: likeWhere,
       include: {
         author:       { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } },
         media:        { orderBy: { orderIndex: 'asc' } },

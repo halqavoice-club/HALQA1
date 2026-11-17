@@ -767,11 +767,13 @@ describe('CF-18 Group 4 — getPost path originalPost handling', () => {
     repost.bookmarks = [];
     repost._count    = { reactions: 0, comments: 0 };
 
-    // getPost calls:
-    //  1. post.findFirst → repost
-    //  2. assertPostAccessible(originalPostId) → post.findFirst for original
+    // P0-01: getPost now has 3 post.findFirst calls:
+    //  1. assertPostAccessible(postId) → repost (minimal select)
+    //  2. post.findFirst with POST_INCLUDE → repost (full fetch)
+    //  3. assertPostAccessible(originalPostId) → original (minimal select)
     prisma.post.findFirst
-      .mockResolvedValueOnce(repost)        // getPost main fetch
+      .mockResolvedValueOnce(repost)        // assertPostAccessible main post check
+      .mockResolvedValueOnce(repost)        // getPost full POST_INCLUDE fetch
       .mockResolvedValueOnce({              // assertPostAccessible for original
         id:          'orig-g4-ok',
         authorId:    originalAuthorId,
@@ -814,10 +816,13 @@ describe('CF-18 Group 4 — getPost path originalPost handling', () => {
     repost.bookmarks = [];
     repost._count    = { reactions: 0, comments: 0 };
 
-    // assertPostAccessible for a PRIVATE post will find the post, then return error
-    // because viewerId !== originalAuthorId and visibility === PRIVATE
+    // P0-01: getPost now has 3 post.findFirst calls:
+    //  1. assertPostAccessible(postId) → repost (minimal select)
+    //  2. post.findFirst with POST_INCLUDE → repost (full fetch)
+    //  3. assertPostAccessible(originalPostId) → original (minimal select)
     prisma.post.findFirst
-      .mockResolvedValueOnce(repost)        // getPost main fetch
+      .mockResolvedValueOnce(repost)        // assertPostAccessible main post check
+      .mockResolvedValueOnce(repost)        // getPost full POST_INCLUDE fetch
       .mockResolvedValueOnce({              // assertPostAccessible for original
         id:          'orig-g4-priv',
         authorId:    originalAuthorId,

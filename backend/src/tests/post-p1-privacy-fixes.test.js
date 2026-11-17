@@ -514,8 +514,10 @@ describe('P1-B: getPost enforces visibility and block policy', () => {
     const authorId  = 'author-b6';
     const schoolId  = 'school-x';
     asUser(viewerId, 'MEMBER', { schoolId });
+    // P0-01: assertPostAccessible reads post.schoolId (not post.author.schoolId).
+    // Set schoolId on the post itself so the SCHOOL_ONLY gate resolves correctly.
     const post = makePost('post-b6', authorId, {
-      visibility: 'SCHOOL_ONLY', authorSchoolId: schoolId
+      visibility: 'SCHOOL_ONLY', schoolId: schoolId, authorSchoolId: schoolId
     });
     prisma.post.findFirst.mockResolvedValue(post);
     prisma.userBlock.findFirst.mockResolvedValue(null);
@@ -531,8 +533,9 @@ describe('P1-B: getPost enforces visibility and block policy', () => {
     const viewerId = 'viewer-b7';
     const authorId = 'author-b7';
     asUser(viewerId, 'MEMBER', { schoolId: 'school-y' });
+    // Post schoolId is 'school-z'; viewer is in 'school-y' → mismatch → 404
     const post = makePost('post-b7', authorId, {
-      visibility: 'SCHOOL_ONLY', authorSchoolId: 'school-z'
+      visibility: 'SCHOOL_ONLY', schoolId: 'school-z', authorSchoolId: 'school-z'
     });
     prisma.post.findFirst.mockResolvedValue(post);
     prisma.userBlock.findFirst.mockResolvedValue(null);
@@ -548,8 +551,9 @@ describe('P1-B: getPost enforces visibility and block policy', () => {
     const viewerId = 'viewer-b7b';
     const authorId = 'author-b7b';
     asUser(viewerId, 'MEMBER', { schoolId: null });
+    // Post schoolId is 'school-z'; viewer has no school → 404
     const post = makePost('post-b7b', authorId, {
-      visibility: 'SCHOOL_ONLY', authorSchoolId: 'school-z'
+      visibility: 'SCHOOL_ONLY', schoolId: 'school-z', authorSchoolId: 'school-z'
     });
     prisma.post.findFirst.mockResolvedValue(post);
     prisma.userBlock.findFirst.mockResolvedValue(null);

@@ -616,7 +616,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
   test('PUBLIC original post is returned as-is', () => {
     const orig = makeOriginalPost('orig-pub', 'other-author', { visibility: 'PUBLIC' });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -629,7 +629,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
   test('PRIVATE original post: non-author viewer gets null', () => {
     const orig = makeOriginalPost('orig-priv', 'other-author', { visibility: 'PRIVATE' });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -641,7 +641,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
   test('PRIVATE original post: author gets it back', () => {
     const orig = makeOriginalPost('orig-priv-auth', viewerId, { visibility: 'PRIVATE' });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -653,7 +653,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
   test('FOLLOWERS original post: non-follower viewer gets null', () => {
     const orig = makeOriginalPost('orig-fol', 'author-fol', { visibility: 'FOLLOWERS' });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],  // not following author
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -665,7 +665,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
   test('FOLLOWERS original post: follower viewer gets it back', () => {
     const orig = makeOriginalPost('orig-fol-ok', 'author-fol-ok', { visibility: 'FOLLOWERS' });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: ['author-fol-ok'],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -677,7 +677,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
   test('Blocked original post author: viewer gets null', () => {
     const orig = makeOriginalPost('orig-blk', 'blocked-author', { visibility: 'PUBLIC' });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -692,7 +692,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
       deletedAt: new Date(),
     });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -707,7 +707,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
       communityId: 'private-comm-orig',
     });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],  // not a member
+      allowedCommunityIds: [],  // not a member
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -722,7 +722,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
       communityId: 'private-comm-orig-ok',
     });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: ['private-comm-orig-ok'],
+      allowedCommunityIds: ['private-comm-orig-ok'],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -746,7 +746,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
 
     // User C is viewing, does not follow User A, User A is not in C's following list
     const result = filterOriginalPost(originalPost, userCId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],  // User C does not follow User A
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -762,7 +762,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
       isExclusive: true,
     });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],  // not subscribed
@@ -777,7 +777,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
       isExclusive: true,
     });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: ['author-excl-ok'],
@@ -788,7 +788,7 @@ describe('CF-18 — Nested originalPost authorization', () => {
 
   test('null originalPost input returns null without error', () => {
     const result = filterOriginalPost(null, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -967,7 +967,7 @@ describe('CF-18 — searchPosts: blocked originalPost author is redacted', () =>
     };
 
     const result = filterOriginalPost(originalPost, viewerId, {
-      memberCommunityIds:  [],
+      allowedCommunityIds:  [],
       followingIds:        [],
       effectiveSchoolId:   null,
       subscribedCreatorIds: [],
@@ -996,7 +996,7 @@ describe('CF-18 — searchPosts: blocked originalPost author is redacted', () =>
     };
 
     const result = filterOriginalPost(originalPost, viewerId, {
-      memberCommunityIds:  [],
+      allowedCommunityIds:  [],
       followingIds:        [],
       effectiveSchoolId:   null,
       subscribedCreatorIds: [],
@@ -1040,7 +1040,7 @@ describe('CF-18 — getUserPosts: blocked originalPost author is redacted', () =
 
     // profileCtx built by getUserPosts now includes the bilateral block
     const result = filterOriginalPost(originalPost, viewerId, {
-      memberCommunityIds:  [],
+      allowedCommunityIds:  [],
       followingIds:        [profileOwner],
       effectiveSchoolId:   null,
       subscribedCreatorIds: [],
@@ -1069,7 +1069,7 @@ describe('CF-18 — getUserPosts: blocked originalPost author is redacted', () =
     };
 
     const result = filterOriginalPost(originalPost, viewerId, {
-      memberCommunityIds:  [],
+      allowedCommunityIds:  [],
       followingIds:        [],
       effectiveSchoolId:   null,
       subscribedCreatorIds: [],
@@ -1112,7 +1112,7 @@ describe('CF-18 — POST_INCLUDE select: authorization scalar fields enforce acc
     };
 
     const result = filterOriginalPost(originalPost, viewerId, {
-      memberCommunityIds:  [],
+      allowedCommunityIds:  [],
       followingIds:        [],
       effectiveSchoolId:   null,
       subscribedCreatorIds: [],
@@ -1141,7 +1141,7 @@ describe('CF-18 — POST_INCLUDE select: authorization scalar fields enforce acc
     };
 
     const result = filterOriginalPost(originalPost, viewerId, {
-      memberCommunityIds:  [],
+      allowedCommunityIds:  [],
       followingIds:        [],
       effectiveSchoolId:   null,
       subscribedCreatorIds: [],

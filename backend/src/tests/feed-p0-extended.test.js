@@ -680,7 +680,7 @@ describe('CF-18 extended — filterOriginalPost additional cases', () => {
       schoolId: 'school-match',
     });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: 'school-match',
       subscribedCreatorIds: [],
@@ -696,7 +696,7 @@ describe('CF-18 extended — filterOriginalPost additional cases', () => {
       schoolId: 'school-a',
     });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: 'school-b',
       subscribedCreatorIds: [],
@@ -711,7 +711,7 @@ describe('CF-18 extended — filterOriginalPost additional cases', () => {
       schoolId: 'school-a',
     });
     const result = filterOriginalPost(orig, viewerId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -730,7 +730,7 @@ describe('CF-18 extended — filterOriginalPost additional cases', () => {
     });
 
     const result = filterOriginalPost(originalPost, viewerBId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [userAId],  // viewer B follows A
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -753,7 +753,7 @@ describe('CF-18 extended — filterOriginalPost additional cases', () => {
 
     // User C views: not in followingIds, not the author
     const result = filterOriginalPost(originalPost, userCId, {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -784,7 +784,7 @@ describe('CF-18 extended — filterOriginalPost additional cases', () => {
     };
 
     const result = filterOriginalPost(privateOriginal, 'viewer-gap', {
-      memberCommunityIds: [],
+      allowedCommunityIds: [],
       followingIds: [],
       effectiveSchoolId: null,
       subscribedCreatorIds: [],
@@ -854,9 +854,13 @@ describe('CF-18 extended — getPost originalPost via assertPostAccessible', () 
       type: 'TEXT',
     };
 
-    // Call sequence: (1) getPost main fetch → repost, (2) assertPostAccessible → originalPost (PRIVATE)
+    // P0-01: getPost now has 3 post.findFirst calls:
+    //  1. assertPostAccessible(postId) → repost (minimal select)
+    //  2. post.findFirst with POST_INCLUDE → repost (full fetch)
+    //  3. assertPostAccessible(originalPostId) → original (minimal select)
     prisma.post.findFirst
-      .mockResolvedValueOnce(repost)        // getPost main fetch
+      .mockResolvedValueOnce(repost)        // assertPostAccessible main post check
+      .mockResolvedValueOnce(repost)        // getPost full POST_INCLUDE fetch
       .mockResolvedValueOnce(originalPost); // assertPostAccessible for original post
 
     const res = await request(app)
@@ -908,8 +912,10 @@ describe('CF-18 extended — getPost originalPost via assertPostAccessible', () 
       },
     });
 
+    // P0-01: 3-call sequence
     prisma.post.findFirst
-      .mockResolvedValueOnce(repost)      // getPost main fetch
+      .mockResolvedValueOnce(repost)        // assertPostAccessible main post check
+      .mockResolvedValueOnce(repost)        // getPost full POST_INCLUDE fetch
       .mockResolvedValueOnce(originalPost); // assertPostAccessible for original
 
     // Viewer follows the original author → assertPostAccessible dimension 4 passes
