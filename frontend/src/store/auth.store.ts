@@ -119,6 +119,9 @@ export const useAuthStore = create<AuthState>()(
           getQueryClient()?.clear()
           // FE-001: store token in memory only, never in localStorage
           setMemoryToken(accessToken)
+          // The httpOnly refreshToken cookie is set by the backend response — no
+          // JS-readable copy is kept. The cookie path in refreshToken() is the
+          // only valid refresh mechanism.
           set({ user, isAuthenticated: true, isLoading: false, mustChangePassword })
         } catch (error: any) {
           set({ isLoading: false })
@@ -137,6 +140,8 @@ export const useAuthStore = create<AuthState>()(
           const { user, accessToken, mustChangePassword = false, isNewUser = false } = response.data.data
           getQueryClient()?.clear()
           setMemoryToken(accessToken)
+          // The httpOnly refreshToken cookie is set by the backend response — no
+          // JS-readable copy is kept.
           set({ user, isAuthenticated: true, isLoading: false, mustChangePassword })
           return { mustChangePassword, isNewUser, user }
         } catch (error: any) {
@@ -170,6 +175,10 @@ export const useAuthStore = create<AuthState>()(
       },
 
       refreshToken: async () => {
+        // Cookie-based refresh — the only valid path.
+        // The httpOnly refreshToken cookie is forwarded automatically by the
+        // browser on same-origin requests (or via Next.js rewrite proxy).
+        // If this fails the user must re-authenticate; no JS-readable fallback exists.
         try {
           const response = await api.post('/auth/refresh')
           const { accessToken } = response.data.data
@@ -177,9 +186,11 @@ export const useAuthStore = create<AuthState>()(
           setMemoryToken(accessToken)
           // FE-010: keep socket auth token in sync so reconnections use fresh token
           updateSocketToken(accessToken)
+          return
         } catch {
+          // Cookie path failed — clear auth (layout's useEffect redirects to /login)
           setMemoryToken(null)
-          set({ user: null, isAuthenticated: false })
+          set({ user: null, isAuthenticated: false, isLoading: false })
         }
       },
 

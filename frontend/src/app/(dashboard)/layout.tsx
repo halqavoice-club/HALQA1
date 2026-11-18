@@ -100,7 +100,7 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex h-screen bg-gray-50 overflow-hidden" dir="ltr">
+    <div className="flex h-screen bg-gray-50 overflow-hidden" dir="ltr" data-testid="dashboard-shell">
       {/* dir="ltr" on the shell keeps sidebar-left layout consistent.
           Individual text content uses the html dir attribute for RTL text. */}
 

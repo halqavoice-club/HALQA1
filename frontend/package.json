@@ -7,7 +7,7 @@
     "dev:https": "next dev --experimental-https",
     "build": "next build",
     "start": "node .next/standalone/server.js",
-    "start:ci": "next start",
+    "start:ci": "node .next/standalone/frontend/server.js",
     "lint": "eslint \"src/**/*.{ts,tsx}\"",
     "test": "jest --passWithNoTests",
     "test:watch": "jest --watch",
@@ -59,7 +59,7 @@
   "devDependencies": {
     "@playwright/test": "1.65.1",
     "@testing-library/dom": "^10.4.2",
-    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/jest": "^30.0.0",
     "@types/node": "^20.11.5",

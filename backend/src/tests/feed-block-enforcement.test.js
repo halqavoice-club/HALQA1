@@ -142,6 +142,16 @@ beforeEach(function() {
   prisma.follow.findMany.mockResolvedValue([]);
   prisma.post.findMany.mockResolvedValue([]);
   prisma.hashtag.findMany.mockResolvedValue([]);
+  // CF-20: stubs for new community queries added to visibilityFilter
+  if (!prisma.communityMember) prisma.communityMember = {};
+  prisma.communityMember.findMany   = jest.fn().mockResolvedValue([]);
+  prisma.communityMember.findUnique = jest.fn().mockResolvedValue(null);
+  if (!prisma.community) prisma.community = {};
+  prisma.community.findMany   = jest.fn().mockResolvedValue([]);
+  prisma.community.findUnique = jest.fn().mockResolvedValue(null);
+  if (!prisma.communityBan) prisma.communityBan = {};
+  prisma.communityBan.findMany  = jest.fn().mockResolvedValue([]);
+  prisma.communityBan.findFirst = jest.fn().mockResolvedValue(null);
 });
 
 // ===========================================================================
@@ -278,7 +288,7 @@ describe('getFeed -- block enforcement', function() {
     expect(postCall.where.NOT).toBeUndefined();
   });
 
-  test('7: userBlock query failure degrades safely -- feed still returns 200', async function() {
+  test('7: userBlock query failure returns 500 -- fail-closed security (P1-04)', async function() {
     var viewerId = 'viewer-7';
     asUser(viewerId);
 
@@ -299,12 +309,10 @@ describe('getFeed -- block enforcement', function() {
       .get('/api/v1/posts/feed')
       .set('Authorization', tok(viewerId));
 
-    // Must still succeed -- block failure is non-fatal (.catch(() => []) fallback)
-    expect(res.status).toBe(200);
-
-    // With the catch fallback, block list is empty so NOT clause is omitted
-    var postCall = prisma.post.findMany.mock.calls[0][0];
-    expect(postCall.where.NOT).toBeUndefined();
+    // P1-04 FIX: A userBlock DB failure must NOT silently grant access to blocked
+    // users' posts (fail-open). The error now propagates, returning 500.
+    // Previously this returned 200 with an empty block list (fail-open).
+    expect(res.status).toBe(500);
   });
 
   test('8: blocked users PRIVATE posts remain excluded (no double-filter bug)', async function() {

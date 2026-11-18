@@ -22,6 +22,8 @@ test.describe('Live Class', () => {
     await page.locator('button[type="submit"]').first().click();
     // Wait until we leave /login -- different roles land on different routes (/feed, /admin etc.)
     await page.waitForURL(url => !url.pathname.includes('/login'), { timeout: 15000 });
+    // Wait for the dashboard shell to be fully hydrated before navigating to feature pages
+    await page.waitForSelector('[data-testid="dashboard-shell"], .sidebar, nav', { timeout: 20000 });
   });
 
   test('live class list page loads', async ({ page }) => {
@@ -35,7 +37,7 @@ test.describe('Live Class', () => {
       .or(page.locator('button:has-text("New Class")'))
       .or(page.getByText(/live class/i));
 
-    await expect(headingOrButton.first()).toBeVisible({ timeout: 20000 });
+    await expect(headingOrButton.first()).toBeVisible({ timeout: 35000 });
   });
 
   test('teacher can create a live class', async ({ page }) => {

@@ -629,7 +629,7 @@ describe('Block enforcement — reactToPost', () => {
     expect(prisma.userBlock.findFirst).toHaveBeenCalledTimes(1);
   });
 
-  test('reactToPost — requester blocked by post author: returns 403', async () => {
+  test('reactToPost — requester blocked by post author: returns 404', async () => {
     asUser('blocked-reactor');
     const post = makePost('post-block-1', 'post-author-1');
     prisma.post.findFirst.mockResolvedValue(post);
@@ -643,14 +643,15 @@ describe('Block enforcement — reactToPost', () => {
       .set('Authorization', tok('blocked-reactor'))
       .send({ type: 'LIKE' });
 
-    expect(res.status).toBe(403);
-    expect(res.body.message).toMatch(/cannot interact/i);
+    // CF-02 FIX: Block on mutation now returns 404 (oracle-attack prevention) instead of 403.
+    // assertPostAccessible returns 404 for all denial reasons to avoid leaking post existence.
+    expect(res.status).toBe(404);
     // No reaction or counter change should occur
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(prisma.postReaction.create).not.toHaveBeenCalled();
   });
 
-  test('reactToPost — requester blocked the post author: returns 403', async () => {
+  test('reactToPost — requester blocked the post author: returns 404', async () => {
     asUser('reactor-who-blocked');
     const post = makePost('post-block-2', 'blocked-author');
     prisma.post.findFirst.mockResolvedValue(post);
@@ -664,8 +665,8 @@ describe('Block enforcement — reactToPost', () => {
       .set('Authorization', tok('reactor-who-blocked'))
       .send({ type: 'LOVE' });
 
-    expect(res.status).toBe(403);
-    expect(res.body.message).toMatch(/cannot interact/i);
+    // CF-02 FIX: Block on mutation now returns 404 (oracle-attack prevention) instead of 403.
+    expect(res.status).toBe(404);
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
@@ -714,7 +715,7 @@ describe('Block enforcement — addComment', () => {
     expect(prisma.userBlock.findFirst).toHaveBeenCalledTimes(1);
   });
 
-  test('addComment — post author blocked commenter: returns 403, no comment created', async () => {
+  test('addComment — post author blocked commenter: returns 404, no comment created', async () => {
     asUser('blocked-commenter');
     const post = makePost('post-block-c1', 'comment-author-blocker');
     prisma.post.findFirst.mockResolvedValue(post);
@@ -727,14 +728,14 @@ describe('Block enforcement — addComment', () => {
       .set('Authorization', tok('blocked-commenter'))
       .send({ body: 'Let me comment!' });
 
-    expect(res.status).toBe(403);
-    expect(res.body.message).toMatch(/cannot interact/i);
+    // CF-02 FIX: Block on mutation now returns 404 (oracle-attack prevention) instead of 403.
+    expect(res.status).toBe(404);
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(prisma.postComment.create).not.toHaveBeenCalled();
     expect(prisma.post.update).not.toHaveBeenCalled(); // commentCount unchanged
   });
 
-  test('addComment — commenter blocked the author: returns 403, no comment created', async () => {
+  test('addComment — commenter blocked the author: returns 404, no comment created', async () => {
     asUser('commenter-who-blocked');
     const post = makePost('post-block-c2', 'blocked-post-author');
     prisma.post.findFirst.mockResolvedValue(post);
@@ -747,8 +748,8 @@ describe('Block enforcement — addComment', () => {
       .set('Authorization', tok('commenter-who-blocked'))
       .send({ body: 'Trying to comment' });
 
-    expect(res.status).toBe(403);
-    expect(res.body.message).toMatch(/cannot interact/i);
+    // CF-02 FIX: Block on mutation now returns 404 (oracle-attack prevention) instead of 403.
+    expect(res.status).toBe(404);
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 

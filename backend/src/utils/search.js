@@ -57,16 +57,39 @@ function toBooleanQuery(term) {
  * Full-text search across post bodies.
  * Falls back to LIKE for very short terms.
  *
+ * CF-20 FIX: Added allowedCommunityIds parameter. Posts belonging to
+ * PRIVATE or INVITE_ONLY communities are now excluded unless the viewer
+ * is a member. The caller (searchPosts controller) pre-computes this list
+ * and passes it in. Posts with communityId IS NULL are always included.
+ *
  * @param {PrismaClient} prisma
  * @param {string}       term
- * @param {string}       viewerId   — for visibility filter
- * @param {object}       opts       — { take, cursor }
+ * @param {string}       viewerId          — for visibility filter
+ * @param {object}       opts              — { take, before, allowedCommunityIds }
+ * @param {string[]}     opts.allowedCommunityIds — community IDs the viewer may access
  */
-async function searchPosts(prisma, term, viewerId, { take = 20, before } = {}) {
+async function searchPosts(prisma, term, viewerId, { take = 20, before, allowedCommunityIds = [], blockedAuthorIds = [] } = {}) {
   const clean = sanitizeSearchTerm(term);
   if (!clean) return [];
 
   const boolQuery = toBooleanQuery(clean);
+
+  // CF-20: Build the community filter clause for the raw SQL query.
+  // If allowedCommunityIds is non-empty, allow posts with no community OR
+  // posts whose communityId is in the allowed set.
+  // If empty (viewer has no memberships and no public communities exist),
+  // only allow posts with communityId IS NULL.
+  const { Prisma } = require('@prisma/client');
+  const communityClause = allowedCommunityIds.length > 0
+    ? Prisma.sql`AND (communityId IS NULL OR communityId IN (${Prisma.join(allowedCommunityIds)}))`
+    : Prisma.sql`AND communityId IS NULL`;
+
+  // P1-03: Exclude posts from blocked authors (both block directions resolved by
+  // the caller). Guarded so the clause is empty when there are no blocks, avoiding
+  // an invalid `IN ()` SQL expression. Applied to BOTH the FULLTEXT and LIKE paths.
+  const blockedAuthorClause = blockedAuthorIds.length > 0
+    ? Prisma.sql`AND authorId NOT IN (${Prisma.join(blockedAuthorIds)})`
+    : Prisma.sql``;
 
   try {
     // MATCH AGAINST with BOOLEAN MODE — uses FULLTEXT index
@@ -75,8 +98,10 @@ async function searchPosts(prisma, term, viewerId, { take = 20, before } = {}) {
       WHERE deletedAt IS NULL
         AND isDraft = 0
         AND visibility = 'PUBLIC'
+        ${communityClause}
+        ${blockedAuthorClause}
         AND MATCH(body) AGAINST(${boolQuery} IN BOOLEAN MODE)
-        ${before ? prisma.$raw`AND createdAt < ${new Date(before)}` : prisma.$raw``}
+        ${before ? Prisma.sql`AND createdAt < ${new Date(before)}` : Prisma.sql``}
       ORDER BY MATCH(body) AGAINST(${boolQuery} IN BOOLEAN MODE) DESC,
                createdAt DESC
       LIMIT ${take}
@@ -89,13 +114,37 @@ async function searchPosts(prisma, term, viewerId, { take = 20, before } = {}) {
     const posts = await prisma.post.findMany({
       where: { id: { in: ids } },
       include: {
-        author:    { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } },
-        media:     { orderBy: { orderIndex: 'asc' } },
-        hashtags:  { include: { hashtag: { select: { id: true, name: true } } } },
-        community: { select: { id: true, slug: true, name: true } },
-        _count:    { select: { reactions: true, comments: true } },
-        reactions: { where: { userId: viewerId }, select: { type: true } },
-        bookmarks: { where: { userId: viewerId }, select: { id: true } },
+        author:       { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } },
+        media:        { orderBy: { orderIndex: 'asc' } },
+        hashtags:     { include: { hashtag: { select: { id: true, name: true } } } },
+        community:    { select: { id: true, slug: true, name: true } },
+        _count:       { select: { reactions: true, comments: true } },
+        reactions:    { where: { userId: viewerId }, select: { type: true } },
+        bookmarks:    { where: { userId: viewerId }, select: { id: true } },
+        originalPost: { select: {
+          // Authorization scalars (required by filterOriginalPost)
+          id:          true,
+          authorId:    true,
+          visibility:  true,
+          isDraft:     true,
+          deletedAt:   true,
+          isExclusive: true,
+          communityId: true,
+          schoolId:    true,
+          // Display scalars
+          type:            true,
+          body:            true,
+          quotedBody:      true,
+          linkUrl:         true,
+          linkTitle:       true,
+          linkDescription: true,
+          linkImage:       true,
+          pollData:        true,
+          createdAt:       true,
+          // Relations
+          author: { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } },
+          media:  { orderBy: { orderIndex: 'asc' } },
+        }},
       }
     });
 
@@ -106,19 +155,56 @@ async function searchPosts(prisma, term, viewerId, { take = 20, before } = {}) {
   } catch (err) {
     // FULLTEXT index may not exist in dev — fall back to LIKE
     logger.warn(`[search:posts] FULLTEXT failed, falling back to LIKE: ${err.message}`);
+
+    // CF-20: Apply community gate in the LIKE fallback as well.
+    const communityWhere = allowedCommunityIds.length > 0
+      ? { OR: [{ communityId: null }, { communityId: { in: allowedCommunityIds } }] }
+      : { communityId: null };
+
+    // P1-03: Exclude blocked authors in the LIKE fallback (mirrors the FULLTEXT path).
+    const likeWhere = {
+      deletedAt:  null,
+      isDraft:    false,
+      visibility: 'PUBLIC',
+      body:       { contains: clean },
+      AND: [communityWhere],
+    };
+    if (blockedAuthorIds.length > 0) {
+      likeWhere.NOT = { authorId: { in: blockedAuthorIds } };
+    }
+
     return prisma.post.findMany({
-      where: {
-        deletedAt: null,
-        isDraft:   false,
-        visibility: 'PUBLIC',
-        body:       { contains: clean }
-      },
+      where: likeWhere,
       include: {
-        author:    { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } },
-        media:     { orderBy: { orderIndex: 'asc' } },
-        _count:    { select: { reactions: true, comments: true } },
-        reactions: { where: { userId: viewerId }, select: { type: true } },
-        bookmarks: { where: { userId: viewerId }, select: { id: true } },
+        author:       { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } },
+        media:        { orderBy: { orderIndex: 'asc' } },
+        _count:       { select: { reactions: true, comments: true } },
+        reactions:    { where: { userId: viewerId }, select: { type: true } },
+        bookmarks:    { where: { userId: viewerId }, select: { id: true } },
+        originalPost: { select: {
+          // Authorization scalars (required by filterOriginalPost)
+          id:          true,
+          authorId:    true,
+          visibility:  true,
+          isDraft:     true,
+          deletedAt:   true,
+          isExclusive: true,
+          communityId: true,
+          schoolId:    true,
+          // Display scalars
+          type:            true,
+          body:            true,
+          quotedBody:      true,
+          linkUrl:         true,
+          linkTitle:       true,
+          linkDescription: true,
+          linkImage:       true,
+          pollData:        true,
+          createdAt:       true,
+          // Relations
+          author: { select: { id: true, firstName: true, lastName: true, avatarUrl: true, role: true, schoolId: true } },
+          media:  { orderBy: { orderIndex: 'asc' } },
+        }},
       },
       orderBy: { createdAt: 'desc' },
       take

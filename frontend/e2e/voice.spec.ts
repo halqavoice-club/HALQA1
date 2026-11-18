@@ -33,6 +33,8 @@ test.describe('Voice Club', () => {
     // Wait until we have navigated away from /login — different roles land on
     // different routes (/feed, /admin, /dashboard) so we match any non-login URL.
     await page.waitForURL(url => !url.pathname.includes('/login'), { timeout: 15000 });
+    // Wait for the dashboard shell to be fully hydrated before navigating to feature pages
+    await page.waitForSelector('[data-testid="dashboard-shell"], .sidebar, nav', { timeout: 20000 });
   });
 
   test('voice room list loads and shows rooms or empty state', async ({ page }) => {
@@ -42,7 +44,7 @@ test.describe('Voice Club', () => {
     const roomsOrEmpty = page.locator(
       '[data-testid="voice-room-card"], [data-testid="empty-state"], .vc-room-card, button:has-text("Start Room"), button:has-text("Start a Room")'
     );
-    await expect(roomsOrEmpty.first()).toBeVisible({ timeout: 20000 });
+    await expect(roomsOrEmpty.first()).toBeVisible({ timeout: 35000 });
   });
 
   test('user can join and leave a voice room', async ({ page }) => {

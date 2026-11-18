@@ -66,7 +66,12 @@ api.interceptors.response.use(
   async (error) => {
     const originalRequest = error.config
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    // auth.store.refreshToken() owns the cookie→body retry. If the interceptor
+    // also tried to refresh on a /auth/refresh 401 it would recurse and deadlock
+    // on the isRefreshing flag, leaving the dashboard on a blank spinner.
+    const isRefreshRequest = originalRequest?.url?.includes('/auth/refresh')
+
+    if (error.response?.status === 401 && !originalRequest._retry && !isRefreshRequest) {
       originalRequest._retry = true
 
       if (isRefreshing) {
