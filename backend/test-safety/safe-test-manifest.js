@@ -25,6 +25,7 @@ const SAFE_UNIT_TESTS = Object.freeze([
   'src/tests/cf18-completion.test.js',
   'src/tests/feed-p0-auth.test.js',
   'src/tests/feed-p0-cf-remediation.test.js',
+  'src/tests/exclusive-content-gates.test.js',
   'src/tests/feed-p0-extended.test.js',
   'src/tests/fix001-seat-lock.test.js',
   'src/tests/gift.test.js',

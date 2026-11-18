@@ -975,13 +975,6 @@ async function getUserPosts(req, res, next) {
         ...accessibleMemberIds,
       ])];
 
-      where.AND = [{
-        OR: [
-          { communityId: null },
-          { communityId: { in: allowedCommunityIds } },
-        ]
-      }];
-
       // CF-18: build context for filterOriginalPost
       let subscribedCreatorIds = [];
       if (activeSubs.length > 0) {
@@ -1004,6 +997,31 @@ async function getUserPosts(req, res, next) {
         (profileBlocks || []).flatMap(b => [b.blockerId, b.blockedId]).filter(id => id !== viewerId)
       );
       profileCtx = { followingIds, effectiveSchoolId, subscribedCreatorIds, allowedCommunityIds, blockedUserIds };
+
+      // P0-02 FIX: Enforce exclusive-content subscription gate for non-owner viewers.
+      // Previously the non-owner filter only excluded PRIVATE posts (visibility != PRIVATE)
+      // but did not check isExclusive. A non-subscriber could see any exclusive post on
+      // the author's profile as long as it was PUBLIC/FOLLOWERS/SCHOOL_ONLY.
+      // The gate: isExclusive:true posts are only visible if the viewer has an active
+      // subscription to that creator (authorId in subscribedCreatorIds).
+      where.AND = [
+        // Community access gate (CF-20)
+        {
+          OR: [
+            { communityId: null },
+            { communityId: { in: allowedCommunityIds } },
+          ]
+        },
+        // Exclusive content gate (P0-02):
+        // A post is accessible if it is NOT exclusive, OR the viewer subscribes to
+        // the author, OR the viewer IS the author (owner path already bypassed above).
+        {
+          OR: [
+            { isExclusive: false },
+            { authorId: { in: subscribedCreatorIds.length > 0 ? subscribedCreatorIds : ['__no_match__'] } },
+          ]
+        },
+      ];
     }
 
     if (cursor) { where.createdAt = { lte: new Date(cursor.split('_')[0]) }; }
@@ -1694,13 +1712,45 @@ async function getReels(req, res, next) {
       ...accessibleMemberIds,
     ])];
 
-    // Build visibility filter: PUBLIC for all, OR FOLLOWERS for followed authors
-    const reelsVisibilityFilter = followingIds.length > 0
-      ? { OR: [
-          { visibility: 'PUBLIC' },
-          { visibility: 'FOLLOWERS', authorId: { in: followingIds } },
-        ]}
-      : { visibility: 'PUBLIC' };
+    // P0-02 FIX: Added isExclusive enforcement to the reels visibility filter.
+    // Previously getReels built its own inline OR without any subscription check,
+    // so exclusive reels (isExclusive:true) were returned to ALL viewers regardless
+    // of subscription status.  The fix mirrors the pattern used in visibilityFilter():
+    //   - Non-exclusive branches carry isExclusive:false
+    //   - Subscriber-only branches are appended for creators the viewer subscribes to
+    //   - Subscription requires isExclusive:true AND an active CreatorSubscription
+    // Resolve subscribedCreatorIds before building the visibility filter.
+    let subscribedCreatorIds = [];
+    if (activeSubs.length > 0) {
+      try {
+        const creatorProfiles = await prisma.creatorProfile.findMany({
+          where: { id: { in: activeSubs.map(s => s.creatorId) } },
+          select: { userId: true }
+        });
+        subscribedCreatorIds = creatorProfiles.map(p => p.userId);
+      } catch { /* non-fatal */ }
+    }
+
+    // Build visibility filter: PUBLIC/FOLLOWERS for all, plus subscriber branches
+    const nonExclusiveOr = followingIds.length > 0
+      ? [
+          { visibility: 'PUBLIC',    isExclusive: false },
+          { visibility: 'FOLLOWERS', isExclusive: false, authorId: { in: followingIds } },
+        ]
+      : [
+          { visibility: 'PUBLIC', isExclusive: false },
+        ];
+
+    const exclusiveOr = subscribedCreatorIds.length > 0
+      ? [
+          { isExclusive: true, visibility: 'PUBLIC', authorId: { in: subscribedCreatorIds } },
+          ...(followingIds.length > 0
+            ? [{ isExclusive: true, visibility: 'FOLLOWERS', authorId: { in: subscribedCreatorIds.filter(id => followingIds.includes(id)) } }]
+            : []),
+        ]
+      : [];
+
+    const reelsVisibilityFilter = { OR: [...nonExclusiveOr, { authorId: viewerId }, ...exclusiveOr] };
 
     const where = {
       deletedAt: null,
@@ -1746,16 +1796,7 @@ async function getReels(req, res, next) {
 
     // CF-18 FIX: Redact inaccessible nested originalPost objects in reels.
     // Reuse community/follow/subscription context already fetched above.
-    let subscribedCreatorIds = [];
-    if (activeSubs.length > 0) {
-      try {
-        const creatorProfiles = await prisma.creatorProfile.findMany({
-          where: { id: { in: activeSubs.map(s => s.creatorId) } },
-          select: { userId: true }
-        });
-        subscribedCreatorIds = creatorProfiles.map(p => p.userId);
-      } catch { /* non-fatal */ }
-    }
+    // subscribedCreatorIds was resolved before building the visibility filter (P0-02 FIX).
     const viewerUser = await prisma.user.findUnique({ where: { id: viewerId }, select: { schoolId: true } }).catch(() => null);
     const effectiveSchoolId = viewerUser?.schoolId ?? schoolMembership?.schoolId ?? null;
     const blockedUserIds = new Set(blockedAuthorIds);
