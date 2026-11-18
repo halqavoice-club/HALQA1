@@ -11,14 +11,15 @@ const nextConfig = {
   // Next.js server (same origin as the frontend), the cookie is forwarded
   // correctly on page reload — allowing silent token refresh to work.
   async rewrites() {
-    const apiBase = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api/v1')
-      .replace(/\/$/, '')
-    // Strip the /api/v1 suffix — rewrite destination includes it already
-    const backendOrigin = apiBase.replace(/\/api\/v1$/, '')
+    // Use BACKEND_URL (server-side only) for the rewrite destination.
+    // NEXT_PUBLIC_API_URL is baked into the browser bundle and must be
+    // '/api/v1' (relative) so browser XHR goes through this proxy.
+    // BACKEND_URL is a server-side env var not exposed to the browser.
+    const backendUrl = (process.env.BACKEND_URL || 'http://localhost:5000').replace(/\/$/, '')
     return [
       {
         source: '/api/v1/:path*',
-        destination: `${backendOrigin}/api/v1/:path*`,
+        destination: `${backendUrl}/api/v1/:path*`,
       },
     ]
   },
