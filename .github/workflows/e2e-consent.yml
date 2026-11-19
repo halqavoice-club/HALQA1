@@ -92,16 +92,17 @@ jobs:
         env:
           LIVEKIT_KEYS: "devkey: secret"
       mysql:
-        image: mysql:8.0
+        image: mariadb:10.11
         ports: ['3306:3306']
         env:
           MYSQL_ROOT_PASSWORD: test
           MYSQL_DATABASE: halqa_test
         options: >-
-          --health-cmd="mysqladmin ping"
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=3
+          --health-retries=10
+          --health-start-period=30s
     steps:
       - uses: actions/checkout@v4
       
@@ -115,6 +116,12 @@ jobs:
       - name: Install backend dependencies
         run: npm ci
         working-directory: backend
+
+      - name: Verify database credentials
+        env:
+          MYSQL_PWD: test
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -u root -e "SELECT 1 AS connected;" halqa_test
       
       - name: Run Prisma migrations
         run: npx prisma migrate deploy

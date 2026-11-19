@@ -2,13 +2,13 @@
 
 ## Current Architecture (Single-Node)
 
-The default production setup runs one backend container, one Redis instance, and one MySQL instance. This handles up to approximately **2,000–3,000 concurrent Socket.IO connections** on a 4-core VPS before CPU becomes the bottleneck.
+The default production setup runs one backend container, one Redis instance, and one MariaDB 10.11 instance. This handles up to approximately **2,000–3,000 concurrent Socket.IO connections** on a 4-core VPS before CPU becomes the bottleneck.
 
 ```
 nginx (80/443)
     ├── frontend:3000
     └── backend:5000
-         ├── MySQL (single node)
+         ├── MariaDB 10.11 (single node)
          └── Redis (single node, in-memory fallback if down)
 ```
 
@@ -149,4 +149,6 @@ DATABASE_URL="mysql://user:pass@host:3306/halqa_db?connection_limit=25&pool_time
 | < 500 | 10 | Default XAMPP setup |
 | 500–2,000 | 25 | Standard production |
 | 2,000–10,000 | 50 | Multi-core VPS or managed DB |
-| 10,000+ | Use PlanetScale / RDS | Managed connection pooling |
+| 10,000+ | Managed MariaDB (AWS RDS for MariaDB) or self-hosted with MaxScale/ProxySQL | Managed connection pooling and read replicas |
+
+> **Note:** Prisma provider remains `mysql` (Prisma's correct setting for MariaDB).
