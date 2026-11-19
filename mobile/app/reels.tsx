@@ -206,10 +206,10 @@ function ReelItem({
   }, [player]);
 
   // React mutation
+  // CF-13 FIX: Backend POST /:id/react is a toggle — always use POST for both like and unlike.
+  // DELETE /posts/:id/react does not exist on the backend.
   const reactMutation = useMutation({
-    mutationFn: () => liked
-      ? api.delete(`/posts/${item.id}/react`)
-      : api.post(`/posts/${item.id}/react`, { type: 'LIKE' }),
+    mutationFn: () => api.post(`/posts/${item.id}/react`, { type: 'LIKE' }),
     onMutate: () => {
       setLiked(v => !v);
       setLikeCount(v => liked ? v - 1 : v + 1);
@@ -220,10 +220,10 @@ function ReelItem({
     },
   });
 
+  // CF-13 FIX: Backend POST /:id/bookmark is a toggle — always use POST for both bookmark and unbookmark.
+  // DELETE /posts/:id/bookmark does not exist on the backend.
   const bookmarkMutation = useMutation({
-    mutationFn: () => bookmarked
-      ? api.delete(`/posts/${item.id}/bookmark`)
-      : api.post(`/posts/${item.id}/bookmark`),
+    mutationFn: () => api.post(`/posts/${item.id}/bookmark`),
     onMutate: () => setBookmarked(v => !v),
     onError:  () => setBookmarked(v => !v),
   });
