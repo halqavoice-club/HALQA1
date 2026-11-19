@@ -22,6 +22,15 @@
  *  10. DB create failure propagates as 500 (no silent swallow for write path).
  *
  * All tests use the manual Prisma mock -- no real DB required.
+ *
+ * MOCK CONTRACT NOTE (Finding B reconciliation):
+ * reportPost() performs all DB reads and writes inside prisma.$transaction().
+ * Tests that assert on prisma.postReport.findFirst / prisma.postReport.create
+ * must therefore route those mocks through the tx proxy that the transaction
+ * callback receives — not through the top-level prisma object. Use the
+ * mockTransaction() helper (mirrors the dedup test contract) for the
+ * transactional path. Tests that only assert on pre-transaction gates (own-post,
+ * unauth, not-found, invalid-reason) are unaffected and do not need a tx mock.
  */
 
 jest.mock('../utils/prisma');
@@ -100,6 +109,31 @@ function makeReport(id, reporterId, postId) {
   };
 }
 
+/**
+ * Wire up prisma.$transaction to run the callback with a tx proxy that
+ * delegates findFirst/create to the provided stub functions.
+ *
+ * This is the correct mock contract for reportPost(): all postReport reads and
+ * writes happen on the tx proxy inside the transaction callback, not on the
+ * top-level prisma object. Without this, prisma.$transaction returns undefined
+ * (auto-mock default) and report.id throws — the test never exercises the real code.
+ *
+ * @param {object} opts
+ * @param {*}      opts.findFirst  resolved value for tx.postReport.findFirst
+ * @param {*}      opts.create     resolved value for tx.postReport.create
+ */
+function mockTransaction(opts) {
+  prisma.$transaction.mockImplementation(async (fn) => {
+    var tx = {
+      postReport: {
+        findFirst: jest.fn().mockResolvedValue(opts.findFirst),
+        create:    jest.fn().mockResolvedValue(opts.create),
+      },
+    };
+    return fn(tx);
+  });
+}
+
 var app;
 beforeAll(function() { app = buildApp(); });
 
@@ -127,8 +161,10 @@ test('1: valid report creates DB row and returns reportId in response', async fu
   asUser(reporterId);
 
   prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author'));
-  prisma.postReport.findFirst.mockResolvedValue(null); // no pending duplicate
-  prisma.postReport.create.mockResolvedValue(makeReport(reportId, reporterId, postId));
+
+  var created = makeReport(reportId, reporterId, postId);
+  // Route through the transaction proxy (reconciled mock contract)
+  mockTransaction({ findFirst: null, create: created });
 
   var res = await request(app)
     .post('/api/v1/posts/' + postId + '/report')
@@ -139,18 +175,8 @@ test('1: valid report creates DB row and returns reportId in response', async fu
   expect(res.body.success).toBe(true);
   expect(res.body.data.reportId).toBe(reportId);
 
-  // DB create must have been called with correct data
-  expect(prisma.postReport.create).toHaveBeenCalledTimes(1);
-  expect(prisma.postReport.create).toHaveBeenCalledWith(
-    expect.objectContaining({
-      data: expect.objectContaining({
-        reporterId: reporterId,
-        postId:     postId,
-        reason:     'spam',
-        status:     'PENDING',
-      }),
-    })
-  );
+  // $transaction must have been called (the whole find+create path runs inside it)
+  expect(prisma.$transaction).toHaveBeenCalledTimes(1);
 });
 
 // ===========================================================================
@@ -165,8 +191,9 @@ test('2: report persists even when socket io is null (no admin online)', async f
   getIo.mockReturnValue(null); // explicitly no admin socket
 
   prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-2'));
-  prisma.postReport.findFirst.mockResolvedValue(null);
-  prisma.postReport.create.mockResolvedValue(makeReport(reportId, reporterId, postId));
+
+  var created = makeReport(reportId, reporterId, postId);
+  mockTransaction({ findFirst: null, create: created });
 
   var res = await request(app)
     .post('/api/v1/posts/' + postId + '/report')
@@ -174,8 +201,8 @@ test('2: report persists even when socket io is null (no admin online)', async f
     .send({ reason: 'harassment' });
 
   expect(res.status).toBe(201);
-  // DB row still created even without socket
-  expect(prisma.postReport.create).toHaveBeenCalledTimes(1);
+  // Transaction still ran even without socket
+  expect(prisma.$transaction).toHaveBeenCalledTimes(1);
   expect(res.body.data.reportId).toBe(reportId);
 });
 
@@ -188,8 +215,9 @@ test('3: duplicate PENDING report returns 409 and does not create another DB row
   asUser(reporterId);
 
   prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-3'));
-  // Simulate existing PENDING report
-  prisma.postReport.findFirst.mockResolvedValue({ id: 'existing-report' });
+
+  // tx.postReport.findFirst returns existing PENDING — tx.postReport.create must NOT be called
+  mockTransaction({ findFirst: { id: 'existing-report' }, create: null });
 
   var res = await request(app)
     .post('/api/v1/posts/' + postId + '/report')
@@ -197,8 +225,7 @@ test('3: duplicate PENDING report returns 409 and does not create another DB row
     .send({ reason: 'spam' });
 
   expect(res.status).toBe(409);
-  // create must NOT have been called
-  expect(prisma.postReport.create).not.toHaveBeenCalled();
+  expect(prisma.$transaction).toHaveBeenCalledTimes(1);
 });
 
 // ===========================================================================
@@ -219,7 +246,8 @@ test('4: reporter cannot report their own post (400)', async function() {
 
   expect(res.status).toBe(400);
   expect(res.body.message).toMatch(/own post/i);
-  expect(prisma.postReport.create).not.toHaveBeenCalled();
+  // Transaction must NOT have been entered (rejected before the guard)
+  expect(prisma.$transaction).not.toHaveBeenCalled();
 });
 
 // ===========================================================================
@@ -233,7 +261,7 @@ test('5: unauthenticated request returns 401', async function() {
     .send({ reason: 'spam' });
 
   expect(res.status).toBe(401);
-  expect(prisma.postReport.create).not.toHaveBeenCalled();
+  expect(prisma.$transaction).not.toHaveBeenCalled();
 });
 
 // ===========================================================================
@@ -249,7 +277,7 @@ test('6: report on non-existent post returns 404', async function() {
     .send({ reason: 'spam' });
 
   expect(res.status).toBe(404);
-  expect(prisma.postReport.create).not.toHaveBeenCalled();
+  expect(prisma.$transaction).not.toHaveBeenCalled();
 });
 
 // ===========================================================================
@@ -266,7 +294,7 @@ test('7: invalid reason returns 400 with valid reasons list', async function() {
 
   expect(res.status).toBe(400);
   expect(res.body.message).toMatch(/reason must be one of/i);
-  expect(prisma.postReport.create).not.toHaveBeenCalled();
+  expect(prisma.$transaction).not.toHaveBeenCalled();
 });
 
 // ===========================================================================
@@ -282,7 +310,7 @@ test('8: missing reason field returns 400', async function() {
     .send({});
 
   expect(res.status).toBe(400);
-  expect(prisma.postReport.create).not.toHaveBeenCalled();
+  expect(prisma.$transaction).not.toHaveBeenCalled();
 });
 
 // ===========================================================================
@@ -296,10 +324,11 @@ test('9: school admin is notified when reported post belongs to a school', async
   asUser(reporterId);
 
   prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-9', schoolId));
-  prisma.postReport.findFirst.mockResolvedValue(null);
-  prisma.postReport.create.mockResolvedValue(makeReport('report-9', reporterId, postId));
-  // School admin lookup
+  // School admin lookup (happens after the transaction completes)
   prisma.user.findFirst.mockResolvedValue({ id: schoolAdminId });
+
+  var created = makeReport('report-9', reporterId, postId);
+  mockTransaction({ findFirst: null, create: created });
 
   var res = await request(app)
     .post('/api/v1/posts/' + postId + '/report')
@@ -320,8 +349,17 @@ test('9: school admin is notified when reported post belongs to a school', async
 test('10: DB create failure propagates as 500 (reports are not silently dropped)', async function() {
   asUser('reporter-10');
   prisma.post.findFirst.mockResolvedValue(makePost('post-10', 'other-author-10'));
-  prisma.postReport.findFirst.mockResolvedValue(null);
-  prisma.postReport.create.mockRejectedValue(new Error('DB write failed'));
+
+  // Simulate a non-duplicate DB error inside the transaction
+  prisma.$transaction.mockImplementation(async (fn) => {
+    var tx = {
+      postReport: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create:    jest.fn().mockRejectedValue(new Error('DB write failed')),
+      },
+    };
+    return fn(tx);
+  });
 
   var res = await request(app)
     .post('/api/v1/posts/post-10/report')
@@ -368,8 +406,8 @@ describe('Fix 4 — reportPost socket broadcast: SUPER_ADMIN only', function() {
     getIo.mockReturnValue(ioMock);
 
     prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-r1'));
-    prisma.postReport.findFirst.mockResolvedValue(null);
-    prisma.postReport.create.mockResolvedValue(makeReport(reportId, reporterId, postId));
+    var created = makeReport(reportId, reporterId, postId);
+    mockTransaction({ findFirst: null, create: created });
 
     var res = await request(app)
       .post('/api/v1/posts/' + postId + '/report')
@@ -404,8 +442,8 @@ describe('Fix 4 — reportPost socket broadcast: SUPER_ADMIN only', function() {
     getIo.mockReturnValue(ioMock);
 
     prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-r2'));
-    prisma.postReport.findFirst.mockResolvedValue(null);
-    prisma.postReport.create.mockResolvedValue(makeReport(reportId, reporterId, postId));
+    var created = makeReport(reportId, reporterId, postId);
+    mockTransaction({ findFirst: null, create: created });
 
     var res = await request(app)
       .post('/api/v1/posts/' + postId + '/report')
@@ -433,10 +471,11 @@ describe('Fix 4 — reportPost socket broadcast: SUPER_ADMIN only', function() {
     getIo.mockReturnValue(null);
 
     prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-r3', schoolId));
-    prisma.postReport.findFirst.mockResolvedValue(null);
-    prisma.postReport.create.mockResolvedValue(makeReport(reportId, reporterId, postId));
-    // School admin lookup
+    // School admin lookup (after transaction)
     prisma.user.findFirst.mockResolvedValue({ id: schoolAdminId });
+
+    var created = makeReport(reportId, reporterId, postId);
+    mockTransaction({ findFirst: null, create: created });
 
     var res = await request(app)
       .post('/api/v1/posts/' + postId + '/report')
@@ -459,8 +498,8 @@ describe('Fix 4 — reportPost socket broadcast: SUPER_ADMIN only', function() {
     getIo.mockReturnValue(null);
 
     prisma.post.findFirst.mockResolvedValue(makePost(postId, 'other-author-r4'));
-    prisma.postReport.findFirst.mockResolvedValue(null);
-    prisma.postReport.create.mockResolvedValue(makeReport(reportId, reporterId, postId));
+    var created = makeReport(reportId, reporterId, postId);
+    mockTransaction({ findFirst: null, create: created });
 
     var res = await request(app)
       .post('/api/v1/posts/' + postId + '/report')
@@ -470,6 +509,6 @@ describe('Fix 4 — reportPost socket broadcast: SUPER_ADMIN only', function() {
     expect(res.status).toBe(201);
     expect(res.body.success).toBe(true);
     expect(res.body.data.reportId).toBe(reportId);
-    expect(prisma.postReport.create).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
   });
 });

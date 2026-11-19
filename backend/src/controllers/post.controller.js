@@ -7,6 +7,7 @@
  */
 const { v4: uuidv4 } = require('uuid');
 const prisma = require('../utils/prisma');
+const { Prisma } = require('@prisma/client');
 const { getIo } = require('../sockets');
 const { successResponse, errorResponse, getPagination, buildPaginationMeta } = require('../utils/response');
 const { notify } = require('../services/notification.service');
@@ -1570,29 +1571,52 @@ async function reportPost(req, res, next) {
       return errorResponse(res, 'Cannot report your own post', 400);
     }
 
-    // REPORT-POST-DB FIX: Persist report to DB before emitting socket event.
-    // Previously only emitted a socket event — if no admin was online the report
-    // was permanently lost. Now mirrors the reportUser() pattern exactly.
-    //
-    // Duplicate guard: one PENDING report per reporter+post pair at a time.
-    const pendingReport = await prisma.postReport.findFirst({
-      where: { reporterId: req.user.id, postId: post.id, status: 'PENDING' },
-      select: { id: true },
-    });
-    if (pendingReport) {
-      return errorResponse(res, 'You already have a pending report on this post. Wait for it to be reviewed.', 409);
+    // CF-03 FIX: Wrap duplicate guard + create in a Serializable transaction to
+    // close the TOCTOU race window. Two concurrent requests from the same reporter
+    // for the same post could both pass the findFirst guard and both create a
+    // PENDING row. Serializable isolation ensures only one succeeds.
+    let report;
+    try {
+      report = await prisma.$transaction(async (tx) => {
+        const existing = await tx.postReport.findFirst({
+          where: { reporterId: req.user.id, postId: post.id, status: 'PENDING' },
+          select: { id: true }
+        });
+        if (existing) {
+          const err = new Error('DUPLICATE_REPORT');
+          err.code = 'DUPLICATE_REPORT';
+          throw err;
+        }
+        // CF-03: Set pendingKey to CONCAT(reporterId, '-', postId) so the DB-level
+        // UNIQUE KEY fires on a duplicate PENDING insert. The column is a regular
+        // nullable column (not generated) for MariaDB 10.11 compatibility.
+        // A status transition to any terminal status must set pendingKey = NULL.
+        return tx.postReport.create({
+          data: {
+            id:          uuidv4(),
+            reporterId:  req.user.id,
+            postId:      post.id,
+            reason,
+            description: description?.trim() || null,
+            status:      'PENDING',
+            pendingKey:  `${req.user.id}-${post.id}`,
+          }
+        });
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    } catch (err) {
+      if (err.code === 'DUPLICATE_REPORT') {
+        return errorResponse(res, 'You already have a pending report on this post. Wait for it to be reviewed.', 409);
+      }
+      // CF-03 DB-LEVEL GUARD: If two requests race past the findFirst check and both
+      // attempt tx.postReport.create simultaneously, the generated-column unique
+      // constraint (pendingKey) fires on the second insert and Prisma surfaces it as
+      // P2002. Map this to the same 409 the application-level guard produces so the
+      // response is consistent regardless of which layer catches the duplicate first.
+      if (err.code === 'P2002') {
+        return errorResponse(res, 'You already have a pending report on this post. Wait for it to be reviewed.', 409);
+      }
+      throw err;
     }
-
-    const report = await prisma.postReport.create({
-      data: {
-        id:          uuidv4(),
-        reporterId:  req.user.id,
-        postId:      post.id,
-        reason,
-        description: description?.trim() || null,
-        status:      'PENDING',
-      },
-    });
 
     const reportPayload = {
       type:        'post_reported',
