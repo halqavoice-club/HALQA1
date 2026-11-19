@@ -101,8 +101,12 @@ describe('CF-17 — getPost draft visibility', () => {
   });
 
   it('returns 200 when the author requests their own draft post', async () => {
-    // Arrange: findFirst returns the draft post owned by author-1
-    prisma.post.findFirst.mockResolvedValueOnce(prisma._mockDraftPost);
+    // Arrange: assertPostAccessible calls findFirst first (minimal select),
+    // then getPost calls findFirst again with POST_INCLUDE after auth passes.
+    // The author bypass in assertPostAccessible skips the draft gate for the author.
+    prisma.post.findFirst
+      .mockResolvedValueOnce(prisma._mockDraftPost)  // assertPostAccessible lightweight check
+      .mockResolvedValueOnce(prisma._mockDraftPost); // getPost full POST_INCLUDE fetch
 
     const req = mockReq('author-1', 'post-draft-1');
     const res = mockRes();
@@ -110,14 +114,9 @@ describe('CF-17 — getPost draft visibility', () => {
 
     await getPost(req, res, next);
 
-    // The author should NOT be blocked by the draft check — they may see
-    // other failures (block check etc.) but not the draft gate specifically.
-    // Status must NOT be 404 from the draft check.
-    // We verify the draft-specific 404 path was not triggered:
-    // If the call passed the draft gate, either 200 or a later gate fires.
-    // The key assertion: post.findFirst was called and next was NOT called with error
-    // from the draft check (the response may be 200 from successResponse).
-    expect(prisma.post.findFirst).toHaveBeenCalledTimes(1);
+    // The author should NOT be blocked by the draft check.
+    // findFirst is called twice (assertPostAccessible + POST_INCLUDE fetch).
+    expect(prisma.post.findFirst).toHaveBeenCalledTimes(2);
     // The author bypass means we should NOT see a 404 response from the draft gate.
     // successResponse sets status 200.
     expect(res.status).not.toHaveBeenCalledWith(404);
@@ -136,7 +135,11 @@ describe('CF-17 — getPost draft visibility', () => {
   });
 
   it('published post is accessible to any user (draft gate does not block)', async () => {
-    prisma.post.findFirst.mockResolvedValueOnce(prisma._mockPublishedPost);
+    // assertPostAccessible (1st call) passes for PUBLIC non-draft post,
+    // then getPost fetches full post with POST_INCLUDE (2nd call).
+    prisma.post.findFirst
+      .mockResolvedValueOnce(prisma._mockPublishedPost)  // assertPostAccessible lightweight check
+      .mockResolvedValueOnce(prisma._mockPublishedPost); // getPost full POST_INCLUDE fetch
 
     const req = mockReq('other-user-999', 'post-pub-1');
     const res = mockRes();

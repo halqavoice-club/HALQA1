@@ -854,12 +854,21 @@ describe('CF-18 extended — getPost originalPost via assertPostAccessible', () 
       type: 'TEXT',
     };
 
-    // getPost makes 2 post.findFirst calls:
-    //  1. post.findFirst with POST_INCLUDE → repost (main fetch)
-    //  2. assertPostAccessible(originalPostId) → original (minimal select, inside CF-18 fix)
-    // The controller does not call assertPostAccessible for the main post — it performs
-    // the visibility/block checks inline. Only the nested originalPost uses assertPostAccessible.
+    // getPost makes 3 post.findFirst calls (P0-01: assertPostAccessible-first pattern):
+    //  1. assertPostAccessible(postId) → repost (minimal select, auth check)
+    //  2. post.findFirst with POST_INCLUDE → repost (full fetch after auth passes)
+    //  3. assertPostAccessible(originalPostId) → original (minimal select, inside CF-18 fix)
     prisma.post.findFirst
+      .mockResolvedValueOnce({              // assertPostAccessible main post check
+        id: 'repost-gp-1',
+        authorId: repostAuthorId,
+        visibility: 'PUBLIC',
+        isDraft: false,
+        isExclusive: false,
+        communityId: null,
+        schoolId: null,
+        type: 'REPOST',
+      })
       .mockResolvedValueOnce(repost)        // getPost full POST_INCLUDE fetch
       .mockResolvedValueOnce(originalPost); // assertPostAccessible for original post
 
@@ -912,8 +921,21 @@ describe('CF-18 extended — getPost originalPost via assertPostAccessible', () 
       },
     });
 
-    // getPost makes 2 post.findFirst calls (same pattern as the PRIVATE test above)
+    // getPost makes 3 post.findFirst calls (P0-01: assertPostAccessible-first pattern):
+    //  1. assertPostAccessible(postId) → repost (minimal select, auth check)
+    //  2. post.findFirst with POST_INCLUDE → repost (full fetch after auth passes)
+    //  3. assertPostAccessible(originalPostId) → original (minimal select, inside CF-18 fix)
     prisma.post.findFirst
+      .mockResolvedValueOnce({              // assertPostAccessible main post check
+        id: 'repost-fol-1',
+        authorId: repostAuthorId,
+        visibility: 'PUBLIC',
+        isDraft: false,
+        isExclusive: false,
+        communityId: null,
+        schoolId: null,
+        type: 'REPOST',
+      })
       .mockResolvedValueOnce(repost)        // getPost full POST_INCLUDE fetch
       .mockResolvedValueOnce(originalPost); // assertPostAccessible for original
 
