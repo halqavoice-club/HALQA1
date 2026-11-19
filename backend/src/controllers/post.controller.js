@@ -193,11 +193,15 @@ async function visibilityFilter(viewerId) {
     // BLOCK FIX: Fetch all block relationships involving this viewer (both directions).
     // blockerId = viewerId → viewer blocked that user
     // blockedId = viewerId → that user blocked the viewer
+    // P1-04 FIX: No .catch() — a block-query failure must propagate as 500 (fail-closed).
+    // Silently degrading to an empty block list (fail-open) would expose blocked-user posts.
     prisma.userBlock.findMany({
       where: { OR: [{ blockerId: viewerId }, { blockedId: viewerId }] },
       select: { blockerId: true, blockedId: true }
-    }).catch(() => []),  // non-fatal — degrade safely if query fails
+    }),
     // CF-20: Viewer's community memberships (exclude deleted communities)
+    // .catch(() => []) is intentional: membership failure is fail-restrictive —
+    // the viewer simply cannot see private-community posts (no security downgrade).
     prisma.communityMember.findMany({
       where: { userId: viewerId, community: { deletedAt: null } },
       select: { communityId: true }
@@ -208,10 +212,12 @@ async function visibilityFilter(viewerId) {
       select: { id: true }
     }).catch(() => []),
     // CF-20: Communities the viewer is banned from (banned members must not see posts)
+    // P1-04 FIX: No .catch() — a communityBan-query failure must propagate as 500 (fail-closed).
+    // Silently degrading to an empty ban list would let banned users see community posts.
     prisma.communityBan.findMany({
       where: { userId: viewerId },
       select: { communityId: true }
-    }).catch(() => [])
+    })
   ]);
   const followingIds = following.map(f => f.followingId);
 
@@ -244,8 +250,11 @@ async function visibilityFilter(viewerId) {
 
   // CF-20: Build the allowed community ID set.
   // A community post is visible to the viewer if:
-  //   - The community is PUBLIC (all publicCommunityIds), OR
+  //   - The community is PUBLIC AND the viewer is not banned from it, OR
   //   - The viewer is a member AND not banned.
+  // P1-01 FIX: Ban enforcement now applies to PUBLIC communities too. Previously
+  // all public community IDs were included unconditionally before ban filtering,
+  // so a viewer banned from a PUBLIC community could still see its posts.
   // Personal posts (communityId: null) are always allowed through the community gate.
   const bannedCommunityIds = new Set((communityBans || []).map(b => b.communityId));
   const accessibleMemberCommunityIds = (memberCommunities || [])
@@ -253,7 +262,7 @@ async function visibilityFilter(viewerId) {
     .filter(id => !bannedCommunityIds.has(id));
   const allowedCommunityIds = [
     ...new Set([
-      ...(publicCommunities || []).map(c => c.id),
+      ...(publicCommunities || []).map(c => c.id).filter(id => !bannedCommunityIds.has(id)),
       ...accessibleMemberCommunityIds,
     ])
   ];
@@ -274,9 +283,14 @@ async function visibilityFilter(viewerId) {
       ...(effectiveSchoolId
         ? [{ visibility: 'SCHOOL_ONLY', isExclusive: false, schoolId: effectiveSchoolId }]
         : []),
-      // Exclusive posts: only visible to active subscribers
+      // Exclusive posts: only visible to active subscribers via PUBLIC posts.
+      // P0-02 FIX: Restrict exclusive content to PUBLIC visibility only.
+      // Previously this branch had no visibility constraint, allowing exclusive
+      // PRIVATE/FOLLOWERS posts to appear in subscribed feeds (bypass). Subscribers
+      // may only receive exclusive PUBLIC posts via the feed; direct-access to
+      // exclusive PRIVATE posts is not supported through the feed endpoint.
       ...(subscribedCreatorIds.length > 0
-        ? [{ isExclusive: true, authorId: { in: subscribedCreatorIds } }]
+        ? [{ isExclusive: true, visibility: 'PUBLIC', authorId: { in: subscribedCreatorIds } }]
         : [])
     ]
   };
@@ -985,7 +999,16 @@ async function getUserPosts(req, res, next) {
         ...(cursor && { cursor: { id: cursor }, skip: 1 })
       });
       const hasMore = bookmarks.length > take;
-      const items = (hasMore ? bookmarks.slice(0, take) : bookmarks).map(b => b.post).filter(Boolean);
+      const rawItems = (hasMore ? bookmarks.slice(0, take) : bookmarks).map(b => b.post).filter(Boolean);
+      // P1-05 FIX: Recheck accessibility for each bookmarked post at retrieval time.
+      // A post's visibility may have changed (PUBLIC→PRIVATE) or the author may have
+      // blocked the viewer after the bookmark was created. Without this check, stale
+      // bookmarks would surface inaccessible content. assertPostAccessible enforces
+      // all 8 dimensions (block, visibility, draft, school, exclusive, community).
+      const accessChecks = await Promise.all(
+        rawItems.map(post => assertPostAccessible(post.id, viewerId, prisma))
+      );
+      const items = rawItems.filter((_, i) => accessChecks[i].error === null);
       return successResponse(res, { items, nextCursor: hasMore && items.length > 0 ? items[items.length - 1]?.id : null, hasMore });
     }
 
@@ -1613,26 +1636,37 @@ async function reportPost(req, res, next) {
     // Previously only emitted a socket event — if no admin was online the report
     // was permanently lost. Now mirrors the reportUser() pattern exactly.
     //
-    // Duplicate guard: one PENDING report per reporter+post pair at a time.
-    const pendingReport = await prisma.postReport.findFirst({
-      where: { reporterId: req.user.id, postId: post.id, status: 'PENDING' },
-      select: { id: true },
+    // CF-03 FIX: Use a serializable transaction for the duplicate-guard + create pair.
+    // A non-transactional findFirst+create has a race window: two concurrent requests
+    // from the same reporter can both pass the findFirst check before either creates,
+    // producing duplicate PENDING rows. The transaction serializes the check+create so
+    // exactly one request wins and the other gets the duplicate guard.
+    let report;
+    const txResult = await prisma.$transaction(async (tx) => {
+      const pendingReport = await tx.postReport.findFirst({
+        where: { reporterId: req.user.id, postId: post.id, status: 'PENDING' },
+        select: { id: true },
+      });
+      if (pendingReport) {
+        return { duplicate: true };
+      }
+      const created = await tx.postReport.create({
+        data: {
+          id:          uuidv4(),
+          reporterId:  req.user.id,
+          postId:      post.id,
+          reason,
+          description: description?.trim() || null,
+          status:      'PENDING',
+        },
+      });
+      return { duplicate: false, report: created };
     });
-    if (pendingReport) {
+
+    if (txResult.duplicate) {
       return errorResponse(res, 'You already have a pending report on this post. Wait for it to be reviewed.', 409);
     }
-
-    const report = await prisma.postReport.create({
-      data: {
-        id:          uuidv4(),
-        reporterId:  req.user.id,
-        postId:      post.id,
-        reason,
-        description: description?.trim() || null,
-        status:      'PENDING',
-      },
-    });
-
+    report = txResult.report;
     const reportPayload = {
       type:        'post_reported',
       reportId:    report.id,
@@ -1682,7 +1716,14 @@ async function reportPost(req, res, next) {
 
     logger.info(`[reportPost] Post ${post.id} reported by user ${req.user.id} — reportId: ${report.id} reason: ${reason}`);
     return successResponse(res, { reportId: report.id }, 'Report submitted. Our moderation team will review it.', 201);
-  } catch (e) { next(e); }
+  } catch (e) {
+    // CF-03: P2002 from the DB-level unique constraint backstop (pendingKey) means a
+    // concurrent request already created the PENDING row — treat as duplicate, not 500.
+    if (e && e.code === 'P2002') {
+      return errorResponse(res, 'You already have a pending report on this post. Wait for it to be reviewed.', 409);
+    }
+    next(e);
+  }
 }
 
 // ─── REELS — TikTok-style video feed ─────────────────────────────────────────

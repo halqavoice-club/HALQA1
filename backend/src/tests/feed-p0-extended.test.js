@@ -854,12 +854,12 @@ describe('CF-18 extended — getPost originalPost via assertPostAccessible', () 
       type: 'TEXT',
     };
 
-    // P0-01: getPost now has 3 post.findFirst calls:
-    //  1. assertPostAccessible(postId) → repost (minimal select)
-    //  2. post.findFirst with POST_INCLUDE → repost (full fetch)
-    //  3. assertPostAccessible(originalPostId) → original (minimal select)
+    // getPost makes 2 post.findFirst calls:
+    //  1. post.findFirst with POST_INCLUDE → repost (main fetch)
+    //  2. assertPostAccessible(originalPostId) → original (minimal select, inside CF-18 fix)
+    // The controller does not call assertPostAccessible for the main post — it performs
+    // the visibility/block checks inline. Only the nested originalPost uses assertPostAccessible.
     prisma.post.findFirst
-      .mockResolvedValueOnce(repost)        // assertPostAccessible main post check
       .mockResolvedValueOnce(repost)        // getPost full POST_INCLUDE fetch
       .mockResolvedValueOnce(originalPost); // assertPostAccessible for original post
 
@@ -912,9 +912,8 @@ describe('CF-18 extended — getPost originalPost via assertPostAccessible', () 
       },
     });
 
-    // P0-01: 3-call sequence
+    // getPost makes 2 post.findFirst calls (same pattern as the PRIVATE test above)
     prisma.post.findFirst
-      .mockResolvedValueOnce(repost)        // assertPostAccessible main post check
       .mockResolvedValueOnce(repost)        // getPost full POST_INCLUDE fetch
       .mockResolvedValueOnce(originalPost); // assertPostAccessible for original
 
