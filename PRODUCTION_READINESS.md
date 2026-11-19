@@ -90,7 +90,7 @@ HALQA is a multi-tenant social, communication, and education platform combining:
 
 ```
 [ ] Set NODE_ENV=production
-[ ] Set DATABASE_URL to managed MySQL (PlanetScale/Railway/RDS)
+[ ] Set DATABASE_URL to managed MariaDB 10.11 (AWS RDS for MariaDB, or self-hosted MariaDB with MaxScale/ProxySQL). PlanetScale uses Vitess (not MariaDB). Railway is MySQL-compatible; verify MariaDB 10.11 support with provider before use.
 [ ] Set REDIS_URL to managed Redis (Redis Cloud/Upstash)
 [ ] Set STORAGE_TYPE=r2 and configure R2 credentials
 [ ] Set JWT_SECRET + JWT_REFRESH_SECRET (64+ char random)
@@ -165,7 +165,7 @@ HALQA is a multi-tenant social, communication, and education platform combining:
 | Layer | Technology |
 |-------|-----------|
 | Backend | Node.js + Express |
-| Database | MySQL via Prisma ORM |
+| Database | MariaDB 10.11 via Prisma ORM (provider: mysql) |
 | Cache + Queues | Redis (Memurai dev / Redis Cloud prod) + BullMQ |
 | Real-time | Socket.IO + Redis adapter |
 | Video/Audio | LiveKit WebRTC |

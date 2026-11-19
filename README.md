@@ -2,7 +2,7 @@
 
 A general-purpose social, community, live communication, creator, and learning platform developed by **Ustaaz Abuhureyra Shek Nura**. HALQA enables people to connect, communicate, learn, create, teach, build communities, and earn. School management and Islamic education are supported domains within the platform — they are not the entire product identity.
 
-Built with Next.js 14, Node.js/Express, Prisma ORM 5.x, MySQL 8, Socket.IO 4.x, and LiveKit WebRTC.
+Built with Next.js 14, Node.js/Express, Prisma ORM 5.x, MariaDB 10.11, Socket.IO 4.x, and LiveKit WebRTC.
 
 > **Full developer setup:** see [`RUNNING.md`](RUNNING.md)\
 > **Platform documentation index:** see [`docs/HALQA-MASTER.md`](docs/HALQA-MASTER.md)
@@ -42,7 +42,7 @@ Built with Next.js 14, Node.js/Express, Prisma ORM 5.x, MySQL 8, Socket.IO 4.x, 
 |-------|------------|
 | Frontend | Next.js 14.1.0 (App Router), TypeScript, Tailwind CSS, shadcn/ui, Radix UI, Framer Motion |
 | Backend | Node.js (20+ recommended), Express 4.x, Prisma ORM 5.22.0 |
-| Database | MySQL 8.0 (XAMPP locally; managed DB in production) |
+| Database | MariaDB 10.11 LTS (XAMPP bundles MariaDB 10.4.x locally; MariaDB 10.11 in CI/prod) |
 | Real-time | Socket.IO 4.8.3 (polling → WebSocket upgrade) |
 | Audio/Video | LiveKit WebRTC (`livekit-server-sdk ^2.6.1`, `@livekit/components-react`) |
 | Auth | JWT (access 15 m + refresh 7 d), bcryptjs, Google OAuth, TOTP 2FA (otplib) |
@@ -65,7 +65,7 @@ Built with Next.js 14, Node.js/Express, Prisma ORM 5.x, MySQL 8, Socket.IO 4.x, 
 | Tool | Version | Notes |
 |------|---------|-------|
 | Node.js | **20+** (22 recommended) | CI validates 20 and 22. Node 18 is untested. |
-| XAMPP (MySQL) | 8.0+ | Required for local development |
+| XAMPP (bundles MariaDB 10.4.x) | 10.4.x (varies; audited: 10.4.32-MariaDB) | https://apachefriends.org — dev only; MariaDB 10.4 is EOL (June 2024); upgrade to MariaDB 10.11 |
 | Git | Any recent | — |
 | Redis | 7+ | **Optional** in development (in-memory fallback active). **Recommended** in production — without Redis, speaker queues, trending hashtags, community bans, and auth caching degrade to database fallback. |
 | Expo CLI | Via `npx` | Required for mobile development only |
@@ -543,7 +543,7 @@ EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_...
 
 1. Push to GitHub
 2. New Project → Deploy from GitHub at railway.app
-3. Add a MySQL 8.0 plugin → copy `DATABASE_URL`
+3. Add a MySQL-compatible database plugin (MariaDB 10.11 or MySQL 8.0-compatible) → copy `DATABASE_URL`
 4. Set all environment variables (see section above)
 5. Deploy
 
@@ -701,7 +701,7 @@ CI pipeline (`.github/workflows/ci.yml`) runs backend unit tests, frontend type-
 - [ ] Set `GOOGLE_CLIENT_ID` for Google OAuth
 - [ ] Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PUBLISHABLE_KEY`
 - [ ] Set `STORAGE_TYPE=r2` and configure all Cloudflare R2 credentials
-- [ ] Use managed MySQL 8.0 (PlanetScale, AWS RDS, or MariaDB with connection pool)
+- [ ] Use managed MariaDB 10.11 (AWS RDS for MariaDB, or self-hosted MariaDB with MaxScale/ProxySQL). PlanetScale uses Vitess (MySQL wire-protocol compatible, not MariaDB) and is not a MariaDB equivalent.
 - [ ] Add `?connection_limit=25&pool_timeout=10` to `DATABASE_URL`
 - [ ] Set `CLIENT_URL` to your frontend domain
 - [ ] Configure LiveKit production server and set all three LiveKit env vars

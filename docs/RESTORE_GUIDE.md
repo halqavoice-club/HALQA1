@@ -10,7 +10,7 @@ Complete instructions for restoring HALQA on a new machine or after disaster rec
 |---|---|---|
 | Git for Windows | 2.x | https://git-scm.com/download/win |
 | Node.js | 20.x LTS | https://nodejs.org |
-| XAMPP (MySQL) | 8.x | https://apachefriends.org |
+| XAMPP (bundles MariaDB 10.4.x) | 10.4.x (varies; audited: 10.4.32-MariaDB) | https://apachefriends.org — dev only; MariaDB 10.4 is EOL (June 2024); upgrade to MariaDB 10.11 |
 | Redis | 7.x | https://redis.io/download (or Docker) |
 | Docker Desktop | Latest | https://docker.com/products/docker-desktop (optional) |
 
@@ -86,7 +86,15 @@ cd ..
 
 ---
 
+> **⚠ MariaDB 10.4 End of Life:** MariaDB 10.4 reached end of maintenance on June 18, 2024 and no longer receives security or bug-fix patches. The local XAMPP installation (audited: 10.4.32-MariaDB) is therefore not a supported development environment. For local development parity with CI/prod (MariaDB 10.11), use `docker-compose up -d` to start the full stack. If you require a native local MariaDB installation (without Docker), install MariaDB 10.11 Community Server from https://mariadb.org/download/ separately from XAMPP. Do not replace or uninstall your XAMPP installation without first backing up your local database.
+
 ## Step 4 — Start MySQL (XAMPP)
+
+> **Local dev parity:** Production and CI use MariaDB 10.11. For closest parity run:
+> ```powershell
+> docker-compose up -d
+> ```
+> This starts the full stack including MariaDB 10.11. XAMPP (bundles MariaDB 10.4.x) is usable for dev but diverges from CI/prod.
 
 1. Open XAMPP Control Panel
 2. Start **MySQL** service
@@ -95,11 +103,11 @@ cd ..
 Or with Docker:
 ```powershell
 docker run -d `
-  --name halqa-mysql `
+  --name halqa-mariadb `
   -p 3306:3306 `
   -e MYSQL_ROOT_PASSWORD=your_password `
   -e MYSQL_DATABASE=halqa_db `
-  mysql:8.0
+  mariadb:10.11
 ```
 
 ---
@@ -123,6 +131,8 @@ cd backend
 npm run prisma:migrate     # runs all migrations
 npm run seed               # seeds initial data
 ```
+
+> **Note:** Prisma provider remains `mysql` (Prisma's correct setting for MariaDB).
 
 ---
 
@@ -229,7 +239,7 @@ copy scripts\git-hooks\pre-push .git\hooks\pre-push
 ## Common Issues
 
 ### "Cannot connect to database"
-- Ensure MySQL is running in XAMPP
+- Ensure MariaDB 10.11 is running (via Docker Compose) or XAMPP (bundles MariaDB 10.4.x) is running (dev only)
 - Check `DATABASE_URL` in `backend/.env`
 - Try: `C:\xampp\mysql\bin\mysql.exe -u root -e "SHOW DATABASES;"`
 

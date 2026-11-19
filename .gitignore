@@ -174,7 +174,6 @@ docs/HALQA-GAP-REGISTER.md
 docs/HALQA-PRODUCTION-SMOKE-TEST-PLAN.md
 docs/HALQA-PRODUCTION-READINESS-AUDIT-REPORT.md
 docs/HALQA-PRODUCTION-READINESS-MATRIX.md
-docs/HALQA-RELEASE-BLOCKERS.md
 docs/HALQA-TEST-COVERAGE-MASTER-AUDIT.md
 docs/HALQA-FINAL-DEPENDENCY-DECISION-AUDIT.md
 docs/audits/
@@ -195,6 +194,7 @@ scripts/gh-*.ps1
 # Two-word-segment HALQA audit reports (e.g. HALQA-CONTRADICTION-REGISTER.md)
 # Covered by HALQA-*-*.md (no tracked file matches this pattern)
 HALQA-*-*.md
+!docs/HALQA-RELEASE-BLOCKERS.md
 
 # Playwright saved auth state
 frontend/e2e/.auth/
