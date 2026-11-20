@@ -9,15 +9,67 @@
  */
 
 const { PrismaClient } = require("@prisma/client");
+const bcrypt = require("bcryptjs");
 
 describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)", () => {
   let prisma;
+  // FIX: The original tests called prisma.school.findFirst() / prisma.user.findFirst()
+  // which return null on a fresh CI database (no pre-seeded data). Instead we create
+  // the minimum required fixtures in beforeAll and clean them up in afterAll.
+  let testSchoolId;
+  let testTeacherId;
+  let testStudentId;
 
   beforeAll(async () => {
     prisma = new PrismaClient();
-  });
+
+    // Create a school for all tests in this suite
+    const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const school = await prisma.school.create({
+      data: { name: `MicTrig School ${uid()}`, slug: `mic-trig-${uid()}`, country: "MY" },
+    });
+    testSchoolId = school.id;
+
+    // Create a TEACHER user (host for live classes)
+    const teacher = await prisma.user.create({
+      data: {
+        email: `mic-trig-teacher-${uid()}@integration-test.halqa`,
+        passwordHash: await bcrypt.hash("Test1234!", 10),
+        firstName: "Trigger",
+        lastName: "Teacher",
+        role: "TEACHER",
+        status: "ACTIVE",
+        emailVerified: true,
+      },
+    });
+    testTeacherId = teacher.id;
+
+    // Create a STUDENT user (participant for data preservation test)
+    const student = await prisma.user.create({
+      data: {
+        email: `mic-trig-student-${uid()}@integration-test.halqa`,
+        passwordHash: await bcrypt.hash("Test1234!", 10),
+        firstName: "Trigger",
+        lastName: "Student",
+        role: "STUDENT",
+        status: "ACTIVE",
+        emailVerified: true,
+      },
+    });
+    testStudentId = student.id;
+  }, 30000);
 
   afterAll(async () => {
+    // Clean up fixtures in FK-safe order
+    if (testStudentId) {
+      await prisma.user.delete({ where: { id: testStudentId } }).catch(() => {});
+    }
+    if (testTeacherId) {
+      await prisma.user.delete({ where: { id: testTeacherId } }).catch(() => {});
+    }
+    if (testSchoolId) {
+      await prisma.school.delete({ where: { id: testSchoolId } }).catch(() => {});
+    }
     await prisma.$disconnect();
   });
 
@@ -31,10 +83,8 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           maxParticipants: 50,
           streamType: "CLASS",
           status: "SCHEDULED",
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           microphoneAuthorizationMode: "SFU_AUTHORITATIVE",
         },
       });
@@ -59,10 +109,8 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           maxParticipants: 50,
           streamType: "CLASS",
           status: "SCHEDULED",
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           microphoneAuthorizationMode: "LEGACY",
         },
       });
@@ -88,10 +136,8 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           maxParticipants: 50,
           streamType: "CLASS",
           status: "SCHEDULED",
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           microphoneAuthorizationMode: "LEGACY",
         },
       });
@@ -116,10 +162,8 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           streamType: "CLASS",
           status: "LIVE",
           startedAt: new Date(),
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           microphoneAuthorizationMode: "LEGACY",
         },
       });
@@ -145,10 +189,8 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           status: "ENDED",
           startedAt: new Date(Date.now() - 3600000),
           endedAt: new Date(),
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           microphoneAuthorizationMode: "LEGACY",
         },
       });
@@ -174,10 +216,8 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           maxParticipants: 50,
           streamType: "CLASS",
           status: "SCHEDULED",
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           microphoneAuthorizationMode: "LEGACY",
         },
       });
@@ -201,10 +241,8 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           maxParticipants: 50,
           streamType: "CLASS",
           status: "SCHEDULED",
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           microphoneAuthorizationMode: "SFU_AUTHORITATIVE",
         },
       });
@@ -229,10 +267,8 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           streamType: "CLASS",
           status: "LIVE",
           startedAt: new Date(),
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           microphoneAuthorizationMode: "LEGACY",
         },
       });
@@ -257,10 +293,8 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           streamType: "CLASS",
           status: "LIVE",
           startedAt: new Date(),
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           microphoneAuthorizationMode: "LEGACY",
         },
       });
@@ -287,10 +321,8 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           maxParticipants: 50,
           streamType: "CLASS",
           status: "SCHEDULED",
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           // microphoneAuthorizationMode defaults to LEGACY
         },
       });
@@ -316,10 +348,8 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           maxParticipants: 50,
           streamType: "CLASS",
           status: "SCHEDULED",
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           microphoneAuthorizationMode: "SFU_AUTHORITATIVE",
         },
       });
@@ -348,17 +378,13 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           maxParticipants: 50,
           streamType: "CLASS",
           status: "SCHEDULED",
-          schoolId: (await prisma.school.findFirst()).id,
-          hostUserId: (
-            await prisma.user.findFirst({ where: { role: "TEACHER" } })
-          ).id,
+          schoolId: testSchoolId,
+          hostUserId: testTeacherId,
           microphoneAuthorizationMode: "SFU_AUTHORITATIVE",
         },
       });
 
-      const student = await prisma.user.findFirst({
-        where: { role: "STUDENT" },
-      });
+      const student = { id: testStudentId };
       const participant = await prisma.liveClassParticipant.create({
         data: {
           liveClassId: liveClass.id,

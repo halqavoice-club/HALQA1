@@ -85,6 +85,10 @@ beforeAll(async function () {
   // from failing on a port conflict and calling process.exit(1).
   process.env.PORT = '0';
   app = require('../../app');
+  // FIX: startServer() must be called to connect Redis (cacheClient) and
+  // BullMQ workers. Without it, cacheClient is null and voice endpoints
+  // return 503 on every cache read/write attempt.
+  await app.startServer();
   [host, memberA, memberB, suspended] = await Promise.all([
     createUser({ role: 'MEMBER', schoolId: null }),
     createUser({ role: 'MEMBER', schoolId: null }),
@@ -110,6 +114,12 @@ afterAll(async function () {
     await prisma.user.deleteMany({ where: { email: { in: emails } } }).catch(() => {});
   } catch { /* ignore */ }
   await prisma.$disconnect();
+
+  // FIX: Shut down the server started by startServer() to close Redis connections
+  // and BullMQ workers cleanly. Without this, Jest detects open handles.
+  try {
+    await require('../../app').shutdown('afterAll', { exitProcess: false });
+  } catch { /* non-fatal */ }
 }, 40000);
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
