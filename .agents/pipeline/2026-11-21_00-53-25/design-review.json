@@ -1,0 +1,40 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    {
+      "id": 1,
+      "severity": "MEDIUM",
+      "location": "Issue 5 — Controller dispatch unit tests snippet",
+      "problem": "The test sketch says 'mock rawUpdateLiveClassStatus to throw the trigger error' and 'mock rawFindLiveClass, assertSchoolAccess, etc. to reach the catch block.' But rawFindLiveClass (line 109), rawUpdateLiveClassStatus (line 182), ensureProtectedScheduledMicrophoneMode (line 210), and assertSchoolAccess (line 324) are functions defined inside live-class.controller.js, not importable modules, so jest.mock cannot replace them individually — the stated mechanism is infeasible. The feasible approach (per live-class-ownership.test.js) mocks the prisma singleton's $queryRawUnsafe/$executeRawUnsafe. Additionally, the sketch mocks isTriggerLegacyStartRejection to mockReturnValue(true), which makes the test vacuous relative to AC 4/5 ('injecting a mock error with the trigger message text') since the injected error's message becomes irrelevant.",
+      "fix": "Use the established pattern from live-class-ownership.test.js: jest.mock('../utils/prisma', () => ({ $queryRawUnsafe: jest.fn(), $executeRawUnsafe: jest.fn(), ... })) plus jest.mock for ../sockets, ../utils/feedLive, ../services/queue.service, ../utils/logger; require('../controllers/live-class.controller'); use a makeRes() helper; stub a PUBLIC-stream SCHEDULED lc via $queryRawUnsafe.mockResolvedValueOnce([{ stream_type: 'PUBLIC', ... }]) so assertSchoolAccess is skipped; reject $executeRawUnsafe with new Error(LEGACY_SESSION_START_REJECTION_MESSAGE) for the 409 case and an unrelated error for the 500 case. Do NOT mock isTriggerLegacyStartRejection — let the real helper detect the injected message so the test exercises the real detection->dispatch path. Consider placing these runtime-mock tests in a separate file to keep live-class-microphone-unit-a.test.js (pure source-string assertions) distinct."
+    },
+    {
+      "id": 2,
+      "severity": "NIT",
+      "location": "Issue 2 — SQL content, 'byte-for-byte copies' claim",
+      "problem": "The proposed trigger bodies omit the inline '-- Block:' comments present in 20261030 Steps 3 and 4. The IF conditions, SIGNAL SQLSTATE, and MESSAGE_TEXT strings are identical (FR-2.4 invariants preserved exactly), but the bodies are not byte-for-byte as claimed.",
+      "fix": "Either retain the inline comments so the bodies are genuinely byte-for-byte, or reword the claim to 'functionally identical to 20261030 Steps 3 and 4 — every IF condition and MESSAGE_TEXT string is preserved exactly; only the explanatory inline comments are omitted.'"
+    },
+    {
+      "id": 3,
+      "severity": "NIT",
+      "location": "Issue 3 — Decision on direction, rawCreateLiveClass 'always SFU_AUTHORITATIVE' claim",
+      "problem": "rawCreateLiveClass uses `data.microphoneAuthorizationMode || MICROPHONE_AUTHORIZATION_MODES.SFU_AUTHORITATIVE`, so a caller passing 'LEGACY' gets LEGACY — it does not 'always' set SFU. The load-bearing claim (the column is always present in the INSERT column list and parameter list, so the DB default is never observed through this path) is correct; only the 'always SFU' phrasing is imprecise.",
+      "fix": "Reword to: 'rawCreateLiveClass always includes microphone_authorization_mode explicitly in the INSERT (defaulting to SFU_AUTHORITATIVE when the caller omits it), so the DB column default is never observed through the production create path.' Issue 3's chosen direction (align DB default to SFU_AUTHORITATIVE) does not depend on the 'always SFU' phrasing."
+    },
+    {
+      "id": 4,
+      "severity": "NIT",
+      "location": "Overview — 'Issue 4 ... informs whether Issue 3 changes SFU->LEGACY or the reverse'",
+      "problem": "Issue 3's section has already decided the direction (align DB default to SFU_AUTHORITATIVE), justified independently of Issue 4 by the production-path reasoning, and the Dependency Order table lists Issue 3's prerequisites as Issue 2 + Issue 6 (not Issue 4). The Overview implies the direction is undecided pending Issue 4 — a cross-section inconsistency.",
+      "fix": "Reword the Overview to state Issue 3's direction is decided (align the DB default to SFU_AUTHORITATIVE) and that Issue 4 provides regression evidence for that decision rather than determining it."
+    },
+    {
+      "id": 5,
+      "severity": "NIT",
+      "location": "Issue 6 — Files to modify, item 3 (fix-live-class-columns.js)",
+      "problem": "FR-6.6 says 'No production code may be modified... The scope is strictly test helpers and test call sites.' backend/fix-live-class-columns.js is neither a test helper nor production runtime code (it is a standalone diagnostic/repair script, not imported by the app and not part of the test suite). The design includes it (justified by FR-3.1) but does not explicitly state why editing it does not violate FR-6.6's 'strictly test helpers' wording.",
+      "fix": "Add one sentence to the Issue 6 'Files to modify' item 3: 'fix-live-class-columns.js is a standalone, manually-run diagnostic script — not imported by the application and not part of the test suite — so editing its Step 10 INSERT does not modify production runtime code; it is included here because FR-3.1 names it as an affected creation path.'"
+    }
+  ]
+}
