@@ -346,6 +346,13 @@ async function removePersistedJob(name) {
       data: { isActive: false }
     });
   } catch (error) {
+    // P2025 = "Record to update not found." removePersistedJob runs on
+    // cancelJob()/shutdown(); the scheduled_jobs row may be absent if it was
+    // never persisted (e.g. the table was missing at persist time) or already
+    // removed. That is an expected no-op, not an error — surface everything else.
+    if (error?.code === 'P2025') {
+      return;
+    }
     logger.error(`[scheduler] Failed to remove persisted job ${name}:`, error);
   }
 }
