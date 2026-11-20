@@ -313,7 +313,9 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
 
   describe("Runtime Protection: LEGACY classes cannot go LIVE", () => {
     test("should allow LEGACY class creation (for migration compatibility)", async () => {
-      // LEGACY default is permissible - application layer enforces protection
+      // LEGACY default is permissible - application layer enforces protection.
+      // Explicit mode is set because the Prisma schema @default is SFU_AUTHORITATIVE;
+      // omitting it would insert SFU_AUTHORITATIVE regardless of the DB column default.
       const liveClass = await prisma.liveClass.create({
         data: {
           title: "Legacy Class",
@@ -323,7 +325,7 @@ describe("SEC01-G-BE02-A: Microphone Authorization Triggers (MySQL Integration)"
           status: "SCHEDULED",
           schoolId: testSchoolId,
           hostUserId: testTeacherId,
-          // microphoneAuthorizationMode defaults to LEGACY
+          microphoneAuthorizationMode: "LEGACY",
         },
       });
 
