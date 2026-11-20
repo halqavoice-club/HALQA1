@@ -7,24 +7,20 @@ import { test, expect } from './fixtures/consent-setup';
  * Covers: navigate to voice page → room list loads → join room → room UI visible
  *         → leave room → back on room list
  *
- * Auth: Uses E2E_AUTH_STORAGE (pre-authenticated browser storage state).
- * The consent-setup fixture overrides Playwright's built-in storageState fixture
- * so the browser context is created already authenticated. No email/password
- * credentials are required, and no manual cookie/localStorage injection is needed.
+ * Auth: The consent-setup fixture overrides the page fixture to perform a real
+ * login via the /login form before each test. No storageState injection or
+ * E2E_AUTH_STORAGE secret is needed.
  *
  * Required env vars (supplied by e2e-consent.yml):
- *   E2E_AUTH_STORAGE     — JSON blob from context.storageState()
+ *   E2E_TEST_EMAIL     — seeded test user email
+ *   E2E_TEST_PASSWORD  — seeded test user password
  *   E2E_CONSENT_ROOM_URL — optional: direct URL to a voice room for join/leave test
  */
 test.describe('Voice Club', () => {
   test.beforeEach(async ({ page }) => {
-    // Navigate to the app root. The browser context already has the auth
-    // cookies and localStorage loaded via the storageState fixture override,
-    // so the app will not redirect to /login.
-    await page.goto('/');
-    // Guard: if still redirected to login the storage state had no valid token.
-    await page.waitForURL(url => !url.pathname.includes('/login'), { timeout: 15000 });
-    // Wait for the dashboard shell to be fully hydrated.
+    // The page fixture in consent-setup.ts has already performed login and
+    // waited for the redirect away from /login. Here we just confirm the
+    // dashboard shell is fully hydrated before navigating to feature pages.
     await page.waitForSelector('[data-testid="dashboard-shell"], .sidebar, nav', { timeout: 20000 });
   });
 

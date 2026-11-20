@@ -1,66 +1,56 @@
 import { test as base, expect } from '@playwright/test';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 
 /**
  * Consent E2E fixture.
  *
- * Reads E2E_AUTH_STORAGE (a JSON string of saved Playwright storage state
- * produced by context.storageState()) from the environment and overrides
- * Playwright's built-in `storageState` fixture so the browser context is
- * created with the auth state already loaded — before the first navigation.
+ * Performs a real login via the app's /login page before each test so the
+ * browser context is fully authenticated: the httpOnly refresh cookie is set
+ * by the backend response, and the auth store's in-memory access token is
+ * populated by the login form handler.
  *
- * This is the correct Playwright pattern for cookie-based auth (including
- * httpOnly cookies): passing storageState at context-creation time means the
- * cookies are present on the very first request, so the app never sees an
- * unauthenticated context and never redirects to /login.
+ * This replaces the previous storageState injection approach, which could not
+ * work because:
+ *   - The access token is memory-only (FE-001: never in localStorage/cookies)
+ *   - The httpOnly refresh cookie is signed with the CI backend's JWT secret,
+ *     so a token saved from a different environment is always rejected
  *
- * Manual injection via addCookies() + addInitScript() does NOT work reliably
- * for httpOnly cookies because those APIs inject state after the context
- * already exists, missing the browser's initial cookie check on first load.
+ * Required env vars:
+ *   E2E_TEST_EMAIL     — email of the seeded test user (student1@halqa.com)
+ *   E2E_TEST_PASSWORD  — password of the seeded test user (Student@2024)
  *
- * If E2E_AUTH_STORAGE is not set, the fixture throws — which causes the test
- * to fail with a clear message rather than silently skipping.
+ * Both vars are supplied by e2e-consent.yml from repository secrets.
+ * No E2E_AUTH_STORAGE secret is needed.
  */
 
-type ConsentFixtures = {
-  /** Absolute path to the temp file holding the parsed storageState JSON. */
-  storageStatePath: string;
-};
+export const test = base.extend({
+  /**
+   * Override the page fixture to log in before each test body runs.
+   * Tests receive an already-authenticated page and do not need to handle auth.
+   */
+  page: async ({ page }, use) => {
+    const email = process.env.E2E_TEST_EMAIL;
+    const password = process.env.E2E_TEST_PASSWORD;
 
-export const test = base.extend<ConsentFixtures>({
-  // Override the built-in storageState fixture so Playwright injects auth
-  // into the browser context before any navigation happens.
-  storageState: async ({}, use) => {
-    const authStorage = process.env.E2E_AUTH_STORAGE;
-    if (!authStorage) {
+    if (!email || !password) {
       throw new Error(
-        'E2E_AUTH_STORAGE environment variable is not set. ' +
-        'Provide a JSON blob of saved Playwright storageState. ' +
-        'See docs/e2e-auth-setup.md for how to generate it.'
+        'E2E_TEST_EMAIL and E2E_TEST_PASSWORD must be set. ' +
+        'These are the seeded test user credentials used by the consent E2E suite.'
       );
     }
-    // Parse to validate, then re-serialize to ensure clean JSON.
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(authStorage);
-    } catch (e) {
-      throw new Error('E2E_AUTH_STORAGE is not valid JSON: ' + (e as Error).message);
-    }
-    const tmpFile = path.join(os.tmpdir(), `e2e-auth-storage-${Date.now()}.json`);
-    fs.writeFileSync(tmpFile, JSON.stringify(parsed));
-    // Yielding the path string is what Playwright expects from the storageState
-    // fixture — it uses this path when creating the BrowserContext.
-    await use(tmpFile);
-    // Cleanup after the test completes.
-    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
-  },
 
-  // Expose the path separately so tests that need it for assertions can access it.
-  storageStatePath: async ({ storageState }, use) => {
-    // storageState is already the temp-file path at this point.
-    await use(storageState as string);
+    // Navigate to the login page and authenticate.
+    // Using the real form flow ensures both the httpOnly refresh cookie and the
+    // in-memory access token (via the auth store) are set before any test navigation.
+    await page.goto('/login');
+    await page.fill('#email', email);
+    await page.fill('#password', password);
+    await page.click('button[type="submit"]');
+
+    // Wait until the app redirects away from /login (dashboard or any non-auth page)
+    await page.waitForURL(url => !url.pathname.startsWith('/login'), { timeout: 20000 });
+
+    // Hand the authenticated page to the test
+    await use(page);
   },
 });
 

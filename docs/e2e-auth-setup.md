@@ -1,129 +1,83 @@
 # E2E Auth Setup — Voice Consent Tests
 
-The Voice Club consent E2E suite (`frontend/e2e/voice.spec.ts`) authenticates via a
-pre-saved Playwright storage state rather than logging in with email/password on every
-run. This avoids flaky auth flows in CI and keeps the consent tests focused on the voice
-room UI, not the login form.
+The Voice Club consent E2E suite (`frontend/e2e/voice.spec.ts`) authenticates by
+performing a real login via the app's `/login` page before each test. This is handled
+automatically by the fixture in `frontend/e2e/fixtures/consent-setup.ts`.
 
-## What is `E2E_AUTH_STORAGE`?
-
-It is a JSON string containing a serialised Playwright
-[`storageState`](https://playwright.dev/docs/auth#reuse-signed-in-state) object:
-
-```json
-{
-  "cookies": [...],
-  "origins": [
-    {
-      "origin": "http://localhost:3000",
-      "localStorage": [
-        { "name": "accessToken", "value": "eyJ..." },
-        { "name": "refreshToken", "value": "eyJ..." }
-      ]
-    }
-  ]
-}
-```
-
-The fixture in `frontend/e2e/fixtures/consent-setup.ts` reads this value, writes it to a
-temp file, and overrides Playwright's built-in `storageState` fixture — so every browser
-context in the suite starts already authenticated.
+No pre-saved storage state is required. The fixture uses `E2E_TEST_EMAIL` and
+`E2E_TEST_PASSWORD` to log in, which sets the httpOnly refresh cookie and the
+in-memory access token through the normal app login flow.
 
 ---
 
-## How to generate it
+## Why not use Playwright storageState?
 
-Run this once from a machine that can reach a local or staging instance of the app.
+The app stores the access token **in memory only** (security requirement FE-001 —
+never in localStorage or cookies). The refresh token is stored in an `httpOnly`
+`SameSite=strict` cookie.
 
-### 1. Start the stack
+A saved storageState cannot restore an authenticated session because:
 
-```bash
-cd backend && npm run dev &
-cd frontend && npm run dev &
-```
+1. The access token is gone on every page load — it must be re-issued via
+   `POST /auth/refresh`.
+2. The refresh cookie is signed with the backend's JWT secret. A token saved from
+   one environment (e.g. your local dev) will always be rejected by a CI backend
+   with a different secret.
 
-### 2. Run the helper script
+The only reliable approach is a real login against the same backend that runs in CI.
 
-```bash
-cd frontend
-node scripts/save-e2e-auth.js
-```
+---
 
-The script opens a Chromium window, navigates to `http://localhost:3000`, logs in with
-the test user credentials below, then calls `context.storageState()` and prints the
-JSON to stdout.
+## Required secrets
 
-> If the script doesn't exist yet, use the manual steps in the next section.
+| Secret | Description |
+|---|---|
+| `E2E_TEST_PASSWORD` | Password for `student1@halqa.com` (seeded by `seed.js`) |
+| `E2E_TEST_USER_ID` | User ID of the test user (from seed output or database) |
+| `E2E_TEST_API_TOKEN` | Shared secret for the backend test API (`/api/test/*`) |
+| `E2E_CONSENT_ROOM_URL` | Optional direct URL to a voice room for join/leave test |
+| `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | LiveKit credentials |
 
-### 3. Manual approach (Playwright REPL)
+The email `student1@halqa.com` is hardcoded in the workflow — it is always created
+by `seed.js` and does not need a secret.
 
-```ts
-// scripts/save-e2e-auth.js  (run with: node scripts/save-e2e-auth.js)
-// Set E2E_TEST_EMAIL and E2E_TEST_PASSWORD in your local shell before running.
-const { chromium } = require('@playwright/test');
+---
 
-(async () => {
-  const browser = await chromium.launch({ headless: false });
-  const context = await browser.newContext();
-  const page = await context.newPage();
+## Setting secrets in GitHub
 
-  // Log in as the E2E test user (credentials from local env, never hardcoded)
-  await page.goto('http://localhost:3000/login');
-  await page.fill('input[name="email"]', process.env.E2E_TEST_EMAIL);
-  await page.fill('input[name="password"]', process.env.E2E_TEST_PASSWORD);
-  await page.click('button[type="submit"]');
-  await page.waitForURL(url => !url.pathname.includes('/login'), { timeout: 15000 });
+1. Go to **Settings → Secrets and variables → Actions**.
+2. Click **New repository secret** for each secret above.
+3. For `E2E_TEST_PASSWORD`: use the password matching the `student1@halqa.com`
+   account as defined in `backend/src/prisma/seed.js`.
 
-  // Save the authenticated state
-  const state = await context.storageState();
-  console.log(JSON.stringify(state));
-
-  await browser.close();
-})();
-```
-
-Redirect the output to a file:
+To find the current seeded password:
 
 ```bash
-node scripts/save-e2e-auth.js > /tmp/auth-state.json
-```
-
-Verify the file contains cookies and/or localStorage entries, then compact it:
-
-```bash
-cat /tmp/auth-state.json | jq -c '.' > /tmp/auth-state-compact.json
+grep -A5 "student1@halqa.com" backend/src/prisma/seed.js
 ```
 
 ---
 
-## Setting the GitHub secret
+## How the fixture works
 
-1. Copy the compact JSON value from `/tmp/auth-state-compact.json`.
-2. In the repository, go to **Settings → Secrets and variables → Actions**.
-3. Click **New repository secret**.
-4. Name: `E2E_AUTH_STORAGE`
-5. Value: paste the JSON string (single line).
-6. Click **Add secret**.
+`frontend/e2e/fixtures/consent-setup.ts` overrides Playwright's `page` fixture:
 
-The `e2e-consent.yml` workflow reads this secret and passes it as the
-`E2E_AUTH_STORAGE` environment variable to the test run.
+1. Navigates to `/login`.
+2. Fills `#email` and `#password` from `E2E_TEST_EMAIL` / `E2E_TEST_PASSWORD`.
+3. Clicks the submit button.
+4. Waits for the redirect away from `/login` (the app redirects to the dashboard
+   on successful login).
+5. Passes the authenticated page to the test.
 
----
-
-## Rotating the secret
-
-JWTs expire. If `web-consent` starts failing with a login redirect again, regenerate
-the storage state using the steps above and update the `E2E_AUTH_STORAGE` secret in
-GitHub.
-
-The access token lifetime is 15 minutes; the refresh token lasts 7 days. The storage
-state is valid as long as the refresh token has not expired and has not been revoked.
+The login sets both the httpOnly refresh cookie (via the backend `Set-Cookie`
+response header) and the in-memory access token (via the auth store login handler).
+Subsequent navigations within the test use the already-authenticated context.
 
 ---
 
 ## Which tests use this
 
-| Workflow | File | Secret required |
+| Workflow | File | Secrets required |
 |---|---|---|
-| `e2e-consent.yml` → `web-consent` | `frontend/e2e/voice.spec.ts` | `E2E_AUTH_STORAGE` |
-| `ci.yml` → `Frontend -- Playwright E2E` | all specs **except** `voice.spec.ts` | ✗ (excluded via `--grep-invert`) |
+| `e2e-consent.yml` → `web-consent` | `frontend/e2e/voice.spec.ts` | `E2E_TEST_PASSWORD` + others above |
+| `ci.yml` → `Frontend -- Playwright E2E` | all specs **except** `voice.spec.ts` | none (excluded via `--grep-invert "Voice Club"`) |
