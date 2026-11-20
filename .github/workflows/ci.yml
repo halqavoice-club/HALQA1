@@ -552,12 +552,15 @@ jobs:
         working-directory: frontend
 
       - name: Run E2E tests
-        run: npm run test:e2e
+        # voice.spec.ts requires E2E_AUTH_STORAGE (pre-authenticated storage
+        # state) and is covered by the dedicated e2e-consent.yml workflow.
+        # Exclude it here so ci.yml doesn't need that secret.
+        run: npm run test:e2e -- --grep-invert "Voice Club"
         working-directory: frontend
         env:
           PLAYWRIGHT_BASE_URL: 'http://localhost:3000'
           # Credentials match users created by seed.js.
-          # student1@halqa.com (STUDENT) -- used by auth.spec, voice.spec, purchase.spec
+          # student1@halqa.com (STUDENT) -- used by auth.spec, purchase.spec
           E2E_TEST_EMAIL: 'student1@halqa.com'
           E2E_TEST_PASSWORD: 'Student@2024'
           # teacher@halqa-academy.com (TEACHER) -- used by live-class.spec
