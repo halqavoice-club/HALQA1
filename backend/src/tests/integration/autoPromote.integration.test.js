@@ -87,7 +87,7 @@ describeIfDB(
           schoolId: testSchoolId,
           title: "INV-002 Test Room",
           hostId: testHostId,
-          status: "ACTIVE",
+          status: "LIVE", // FIX: "ACTIVE" is not a valid VoiceRoomStatus; use "LIVE"
           maxSpeakers: 2,
           micLocked: false,
           allMuted: false,

@@ -60,6 +60,11 @@ const { v4: uuidv4 } = require('uuid');
 // Avoids booting the entire app (Redis connections, BullMQ workers, etc.).
 function buildApp() {
   const app = express();
+  // FIX: Prisma returns BigInt for microphoneAuthorizationVersion / microphoneSfuVersion
+  // fields added by the 20261029_add_live_class_microphone_authority migration.
+  // JSON.stringify throws on BigInt by default. Set a replacer that converts BigInt
+  // to Number (safe for the int64 values used here — all are small counters starting at 0).
+  app.set('json replacer', (_key, val) => (typeof val === 'bigint' ? Number(val) : val));
   app.use(express.json());
   app.use(cookieParser());
   app.use(require('../../middleware/ipAllowlist'));

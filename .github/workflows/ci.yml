@@ -183,7 +183,7 @@ jobs:
   # Runs after backend lint and unit tests both pass.
   # Blocks the Docker build if any integration test fails.
   backend-integration:
-    name: Backend -- Integration Tests
+    name: Backend -- Integration Tests (MariaDB 10.11)
     runs-on: ubuntu-latest
     needs: [backend, backend-tests]
 
