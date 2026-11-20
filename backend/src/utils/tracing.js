@@ -43,6 +43,14 @@ async function initialize() {
     return;
   }
 
+  // Skip tracing in test mode when no OTEL endpoint is configured.
+  // OTel SDK 2.x removed addSpanProcessor() from NodeTracerProvider; the
+  // console-exporter fallback path would crash before isInitialized is set.
+  if (process.env.NODE_ENV === 'test' && !process.env.OTEL_EXPORTER_OTLP_ENDPOINT && !process.env.JAEGER_ENDPOINT) {
+    logger.info('[tracing] Skipping tracing initialization in test mode (no OTEL endpoint configured)');
+    return;
+  }
+
   try {
     const { NodeTracerProvider } = require('@opentelemetry/sdk-trace-node');
     const { resourceFromAttributes } = require('@opentelemetry/resources');
