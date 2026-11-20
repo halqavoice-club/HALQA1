@@ -7,17 +7,32 @@ import * as path from 'path';
  * Consent E2E fixture.
  *
  * Reads E2E_AUTH_STORAGE (a JSON string of saved Playwright storage state
- * produced by context.storageState()) from the environment and writes it to a
- * temp file so Playwright can load it as the browser context's storageState.
+ * produced by context.storageState()) from the environment and overrides
+ * Playwright's built-in `storageState` fixture so the browser context is
+ * created with the auth state already loaded — before the first navigation.
  *
- * This lets the consent suite run without an email/password login flow: the
- * browser context starts already authenticated.
+ * This is the correct Playwright pattern for cookie-based auth (including
+ * httpOnly cookies): passing storageState at context-creation time means the
+ * cookies are present on the very first request, so the app never sees an
+ * unauthenticated context and never redirects to /login.
+ *
+ * Manual injection via addCookies() + addInitScript() does NOT work reliably
+ * for httpOnly cookies because those APIs inject state after the context
+ * already exists, missing the browser's initial cookie check on first load.
  *
  * If E2E_AUTH_STORAGE is not set, the fixture throws — which causes the test
  * to fail with a clear message rather than silently skipping.
  */
-export const test = base.extend<{ storagePath: string }>({
-  storagePath: async ({}, use) => {
+
+type ConsentFixtures = {
+  /** Absolute path to the temp file holding the parsed storageState JSON. */
+  storageStatePath: string;
+};
+
+export const test = base.extend<ConsentFixtures>({
+  // Override the built-in storageState fixture so Playwright injects auth
+  // into the browser context before any navigation happens.
+  storageState: async ({}, use) => {
     const authStorage = process.env.E2E_AUTH_STORAGE;
     if (!authStorage) {
       throw new Error(
@@ -26,7 +41,7 @@ export const test = base.extend<{ storagePath: string }>({
         'See docs/e2e-auth-setup.md for how to generate it.'
       );
     }
-    // Parse to validate, then re-serialize to ensure clean JSON
+    // Parse to validate, then re-serialize to ensure clean JSON.
     let parsed: unknown;
     try {
       parsed = JSON.parse(authStorage);
@@ -35,9 +50,17 @@ export const test = base.extend<{ storagePath: string }>({
     }
     const tmpFile = path.join(os.tmpdir(), `e2e-auth-storage-${Date.now()}.json`);
     fs.writeFileSync(tmpFile, JSON.stringify(parsed));
+    // Yielding the path string is what Playwright expects from the storageState
+    // fixture — it uses this path when creating the BrowserContext.
     await use(tmpFile);
-    // Cleanup
+    // Cleanup after the test completes.
     try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+  },
+
+  // Expose the path separately so tests that need it for assertions can access it.
+  storageStatePath: async ({ storageState }, use) => {
+    // storageState is already the temp-file path at this point.
+    await use(storageState as string);
   },
 });
 
