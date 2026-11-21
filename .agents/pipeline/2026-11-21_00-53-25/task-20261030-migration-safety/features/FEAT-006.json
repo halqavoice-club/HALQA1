@@ -1,0 +1,38 @@
+{
+  "id": "FEAT-006",
+  "type": "feat",
+  "description": "Issues 2+3 (P2): land the two forward-only migrations. 20261115_harden_microphone_trigger_idempotency adds DROP TRIGGER IF EXISTS guards before recreating both triggers (bodies byte-identical to 20261030 Steps 3/4, all four authorization invariants preserved). 20261116_reconcile_microphone_authorization_default changes the live_classes.microphone_authorization_mode column DEFAULT to SFU_AUTHORITATIVE (matching schema.prisma; existing row values untouched). Historical migrations 20261029/20261030 must remain byte-for-byte unchanged. Depends on FEAT-003 (helpers no longer depend on the LEGACY default) and lands after FEAT-005 so the default test can be re-run in the post-reconciliation state.",
+  "status": "completed",
+  "steps": [
+    "Create backend/prisma/migrations/20261115_harden_microphone_trigger_idempotency/migration.sql with the design's exact SQL: DROP TRIGGER IF EXISTS live_classes_microphone_mode_guard; CREATE TRIGGER live_classes_microphone_mode_guard (BEFORE UPDATE, the three SIGNAL blocks: SFU→LEGACY downgrade block; LIVE LEGACY upgrade block; non-SCHEDULED/LIVE/ENDED mode-change block); DROP TRIGGER IF EXISTS live_classes_legacy_start_guard; CREATE TRIGGER live_classes_legacy_start_guard (BEFORE UPDATE, LEGACY start block). Copy the trigger bodies verbatim from backend/prisma/migrations/20261030_fix_live_class_microphone_triggers/migration.sql Steps 3 and 4 (read that file first) so the invariants are preserved exactly. Include the header comments from the design.",
+    "Create backend/prisma/migrations/20261116_reconcile_microphone_authorization_default/migration.sql: ALTER TABLE `live_classes` ALTER COLUMN `microphone_authorization_mode` SET DEFAULT 'SFU_AUTHORITATIVE'; with the design's comment block (production create path always sets the value explicitly; raw-SQL test helpers already made explicit by FEAT-003; prerequisite: 20261115 applied first; existing row values NOT changed).",
+    "Verify directory names sort after 20261114_add_post_report_pending_unique (they do: 20261115 < 20261116).",
+    "Apply to the disposable DB: $env:DATABASE_URL='mysql://root@localhost:3306/halqa_test'; npx prisma migrate deploy — both new migrations apply (20261115 then 20261116, in lexicographic order).",
+    "Verify post-state: & 'C:\\xampp\\mysql\\bin\\mysql.exe' -uroot -N -B -e \"SELECT trigger_name FROM information_schema.triggers WHERE event_object_table='live_classes' AND trigger_schema='halqa_test';\" returns exactly live_classes_microphone_mode_guard and live_classes_legacy_start_guard; \"SHOW COLUMNS FROM halqa_test.live_classes LIKE 'microphone_authorization_mode';\" shows Default SFU_AUTHORITATIVE.",
+    "Re-execution rehearsal (disposable halqa_test ONLY — this is the design's disposable-container rehearsal adapted to the local 10.4 server, since Docker is unavailable): & 'C:\\xampp\\mysql\\bin\\mysql.exe' -uroot -e \"UPDATE halqa_test._prisma_migrations SET finished_at=NULL, rolled_back_at=NOW() WHERE migration_name='20261115_harden_microphone_trigger_idempotency';\" then npx prisma migrate deploy again — must succeed with NO 'Trigger already exists' (error 1359) because of the DROP IF EXISTS guards. Record the outcome in findings.",
+    "Re-run the trigger suite and integration suites in the post-reconciliation state: liveclass-microphone-triggers.integration.test.js (12 tests), live-class.integration.test.js, and liveclass-microphone-default.integration.test.js (Case 3 must now expect and store SFU_AUTHORITATIVE) — all green. Also re-run npm run test:unit.",
+    "Row-preservation check: take a pre-migration snapshot on halqa_test is trivial (fresh DB), so instead confirm the migration SQL contains only the ALTER DEFAULT and no UPDATE of live_classes rows.",
+    "Confirm (Get-FileHash 'backend/prisma/migrations/20261030_fix_live_class_microphone_triggers/migration.sql' -Algorithm SHA256).Hash.ToLower() -eq '4fc783645ef9efbe181412e5abe32f3174a746ab9e1d585209ce26408c71cc80' and that git status shows no modification under that directory.",
+    "Run npx prisma migrate status against halqa_test — 'Database schema is up to date' (no pending migrations).",
+    "Commit with message 'feat(prisma): harden microphone trigger idempotency and reconcile authorization default (Issues 2+3)'."
+  ],
+  "acceptance_criteria": [
+    "Both migration directories exist and sort after 20261114; neither historical migration file (20261029, 20261030) is modified.",
+    "After deploy, both triggers exist on the live_classes table with the 20261030 bodies (all four authorization invariants).",
+    "The column default is SFU_AUTHORITATIVE after 20261116 and matches schema.prisma @default.",
+    "Re-execution of 20261115 via a rolled-back row + migrate deploy succeeds without error 1359.",
+    "The 12-test trigger suite, live-class integration suite, and the FEAT-005 default test all pass after both migrations.",
+    "No existing row's microphone_authorization_mode value is changed by the migration (ALTER DEFAULT only)."
+  ],
+  "verification": [
+    "cd backend; $env:DATABASE_URL='mysql://root@localhost:3306/halqa_test'; npx prisma migrate deploy — 2 migrations applied, no error.",
+    "mysql.exe trigger inventory query returns exactly the two trigger names; SHOW COLUMNS shows Default SFU_AUTHORITATIVE.",
+    "Re-execution rehearsal: UPDATE _prisma_migrations (disposable halqa_test only) then npx prisma migrate deploy — succeeds, no error 1359.",
+    "cd backend; npm run test:integration -- src/tests/integration/liveclass-microphone-triggers.integration.test.js (12 pass), src/tests/integration/live-class.integration.test.js (pass), src/tests/integration/liveclass-microphone-default.integration.test.js (4 pass, Case 3 = SFU_AUTHORITATIVE).",
+    "cd backend; npm run test:unit — green. npx prisma migrate status — up to date.",
+    "20261030 checksum still 4fc783645ef9efbe181412e5abe32f3174a746ab9e1d585209ce26408c71cc80.",
+    "Note: local MariaDB is 10.4.32; the CI job 'Backend -- Integration Tests (MariaDB 10.11)' is the authoritative 10.11 verification once the branch is pushed by the merge step."
+  ],
+  "blocked_reason": null,
+  "findings": "Completed on commit 3e8ef69 (main, local only; not pushed). Two migration files created and applied to halqa_test. DB state after this FEAT: halqa_test has all 109 migrations applied (through 20261116_reconcile_microphone_authorization_default); microphone_authorization_mode column DEFAULT is now SFU_AUTHORITATIVE; both triggers live_classes_microphone_mode_guard and live_classes_legacy_start_guard are present with 20261030-identical bodies. Re-execution rehearsal passed: marked 20261115 rolled_back in _prisma_migrations then ran migrate deploy — applied cleanly, no error 1359 (DROP IF EXISTS guards worked). All integration suites green: liveclass-microphone-triggers 12/12; live-class 28/28; liveclass-microphone-default 4/4 (Case 3 now correctly expects SFU_AUTHORITATIVE because reconciliation migration is present). npm run test:unit green (all batches passed, exit 0). npx prisma migrate status: 'Database schema is up to date'. 20261030 checksum verified unchanged (4fc783645ef9efbe181412e5abe32f3174a746ab9e1d585209ce26408c71cc80). git diff confirms 20261030 directory untouched. 20261116 migration SQL contains only ALTER DEFAULT — no UPDATE of live_classes rows (row-preservation confirmed). Aikido full scan on all three modified files: 0 findings. Note for later steps: DESTRUCTIVE_TESTS count in safe-test-manifest.js remains 19 (no new test files added in this FEAT). The authoritative MariaDB 10.11 gate is CI job 'Backend -- Integration Tests (MariaDB 10.11)' once pushed."
+}

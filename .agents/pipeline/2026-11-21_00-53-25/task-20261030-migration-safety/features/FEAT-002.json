@@ -1,0 +1,32 @@
+{
+  "id": "FEAT-002",
+  "type": "docs",
+  "description": "Issue 1 (P1): author the production recovery runbook for migration 20261030_fix_live_class_microphone_triggers at docs/live-class/migration-20261030-recovery-runbook.md, following the approved design's Issue 1 section verbatim in structure (executive summary, _prisma_migrations 8-column reference with the migration_type-does-not-exist note, three row states table, migrate-deploy refusal behavior, read-only diagnostic SQL block, scenarios A-E plus No-row each with prerequisite diagnostic / state-changing recovery command / expected outcome / stop conditions, anti-patterns box, ASCII decision tree, per-command failure notes). The design document (02-design.md, 'Issue 1' section) contains the full required content; transcribe it, do not re-derive.",
+  "status": "completed",
+  "steps": [
+    "Read .agents/pipeline/2026-11-21_00-53-25/02-design.md section 'Issue 1 — Production Recovery Runbook' and 01-requirements.md FR-1.1…FR-1.12.",
+    "Create docs/live-class/migration-20261030-recovery-runbook.md with: executive summary (four SQL statements in order: ALTER DEFAULT, DROP MG, CREATE MG, CREATE SG; never edit the historical file; recovery uses migrate resolve, never INSERT INTO _prisma_migrations).",
+    "_prisma_migrations schema reference: eight columns id, checksum, finished_at, migration_name, logs, rolled_back_at, started_at, applied_steps_count; explicit note that migration_type does NOT exist; three-row-state table (failed: finished_at NULL + rolled_back_at NULL; rolled-back: rolled_back_at NOT NULL; applied: finished_at NOT NULL).",
+    "Key behavior box: npx prisma migrate deploy REFUSES (does not re-execute SQL) when an unresolved failed migration row exists; the duplicate-trigger error (MariaDB 1359) only appears if --rolled-back was chosen for a scenario-E state and deploy is then run.",
+    "Read-only diagnostic SQL block (labeled 'READ-ONLY DIAGNOSTIC — may run at any time'): the three queries from the design (migration row state, trigger inventory via information_schema.triggers for event_object_table='live_classes', SHOW COLUMNS FROM live_classes LIKE 'microphone_authorization_mode' — expected Default: LEGACY after 20261030, noting FEAT-006's reconciliation migration changes it to SFU_AUTHORITATIVE once applied).",
+    "Scenario sections A, B, C, D, E, No-row with per-scenario: prerequisite diagnostic, recovery command labeled 'STATE-CHANGING — verify prerequisites before executing', expected outcome, stop conditions. Scenario table exactly as in the design: A-D use --rolled-back then migrate deploy (C: as soon as possible, unguarded window risk noted, ensureProtectedScheduledMicrophoneMode is defense-in-depth); E uses --applied ONLY after verifying both triggers present and correct, with the explicit warning that --rolled-back for scenario E causes re-execution failing at Step 4 with error 1359; No-row uses --applied as documented Prisma baselining (resolve --applied inserts a new row; no prior failed row needed).",
+    "Anti-patterns box: INSERT INTO _prisma_migrations invalid (migration_type does not exist in Prisma 5.22.0; checksum NOT NULL); UPDATE _prisma_migrations as first resort (migrate resolve is the documented tool); editing the 20261030 migration.sql (changes checksum, causes drift).",
+    "ASCII decision tree exactly as in the design.",
+    "Error-handling notes: migrate resolve failure (name spelled exactly; row in failed state); migrate deploy Step-4 'Trigger already exists' (operator chose --rolled-back for scenario E; DROP TRIGGER IF EXISTS live_classes_legacy_start_guard then re-run deploy).",
+    "Optionally add a link line to docs/live-class/README.md if it contains a doc index.",
+    "Commit with message 'docs(live-class): add Migration 20261030 production recovery runbook (Issue 1)'."
+  ],
+  "acceptance_criteria": [
+    "docs/live-class/migration-20261030-recovery-runbook.md exists and covers FR-1.1 through FR-1.12: eight columns documented with the migration_type note, three row states, deploy-refusal semantics, all six scenarios each with diagnostic/recovery/expected outcome/stop conditions, read-only vs state-changing labels on every SQL block, anti-patterns box, decision tree, trigger + default verification SQL.",
+    "No recovery path for scenario E recommends --rolled-back.",
+    "No SQL is recommended as unconditionally safe; every state-changing command is gated on a prior read-only diagnostic.",
+    "backend/prisma/migrations/20261030_fix_live_class_microphone_triggers/migration.sql is byte-for-byte unchanged."
+  ],
+  "verification": [
+    "Test-Path 'docs/live-class/migration-20261030-recovery-runbook.md' returns True and the file contains the sections 'Scenario E', 'No-row', 'Anti-patterns', 'Decision tree' (grep against the file).",
+    "(Get-FileHash 'backend/prisma/migrations/20261030_fix_live_class_microphone_triggers/migration.sql' -Algorithm SHA256).Hash.ToLower() still equals 4fc783645ef9efbe181412e5abe32f3174a746ab9e1d585209ce26408c71cc80.",
+    "git status shows only the new doc file (and optional README line) as changes from this feature."
+  ],
+  "blocked_reason": null,
+  "findings": "Runbook created at docs/live-class/migration-20261030-recovery-runbook.md and linked from docs/live-class/README.md index. Verified: all six scenarios (A-E, No-row), anti-patterns, decision tree, migration_type note, read-only/state-changing labels present; 20261030 migration.sql SHA-256 unchanged (4fc783645ef9efbe181412e5abe32f3174a746ab9e1d585209ce26408c71cc80). Notes for later steps: (1) FEAT-006 (20261116 reconcile default migration) — the runbook's Expected-healthy-results section already notes the default flips from LEGACY to SFU_AUTHORITATIVE once that migration applies; no further doc edit strictly required, but FEAT-006 may optionally append its migration name there. (2) FEAT-001 issue bodies: runbook references migration name exactly '20261030_fix_live_class_microphone_triggers' and checksum 4fc783...; issue-1.md acceptance criteria 7 verified. (3) For FEAT-003/005/006: DB state assumed LEGACY default until the 20261116 migration is applied. Aikido scans of all touched files returned zero findings."
+}

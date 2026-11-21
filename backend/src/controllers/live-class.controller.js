@@ -6,7 +6,7 @@ const { broadcastLiveStart, broadcastLiveEnd } = require('../utils/feedLive');
 const { queueBulkNotifications } = require('../services/queue.service');
 const logger = require('../utils/logger');
 const { v4: uuidv4 } = require('uuid');
-const { MICROPHONE_AUTHORIZATION_MODES } = require('../utils/liveClassMicrophoneContract');
+const { MICROPHONE_AUTHORIZATION_MODES, LEGACY_SESSION_START_REJECTION_MESSAGE, isTriggerLegacyStartRejection } = require('../utils/liveClassMicrophoneContract');
 const { assertProtectedRuntimeReady } = require('../services/liveclass-microphone-authority.service');
 
 const userSelect = { id: true, firstName: true, lastName: true, avatarUrl: true, role: true };
@@ -886,7 +886,16 @@ async function startLiveClass(req, res, next) {
 
     liveClassAudit(req.user.id, 'START', lc.id, { title: lc.title }).catch(() => {});
     return successResponse(res, updated, 'Class started');
-  } catch (e) { next(e); }
+  } catch (e) {
+    // SEC01-G-BE02: The live_classes_legacy_start_guard trigger raises a
+    // SQLSTATE 45000 business-rule violation when a LEGACY session attempts
+    // to go LIVE. Surface it as a clean 409 without leaking SQL details;
+    // every other error passes through unchanged.
+    if (isTriggerLegacyStartRejection(e)) {
+      return errorResponse(res, 'The microphone authorization mode must be upgraded before starting this class.', 409);
+    }
+    next(e);
+  }
 }
 
 //  END

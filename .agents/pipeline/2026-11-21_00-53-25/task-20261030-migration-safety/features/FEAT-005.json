@@ -1,0 +1,32 @@
+{
+  "id": "FEAT-005",
+  "type": "test",
+  "description": "Issue 4 (P2): add the isolated Prisma default-behavior integration test at backend/src/tests/integration/liveclass-microphone-default.integration.test.js with the four cases from the design (Prisma create omitting the field; Prisma create explicit; raw SQL INSERT omitting the column; raw SQL INSERT explicit). Follows the self-contained PrismaClient pattern of liveclass-microphone-triggers.integration.test.js. The test must be registered in the destructive list of the test-safety manifest in the same commit.",
+  "status": "completed",
+  "steps": [
+    "Read .agents/pipeline/2026-11-21_00-53-25/02-design.md section 'Issue 4' — it contains the complete test file code (beforeAll fixtures, four test cases, afterAll cleanup). Transcribe it into backend/src/tests/integration/liveclass-microphone-default.integration.test.js, using the design's exact fixtures: school with name 'mic-default-test-school-<uid>', slug 'mic-default-<uid>', country 'MY'; teacher with firstName 'MicDefault', lastName 'Teacher', email 'mic-default-teacher-<uid>@test.local', passwordHash 'hashed-not-real', role 'TEACHER', status 'ACTIVE', emailVerified true; const { v4: uuidv4 } = require('uuid') at module scope.",
+    "Case 1: a second PrismaClient with log: [{ emit: 'event', level: 'query' }] created inside the test; capture { query: e.query, params: e.params }; create the live class with microphoneAuthorizationMode omitted; assert lc.microphoneAuthorizationMode === 'SFU_AUTHORITATIVE'; find the INSERT event (query contains 'insert' and 'live_classes'); assert insertEvent.params (a JSON string in Prisma 5.x) contains 'SFU_AUTHORITATIVE'; read back via prisma.$queryRawUnsafe on the outer client and assert SFU_AUTHORITATIVE; disconnect the logging client; push the id into createdLcIds.",
+    "Case 2: create with microphoneAuthorizationMode: 'SFU_AUTHORITATIVE'; assert ORM return + raw read-back are SFU_AUTHORITATIVE.",
+    "Case 3: raw SQL INSERT omitting the column (the design's exact INSERT with 16 ? params); derive expectedDefault by querying _prisma_migrations for a finished migration matching '%reconcile_microphone_authorization_default%' (SFU_AUTHORITATIVE if present, LEGACY otherwise — with only current migrations applied it is LEGACY); assert the stored value equals expectedDefault; secondary confirmation via SHOW COLUMNS FROM live_classes LIKE 'microphone_authorization_mode' with colInfo[0].Default === expectedDefault.",
+    "Case 4: raw SQL INSERT with explicit microphone_authorization_mode 'SFU_AUTHORITATIVE'; assert stored value SFU_AUTHORITATIVE.",
+    "afterAll: delete all createdLcIds rows first, then teacher, then school (each .catch(() => {})), then prisma.$disconnect().",
+    "CRITICAL — register the file in backend/test-safety/safe-test-manifest.js: add 'src/tests/integration/liveclass-microphone-default.integration.test.js' to DESTRUCTIVE_TESTS in alphabetical position (between 'src/tests/integration/live-class.integration.test.js' and 'src/tests/integration/liveclass-microphone-triggers.integration.test.js'). The manifest audit (auditClassification) throws 'unclassified test file' otherwise and breaks every unit run.",
+    "Commit with message 'test(live-class): add Prisma default-behavior integration test (Issue 4)'."
+  ],
+  "acceptance_criteria": [
+    "The new test file exists and contains exactly the four cases; Cases 1, 2, 4 assert SFU_AUTHORITATIVE deterministically.",
+    "Case 1 asserts the client-side default via e.params containing 'SFU_AUTHORITATIVE' (not via the DB default).",
+    "Case 3's expectation is derived from the applied migration state (not tautologically from SHOW COLUMNS).",
+    "Cleanup deletes only rows created by the test (createdLcIds) and their fixtures, in FK-safe order.",
+    "The file is listed in DESTRUCTIVE_TESTS in safe-test-manifest.js, and npm run test:unit still runs.",
+    "The test passes against the migrated halqa_test database, and passes again unchanged on a second run (deterministic)."
+  ],
+  "verification": [
+    "cd backend; npm run test:unit — the manifest audit passes (no 'unclassified test file' error) and the safe suite is green.",
+    "Ensure the disposable DB exists and is migrated (see FEAT-003 verification steps; if not yet done: create halqa_test, then $env:DATABASE_URL='mysql://root@localhost:3306/halqa_test'; npx prisma migrate deploy).",
+    "cd backend; $env:DATABASE_URL='mysql://root@localhost:3306/halqa_test'; $env:NODE_ENV='test'; $env:JWT_SECRET='ci_integration_jwt_secret_at_least_32_characters!!'; $env:JWT_REFRESH_SECRET='ci_integration_refresh_secret_32_chars!!'; $env:PORT='5002'; npm run test:integration -- src/tests/integration/liveclass-microphone-default.integration.test.js — 4/4 pass, Case 3 expects LEGACY at this stage (reconciliation migration not yet present).",
+    "Run the same command a second time — still 4/4 (no cleanup needed between runs)."
+  ],
+  "blocked_reason": null,
+  "findings": "Completed on commit 2478109 (main, local only; not pushed). Test file: backend/src/tests/integration/liveclass-microphone-default.integration.test.js — 4/4 passing, run twice against freshly migrated halqa_test (deterministic, no manual cleanup needed). DB state for later steps: halqa_test exists, all 107 migrations applied via `npx prisma migrate deploy` with DATABASE_URL mysql://root@localhost:3306/halqa_test; current DB default for microphone_authorization_mode is LEGACY (reconciliation migration 20261116 not yet present, so Case 3 expected LEGACY and passed); both 20261030 triggers present. Mock-shape notes for FEAT-004/006: prisma-client-unit-guard.test.js hardcodes manifest counts — DESTRUCTIVE_TESTS is now 19 and discovered files 194; any further test-file addition must bump those counts. Manifest entry added alphabetically between live-class.integration.test.js and liveclass-microphone-triggers.integration.test.js. 20261030 migration checksum verified unchanged (4fc783645ef9efbe181412e5abe32f3174a746ab9e1d585209ce26408c71cc80). npm run test:unit green (exit 0). Aikido scans of all touched files: zero findings."
+}

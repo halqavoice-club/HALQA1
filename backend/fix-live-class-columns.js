@@ -164,9 +164,13 @@ async function run() {
     const host = await prisma.user.findFirst({ where: { deletedAt: null, status: 'ACTIVE' }, select: { id: true } });
     const testId = uuidv4();
     const now = new Date().toISOString().slice(0, 23).replace('T', ' ');
+    // SEC01-G-BE02: set microphone_authorization_mode explicitly so this
+    // diagnostic does not depend on the DB column default (which Issue 3
+    // changes from LEGACY to SFU_AUTHORITATIVE). SFU_AUTHORITATIVE mirrors
+    // what rawCreateLiveClass always writes.
     await prisma.$executeRawUnsafe(
-      `INSERT INTO live_classes (id, stream_type, host_user_id, schoolId, classId, teacherId, title, description, scheduledAt, duration, status, chatEnabled, handRaiseEnabled, whiteboardEnabled, quranPanelEnabled, isOpenMic, screenShareEnabled, maxParticipants, isRecorded, createdAt, updatedAt)
-       VALUES (?, 'PUBLIC', ?, NULL, NULL, NULL, '_test_', NULL, NULL, NULL, 'SCHEDULED', 1, 1, 1, 0, 1, 1, NULL, 0, ?, ?)`,
+      `INSERT INTO live_classes (id, stream_type, host_user_id, schoolId, classId, teacherId, title, description, scheduledAt, duration, status, chatEnabled, handRaiseEnabled, whiteboardEnabled, quranPanelEnabled, isOpenMic, screenShareEnabled, maxParticipants, isRecorded, microphone_authorization_mode, createdAt, updatedAt)
+       VALUES (?, 'PUBLIC', ?, NULL, NULL, NULL, '_test_', NULL, NULL, NULL, 'SCHEDULED', 1, 1, 1, 0, 1, 1, NULL, 0, 'SFU_AUTHORITATIVE', ?, ?)`,
       testId, host.id, now, now
     );
     const rows = await prisma.$queryRawUnsafe('SELECT id, maxParticipants FROM live_classes WHERE id = ?', testId);

@@ -139,8 +139,24 @@ async function createClass(schoolId) {
 async function rawInsertLC(data) {
   var id  = uuidv4();
   var now = new Date().toISOString().slice(0, 23).replace('T', ' ');
+
+  // Build column list and values dynamically to include the mode column only when specified.
+  // When omitted, the DB column default is used — after Issue 3 this will be SFU_AUTHORITATIVE.
+  var modeColumns = '';
+  var modeValues  = '';
+  var modeParams  = [];
+  if (data.microphoneAuthorizationMode !== undefined) {
+    modeColumns = ', microphone_authorization_mode';
+    modeValues  = ', ?';
+    modeParams  = [data.microphoneAuthorizationMode];
+  }
+
   await prisma.$executeRawUnsafe(
-    'INSERT INTO live_classes (id, stream_type, host_user_id, schoolId, classId, teacherId, title, status, maxSpeakers, maxParticipants, chatEnabled, handRaiseEnabled, isOpenMic, screenShareEnabled, whiteboardEnabled, quranPanelEnabled, isRecorded, createdAt, updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,0,0,?,?)',
+    'INSERT INTO live_classes (id, stream_type, host_user_id, schoolId, classId, teacherId, title, status, maxSpeakers, maxParticipants, chatEnabled, handRaiseEnabled, isOpenMic, screenShareEnabled, whiteboardEnabled, quranPanelEnabled, isRecorded' +
+    modeColumns +
+    ', createdAt, updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,0,0' +
+    modeValues +
+    ',?,?)',
     id,
     data.streamType   || 'SCHOOL',
     data.hostUserId,
@@ -154,6 +170,7 @@ async function rawInsertLC(data) {
     data.chatEnabled         !== false ? 1 : 0,
     data.handRaiseEnabled    !== false ? 1 : 0,
     data.isOpenMic           ? 1 : 0,
+    ...modeParams,
     now,
     now
   );
@@ -230,7 +247,7 @@ describe('GATE-AUTH: unauthenticated → 401', function () {
     createdUserIds.push(host.id);
     createdSchoolIds.push(school.id);
     createdClassIds.push(cls.id);
-    lcId = await rawInsertLC({ streamType: 'SCHOOL', hostUserId: host.id, schoolId: school.id, classId: cls.id, status: 'LIVE' });
+    lcId = await rawInsertLC({ streamType: 'SCHOOL', hostUserId: host.id, schoolId: school.id, classId: cls.id, status: 'LIVE', microphoneAuthorizationMode: 'SFU_AUTHORITATIVE' });
   }, 30000);
 
   test('GET /live-classes without token → 401', async function () {
@@ -263,7 +280,7 @@ describe('GATE-F02: SUPER_ADMIN cannot access SCHOOL streams', function () {
     createdUserIds.push(host.id, superAdmin.id);
     createdSchoolIds.push(school.id);
     createdClassIds.push(cls.id);
-    lcId = await rawInsertLC({ streamType: 'SCHOOL', hostUserId: host.id, schoolId: school.id, classId: cls.id, status: 'LIVE' });
+    lcId = await rawInsertLC({ streamType: 'SCHOOL', hostUserId: host.id, schoolId: school.id, classId: cls.id, status: 'LIVE', microphoneAuthorizationMode: 'SFU_AUTHORITATIVE' });
   }, 30000);
 
   test('SUPER_ADMIN GET SCHOOL stream → 403 with platform administrator message', async function () {
@@ -285,6 +302,9 @@ describe('GATE-F02: SUPER_ADMIN cannot access SCHOOL streams', function () {
     var scheduledLcId = await rawInsertLC({
       streamType: 'SCHOOL', hostUserId: superAdmin.id,
       schoolId: school.id, classId: null, status: 'SCHEDULED',
+      // Mode is irrelevant: assertSchoolAccess fires a 403 before any microphone check.
+      // SFU_AUTHORITATIVE is used as the application-consistent default.
+      microphoneAuthorizationMode: 'SFU_AUTHORITATIVE',
     });
     var res = await request(app)
       .post('/api/v1/live-classes/' + scheduledLcId + '/start')
@@ -321,7 +341,7 @@ describe('GATE-CROSS-SCHOOL: cross-school user cannot access another school SCHO
     createdUserIds.push(host.id, crossSchoolUser.id);
     createdSchoolIds.push(school1.id, school2.id);
     createdClassIds.push(cls.id);
-    lcId = await rawInsertLC({ streamType: 'SCHOOL', hostUserId: host.id, schoolId: school1.id, classId: cls.id, status: 'LIVE' });
+    lcId = await rawInsertLC({ streamType: 'SCHOOL', hostUserId: host.id, schoolId: school1.id, classId: cls.id, status: 'LIVE', microphoneAuthorizationMode: 'SFU_AUTHORITATIVE' });
   }, 30000);
 
   test('cross-school user GET SCHOOL stream → 403', async function () {
@@ -352,7 +372,7 @@ describe('GATE-11: PUBLIC stream — any authenticated user can access', functio
     superAdmin    = await createUser({ role: 'SUPER_ADMIN' });
 
     createdUserIds.push(host.id, noSchoolUser.id, crossUser.id, superAdmin.id);
-    lcId = await rawInsertLC({ streamType: 'PUBLIC', hostUserId: host.id, schoolId: null, classId: null, status: 'LIVE' });
+    lcId = await rawInsertLC({ streamType: 'PUBLIC', hostUserId: host.id, schoolId: null, classId: null, status: 'LIVE', microphoneAuthorizationMode: 'SFU_AUTHORITATIVE' });
   }, 30000);
 
   test('no-school user GET PUBLIC stream → 200', async function () {
@@ -404,7 +424,7 @@ describe('GATE-9: Role injection attack — body.role ignored', function () {
     host    = await createUser({ role: 'MEMBER' });
     attacker = await createUser({ role: 'MEMBER' });
     createdUserIds.push(host.id, attacker.id);
-    lcId = await rawInsertLC({ streamType: 'PUBLIC', hostUserId: host.id, schoolId: null, classId: null, status: 'LIVE' });
+    lcId = await rawInsertLC({ streamType: 'PUBLIC', hostUserId: host.id, schoolId: null, classId: null, status: 'LIVE', microphoneAuthorizationMode: 'SFU_AUTHORITATIVE' });
   }, 30000);
 
   test('POST /join with role:HOST in body → still STUDENT (body.role ignored)', async function () {
@@ -438,7 +458,7 @@ describe('GATE-10: Ownership enforcement — only creator can mutate', function 
     host       = await createUser({ role: 'MEMBER' });
     nonCreator = await createUser({ role: 'MEMBER' });
     createdUserIds.push(host.id, nonCreator.id);
-    lcId = await rawInsertLC({ streamType: 'PUBLIC', hostUserId: host.id, schoolId: null, classId: null, status: 'SCHEDULED' });
+    lcId = await rawInsertLC({ streamType: 'PUBLIC', hostUserId: host.id, schoolId: null, classId: null, status: 'SCHEDULED', microphoneAuthorizationMode: 'SFU_AUTHORITATIVE' });
   }, 30000);
 
   test('non-creator PATCH → 403', async function () {
@@ -487,7 +507,7 @@ describe('GATE-6: Kicked participant — all re-entry paths blocked', function (
     host       = await createUser({ role: 'MEMBER' });
     kickedUser = await createUser({ role: 'MEMBER' });
     createdUserIds.push(host.id, kickedUser.id);
-    lcId = await rawInsertLC({ streamType: 'PUBLIC', hostUserId: host.id, schoolId: null, classId: null, status: 'LIVE' });
+    lcId = await rawInsertLC({ streamType: 'PUBLIC', hostUserId: host.id, schoolId: null, classId: null, status: 'LIVE', microphoneAuthorizationMode: 'SFU_AUTHORITATIVE' });
 
     // Set up: add participant with wasKicked=true directly in DB
     await addParticipant(lcId, host.id,       'HOST',    false);
@@ -548,7 +568,7 @@ describe('GATE-NO-SCHOOL: no-school user blocked from SCHOOL stream', function (
     createdUserIds.push(host.id, noSchoolUser.id);
     createdSchoolIds.push(school.id);
     createdClassIds.push(cls.id);
-    lcId = await rawInsertLC({ streamType: 'SCHOOL', hostUserId: host.id, schoolId: school.id, classId: cls.id, status: 'LIVE' });
+    lcId = await rawInsertLC({ streamType: 'SCHOOL', hostUserId: host.id, schoolId: school.id, classId: cls.id, status: 'LIVE', microphoneAuthorizationMode: 'SFU_AUTHORITATIVE' });
   }, 30000);
 
   test('no-school user GET SCHOOL stream → 400 or 403', async function () {

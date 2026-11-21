@@ -75,8 +75,8 @@ describe('approved unit-mode PrismaClient construction guard', () => {
 
     expect(() => auditClassification(discovered)).not.toThrow();
     expect(SAFE_UNIT_TESTS).toHaveLength(175); // +3: CF-03/CF-08 + 4: feed-p1 test files registered
-    expect(DESTRUCTIVE_TESTS).toHaveLength(18);
-    expect(discovered).toHaveLength(193); // +3: CF-03/CF-08 + 4: feed-p1 test files registered
+    expect(DESTRUCTIVE_TESTS).toHaveLength(19); // +1: liveclass-microphone-default (Issue 4)
+    expect(discovered).toHaveLength(194); // +3: CF-03/CF-08 + 4: feed-p1 test files registered + 1: Issue 4 integration test
     expect(SAFE_UNIT_TESTS).toContain(
       'src/tests/test-safety/prisma-client-unit-guard.test.js'
     );

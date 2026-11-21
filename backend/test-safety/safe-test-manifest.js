@@ -191,6 +191,7 @@ const DESTRUCTIVE_TESTS = Object.freeze([
   'src/tests/integration/explore.integration.test.js',
   'src/tests/integration/gift.integration.test.js',
   'src/tests/integration/live-class.integration.test.js',
+  'src/tests/integration/liveclass-microphone-default.integration.test.js',
   'src/tests/integration/liveclass-microphone-triggers.integration.test.js',
   'src/tests/integration/school-membership.integration.test.js',
   'src/tests/integration/voice.integration.test.js',

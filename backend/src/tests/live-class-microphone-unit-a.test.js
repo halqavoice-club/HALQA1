@@ -6,9 +6,11 @@ const {
   LIVE_CLASS_MICROPHONE_API_CONTRACT,
   MICROPHONE_AUTHORIZATION_MODES,
   MICROPHONE_AUTHORIZATION_REASONS,
+  LEGACY_SESSION_START_REJECTION_MESSAGE,
   normalizeMicrophoneAuthorizationMode,
   isSfuAuthoritativeMode,
   classifyMicrophoneAuthorization,
+  isTriggerLegacyStartRejection,
 } = require("../utils/liveClassMicrophoneContract");
 const {
   liveClassMicrophoneSchema,
@@ -173,5 +175,185 @@ describe("SEC01-G-BE02-A session-bound migration policy", () => {
       start.indexOf("ensureProtectedScheduledMicrophoneMode"),
     );
     expect(start).toContain("lc.status === 'CANCELLED'");
+  });
+});
+
+describe("SEC01-G-BE02-A isTriggerLegacyStartRejection", () => {
+  test("returns true only when the message contains the legacy-start-guard rejection text", () => {
+    expect(
+      isTriggerLegacyStartRejection(
+        new Error(
+          `Some driver preamble :: SQLSTATE 45000 — ${LEGACY_SESSION_START_REJECTION_MESSAGE}`,
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  test.each([
+    new Error("Connection refused"),
+    new Error("ER_ROW_IS_REFERENCED_2: Cannot delete or update a parent row"),
+    new Error("Cannot downgrade from SFU_AUTHORITATIVE to LEGACY"),
+    null,
+    undefined,
+    {},
+    { message: null },
+  ])("returns false for unrelated or non-error values: %p", (value) => {
+    expect(isTriggerLegacyStartRejection(value)).toBe(false);
+  });
+});
+
+// The controller closes over the shared prisma client from ../utils/prisma at
+// module scope, so the dispatch tests mock that module. The mock mirrors the
+// real export shape: utils/prisma exports the PrismaClient instance itself.
+jest.mock("../utils/prisma", () => {
+  const makeModel = () => {
+    const target = {};
+    return new Proxy(target, {
+      get(obj, prop) {
+        if (typeof prop !== "string") return undefined;
+        if (!(prop in obj)) obj[prop] = jest.fn();
+        return obj[prop];
+      },
+    });
+  };
+  const base = {
+    $on: jest.fn(),
+    $use: jest.fn(),
+    $connect: jest.fn(),
+    $disconnect: jest.fn(),
+    $queryRawUnsafe: jest.fn(),
+    $executeRawUnsafe: jest.fn(),
+  };
+  return new Proxy(base, {
+    get(obj, prop) {
+      if (typeof prop !== "string" || prop.startsWith("$")) {
+        return prop in obj ? obj[prop] : undefined;
+      }
+      if (!(prop in obj)) obj[prop] = makeModel();
+      return obj[prop];
+    },
+  });
+});
+jest.mock("../sockets", () => ({ getIo: () => null }));
+jest.mock("../utils/feedLive", () => ({
+  broadcastLiveStart: jest.fn(),
+  broadcastLiveEnd: jest.fn(),
+}));
+jest.mock("../services/liveclass-microphone-authority.service", () => ({
+  assertProtectedRuntimeReady: jest.fn(),
+}));
+
+describe("SEC01-G-BE02-A startLiveClass error dispatch", () => {
+  let prismaMock;
+  let startLiveClass;
+
+  beforeAll(() => {
+    prismaMock = require("../utils/prisma");
+    // eslint-disable-next-line global-require
+    ({ startLiveClass } = require("../controllers/live-class.controller"));
+  });
+
+  beforeEach(() => {
+    prismaMock.$queryRawUnsafe.mockReset();
+    prismaMock.$executeRawUnsafe.mockReset();
+    prismaMock.$queryRawUnsafe.mockResolvedValue([]);
+    prismaMock.$executeRawUnsafe.mockResolvedValue(1);
+  });
+
+  function makeReqRes() {
+    const req = {
+      params: { id: "lc-dispatch-1" },
+      user: { id: "host-user-1", role: "TEACHER" },
+    };
+    const res = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn(),
+    };
+    const next = jest.fn();
+    return { req, res, next };
+  }
+
+  function enqueueHappyLookup() {
+    const rawRow = {
+      id: "lc-dispatch-1",
+      stream_type: "PUBLIC",
+      schoolId: null,
+      classId: null,
+      teacherId: null,
+      host_user_id: null,
+      delegated_host_id: null,
+      title: "Dispatch test class",
+      description: null,
+      scheduledAt: null,
+      duration: null,
+      status: "SCHEDULED",
+      livekitRoomName: null,
+      recordingUrl: null,
+      coverImageUrl: null,
+      maxParticipants: null,
+      maxSpeakers: 20,
+      isRecorded: 0,
+      recordingStartedAt: null,
+      chatEnabled: 1,
+      handRaiseEnabled: 1,
+      whiteboardEnabled: 1,
+      quranPanelEnabled: 0,
+      isOpenMic: 0,
+      screenShareEnabled: 0,
+      startedAt: null,
+      endedAt: null,
+      deletedAt: null,
+      createdAt: new Date("2026-11-01T00:00:00Z"),
+      updatedAt: new Date("2026-11-01T00:00:00Z"),
+    };
+    // 1st call: rawFindLiveClass — full row shaped by shapeLiveClassRow
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([rawRow]);
+    // 2nd call: ensureProtectedScheduledMicrophoneMode — mode already
+    // protected, so the helper is a no-op
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        status: "SCHEDULED",
+        microphone_authorization_mode: "SFU_AUTHORITATIVE",
+      },
+    ]);
+  }
+
+  test("returns HTTP 409 with a clean message when the legacy-start-guard trigger rejects the start", async () => {
+    enqueueHappyLookup();
+    prismaMock.$executeRawUnsafe.mockRejectedValueOnce(
+      new Error(
+        `PrismaClientKnownRequestError :: ${LEGACY_SESSION_START_REJECTION_MESSAGE}`,
+      ),
+    );
+
+    const { req, res, next } = makeReqRes();
+    await startLiveClass(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledTimes(1);
+    expect(next).not.toHaveBeenCalled();
+
+    const payload = JSON.stringify(res.json.mock.calls[0][0]);
+    expect(payload).not.toContain("SQLSTATE");
+    expect(payload).not.toContain("45000");
+    expect(payload).not.toContain("trigger");
+    expect(payload).not.toContain("SELECT");
+    expect(payload).not.toContain("UPDATE live_classes");
+    expect(res.json.mock.calls[0][0].message).toBe(
+      "The microphone authorization mode must be upgraded before starting this class.",
+    );
+  });
+
+  test("passes unrelated database failures through next(e) as 500", async () => {
+    enqueueHappyLookup();
+    const connectionError = new Error("Connection refused");
+    prismaMock.$executeRawUnsafe.mockRejectedValueOnce(connectionError);
+
+    const { req, res, next } = makeReqRes();
+    await startLiveClass(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(connectionError);
+    expect(res.status).not.toHaveBeenCalledWith(409);
+    expect(res.json).not.toHaveBeenCalled();
   });
 });

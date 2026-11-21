@@ -1,0 +1,7 @@
+{
+  "task_id": "task-20261030-migration-safety",
+  "task_description": "Implement the approved design for Migration 20261030 recovery, trigger safety, and microphone authorization consistency: open the six GitHub issues, write the production recovery runbook, make raw-SQL test helpers explicit, return HTTP 409 for the LEGACY start-guard trigger rejection, add the Prisma default-behavior integration test, and land the two forward-only migrations (trigger idempotency + database default reconciliation).",
+  "status": "pending",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004", "FEAT-005", "FEAT-006"],
+  "blocked_reason": null
+}
