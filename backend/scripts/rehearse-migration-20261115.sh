@@ -257,23 +257,55 @@ run_scenario() {
     return 1
   fi
 
-  # ---- Step 3: Apply ALL migrations (real SQL) with per-schema DATABASE_URL -
-  echo "  [${LABEL_UPPER}] Running prisma migrate deploy (real SQL, all migrations)..."
+  # ---- Step 3: Clone halqa_test schema structure into throwaway schema ------
+  # Cloning halqa_test (which already has all 109 migrations including 20261115
+  # applied) is 10-100x faster than replaying 109 migrations from scratch.
+  # We then manipulate _prisma_migrations in the THROWAWAY schema only to set
+  # up the pre-fault state.  No production or halqa_test data is ever modified.
+  echo "  [${LABEL_UPPER}] Cloning halqa_test structure into throwaway schema: ${schema}..."
   local db_url="mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@${MYSQL_HOST}:${MYSQL_PORT}/${schema}"
-  if ! DATABASE_URL="$db_url" npx prisma migrate deploy 2>&1; then
-    fail_reason="prisma migrate deploy (initial, real SQL) failed"
+
+  # Dump schema-only (no row data) from halqa_test using root (halqa user lacks
+  # SELECT on all tables in arbitrary order needed for a full dump).
+  local dump_output
+  if ! dump_output=$(mysqldump \
+      -h "$MYSQL_HOST" -P "$MYSQL_PORT" \
+      -u "$MYSQL_ROOT_USER" -p"$MYSQL_ROOT_PASSWORD" \
+      --protocol=TCP \
+      --no-data --routines --triggers --single-transaction \
+      halqa_test 2>&1); then
+    fail_reason="mysqldump of halqa_test failed: $dump_output"
     scenario_failed=1
   fi
 
   if [ "$scenario_failed" -eq 0 ]; then
-    # ---- Step 4: Roll back 20261115 in Prisma history ----------------------
-    # This puts Prisma's view of the schema back to post-20261030 / pre-20261115.
-    # The triggers in the DB are already in their 20261115 (final) state from
-    # the full deploy; rolling back the history entry means Prisma considers
-    # 20261115 "not yet applied" and will attempt it again on next deploy.
-    echo "  [${LABEL_UPPER}] Marking 20261115 as rolled-back in Prisma history..."
-    if ! DATABASE_URL="$db_url" npx prisma migrate resolve --rolled-back "${MIGRATION_NAME}" 2>&1; then
-      fail_reason="prisma migrate resolve --rolled-back (setup) failed"
+    if ! echo "$dump_output" | mysql \
+        -h "$MYSQL_HOST" -P "$MYSQL_PORT" \
+        -u "$MYSQL_ROOT_USER" -p"$MYSQL_ROOT_PASSWORD" \
+        --protocol=TCP \
+        "$schema" 2>&1; then
+      fail_reason="Schema import into ${schema} failed"
+      scenario_failed=1
+    fi
+  fi
+
+  if [ "$scenario_failed" -eq 0 ]; then
+    # ---- Step 4: Mark 20261115 as ROLLED_BACK in the THROWAWAY schema ------
+    # This is a direct UPDATE on _prisma_migrations in the DISPOSABLE throwaway
+    # schema only — never on halqa_test, never on production.
+    # Setting rolled_back_at makes Prisma consider 20261115 "not yet applied"
+    # (rolled_back_at set + finished_at NULL = ROLLED_BACK state), which allows
+    # the fault-injected deploy in Step 6 to re-attempt and genuinely fail.
+    # This is the ONLY way to set up the fault scenario without P3012:
+    # resolve --rolled-back only works on FAILED migrations (P3012 blocks it on
+    # APPLIED ones), so we must set up the state directly in the throwaway DB.
+    echo "  [${LABEL_UPPER}] Setting up fault state: marking 20261115 ROLLED_BACK in ${schema}..."
+    if ! mysql_cmd "$schema" -e "
+      UPDATE \`_prisma_migrations\`
+      SET rolled_back_at = NOW(3),
+          finished_at    = NULL
+      WHERE migration_name = '${MIGRATION_NAME}';" 2>&1; then
+      fail_reason="Failed to set up ROLLED_BACK state in ${schema}._prisma_migrations"
       scenario_failed=1
     fi
   fi
