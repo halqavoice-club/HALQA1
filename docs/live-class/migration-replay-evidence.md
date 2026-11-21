@@ -72,15 +72,37 @@ The correct partial-failure boundaries follow this interleaved order. There is n
 
 ## 4. Partial-Failure Recovery Matrix (20261115)
 
+**Executed against:** MariaDB 10.11.19 — CI run `44927724655`, job `136917768396`, head `ea81d3b8ae8341d93e58887cf294f86afa9ab272`.
+
+**Script:** `backend/scripts/rehearse-migration-20261115.sh`
+
 | Scenario | Fault point | Objects present after fault | Recovery | Execution Status |
 |---|---|---|---|---|
-| A | After Step 1 (DROP MG), before Step 2 (CREATE MG) | MG absent, SG present | `--rolled-back` + `migrate deploy` | NOT EXECUTED (CI rehearsal pending) |
-| B | After Step 2 (CREATE MG), before Step 3 (DROP SG) | MG present (new), SG present (old) | `--rolled-back` + `migrate deploy` | NOT EXECUTED (CI rehearsal pending) |
-| C | After Step 3 (DROP SG), before Step 4 (CREATE SG) | MG present (new), SG absent | `--rolled-back` + `migrate deploy` | NOT EXECUTED (CI rehearsal pending) |
-| D | After Step 4, before Prisma records success | MG present (new), SG present (new) | `--applied` | NOT EXECUTED (CI rehearsal pending) |
-| N | Normal replay (idempotent re-execution) | N/A — apply succeeds | `--rolled-back` + `migrate deploy`, verify no error 1359 | NOT EXECUTED (CI rehearsal pending) |
+| A | After Step 1 (DROP MG), before Step 2 (CREATE MG) | MG absent, SG present | `--rolled-back` + `migrate deploy` | **PASS** — CI run `44927724655` / job `136917768396` |
+| B | After Step 2 (CREATE MG), before Step 3 (DROP SG) | MG present (new), SG present (old) | `--rolled-back` + `migrate deploy` | **PASS** — CI run `44927724655` / job `136917768396` |
+| C | After Step 3 (DROP SG), before Step 4 (CREATE SG) | MG present (new), SG absent | `--rolled-back` + `migrate deploy` | **PASS** — CI run `44927724655` / job `136917768396` |
+| D | After Step 4, before Prisma records success | MG present (new), SG present (new) | `--applied` | **PASS** — CI run `44927724655` / job `136917768396` |
+| N | Normal replay (idempotent re-execution) | N/A — apply succeeds | `--rolled-back` + `migrate deploy`, verify no error 1359 | **PASS** — CI run `44927724655` / job `136917768396` |
 
-These rows will be updated with CI run ID, job ID, and outcome after the rehearsal step (Section 5) runs in CI.
+**Final CI output:**
+```
+============================================================
+ ALL SCENARIOS: PASS
+============================================================
+```
+
+**Both triggers confirmed present after each scenario's recovery** (verified via `information_schema.triggers`):
+- `live_classes_microphone_mode_guard` (BEFORE UPDATE)
+- `live_classes_legacy_start_guard` (BEFORE UPDATE)
+
+**MariaDB error 1359 (`Trigger already exists`):** Not observed in any scenario. ✅
+
+**Prisma two-row state (Scenario D):** After `migrate resolve --applied`, `_prisma_migrations` shows:
+- Row 1: ROLLED_BACK (the setup row marked by `UPDATE rolled_back_at`)
+- Row 2: FAILED (the fault-deploy row; this row is what `resolve --applied` acts on)
+- Post-resolution: Row 1 ROLLED_BACK + Row 2 updated to APPLIED (resolved)
+
+`migrate status` confirms: "Database schema is up to date." ✅
 
 ---
 
