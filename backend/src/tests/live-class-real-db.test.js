@@ -103,17 +103,29 @@ async function createTestLC(params = {}) {
     isOpenMic: 0,
     ...params,
   };
+
+  // SEC01-G-BE02: set microphone_authorization_mode explicitly when provided.
+  // When omitted the DB column default is used (LEGACY after 20261030,
+  // SFU_AUTHORITATIVE after the Issue 3 reconciliation migration). Call sites
+  // whose scenario depends on the mode MUST pass microphoneAuthorizationMode;
+  // mode-indifferent call sites default to SFU_AUTHORITATIVE (see policy below).
+  const hasMode = p.microphoneAuthorizationMode !== undefined;
+  const modeColumn = hasMode ? ', microphone_authorization_mode' : '';
+  const modePlaceholder = hasMode ? ', ?' : '';
+  const modeValue = hasMode ? [p.microphoneAuthorizationMode] : [];
+
   await prisma.$executeRawUnsafe(`
     INSERT INTO live_classes
       (id, stream_type, host_user_id, schoolId, classId, teacherId,
        title, status, maxSpeakers, maxParticipants, chatEnabled,
        handRaiseEnabled, isOpenMic, screenShareEnabled, whiteboardEnabled,
-       quranPanelEnabled, isRecorded, createdAt, updatedAt)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,0,0,?,?)
+       quranPanelEnabled, isRecorded${modeColumn}, createdAt, updatedAt)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,0,0${modePlaceholder},?,?)
   `,
     id, p.streamType, p.hostUserId, p.schoolId, p.classId, p.teacherId,
     p.title, p.status, p.maxSpeakers, p.maxParticipants,
     p.chatEnabled, p.handRaiseEnabled, p.isOpenMic,
+    ...modeValue,
     now, now
   );
   createdLcIds.push(id);
@@ -190,7 +202,10 @@ afterAll(async () => {
 
 describe('GATE-7A: SCHOOL stream — unauthenticated and cross-school denied', () => {
   let lcId;
-  beforeAll(async () => { lcId = await createTestLC(); });
+  beforeAll(async () => {
+    // Mode irrelevant: GET-authorization test; SFU_AUTHORITATIVE is the application-consistent default.
+    lcId = await createTestLC({ microphoneAuthorizationMode: 'SFU_AUTHORITATIVE' });
+  });
 
   test('G7A-1: Unauthenticated GET /:id → 401', async () => {
     const res = await request(app).get(`/api/v1/live-classes/${lcId}`);
@@ -223,7 +238,10 @@ describe('GATE-7A: SCHOOL stream — unauthenticated and cross-school denied', (
 
 describe('GATE-8: SUPER_ADMIN blocked from SCHOOL stream', () => {
   let lcId;
-  beforeAll(async () => { lcId = await createTestLC(); });
+  beforeAll(async () => {
+    // Mode irrelevant: GET-authorization test; SFU_AUTHORITATIVE is the application-consistent default.
+    lcId = await createTestLC({ microphoneAuthorizationMode: 'SFU_AUTHORITATIVE' });
+  });
 
   test('G8-1: SA GET SCHOOL stream → 403', async () => {
     const res = await request(app)
@@ -301,6 +319,7 @@ describe('GATE-11: PUBLIC stream authorization', () => {
       hostUserId: TEACHER_ID,
       schoolId:   null,
       title:      'Integration PUBLIC Test',
+      microphoneAuthorizationMode: 'SFU_AUTHORITATIVE',
     });
   });
 
@@ -371,6 +390,7 @@ describe('GATE-9: Role injection attacks', () => {
       hostUserId: TEACHER_ID,
       schoolId:   null,
       title:      'Role Injection Test',
+      microphoneAuthorizationMode: 'SFU_AUTHORITATIVE',
     });
   });
 
@@ -413,6 +433,7 @@ describe('GATE-10: Ownership enforcement', () => {
       schoolId:   null,
       status:     'SCHEDULED',
       title:      'Ownership Test',
+      microphoneAuthorizationMode: 'SFU_AUTHORITATIVE',
     });
   });
 
@@ -464,6 +485,7 @@ describe('GATE-6: Kicked participant cannot rejoin', () => {
       schoolId:   null,
       status:     'LIVE',
       title:      'Kick Test',
+      microphoneAuthorizationMode: 'SFU_AUTHORITATIVE',
     });
     // Teacher joins as HOST
     await addParticipant(lcId, TEACHER_ID, 'HOST');
@@ -533,6 +555,7 @@ describe('GATE-1/2/3: Real MySQL maxSpeakers concurrency', () => {
       status:      'LIVE',
       maxSpeakers: MAX,
       title:       'Concurrency Test',
+      microphoneAuthorizationMode: 'SFU_AUTHORITATIVE',
     });
     // Host joins
     await addParticipant(lcId, TEACHER_ID, 'HOST');
@@ -605,6 +628,7 @@ describe('GATE-1/2/3: Real MySQL maxSpeakers concurrency', () => {
     const concLcId = await createTestLC({
       streamType: 'SCHOOL', hostUserId: TEACHER_ID, schoolId: SCHOOL_ID,
       status: 'LIVE', maxSpeakers: 2, title: 'Concurrent Approval Test',
+      microphoneAuthorizationMode: 'SFU_AUTHORITATIVE',
     });
     await addParticipant(concLcId, TEACHER_ID,       'HOST');
     await addParticipant(concLcId, STUDENT_ID,        'STUDENT');
@@ -652,6 +676,7 @@ describe('GATE-1/2/3: Real MySQL maxSpeakers concurrency', () => {
     const dupLcId = await createTestLC({
       streamType: 'SCHOOL', hostUserId: TEACHER_ID, schoolId: SCHOOL_ID,
       status: 'LIVE', maxSpeakers: 3, title: 'Dup Slot Test',
+      microphoneAuthorizationMode: 'SFU_AUTHORITATIVE',
     });
     await addParticipant(dupLcId, TEACHER_ID, 'HOST');
     await addParticipant(dupLcId, STUDENT_ID,  'STUDENT');
@@ -693,6 +718,7 @@ describe('GATE-4: Slot release and reuse', () => {
     lcId = await createTestLC({
       streamType: 'SCHOOL', hostUserId: TEACHER_ID, schoolId: SCHOOL_ID,
       status: 'LIVE', maxSpeakers: 2, title: 'Slot Release Test',
+      microphoneAuthorizationMode: 'SFU_AUTHORITATIVE',
     });
     await addParticipant(lcId, TEACHER_ID,      'HOST');
     await addParticipant(lcId, STUDENT_ID,       'STUDENT');
@@ -768,6 +794,7 @@ describe('GATE-5: Reconnect clears stale speakerSlot', () => {
     lcId = await createTestLC({
       streamType: 'PUBLIC', hostUserId: TEACHER_ID, schoolId: null,
       status: 'LIVE', maxSpeakers: 2, title: 'Reconnect Test',
+      microphoneAuthorizationMode: 'SFU_AUTHORITATIVE',
     });
     // Manually set student as active speaker with slot=0
     await addParticipant(lcId, TEACHER_ID, 'HOST');
@@ -814,6 +841,7 @@ describe('GATE-12: maxSpeakers limits stage only, not total participants', () =>
       maxSpeakers:    1,
       maxParticipants: null, // unlimited viewers
       title:          'Scale Test',
+      microphoneAuthorizationMode: 'SFU_AUTHORITATIVE',
     });
     await addParticipant(lcId, TEACHER_ID, 'HOST');
   });
