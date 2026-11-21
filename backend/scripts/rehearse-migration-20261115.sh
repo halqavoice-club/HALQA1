@@ -267,26 +267,38 @@ run_scenario() {
 
   # Dump schema-only (no row data) from halqa_test using root (halqa user lacks
   # SELECT on all tables in arbitrary order needed for a full dump).
-  local dump_output
-  if ! dump_output=$(mysqldump \
+  # Stderr is redirected to a temp file so the mysqldump password warning
+  # ("Using a password on the command line interface can be insecure.") does
+  # NOT enter the pipe as SQL — which would cause MariaDB ERROR 1064.
+  local dump_stderr_log
+  dump_stderr_log=$(mktemp /tmp/mysqldump_stderr_XXXXXX.log)
+
+  if ! mysqldump \
       -h "$MYSQL_HOST" -P "$MYSQL_PORT" \
       -u "$MYSQL_ROOT_USER" -p"$MYSQL_ROOT_PASSWORD" \
       --protocol=TCP \
       --no-data --routines --triggers --single-transaction \
-      halqa_test 2>&1); then
-    fail_reason="mysqldump of halqa_test failed: $dump_output"
+      halqa_test \
+      2>"$dump_stderr_log" \
+      | mysql \
+          -h "$MYSQL_HOST" -P "$MYSQL_PORT" \
+          -u "$MYSQL_ROOT_USER" -p"$MYSQL_ROOT_PASSWORD" \
+          --protocol=TCP \
+          "$schema" \
+          2>&1; then
+    # Show what went wrong (stderr from mysqldump and/or mysql)
+    echo "  [${LABEL_UPPER}] mysqldump stderr:"
+    cat "$dump_stderr_log" 2>/dev/null || true
+    rm -f "$dump_stderr_log"
+    fail_reason="Schema clone (mysqldump | mysql) into ${schema} failed"
     scenario_failed=1
-  fi
-
-  if [ "$scenario_failed" -eq 0 ]; then
-    if ! echo "$dump_output" | mysql \
-        -h "$MYSQL_HOST" -P "$MYSQL_PORT" \
-        -u "$MYSQL_ROOT_USER" -p"$MYSQL_ROOT_PASSWORD" \
-        --protocol=TCP \
-        "$schema" 2>&1; then
-      fail_reason="Schema import into ${schema} failed"
-      scenario_failed=1
+  else
+    # Log any warnings from mysqldump without failing
+    if [ -s "$dump_stderr_log" ]; then
+      echo "  [${LABEL_UPPER}] mysqldump warnings (non-fatal):"
+      cat "$dump_stderr_log"
     fi
+    rm -f "$dump_stderr_log"
   fi
 
   if [ "$scenario_failed" -eq 0 ]; then
