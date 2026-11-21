@@ -41,6 +41,11 @@ MYSQL_HOST="${MYSQL_HOST:-127.0.0.1}"
 MYSQL_PORT="${MYSQL_PORT:-3306}"
 MYSQL_USER="${MYSQL_USER:-halqa}"
 MYSQL_PASSWORD="${MYSQL_PASSWORD:-halqa_test_pw}"
+# Root credential — used exclusively for CREATE DATABASE / DROP DATABASE.
+# In CI the MariaDB service is started with MYSQL_ROOT_PASSWORD=root.
+# No other operation uses this credential.
+MYSQL_ROOT_USER="${MYSQL_ROOT_USER:-root}"
+MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-root}"
 
 MIGRATION_NAME="20261115_harden_microphone_trigger_idempotency"
 MIGRATION_FILE="prisma/migrations/${MIGRATION_NAME}/migration.sql"
@@ -70,9 +75,18 @@ mysql_cmd() {
     --protocol=TCP "$schema" "$@" 2>/dev/null
 }
 
-# MySQL helper: run SQL without a default schema
+# MySQL helper: run SQL without a default schema (halqa user)
 mysql_no_db() {
   mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" \
+    --protocol=TCP "$@" 2>/dev/null
+}
+
+# MySQL helper: CREATE/DROP DATABASE only — uses root credential.
+# This is the narrowest possible privilege escalation: only schema lifecycle
+# operations use root; every Prisma and application query uses $MYSQL_USER.
+mysql_root_schema() {
+  mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" \
+    -u "$MYSQL_ROOT_USER" -p"$MYSQL_ROOT_PASSWORD" \
     --protocol=TCP "$@" 2>/dev/null
 }
 
@@ -232,8 +246,11 @@ run_scenario() {
   printf '%s' "$ORIGINAL_SQL" > "$MIGRATION_FILE"
 
   # ---- Step 2: Create throwaway schema ------------------------------------
+  # Uses root credential for CREATE/DROP DATABASE — the halqa user does not
+  # hold CREATE DATABASE privilege in CI.  All subsequent Prisma and query
+  # operations continue to use the halqa user via $MYSQL_USER.
   echo "  [${LABEL_UPPER}] Creating throwaway schema: ${schema}"
-  if ! mysql_no_db -e "DROP DATABASE IF EXISTS \`${schema}\`; CREATE DATABASE \`${schema}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>&1; then
+  if ! mysql_root_schema -e "DROP DATABASE IF EXISTS \`${schema}\`; CREATE DATABASE \`${schema}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; GRANT ALL PRIVILEGES ON \`${schema}\`.* TO '${MYSQL_USER}'@'%'; FLUSH PRIVILEGES;" 2>&1; then
     echo "  [${LABEL_UPPER}] ERROR: Failed to create schema ${schema}"
     echo "=== SCENARIO ${LABEL_UPPER} RESULT: FAIL — could not create throwaway schema ==="
     OVERALL_RESULT=1
@@ -460,9 +477,9 @@ run_scenario() {
     echo "              Trigger existence and definition are verified above.)"
   fi
 
-  # ---- Step 12: Drop throwaway schema ------------------------------------
+  # ---- Step 12: Drop throwaway schema (root — halqa cannot DROP DATABASE) --
   echo "  [${LABEL_UPPER}] Dropping throwaway schema: ${schema}"
-  mysql_no_db -e "DROP DATABASE IF EXISTS \`${schema}\`;" 2>&1 || true
+  mysql_root_schema -e "DROP DATABASE IF EXISTS \`${schema}\`;" 2>&1 || true
 
   # ---- Step 13: Restore original SQL (belt-and-suspenders; trap covers exit) -
   printf '%s' "$ORIGINAL_SQL" > "$MIGRATION_FILE"
