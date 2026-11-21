@@ -270,14 +270,25 @@ run_scenario() {
   # Stderr is redirected to a temp file so the mysqldump password warning
   # ("Using a password on the command line interface can be insecure.") does
   # NOT enter the pipe as SQL — which would cause MariaDB ERROR 1064.
+  #
+  # We dump in two passes:
+  #   Pass 1: schema-only (no row data) for all tables — creates all tables
+  #   Pass 2: data-only for _prisma_migrations — clones migration history so
+  #           Prisma knows which migrations are already applied and does NOT try
+  #           to replay them from scratch (which would fail with ERROR 1050
+  #           "Table already exists" because the tables were just created).
+  # After cloning, we UPDATE _prisma_migrations in the THROWAWAY schema to
+  # mark 20261115 as ROLLED_BACK, giving Prisma exactly the pre-fault state.
   local dump_stderr_log
   dump_stderr_log=$(mktemp /tmp/mysqldump_stderr_XXXXXX.log)
 
+  # Pass 1: schema structure (triggers are excluded here; they come from migrate)
   if ! mysqldump \
       -h "$MYSQL_HOST" -P "$MYSQL_PORT" \
       -u "$MYSQL_ROOT_USER" -p"$MYSQL_ROOT_PASSWORD" \
       --protocol=TCP \
-      --no-data --routines --triggers --single-transaction \
+      --no-data --no-tablespaces \
+      --skip-triggers \
       halqa_test \
       2>"$dump_stderr_log" \
       | mysql \
@@ -286,19 +297,47 @@ run_scenario() {
           --protocol=TCP \
           "$schema" \
           2>&1; then
-    # Show what went wrong (stderr from mysqldump and/or mysql)
-    echo "  [${LABEL_UPPER}] mysqldump stderr:"
+    echo "  [${LABEL_UPPER}] mysqldump stderr (pass 1):"
     cat "$dump_stderr_log" 2>/dev/null || true
     rm -f "$dump_stderr_log"
-    fail_reason="Schema clone (mysqldump | mysql) into ${schema} failed"
+    fail_reason="Schema clone pass 1 (table structure) into ${schema} failed"
     scenario_failed=1
   else
-    # Log any warnings from mysqldump without failing
     if [ -s "$dump_stderr_log" ]; then
-      echo "  [${LABEL_UPPER}] mysqldump warnings (non-fatal):"
+      echo "  [${LABEL_UPPER}] mysqldump pass 1 warnings (non-fatal):"
       cat "$dump_stderr_log"
     fi
-    rm -f "$dump_stderr_log"
+    : > "$dump_stderr_log"
+  fi
+
+  # Pass 2: _prisma_migrations data only — so Prisma sees the full migration
+  # history and does not attempt to re-apply already-applied migrations.
+  if [ "$scenario_failed" -eq 0 ]; then
+    if ! mysqldump \
+        -h "$MYSQL_HOST" -P "$MYSQL_PORT" \
+        -u "$MYSQL_ROOT_USER" -p"$MYSQL_ROOT_PASSWORD" \
+        --protocol=TCP \
+        --no-create-info --skip-triggers \
+        halqa_test _prisma_migrations \
+        2>"$dump_stderr_log" \
+        | mysql \
+            -h "$MYSQL_HOST" -P "$MYSQL_PORT" \
+            -u "$MYSQL_ROOT_USER" -p"$MYSQL_ROOT_PASSWORD" \
+            --protocol=TCP \
+            "$schema" \
+            2>&1; then
+      echo "  [${LABEL_UPPER}] mysqldump stderr (pass 2):"
+      cat "$dump_stderr_log" 2>/dev/null || true
+      rm -f "$dump_stderr_log"
+      fail_reason="Schema clone pass 2 (_prisma_migrations data) into ${schema} failed"
+      scenario_failed=1
+    else
+      if [ -s "$dump_stderr_log" ]; then
+        echo "  [${LABEL_UPPER}] mysqldump pass 2 warnings (non-fatal):"
+        cat "$dump_stderr_log"
+      fi
+      rm -f "$dump_stderr_log"
+    fi
   fi
 
   if [ "$scenario_failed" -eq 0 ]; then
