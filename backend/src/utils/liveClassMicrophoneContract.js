@@ -29,6 +29,32 @@ const MICROPHONE_AUTHORIZATION_REASONS = Object.freeze({
 });
 
 /**
+ * Message text raised by the live_classes_legacy_start_guard trigger when a
+ * LEGACY-mode session attempts to transition to LIVE (SQLSTATE 45000).
+ * The controller matches database rejection errors against this text to
+ * return a clean HTTP 409 without exposing SQL details.
+ */
+const LEGACY_SESSION_START_REJECTION_MESSAGE =
+  'Cannot start LEGACY session; upgrade microphone_authorization_mode to SFU_AUTHORITATIVE first';
+
+/**
+ * Returns true only when the error's message contains the legacy-start-guard
+ * trigger rejection text. Anything else (connection failures, unrelated SQL
+ * errors, non-error values) returns false and must not be treated as a 409.
+ *
+ * @param {Error|null|undefined|*} err
+ * @returns {boolean}
+ */
+function isTriggerLegacyStartRejection(err) {
+  return Boolean(
+    err &&
+    err.message &&
+    typeof err.message.includes === 'function' &&
+    err.message.includes(LEGACY_SESSION_START_REJECTION_MESSAGE),
+  );
+}
+
+/**
  * Normalize a raw microphone authorization mode value.
  * Returns LEGACY for undefined/null/empty/UNKNOWN/LEGACY.
  * Returns SFU_AUTHORITATIVE only for exact string match.
@@ -79,7 +105,9 @@ module.exports = {
   LIVE_CLASS_MICROPHONE_API_CONTRACT,
   MICROPHONE_AUTHORIZATION_MODES,
   MICROPHONE_AUTHORIZATION_REASONS,
+  LEGACY_SESSION_START_REJECTION_MESSAGE,
   normalizeMicrophoneAuthorizationMode,
   isSfuAuthoritativeMode,
   classifyMicrophoneAuthorization,
+  isTriggerLegacyStartRejection,
 };
