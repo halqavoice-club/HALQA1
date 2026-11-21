@@ -363,3 +363,52 @@ Recovery-evidence requirements: before and after any state-changing command, cap
 ## Immutable File Notice
 
 `backend/prisma/migrations/20261030_fix_live_class_microphone_triggers/migration.sql` must remain byte-for-byte unchanged (SHA-256 `4fc783645ef9efbe181412e5abe32f3174a746ab9e1d585209ce26408c71cc80`). No instruction in this runbook, and no recovery path, authorizes editing it.
+
+---
+
+## Recovery Procedures for Migration `20261115_harden_microphone_trigger_idempotency`
+
+This section is a brief cross-reference. Full scenario documentation is in `docs/live-class/migration-replay-evidence.md`.
+
+Migration `20261115_harden_microphone_trigger_idempotency` executes in the interleaved order: DROP MG → CREATE MG → DROP SG → CREATE SG. Because each CREATE is preceded by its own DROP IF EXISTS, `--rolled-back` + `migrate deploy` is safe for every partial-failure state of this migration.
+
+**Partial failures (scenarios A, B, C — any fault before Prisma records success where DDL was not complete):**
+
+```bash
+npx prisma migrate resolve --rolled-back 20261115_harden_microphone_trigger_idempotency
+npx prisma migrate deploy
+```
+
+Safe because 20261115 begins with `DROP TRIGGER IF EXISTS` for both triggers. Re-execution from step 1 is idempotent: each DROP removes any existing trigger before the CREATE runs. MariaDB error 1359 ("Trigger already exists") cannot occur.
+
+**Scenario D — all four DDL statements completed, Prisma bookkeeping row not written:**
+
+```bash
+npx prisma migrate resolve --applied 20261115_harden_microphone_trigger_idempotency
+```
+
+Both triggers are already present and correct. `--applied` marks the failed row as rolled-back and creates a new applied row. No SQL re-execution.
+
+**Verification after recovery (run against the target database):**
+
+```sql
+-- READ-ONLY DIAGNOSTIC — may run at any time
+SELECT trigger_name, event_manipulation, action_timing
+FROM information_schema.triggers
+WHERE trigger_schema = DATABASE() AND event_object_table = 'live_classes'
+ORDER BY trigger_name;
+-- Expect: live_classes_legacy_start_guard and live_classes_microphone_mode_guard
+
+SELECT migration_name,
+       CASE
+         WHEN finished_at IS NOT NULL AND rolled_back_at IS NULL THEN 'APPLIED'
+         WHEN rolled_back_at IS NOT NULL AND finished_at IS NULL THEN 'ROLLED_BACK'
+         WHEN finished_at IS NULL AND rolled_back_at IS NULL THEN 'FAILED'
+         ELSE 'UNKNOWN'
+       END AS state
+FROM _prisma_migrations
+WHERE migration_name = '20261115_harden_microphone_trigger_idempotency'
+ORDER BY started_at;
+```
+
+For full scenario documentation, fault-injection evidence, and CI rehearsal results see `docs/live-class/migration-replay-evidence.md`.

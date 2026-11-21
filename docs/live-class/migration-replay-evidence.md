@@ -24,6 +24,8 @@
 
 The CI run is authoritative for MariaDB 10.11 compatibility. The local environment has neither Docker nor a local MariaDB/MySQL installation available; Docker-based local rehearsal is BLOCKED (see Section 2).
 
+**What this CI run proves:** Initial migration deployment of all 109 migrations including 20261115, against MariaDB 10.11.19, with integration test validation. It does NOT, by itself, prove recovery after partial DDL execution of 20261115. That gap is closed by the automated fault-injection rehearsal added in Section 5.
+
 ---
 
 ## 2. Local Replay Results
@@ -36,58 +38,101 @@ Neither `mysql` nor `mariadb` commands are available in PATH.
 
 **Result:** Docker-based local rehearsal is BLOCKED. No local database environment is available for replay.
 
-**Authoritative evidence source:** CI run 44913839633 (MariaDB 10.11.19) is the sole authoritative replay result. All 109 migrations deployed successfully against MariaDB 10.11.19 in CI. The fault-injection methodology is documented in Section 3 below; the recovery matrix in Section 4 is derived from analysis of the migration SQL and Prisma 5.22.0 engine behavior.
+**Authoritative evidence source:** CI run 44913839633 (MariaDB 10.11.19) is the sole authoritative initial-deployment result. The fault-injection partial-failure recovery scenarios are delegated to the CI rehearsal step documented in Section 5.
 
 ---
 
-## 3. Fault-Injection Design — Scenario B (20261115)
+## 3. Fault-Injection Design — Corrected Scenario Boundaries (20261115)
 
-The fault-injection methodology uses a **disposable migration copy** (`.fault-b` reference file) with a deliberately failing SQL statement injected between the DROP and CREATE statements. This reference file is never committed.
+Migration `20261115_harden_microphone_trigger_idempotency` executes statements in this exact interleaved order:
 
-**Reference file:** `backend/prisma/migrations/20261115_harden_microphone_trigger_idempotency/migration.sql.fault-b`
+| Step | Statement |
+|---|---|
+| 1 | `DROP TRIGGER IF EXISTS live_classes_microphone_mode_guard` (MG) |
+| 2 | `CREATE TRIGGER live_classes_microphone_mode_guard` |
+| 3 | `DROP TRIGGER IF EXISTS live_classes_legacy_start_guard` (SG) |
+| 4 | `CREATE TRIGGER live_classes_legacy_start_guard` |
 
-**Injected fault position:** After both `DROP TRIGGER IF EXISTS` statements succeed, before either `CREATE TRIGGER` executes. This simulates the most hazardous partial-execution state: both triggers have been dropped but neither has been recreated.
+The correct partial-failure boundaries follow this interleaved order. There is no point in the execution sequence where both DROPs have run and neither CREATE has run — that boundary does not exist in this migration. Each DROP is immediately followed by its corresponding CREATE before the next DROP runs.
 
-**Expected state after fault injection:**
-- `_prisma_migrations` row for `20261115_harden_microphone_trigger_idempotency`: FAILED (`finished_at IS NULL AND rolled_back_at IS NULL`)
-- `live_classes_microphone_mode_guard`: ABSENT (dropped by step 1)
-- `live_classes_legacy_start_guard`: ABSENT (dropped by step 2)
-- Authorization invariants: **UNENFORCED** at the database level
+**Corrected partial-failure boundaries:**
 
-**Recovery path:**
-```bash
-npx prisma migrate resolve --rolled-back 20261115_harden_microphone_trigger_idempotency
-npx prisma migrate deploy
-```
+| Fault point | Objects present after fault | Recovery |
+|---|---|---|
+| After Step 1 (DROP MG), before Step 2 (CREATE MG) | MG absent, SG present | `--rolled-back` + `migrate deploy` |
+| After Step 2 (CREATE MG), before Step 3 (DROP SG) | MG present (new), SG present (old) | `--rolled-back` + `migrate deploy` |
+| After Step 3 (DROP SG), before Step 4 (CREATE SG) | MG present (new), SG absent | `--rolled-back` + `migrate deploy` |
+| After Step 4, before Prisma records success | MG present (new), SG present (new) | `--applied` (scenario D/E) |
 
-**Expected recovery outcome:** Both triggers recreated. `migrate deploy` applies the real `20261115` migration (DROP IF EXISTS × 2, CREATE × 2). No MariaDB error 1359 because the triggers are already absent.
+**Why `--rolled-back` + `migrate deploy` is safe for all partial states of 20261115:** Each CREATE in 20261115 is preceded by a DROP IF EXISTS for the same trigger. Even if a partial state left one trigger present, re-executing from the beginning: (1) DROP MG removes it if present, (2) CREATE MG recreates it, (3) DROP SG removes it if present, (4) CREATE SG recreates it. No MariaDB error 1359 ("Trigger already exists") can occur. This contrasts with migration 20261030, which had no DROP before the SG CREATE, making scenario E `--rolled-back` dangerous for that migration.
 
-**Why no MariaDB 1359 for 20261115:** Migration 20261115 begins with `DROP TRIGGER IF EXISTS` for BOTH triggers before creating them. Even if the triggers exist (from a prior successful `20261030` application), the DROPs remove them before the CREATEs run. This is the idempotency fix that 20261115 delivers.
+**Status of fault-injection execution:** These scenarios are designed and implemented in `backend/scripts/rehearse-migration-20261115.sh`. Execution results will be recorded in Section 5 after CI runs with the rehearsal step.
 
 ---
 
 ## 4. Partial-Failure Recovery Matrix (20261115)
 
-| Fault point | Objects present after fault | Recovery |
-|---|---|---|
-| Before Step 1 (DROP MG) | MG present, SG present | `--rolled-back` + `migrate deploy` (idempotent) |
-| After Step 1, before Step 2 (DROP SG) | MG absent, SG present | `--rolled-back` + `migrate deploy` (Step 2 DROP SG, then CREATE both) |
-| After Step 2, before Step 3 (CREATE MG) | MG absent, SG absent | `--rolled-back` + `migrate deploy` (critical: unguarded window; both DROPs are no-ops, both CREATEs succeed) |
-| After Step 3, before Step 4 (CREATE SG) | MG present (new), SG absent | `--rolled-back` + `migrate deploy` (DROP MG drops it, DROP SG is no-op, CREATE MG recreates, CREATE SG creates) |
-| After Step 4 (all done, Prisma failed) | MG present (new), SG present (new) | `--applied` (scenario E) |
+| Scenario | Fault point | Objects present after fault | Recovery | Execution Status |
+|---|---|---|---|---|
+| A | After Step 1 (DROP MG), before Step 2 (CREATE MG) | MG absent, SG present | `--rolled-back` + `migrate deploy` | NOT EXECUTED (CI rehearsal pending) |
+| B | After Step 2 (CREATE MG), before Step 3 (DROP SG) | MG present (new), SG present (old) | `--rolled-back` + `migrate deploy` | NOT EXECUTED (CI rehearsal pending) |
+| C | After Step 3 (DROP SG), before Step 4 (CREATE SG) | MG present (new), SG absent | `--rolled-back` + `migrate deploy` | NOT EXECUTED (CI rehearsal pending) |
+| D | After Step 4, before Prisma records success | MG present (new), SG present (new) | `--applied` | NOT EXECUTED (CI rehearsal pending) |
+| N | Normal replay (idempotent re-execution) | N/A — apply succeeds | `--rolled-back` + `migrate deploy`, verify no error 1359 | NOT EXECUTED (CI rehearsal pending) |
 
-**Key insight for 20261115 vs 20261030:** Unlike 20261030 (which had no DROP before the SG CREATE, making scenario E `--rolled-back` dangerous), 20261115 precedes each CREATE with a DROP IF EXISTS. This means `--rolled-back` + `migrate deploy` is safe for ALL partial states of 20261115, including scenario E — both DROPs are idempotent. `--applied` can also be used for 20261115 scenario E if the operator prefers.
+These rows will be updated with CI run ID, job ID, and outcome after the rehearsal step (Section 5) runs in CI.
 
 ---
 
-## 5. Idempotency Verification (20261115 Re-execution Test)
+## 5. CI Fault-Injection Rehearsal (Issue #163)
 
-From CI run 44913839633: migration 20261115 was applied successfully against MariaDB 10.11.19. The CI run confirmed:
-- Both trigger definitions match the expected bodies.
-- All 12 `liveclass-microphone-triggers` tests passed after 20261115 was applied.
-- No MariaDB error 1359 was produced during the apply.
+### Rehearsal script
 
-The DROP TRIGGER IF EXISTS guards in 20261115 mean that re-executing the migration against a database where both triggers already exist will: (1) silently drop both triggers, (2) recreate them with identical definitions. No error is produced.
+**File:** `backend/scripts/rehearse-migration-20261115.sh`
+
+The script runs five scenarios against isolated throwaway MariaDB schemas (`halqa_rehearsal_a` through `halqa_rehearsal_n`). For each scenario it:
+
+1. Creates the throwaway schema.
+2. Applies all migrations with the real migration SQL (`prisma migrate deploy`).
+3. Marks 20261115 as rolled-back in Prisma history (`migrate resolve --rolled-back`) to simulate a pre-20261115 state.
+4. Writes the fault-injection SQL (or the real SQL for scenario N) to the migration file.
+5. Runs `prisma migrate deploy` — expects failure for A/B/C/D, success for N.
+6. Immediately restores the original migration SQL (the `trap EXIT` handler also restores it unconditionally).
+7. Runs the appropriate recovery command.
+8. Verifies both triggers exist in `information_schema.triggers`.
+9. Drops the throwaway schema and reports PASS/FAIL.
+
+The original migration SQL is restored via a `trap EXIT` handler, ensuring the file is never left modified regardless of script exit path.
+
+### CI step added
+
+**Job:** `backend-integration`
+**Step name:** `Rehearse migration-20261115 partial-failure recovery (Issue #163)`
+**Position:** After `Verify no pending migrations (drift detection)`, before `Run integration tests`.
+**Cleanup step:** `Cleanup rehearsal throwaway schemas` (runs with `if: always()` after the rehearsal step).
+
+### Scenario descriptions
+
+| Scenario | Fault position | Trigger state after fault | Recovery |
+|---|---|---|---|
+| A | After DROP MG (step 1), before CREATE MG (step 2) | MG absent, SG present | `migrate resolve --rolled-back` + `migrate deploy` |
+| B | After CREATE MG (step 2), before DROP SG (step 3) | MG present (new), SG present (old) | `migrate resolve --rolled-back` + `migrate deploy` |
+| C | After DROP SG (step 3), before CREATE SG (step 4) | MG present (new), SG absent | `migrate resolve --rolled-back` + `migrate deploy` |
+| D | After CREATE SG (step 4), before Prisma records success | MG present (new), SG present (new) | `migrate resolve --applied` |
+| N | No fault — normal apply then replay | N/A | `migrate resolve --rolled-back` + `migrate deploy`, verify no error 1359 |
+
+**Recovery rationale:**
+- Scenarios A/B/C: `migrate resolve --rolled-back` marks the failed row for re-application. `migrate deploy` then re-executes 20261115 from step 1. Because 20261115 starts each CREATE with a DROP IF EXISTS, re-execution is idempotent regardless of which partial state was left.
+- Scenario D: all DDL committed; only the Prisma bookkeeping row is wrong. `migrate resolve --applied` marks the existing failed row as rolled-back and creates a new applied row. No SQL re-execution needed or safe (triggers already present).
+- Scenario N: confirms the DROP IF EXISTS guards prevent MariaDB error 1359 during genuine re-execution against a database where both triggers already exist.
+
+### CI rehearsal results
+
+| CI Run | Job ID | Scenario A | Scenario B | Scenario C | Scenario D | Scenario N |
+|---|---|---|---|---|---|---|
+| PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+
+This table will be updated after the first CI run that includes the rehearsal step.
 
 ---
 

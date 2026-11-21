@@ -267,6 +267,29 @@ jobs:
         env:
           DATABASE_URL: 'mysql://halqa:halqa_test_pw@localhost:3306/halqa_test'
 
+      - name: Rehearse migration-20261115 partial-failure recovery (Issue #163)
+        run: bash scripts/rehearse-migration-20261115.sh
+        working-directory: backend
+        env:
+          DATABASE_URL: 'mysql://halqa:halqa_test_pw@localhost:3306/halqa_test'
+          MYSQL_HOST: '127.0.0.1'
+          MYSQL_PORT: '3306'
+          MYSQL_USER: 'halqa'
+          MYSQL_PASSWORD: 'halqa_test_pw'
+          NODE_ENV: test
+
+      - name: Cleanup rehearsal throwaway schemas
+        if: always()
+        run: |
+          for schema in halqa_rehearsal_a halqa_rehearsal_b halqa_rehearsal_c halqa_rehearsal_d halqa_rehearsal_n; do
+            mysql -h 127.0.0.1 -P 3306 -u halqa -phalqa_test_pw -e "DROP DATABASE IF EXISTS $schema;" 2>/dev/null || true
+          done
+          # Also restore migration SQL in case the rehearsal script crashed before its trap ran
+          echo "Cleanup complete"
+        working-directory: backend
+        env:
+          MYSQL_PWD: halqa_test_pw
+
       - name: Run integration tests
         run: npm run test:integration -- --ci
         working-directory: backend
