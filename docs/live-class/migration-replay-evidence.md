@@ -130,9 +130,22 @@ The original migration SQL is restored via a `trap EXIT` handler, ensuring the f
 
 | CI Run | Job ID | Scenario A | Scenario B | Scenario C | Scenario D | Scenario N |
 |---|---|---|---|---|---|---|
-| PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 44922509742 | 136901721574 | BLOCKED | BLOCKED | BLOCKED | BLOCKED | BLOCKED |
 
-This table will be updated after the first CI run that includes the rehearsal step.
+**Run outcome:** All five scenarios BLOCKED. Root cause: the `halqa` CI user (provisioned
+with access only to `halqa_test`) lacks `CREATE DATABASE` privilege. Every `CREATE DATABASE
+halqa_rehearsal_{a,b,c,d,n}` call was refused by MariaDB before any migration SQL executed.
+No trigger state was reached and no Prisma operations ran. These are infrastructure failures,
+not scenario-logic failures.
+
+**Fix:** Commit `1ee242be9c6d04ef2e3a82138350402386bfbd67` (branch HEAD, not yet pushed)
+adds root credential support (`mysql_root_schema()` helper) for the CREATE/DROP DATABASE
+steps only. All Prisma operations continue to use the `halqa` user. After that commit is
+pushed and CI runs successfully, this table must be updated with the passing run ID and
+job ID and the BLOCKED entries replaced with PASS or FAIL outcomes.
+
+**Head SHA for the blocked run:** `f999d8f2c49650a152bad054c4a702c19d6758aa`  
+**Captured:** 2026-11-21T16:05:59Z
 
 ---
 
