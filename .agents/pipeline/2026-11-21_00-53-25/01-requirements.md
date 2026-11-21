@@ -1,3 +1,5 @@
+> **Note:** This requirements document was generated from a workflow template. The `{{task}}` placeholder in this document refers to the original user request (PROMPT 0 — CREATE THE SIX GITHUB ISSUES) which was provided as the message body. The placeholder was not substituted at generation time; the full specification is the message body. See `.agents/tasks/migration-20261030-audit-report.md` for the authoritative context.
+
 # Requirements: Migration 20261030 Recovery, Trigger Safety, and Microphone Authorization Consistency
 
 **Repository:** `halqavoice-club/HALQA1`  
