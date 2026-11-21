@@ -2,7 +2,7 @@
   "id": "FEAT-002",
   "type": "docs",
   "description": "Issue 1 (P1): author the production recovery runbook for migration 20261030_fix_live_class_microphone_triggers at docs/live-class/migration-20261030-recovery-runbook.md, following the approved design's Issue 1 section verbatim in structure (executive summary, _prisma_migrations 8-column reference with the migration_type-does-not-exist note, three row states table, migrate-deploy refusal behavior, read-only diagnostic SQL block, scenarios A-E plus No-row each with prerequisite diagnostic / state-changing recovery command / expected outcome / stop conditions, anti-patterns box, ASCII decision tree, per-command failure notes). The design document (02-design.md, 'Issue 1' section) contains the full required content; transcribe it, do not re-derive.",
-  "status": "pending",
+  "status": "completed",
   "steps": [
     "Read .agents/pipeline/2026-11-21_00-53-25/02-design.md section 'Issue 1 — Production Recovery Runbook' and 01-requirements.md FR-1.1…FR-1.12.",
     "Create docs/live-class/migration-20261030-recovery-runbook.md with: executive summary (four SQL statements in order: ALTER DEFAULT, DROP MG, CREATE MG, CREATE SG; never edit the historical file; recovery uses migrate resolve, never INSERT INTO _prisma_migrations).",
@@ -28,5 +28,5 @@
     "git status shows only the new doc file (and optional README line) as changes from this feature."
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "Runbook created at docs/live-class/migration-20261030-recovery-runbook.md and linked from docs/live-class/README.md index. Verified: all six scenarios (A-E, No-row), anti-patterns, decision tree, migration_type note, read-only/state-changing labels present; 20261030 migration.sql SHA-256 unchanged (4fc783645ef9efbe181412e5abe32f3174a746ab9e1d585209ce26408c71cc80). Notes for later steps: (1) FEAT-006 (20261116 reconcile default migration) — the runbook's Expected-healthy-results section already notes the default flips from LEGACY to SFU_AUTHORITATIVE once that migration applies; no further doc edit strictly required, but FEAT-006 may optionally append its migration name there. (2) FEAT-001 issue bodies: runbook references migration name exactly '20261030_fix_live_class_microphone_triggers' and checksum 4fc783...; issue-1.md acceptance criteria 7 verified. (3) For FEAT-003/005/006: DB state assumed LEGACY default until the 20261116 migration is applied. Aikido scans of all touched files returned zero findings."
 }
