@@ -33,7 +33,7 @@ The table has exactly eight columns:
 | `logs` | YES | Error output from a failed run |
 | `rolled_back_at` | YES | Timestamp when marked for re-application |
 | `started_at` | NO | Timestamp when execution started |
-| `applied_steps_count` | YES | Steps applied (Prisma 5.x) |
+| `applied_steps_count` | NO | Deprecated in Prisma 5.x — the engine still writes it (DEFAULT 0) but it is no longer meaningful as a step counter. NOT NULL. |
 
 > **Note:** the column `migration_type` **does not exist** in Prisma 5.22.0's `_prisma_migrations`. Any SQL or guidance referencing it is invalid.
 
@@ -82,10 +82,17 @@ Run all three before choosing any recovery path:
 ```sql
 -- READ-ONLY DIAGNOSTIC — may run at any time
 
--- 1. Migration record state
-SELECT migration_name, finished_at, rolled_back_at, started_at, logs
+-- 1. Migration record state (multi-row aware — handles multiple rows for the same migration)
+SELECT migration_name, started_at, finished_at, rolled_back_at,
+       CASE
+         WHEN finished_at IS NOT NULL AND rolled_back_at IS NULL THEN 'APPLIED'
+         WHEN rolled_back_at IS NOT NULL AND finished_at IS NULL THEN 'ROLLED_BACK'
+         WHEN finished_at IS NULL AND rolled_back_at IS NULL THEN 'FAILED'
+         ELSE 'UNKNOWN'
+       END AS state
 FROM _prisma_migrations
-WHERE migration_name = '20261030_fix_live_class_microphone_triggers';
+WHERE migration_name LIKE '2026103%'
+ORDER BY started_at DESC;
 
 -- 2. Trigger inventory (must return both rows in a healthy state)
 SELECT trigger_name, action_timing, event_manipulation, action_statement
@@ -95,6 +102,19 @@ WHERE trigger_schema = DATABASE() AND event_object_table = 'live_classes';
 -- 3. Column default
 SHOW COLUMNS FROM live_classes LIKE 'microphone_authorization_mode';
 ```
+
+**Multiple-row decision table:**
+
+| Row count | States present | Action |
+|---|---|---|
+| 0 | (none) | Migration never attempted — verify triggers/default, then `resolve --applied` to baseline |
+| 1 | FAILED | Partial execution — classify scenario (A–D or E), then resolve |
+| 1 | ROLLED_BACK | Marked for re-deploy — check for orphaned SG trigger, then `migrate deploy` |
+| 1 | APPLIED | Migration complete — no action needed |
+| 2+ | ROLLED_BACK + APPLIED | Normal post-resolve --applied state — verify APPLIED row's `finished_at IS NOT NULL AND rolled_back_at IS NULL` |
+| 2+ | FAILED + FAILED (or other) | Multiple failed attempts — escalate; do not retry without DBA review |
+
+> **Important:** An operator who sees a ROLLED_BACK row must check whether there is ALSO an APPLIED row before attempting any recovery. A ROLLED_BACK row alone does not mean the migration is not applied — it may be the original failed attempt from a prior `resolve --applied` run.
 
 Expected healthy results:
 
@@ -208,20 +228,57 @@ npx prisma migrate deploy
 
 ## Scenario E — All four SQL statements completed, but Prisma recorded a failed row
 
-**What happened:** every DDL committed (e.g. the connection dropped after the last DDL, before Prisma wrote `finished_at`). The database is fully correct; the record is wrong.
+**What happened:** every DDL committed (e.g. the connection dropped after the last DDL, before Prisma wrote `finished_at`). The database is fully correct; the migration-history record is wrong.
+
+**Actual `migrate resolve --applied` engine behavior (Prisma 5.22.0 `MigrateResolve.ts`):**
+This command does NOT simply set `finished_at` on the original failed row. The engine:
+1. **Marks the existing failed row as rolled back** — sets `rolled_back_at` on the original failed row.
+2. **Creates a NEW row** for the same migration name with `finished_at` populated (the "applied" record).
+3. The original failed attempt's row is preserved with `rolled_back_at` set.
+
+Result: **two rows** in `_prisma_migrations` for `20261030_fix_live_class_microphone_triggers` after `resolve --applied` on a failed row:
+- Row 1 (original): `finished_at IS NULL, rolled_back_at IS NOT NULL` → state: ROLLED_BACK
+- Row 2 (new): `finished_at IS NOT NULL, rolled_back_at IS NULL` → state: APPLIED
+
+This matters for diagnostic queries: when checking if a migration is applied, the operator must look for a row with `finished_at IS NOT NULL AND rolled_back_at IS NULL`, not just any row.
 
 **Prerequisite diagnostic (read-only) — MUST all be true before recovery:**
-- Query 1: failed row (`finished_at IS NULL AND rolled_back_at IS NULL`).
-- Query 2: **both** triggers present, and each `action_statement` matches the definitions in `backend/prisma/migrations/20261030_fix_live_class_microphone_triggers/migration.sql` (Steps 3 and 4).
-- Query 3: `Default: LEGACY`.
+- Both `live_classes_microphone_mode_guard` AND `live_classes_legacy_start_guard` exist in `information_schema.triggers`.
+- Each trigger's `action_statement` body matches the `20261030` migration SQL exactly (definition comparison required, not just name check). Use `SHOW COLUMNS FROM live_classes LIKE 'microphone_authorization_mode'` to verify default = `LEGACY`.
+- `_prisma_migrations` has a row for `20261030_fix_live_class_microphone_triggers` with `finished_at IS NULL AND rolled_back_at IS NULL`.
+- A naive `migrate deploy` REFUSES with a "failed migration — recover first" message (confirms the failed-row state).
 
-**Recovery (STATE-CHANGING — verify prerequisites before executing):**
+**Recovery (OPERATOR-AUTHORIZED — verify ALL prerequisites before executing):**
 
 ```bash
+# OPERATOR-AUTHORIZED ACTION — verify ALL prerequisites above first
 npx prisma migrate resolve --applied 20261030_fix_live_class_microphone_triggers
 ```
 
-**Expected outcome:** Prisma marks the row applied (`finished_at` set, `rolled_back_at` stays NULL); `migrate deploy` advances normally on subsequent runs.
+**Post-recovery verification:**
+
+```sql
+-- READ-ONLY DIAGNOSTIC — may run at any time
+-- Expect TWO rows: original failed row (rolled_back_at set) + new applied row (finished_at set)
+SELECT migration_name, started_at, finished_at, rolled_back_at,
+       CASE
+         WHEN finished_at IS NOT NULL AND rolled_back_at IS NULL THEN 'APPLIED'
+         WHEN rolled_back_at IS NOT NULL AND finished_at IS NULL THEN 'ROLLED_BACK'
+         WHEN finished_at IS NULL AND rolled_back_at IS NULL THEN 'FAILED'
+         ELSE 'UNKNOWN'
+       END AS state
+FROM _prisma_migrations
+WHERE migration_name = '20261030_fix_live_class_microphone_triggers'
+ORDER BY started_at;
+```
+
+Expect: two rows — one ROLLED_BACK (the original failed attempt) and one APPLIED (the new record). Then run:
+```bash
+npx prisma migrate status
+```
+Confirm no unapplied migrations remain.
+
+**Expected outcome:** Prisma marks the original row as rolled back and creates a new applied row. `migrate deploy` subsequently recognizes the migration as applied and advances normally.
 
 > **Do NOT use `--rolled-back` for this scenario.** `--rolled-back` marks the migration for re-application. `migrate deploy` will then re-execute all four statements and fail at Step 4 (`CREATE TRIGGER live_classes_legacy_start_guard`) with **MariaDB error 1359 "Trigger already exists"**, because that trigger was already created in Step 4 of the first (complete) execution and is not idempotently dropped by this migration. If `--rolled-back` was mistakenly used, see the error-handling note below.
 
@@ -268,10 +325,12 @@ START: does a 20261030 row exist in _prisma_migrations?
 │
 └─ YES → check finished_at and rolled_back_at
          │
-         ├─ finished_at IS NOT NULL → migration already applied; no action needed
+         ├─ finished_at IS NOT NULL AND rolled_back_at IS NULL → migration APPLIED; no action needed
          │
          ├─ rolled_back_at IS NOT NULL → already marked for re-apply
-         │   └─ check for orphaned SG trigger → if SG exists, DROP it → migrate deploy
+         │   └─ check whether an APPLIED row also exists (finished_at IS NOT NULL AND rolled_back_at IS NULL)
+         │       ├─ APPLIED row exists → migration is applied; the ROLLED_BACK row is the prior failed attempt; no action needed
+         │       └─ no APPLIED row → check for orphaned SG trigger → if SG exists, DROP it → migrate deploy
          │
          └─ both NULL (failed row)
              │
@@ -280,6 +339,8 @@ START: does a 20261030 row exist in _prisma_migrations?
              │
              └─ NO (partial state) → resolve --rolled-back → migrate deploy (scenarios A–D)
 ```
+
+> After `resolve --applied` on a failed row, the query returns TWO rows: a ROLLED_BACK row (original failed attempt) and an APPLIED row. This is normal. Only the APPLIED row (`finished_at IS NOT NULL AND rolled_back_at IS NULL`) determines the migration state.
 
 Recovery-evidence requirements: before and after any state-changing command, capture the output of the read-only diagnostic block (row state, trigger inventory, column default) and attach it to the incident record. The "after" capture is the proof the recovery reached a guarded, consistent state.
 
