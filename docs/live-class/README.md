@@ -28,6 +28,7 @@ The Live Class system is HALQA's real-time educational broadcasting feature. It 
 | [realtime.md](./realtime.md) | Socket.IO events + LiveKit integration |
 | [error-handling.md](./error-handling.md) | Error codes, causes, recovery |
 | [production-rules.md](./production-rules.md) | Production deployment rules |
+| [migration-20261030-recovery-runbook.md](./migration-20261030-recovery-runbook.md) | Operator recovery runbook for migration 20261030 (failed/rolled-back/applied states, scenarios A–E, no-row baselining) |
 | [gaps.md](./gaps.md) | Known gaps and violations |
 
 ---
